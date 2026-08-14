@@ -36,6 +36,20 @@
   ]
 ]
 
+#html.elem("div", attrs: (style: "text-align: center; margin-block: 0 2rem;"))[
+  #html.elem(
+    "video",
+    attrs: (
+      src: "assets/tour.mp4",
+      controls: "",
+      playsinline: "",
+      preload: "metadata",
+      style: "width: 50%; min-width: 18rem; height: auto; display: block;"
+        + " margin: 0 auto; border-radius: 0.5rem;",
+    ),
+  )[]
+]
+
 = Installation
 
 #include "parts/install.typ"

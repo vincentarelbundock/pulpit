@@ -2,6 +2,7 @@
   "outputs": [
     "assets/favicon.svg",
     "assets/logo.svg",
+    "assets/tour.mp4",
     "index.html",
     "robots.txt",
     "sitemap.xml"
