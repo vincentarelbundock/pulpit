@@ -1,11 +1,26 @@
 #set document(title: [Pulpit])
 #metadata((tags: ("overview",))) <website-metadata>
 
-#title()
+#html.elem("div", attrs: (style: "text-align: center; margin-block: 2rem;"))[
+  #html.elem(
+    "img",
+    attrs: (
+      src: "assets/logo.svg",
+      alt: "Pulpit",
+      style: "width: 45%; max-width: 20rem;",
+    ),
+  )
+  #html.elem(
+    "div",
+    attrs: (
+      style: "font-family: Helvetica, Arial, sans-serif; font-size: 3rem;"
+        + " font-weight: 700; letter-spacing: 0.12em; margin-top: 0.5rem;",
+    ),
+  )[PULPIT]
+]
 
-#align(center)[#image("assets/logo.svg", width: 45%)]
-
-*Pulpit is the PDF presenter that does not screw up your projector.*
+*Pulpit: a snappy and snazzy PDF projector with interactive media, speaker
+notes, annotations, jump page, timers, and more!*
 
 It runs a presenter window on your display and an audience window on the
 projector, and it treats connection, disconnection, mirroring, swapping,

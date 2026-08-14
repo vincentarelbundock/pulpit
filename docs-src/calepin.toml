@@ -1,19 +1,15 @@
 title = "Pulpit"
 description = "A focused PDF presenter in Rust that does not screw up your projector."
 base-url = "https://vincentarelbundock.github.io/pulpit"
-theme = "calepin"
+theme = "themes/pulpit"
 logo = "assets/logo.svg"
 logo-alt = "Pulpit"
 favicon = "assets/favicon.svg"
 
-pdf = true
+pdf = false
 
 [static]
 include = ["assets/**"]
-
-[[menus.main]]
-target = "install.typ"
-label = "Documentation"
 
 [[menus.social]]
 target = "https://github.com/vincentarelbundock/pulpit"
