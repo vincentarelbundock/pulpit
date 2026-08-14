@@ -1,0 +1,37 @@
+{
+    "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+    "version": "0.1.0",
+    "description": "A PDF presenter that treats connecting, disconnecting, mirroring and swapping displays as the main problem.",
+    "homepage": "https://github.com/vincentarelbundock/pulpit",
+    "license": "MIT OR Apache-2.0",
+    "notes": [
+        "Media overlays need a Chromium-family browser. Edge is preinstalled, so nothing is usually required.",
+        "pdfium.dll ships beside pulpit.exe; no PATH entry is needed."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/vincentarelbundock/pulpit/releases/download/v0.1.0/pulpit-0.1.0-windows-x64.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "pulpit.exe",
+    "shortcuts": [
+        [
+            "pulpit.exe",
+            "Pulpit"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/vincentarelbundock/pulpit"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/vincentarelbundock/pulpit/releases/download/v$version/pulpit-$version-windows-x64.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}

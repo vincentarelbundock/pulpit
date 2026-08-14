@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: VincentArelBundock.Pulpit
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Vincent Arel-Bundock
+PublisherUrl: https://github.com/vincentarelbundock
+PackageName: Pulpit
+PackageUrl: https://github.com/vincentarelbundock/pulpit
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/vincentarelbundock/pulpit/blob/main/LICENSES/README.md
+ShortDescription: A PDF presenter built around connecting and disconnecting displays.
+Description: |-
+  Pulpit opens a presenter window on the operator's display and an audience
+  window on the projector. Connection, disconnection, mirroring, swapping,
+  suspend/resume and mixed DPI are treated as the main engineering problem
+  rather than as polish: the audience frame is never worse than it was, and
+  rendering happens in supervised worker processes.
+Moniker: pulpit
+Tags:
+  - pdf
+  - presentation
+  - presenter
+  - slides
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

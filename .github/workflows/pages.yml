@@ -1,0 +1,55 @@
+name: Pages
+
+# Publishes the compiled website. `docs/` is generated output, committed to
+# the repository by `make website`, so this workflow only uploads it — it does
+# not run Calepin. The check below fails a push whose `docs/` is missing the
+# page a `docs-src/` change added, which is the mistake worth catching.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'docs-src/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source page has a compiled page
+        run: |
+          set -eu
+          missing=0
+          for src in docs-src/*.typ; do
+            page="$(basename "${src%.typ}").html"
+            if [ ! -f "docs/${page}" ]; then
+              echo "docs/${page} is missing — run 'make website' and commit docs/"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

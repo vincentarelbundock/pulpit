@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bouncing balls</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #101820; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hint {
+    position: fixed; left: 8px; bottom: 6px;
+    font: 14px/1.2 sans-serif; color: #8a97a8; user-select: none; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">click a ball to kick it &middot; click empty space to add one</div>
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const COLORS = ['#e6544b', '#f0a202', '#3fb27f', '#4f9bd9', '#b06ad9', '#e8dfc7'];
+  const GRAVITY = 900;      // px / s²
+  const RESTITUTION = 0.86; // energy kept on a bounce
+  let balls = [];
+  let W = 0, H = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = canvas.clientWidth;
+    H = canvas.clientHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function spawn(x, y) {
+    const r = 14 + Math.random() * 26;
+    balls.push({
+      x: x !== undefined ? x : r + Math.random() * (W - 2 * r),
+      y: y !== undefined ? y : r + Math.random() * (H / 2),
+      vx: (Math.random() - 0.5) * 600,
+      vy: (Math.random() - 0.5) * 300,
+      r: r,
+      color: COLORS[balls.length % COLORS.length]
+    });
+  }
+
+  function step(dt) {
+    for (const b of balls) {
+      b.vy += GRAVITY * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      if (b.x - b.r < 0)     { b.x = b.r;     b.vx = Math.abs(b.vx) * RESTITUTION; }
+      if (b.x + b.r > W)     { b.x = W - b.r; b.vx = -Math.abs(b.vx) * RESTITUTION; }
+      if (b.y - b.r < 0)     { b.y = b.r;     b.vy = Math.abs(b.vy) * RESTITUTION; }
+      if (b.y + b.r > H) {
+        b.y = H - b.r;
+        b.vy = -Math.abs(b.vy) * RESTITUTION;
+        b.vx *= 0.99;
+        if (Math.abs(b.vy) < 40) b.vy = 0; // settle instead of jittering forever
+      }
+    }
+
+    // ball-to-ball collisions: equal-mass elastic response along the contact normal
+    for (let i = 0; i < balls.length; i++) {
+      for (let j = i + 1; j < balls.length; j++) {
+        const a = balls[i], b = balls[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy) || 0.0001;
+        const overlap = a.r + b.r - dist;
+        if (overlap <= 0) continue;
+
+        const nx = dx / dist, ny = dy / dist;
+        a.x -= nx * overlap / 2; a.y -= ny * overlap / 2;
+        b.x += nx * overlap / 2; b.y += ny * overlap / 2;
+
+        const rvn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (rvn > 0) continue;
+        const imp = -(1 + RESTITUTION) * rvn / 2;
+        a.vx -= imp * nx; a.vy -= imp * ny;
+        b.vx += imp * nx; b.vy += imp * ny;
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    for (const b of balls) {
+      const g = ctx.createRadialGradient(b.x - b.r * .35, b.y - b.r * .35, b.r * .1, b.x, b.y, b.r);
+      g.addColorStop(0, '#ffffff');
+      g.addColorStop(0.25, b.color);
+      g.addColorStop(1, '#000000');
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+
+  let last = null;
+  function frame(now) {
+    if (last === null) last = now;
+    const dt = Math.min((now - last) / 1000, 1 / 30);
+    last = now;
+    step(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  canvas.addEventListener('pointerdown', function (ev) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+
+    // topmost ball under the pointer gets kicked away from the click
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const b = balls[i];
+      const dx = b.x - x, dy = b.y - y;
+      if (Math.hypot(dx, dy) <= b.r) {
+        const d = Math.hypot(dx, dy) || 0.0001;
+        const speed = 500 + Math.random() * 400;
+        b.vx = (dx / d) * speed;
+        b.vy = (dy / d) * speed - 250;
+        b.color = COLORS[Math.floor(Math.random() * COLORS.length)];
+        return;
+      }
+    }
+    spawn(x, y);
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  for (let i = 0; i < 6; i++) spawn();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

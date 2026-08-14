@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Everything that must pass on every commit, with no graphical session:
+  # reconciliation, scripted topology transitions, presentation state,
+  # document reload, cache accounting, render generations and protocol
+  # decoding.
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libdbus-1-dev pkg-config
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets
+      - name: The application alone builds with the features it asks for
+        # A workspace build unifies features, so another crate enabling the
+        # media crate's browser worker hides an application that never asked
+        # for it — and an application without it plays no media at all.
+        # Building it on its own is the only thing that catches that.
+        run: cargo build -p pulpit-app
+      - name: Tests without PDFium
+        # The fixture backend keeps every layer above the binding under test
+        # even when no libpdfium is present.
+        run: cargo test --workspace
+
+  # Scripted monitor topologies: connection, disconnection, changed
+  # enumeration, mirroring, repeated and out-of-order notifications, replayed
+  # through the real reconciliation state machine under every capability
+  # profile. Files come from tests/topology/, including captures taken from
+  # real hardware with `pulpit-topology`.
+  topology-scenarios:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev pkg-config
+      - run: cargo test -p pulpit-display --test topology_script -- --nocapture
+      - name: Every committed scenario parses and round-trips
+        run: cargo test -p pulpit-display scenario
+
+  # The same suite with a pinned PDFium, so the real rendering path,
+  # progressive cancellation and metadata extraction are exercised too.
+  with-pdfium:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libdbus-1-dev pkg-config
+      - name: Fetch pinned PDFium
+        run: ./scripts/fetch-pdfium.sh
+      - name: Tests with PDFium
+        env:
+          PULPIT_PDFIUM_PATH: ${{ github.workspace }}/lib
+        run: cargo test --workspace
+
+  # Renderer robustness: crashing and hanging workers, malformed input,
+  # stale-generation rejection, shared-memory size validation.
+  renderer-failure-injection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p pulpit-render -- --nocapture
+
+  # The Nix package: the wrapped binary is what makes pulpit start on a
+  # distribution with no global library path.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - run: nix flake check
+      - run: nix build .#pulpit
+      - name: The wrapper resolves its own runtime libraries
+        run: |
+          ldd result/bin/pulpit | (! grep -q 'not found')
+          result/bin/pulpit --version
+
+  # Live-adapter smoke test against a real X server: enumeration, EDID
+  # identity and the capture tool. VKMS connector scripting needs a
+  # privileged runner (scripts/vkms-topology.sh); this covers what a public
+  # runner can do, and the deterministic tests above remain mandatory.
+  x-server-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Xvfb and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils libx11-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev pkg-config
+      - name: Display adapter against a real X server
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 +extension RANDR" \
+            cargo test -p pulpit-display
+      - name: Capture a topology and replay it
+        run: |
+          cargo build -p pulpit-display --bin pulpit-topology
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 +extension RANDR" \
+            ./target/debug/pulpit-topology > /tmp/captured.txt
+          cat /tmp/captured.txt
+          cp /tmp/captured.txt crates/pulpit-display/tests/topology/ci-captured.txt
+          cargo test -p pulpit-display --test topology_script
+
+  # The platform boundary compiles and passes its own tests on Windows and
+  # macOS. The application is only packaged for Nix today (see the spec's
+  # deferrals), so this job deliberately covers the portable crates rather
+  # than a full desktop build: it is what keeps the contracts honest while
+  # the adapters for those desktops are still to be written.
+  platform-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The OS-facing contracts and the pure domain crates
+        # The platform boundary, the layout model and the settings store now
+        # live inside pulpit-app as modules, so their tests run with it.
+        run: >
+          cargo test
+          -p pulpit-core
+          -p pulpit-display
+          -p pulpit-app
+
+  # The macOS package, built and signed exactly as a release builds it.
+  #
+  # This job is load-bearing in a way the others are not: there is no macOS
+  # machine in the loop, so a green run here is the only evidence that the
+  # bundle is well-formed and that the signed binary executes at all. It
+  # deliberately goes further than `platform-boundary` — a full release build
+  # links, which `cargo check` does not, and the bundle step exercises the
+  # PDFium layout the app depends on at run time.
+  #
+  # What it cannot show: placement, reconciliation and the swap. Those need
+  # two real displays, and a hosted runner has none. They stay unverified on
+  # macOS until somebody runs the app on a Mac with a projector attached.
+  macos-package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the pinned PDFium
+        run: ./scripts/fetch-pdfium.sh
+      - name: Rendering, against the real PDFium
+        # With lib/libpdfium.dylib now present, the PDFium tests stop skipping
+        # and actually render. This is the only place that happens on macOS.
+        run: cargo test -p pulpit-render
+      - name: Build the release binary
+        run: cargo build --release -p pulpit-app
+      - name: Build and ad-hoc sign the bundle
+        run: ./scripts/make-app-bundle.sh
+      - name: The signed binary runs
+        # `--version` exits before any window is opened, so this is a real
+        # check on a runner with no display: it proves the signature is
+        # acceptable to the kernel, which is the whole point of signing
+        # ad-hoc, and that the bundle layout is not malformed.
+        run: ./dist/Pulpit.app/Contents/MacOS/pulpit --version
+      - name: PDFium is found from inside the bundle
+        # The bundle puts libpdfium.dylib beside the executable and relies on
+        # the search order finding it with no environment variable. If that
+        # ever stops being true, the app degrades to the fixture backend on
+        # every user's machine — silently. This asserts it does not.
+        run: |
+          test -f dist/Pulpit.app/Contents/MacOS/libpdfium.dylib
+          test -f dist/Pulpit.app/Contents/Resources/pulpit.icns
+          codesign --verify --strict --verbose=2 dist/Pulpit.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pulpit.app
+          path: dist/Pulpit.app
+
+  # The Windows package, built as a release builds it. Load-bearing for the
+  # same reason as macos-package: there is no Windows machine in the loop.
+  #
+  # No signing happens here. Signing is a quality improvement and must not
+  # become a prerequisite (SPEC-package.md §6.1), so CI must stay green
+  # without a certificate — including on forks, which cannot see secrets.
+  windows-package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the pinned PDFium
+        run: ./scripts/fetch-pdfium.sh
+      - name: Rendering, against the real PDFium
+        # With lib/pdfium.dll present the PDFium tests stop skipping. This is
+        # the only place real rendering is exercised on Windows.
+        run: cargo test -p pulpit-render
+      - name: Build the release binary
+        # This also runs build.rs, which embeds the icon and version block.
+        # A missing resource compiler only warns, so watch for that warning
+        # rather than trusting a green build to mean the icon is there.
+        run: cargo build --release -p pulpit-app
+      - name: Build the portable zip and the installer
+        # Inno Setup is preinstalled on the GitHub Windows image. If that ever
+        # stops being true the script skips the installer and still produces
+        # the zip, so this step would go quietly half-green — the assertion
+        # below is what catches it.
+        run: ./scripts/make-windows-package.sh
+      - name: Both artifacts exist, and the binary runs
+        run: |
+          set -eu
+          test -f dist/pulpit-windows/pulpit.exe
+          test -f dist/pulpit-windows/pdfium.dll
+          ls dist/pulpit-*-windows-x64.zip
+          ls dist/pulpit-*-windows-x64-setup.exe
+          # --version exits before any window is opened, so this works on a
+          # runner with no interactive desktop.
+          ./dist/pulpit-windows/pulpit.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulpit-windows
+          path: dist/

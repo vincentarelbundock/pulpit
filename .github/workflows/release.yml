@@ -1,0 +1,292 @@
+name: Release
+
+# Fires on a version tag pushed by `make release`.
+#
+# Pulpit is deliberately *not* released as a bare binary. winit, wgpu and
+# PDFium are all dlopen'd at run time, so a naked executable starts on one
+# machine and fails on the next; `scripts/make-bundle.sh` produces a
+# relocatable directory carrying libpdfium and a launcher that sets the loader
+# path. That bundle, not the executable, is the artifact.
+#
+# `.deb` and `.rpm` remain the intended Linux deliverable (SPEC-package.md): only a
+# native package can declare the dlopen set as dependencies and a
+# Chromium-family browser as a recommendation.
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: Linux x86_64 bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libdbus-1-dev pkg-config
+
+      # Fetches the pinned, hash-verified PDFium and stages it beside the
+      # binary. A hash mismatch fails the release rather than shipping an
+      # unverified library.
+      - name: Build the bundle
+        run: make bundle
+
+      - name: Archive
+        id: archive
+        run: |
+          set -eu
+          # make-bundle.sh writes both the directory and its tarball, named
+          # from the manifest version and the machine architecture.
+          archive="$(ls dist/pulpit-*.tar.gz)"
+          sha256sum "${archive}" > "${archive}.sha256"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # A tag with a hyphen is a rehearsal: publish the artifacts, but
+          # never let it show as the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.archive }}.sha256
+          body: |
+            See CHANGELOG.md.
+
+            The tarball is a relocatable directory: unpack it and run
+            `pulpit/pulpit deck.pdf`. It carries its own libpdfium. The usual
+            desktop libraries (`libxcursor`, `libxkbcommon`, a Vulkan loader)
+            must be present on the machine; Pulpit says which ones are missing
+            rather than crashing.
+
+            On NixOS, use the flake instead: `nix profile install .`
+
+  macos:
+    name: macOS arm64 app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `make app` fetches the pinned PDFium, builds the release binary, lays
+      # out `Pulpit.app` and ad-hoc signs it. A hash mismatch on PDFium fails
+      # the release rather than shipping an unverified library.
+      - name: Build and sign the app bundle
+        run: make app
+
+      # The disk image is the shape a Homebrew Cask expects and the shape a
+      # human expects from a download: mount, drag onto Applications.
+      - name: Disk image
+        id: dmg
+        run: |
+          set -eu
+          version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
+          staging="$(mktemp -d)"
+          cp -R dist/Pulpit.app "$staging/"
+          ln -s /Applications "$staging/Applications"
+          dmg="dist/pulpit-${version}-macos-arm64.dmg"
+          hdiutil create -volname Pulpit -srcfolder "$staging" \
+            -ov -format UDZO "$dmg"
+          shasum -a 256 "$dmg" > "$dmg.sha256"
+          echo "dmg=${dmg}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # A tag with a hyphen is a rehearsal: publish the artifacts, but
+          # never let it show as the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            ${{ steps.dmg.outputs.dmg }}
+            ${{ steps.dmg.outputs.dmg }}.sha256
+          body: |
+            See CHANGELOG.md.
+
+            The disk image carries `Pulpit.app`, which bundles its own
+            libpdfium. Drag it onto Applications.
+
+            The app is **ad-hoc signed, not notarized**. Notarization needs a
+            paid Developer ID and no release is gated on one
+            (SPEC-package.md §7). A first launch from a browser download
+            therefore goes through System Settings → Privacy & Security →
+            Open Anyway, once. Installing through the Homebrew Cask with
+            `--no-quarantine` avoids the step entirely.
+
+            Apple Silicon only for now: the Intel build needs a second PDFium
+            artifact and a `lipo` pass that this workflow does not yet do.
+
+      # Update the Homebrew Cask, so `brew install --cask` works off this tag
+      # without a hand edit. Conditional on the token for the same reason the
+      # Windows signing step is conditional: a tag pushed without it must
+      # still produce a complete release, and a fork must stay green.
+      #
+      # The cask is rendered from packaging/macos/pulpit.rb.in — the tap's
+      # copy is generated output, and a hand edit there is overwritten here.
+      # `secrets` is not an available context in a step-level `if`, so the
+      # presence of the token is turned into an output first.
+      - name: Is the tap configured?
+        id: tap
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # A prerelease tag — v0.2.0-rc1 — exists to rehearse this workflow.
+          # It must build and upload everything, so that the rehearsal is
+          # worth something, and must not become what `brew install` hands a
+          # user. The tap always describes the current *release*.
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${GITHUB_REF_NAME} is a prerelease; leaving the cask alone."
+          elif [ -n "${TOKEN:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_GITHUB_TOKEN is not set; skipping the cask."
+          fi
+
+      - name: Update the Homebrew tap
+        if: steps.tap.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
+          dmg="dist/pulpit-${version}-macos-arm64.dmg"
+          # The hash of the artifact actually published, read back from the
+          # file just uploaded rather than recomputed from a rebuild.
+          checksum="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"
+
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/vincentarelbundock/homebrew-tap.git" \
+            "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s/__VERSION__/${version}/g" -e "s/__SHA256__/${checksum}/g" \
+            packaging/macos/pulpit.rb.in > "$RUNNER_TEMP/tap/Casks/pulpit.rb"
+
+          cd "$RUNNER_TEMP/tap"
+          if git diff --quiet; then
+            echo "::notice::the cask is already at ${version}"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/pulpit.rb
+          git commit -m "pulpit ${version}"
+          git push
+
+  windows:
+    name: Windows x64 package
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Fetches the pinned, hash-verified PDFium, builds the binary with its
+      # icon and version block embedded, and produces both the portable zip
+      # Scoop installs from and the per-user installer winget runs.
+      - name: Build the package
+        run: make windows
+
+      # Signing is deliberately conditional. A certificate is a *quality*
+      # improvement and no release may be gated on possessing one
+      # (SPEC-package.md §6.1), so a tag pushed without the secret configured
+      # still produces a complete, publishable release — winget wants a
+      # checksum, Scoop wants nothing.
+      #
+      # SignPath's Foundation tier signs open-source projects for free. This
+      # needs a SignPath project, and the slugs below must match it.
+      - name: Is signing configured?
+        id: signing
+        env:
+          TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if [ -n "${TOKEN:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SIGNPATH_API_TOKEN is not set; publishing unsigned."
+          fi
+
+      - name: Upload the installer for signing
+        if: steps.signing.outputs.enabled == 'true'
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulpit-installer-unsigned
+          path: dist/pulpit-*-windows-x64-setup.exe
+
+      - name: Sign
+        if: steps.signing.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: pulpit
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-signed
+
+      - name: Take the signed installer
+        if: steps.signing.outputs.enabled == 'true'
+        run: cp dist-signed/*.exe dist/
+
+      # Checksums come *after* signing, never before: a signature changes the
+      # bytes, and winget verifies the hash of the file it actually downloads.
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          for artifact in pulpit-*-windows-x64.zip pulpit-*-windows-x64-setup.exe; do
+            sha256sum "$artifact" > "$artifact.sha256"
+          done
+          ls -l
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # A tag with a hyphen is a rehearsal: publish the artifacts, but
+          # never let it show as the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/pulpit-*-windows-x64.zip
+            dist/pulpit-*-windows-x64.zip.sha256
+            dist/pulpit-*-windows-x64-setup.exe
+            dist/pulpit-*-windows-x64-setup.exe.sha256
+          body: |
+            See CHANGELOG.md.
+
+            Two artifacts, because there are two channels. The `.zip` is what
+            Scoop installs from and needs no installer and no signature. The
+            `-setup.exe` is a **per-user** installer — it writes under
+            `%LOCALAPPDATA%`, raises no UAC prompt, and is what winget runs.
+
+            Both carry `pdfium.dll` beside `pulpit.exe`. The graphics stack
+            ships with Windows, and media overlays use the preinstalled Edge,
+            so there is nothing else to install.
+
+            Installing through a package manager avoids the browser-download
+            path that produces the loudest SmartScreen warning.
+
+            x64 only for now; arm64 Windows runs it under emulation.

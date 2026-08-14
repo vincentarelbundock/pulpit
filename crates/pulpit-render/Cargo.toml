@@ -1,0 +1,32 @@
+[package]
+name = "pulpit-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pulpit-render-worker"
+path = "src/bin/worker.rs"
+
+[features]
+default = ["pdfium"]
+# PDFium is loaded dynamically at run time; the binary is not linked in, so a
+# build without libpdfium present still succeeds and falls back with a clear
+# diagnostic (see `scripts/fetch-pdfium.sh`).
+pdfium = ["dep:pdfium-render"]
+
+[dependencies]
+pulpit-core = { workspace = true }
+pdfium-render = { version = "0.9", optional = true }
+bincode = { workspace = true }
+memmap2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

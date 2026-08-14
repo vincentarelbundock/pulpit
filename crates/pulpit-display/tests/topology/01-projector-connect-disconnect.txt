@@ -1,0 +1,10 @@
+# Start on the laptop alone, plug in a projector, unplug it again
+step laptop-only
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001 mm=344x215
+
+step projector-connected
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001 mm=344x215
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001
+
+step projector-disconnected
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001 mm=344x215

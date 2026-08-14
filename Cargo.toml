@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pulpit-core",
+    "crates/pulpit-display",
+    "crates/pulpit-media",
+    "crates/pulpit-render",
+    "crates/pulpit-app",
+]
+# `cargo run` at the workspace root means the application. The other two
+# binaries — the render worker and the topology capture tool — are asked for
+# by name.
+default-members = ["crates/pulpit-app"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vincentarelbundock/pulpit"
+
+[workspace.dependencies]
+pulpit-core = { path = "crates/pulpit-core" }
+pulpit-display = { path = "crates/pulpit-display", default-features = false }
+# Default features on purpose: the browser worker is the only media runtime,
+# so a dependant that quietly opted out would ship an application whose media
+# silently never plays — which happened once already, from the other end.
+pulpit-media = { path = "crates/pulpit-media" }
+pulpit-render = { path = "crates/pulpit-render", default-features = false }
+
+anyhow = "1"
+bincode = { version = "1.3", default-features = false }
+crc32fast = "1"
+iced = "0.14"
+memmap2 = "0.9"
+notify = "8"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+smithay-client-toolkit = { version = "0.21", default-features = false }
+wayland-client = "0.31"
+x11rb = "0.14"
+# Embeds the icon and version block into pulpit.exe. Windows-only, and only
+# ever a build dependency.
+winresource = "0.1"
+zbus = { version = "5", features = ["blocking"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+debug = 1

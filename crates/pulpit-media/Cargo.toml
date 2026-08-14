@@ -1,0 +1,45 @@
+[package]
+name = "pulpit-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No binaries here on purpose.
+#
+# The browser runtime links nothing optional — it only ever *launches* an
+# installed browser — so it lives in `worker/` and runs inside the
+# application's own executable, re-executed with a flag: the same arrangement
+# the renderer worker uses, and the reason a media worker can never be missing
+# from a build or a package.
+#
+# A runtime that linked an optional system library (WebKitGTK) would need its
+# own executable, so that one absent shared library could not stop the
+# application from starting (`docs-src/internals.typ`). None currently does.
+
+[features]
+default = ["chromium-runtime"]
+# Drives an *externally installed* Chromium-family browser over CDP. Ships no
+# engine; the dependency is a JPEG decoder for screencast frames.
+chromium-runtime = ["dep:image", "dep:serde_json"]
+
+[dependencies]
+pulpit-core = { workspace = true }
+
+bincode = { workspace = true }
+# libmpv is discovered and dlopened at runtime, never linked: the same
+# ships-no-engine policy as the browser and PDFium.
+libloading = "0.8"
+memmap2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "jpeg",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,43 @@
+# Homebrew Cask template for Pulpit.
+#
+# `__VERSION__` and `__SHA256__` are filled in by the release workflow, which
+# then pushes the rendered file to vincentarelbundock/homebrew-tap as
+# `Casks/pulpit.rb`. Edit this file, never the copy in the tap: the tap's copy
+# is generated output and any hand edit is overwritten by the next release.
+cask "pulpit" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/vincentarelbundock/pulpit/releases/download/v#{version}/pulpit-#{version}-macos-arm64.dmg"
+  name "Pulpit"
+  desc "PDF presenter built around connecting and disconnecting displays"
+  homepage "https://github.com/vincentarelbundock/pulpit"
+
+  # Apple Silicon only: the Intel build needs a second pinned PDFium and a
+  # lipo pass. LSMinimumSystemVersion in the bundle says the same thing.
+  depends_on arch: :arm64
+  depends_on macos: ">= :big_sur"
+
+  app "Pulpit.app"
+
+  caveats <<~EOS
+    Pulpit is ad-hoc signed but not notarized. Ad-hoc signing is what lets
+    Apple Silicon execute the binary at all; it buys no Gatekeeper relief,
+    and notarization needs a paid Developer ID that no release is gated on.
+
+    Installed this way the quarantine attribute still applies, so the first
+    launch costs one trip through System Settings -> Privacy & Security,
+    where a message about Pulpit offers "Open Anyway". To skip that entirely,
+    reinstall with:
+
+      brew install --cask --no-quarantine vincentarelbundock/tap/pulpit
+
+    Media overlays need a Chromium-family browser installed.
+  EOS
+
+  zap trash: [
+    "~/Library/Application Support/pulpit",
+    "~/Library/Caches/pulpit",
+    "~/Library/Logs/pulpit",
+  ]
+end

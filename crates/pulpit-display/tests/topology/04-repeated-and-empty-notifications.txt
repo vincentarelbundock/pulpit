@@ -1,0 +1,19 @@
+# Bursts of identical notifications, and a transient empty topology while the
+# desktop reconfigures. Neither may move a window.
+step both
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001
+
+step same-again
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001
+
+step same-once-more
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001
+
+step blackout
+
+step recovered
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001

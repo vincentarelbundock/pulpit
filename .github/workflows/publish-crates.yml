@@ -1,0 +1,53 @@
+name: Publish to crates.io
+
+# Fires on a *final* release tag. `release.yml` runs independently from the
+# same push, so binary artifacts and crates.io publishing are not coupled.
+#
+# The pattern deliberately has no trailing wildcard, which `release.yml`'s
+# does: a prerelease tag like `v0.2.0-rc1` builds and publishes artifacts and
+# updates the Homebrew cask, but must never reach crates.io. A published
+# version there can be yanked but never deleted or reused, so a rehearsal that
+# burned `0.2.0` would cost the real release its version number.
+#
+# Order matters: a crate cannot be published before the crates it depends on
+# are on the registry, so the workspace is published bottom-up.
+#
+# Required secrets:
+#   CARGO_REGISTRY_TOKEN   crates.io token with publish rights.
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libdbus-1-dev pkg-config
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          for crate in pulpit-core pulpit-display pulpit-render pulpit-media pulpit-app; do
+            cargo publish -p "$crate" --locked --token "${CARGO_REGISTRY_TOKEN}"
+          done

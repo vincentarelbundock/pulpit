@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=pulpit
+GenericName=PDF Presenter
+Comment=Present PDF slides with dependable multi-monitor behaviour
+Exec=pulpit %f
+TryExec=pulpit
+Icon=pulpit
+Terminal=false
+Categories=Office;Presentation;Viewer;
+MimeType=application/pdf;
+Keywords=presentation;slides;projector;beamer;pdf;
+StartupNotify=true

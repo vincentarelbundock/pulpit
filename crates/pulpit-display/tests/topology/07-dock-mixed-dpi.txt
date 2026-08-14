@@ -1,0 +1,11 @@
+# A USB-C dock arriving with two displays at different scales at once
+step laptop-only
+  monitor eDP-1 builtin 2880x1800+0+0 @2 make=LEN model=Panel id=LEN-0001
+
+step docked
+  monitor eDP-1 builtin 2880x1800+0+0 @2 make=LEN model=Panel id=LEN-0001
+  monitor DP-3 2560x1440+2880+0 @1 make=DEL model=U2719 id=DEL-4711
+  monitor HDMI-1 1920x1080+5440+0 @1 make=ACME model=Projector id=ACM-9001
+
+step undocked
+  monitor eDP-1 builtin 2880x1800+0+0 @2 make=LEN model=Panel id=LEN-0001

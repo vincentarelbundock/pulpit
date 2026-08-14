@@ -1,0 +1,149 @@
+//! Drawing the media transport.
+//!
+//! Presenter-only by construction: this is a layout widget, and the layout is
+//! the presenter screen. Nothing here can reach the audience window, which is
+//! the entire reason the controls are drawn on this side instead of inside
+//! the page the two views share.
+
+use iced::widget::{button, container, responsive, row, slider, text};
+use iced::{Element, Length, Padding};
+
+use crate::theme;
+use crate::theme::{target, type_scale};
+use crate::widgets::context::MediaData;
+use crate::widgets::event::{TransportRequest, WidgetEvent};
+use crate::widgets::media::model::Transport;
+use crate::widgets::{Mode, Widget, WidgetKind};
+
+const SPACING: f32 = 10.0;
+
+pub fn view<Message: Clone + 'static>(
+    widget: &Widget,
+    media: &MediaData,
+    mode: Mode,
+    on: fn(WidgetEvent) -> Message,
+    scale: f32,
+) -> Element<'static, Message> {
+    if widget.kind() != WidgetKind::MediaTransport {
+        return crate::widgets::common::view::misdirected(widget.kind());
+    }
+    let Some(transport) = media.transport.clone() else {
+        return idle(scale);
+    };
+    // In the editor the controls are drawn but do nothing, like every other
+    // control there. `interactive` is about the mode; `enabled` is about
+    // whether the media itself can answer.
+    let live = mode.interactive() && transport.enabled;
+    transport_row(transport, live, on, scale)
+}
+
+/// A slide with no media at all. The pane still says what it is for, rather
+/// than going blank and reading as a rendering fault.
+fn idle<Message: 'static>(scale: f32) -> Element<'static, Message> {
+    container(
+        text("No media on this slide")
+            .size(type_scale::BODY * scale)
+            .color(theme::ambient::muted()),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center(Length::Fill)
+    .into()
+}
+
+fn transport_row<Message: Clone + 'static>(
+    transport: Transport,
+    live: bool,
+    on: fn(WidgetEvent) -> Message,
+    scale: f32,
+) -> Element<'static, Message> {
+    responsive(move |area| {
+        let height = (area.height * 0.8)
+            .clamp(target::MINIMUM, 56.0)
+            .min(area.height.max(target::MINIMUM));
+
+        let action = transport.action;
+        let mut play = button(
+            text(action.glyph())
+                .size((height * 0.42).clamp(12.0, 22.0))
+                .center()
+                .width(Length::Fill),
+        )
+        .width(Length::Fixed(height))
+        .height(Length::Fixed(height))
+        .padding(0)
+        .style(theme::ambient::forward_button);
+        if live {
+            play = play.on_press(on(WidgetEvent::Transport(match action {
+                crate::widgets::media::model::Action::Play => TransportRequest::Play,
+                crate::widgets::media::model::Action::Pause => TransportRequest::Pause,
+            })));
+        }
+
+        let readout = text(transport.readout.clone())
+            .size((type_scale::LABEL * scale).clamp(10.0, 20.0))
+            .color(if transport.enabled {
+                theme::ambient::text()
+            } else {
+                theme::ambient::muted()
+            })
+            .wrapping(iced::widget::text::Wrapping::None);
+
+        let mut controls = row![play].spacing(SPACING).align_y(iced::Alignment::Center);
+
+        // The scrub bar takes whatever the row does not need. Without a
+        // duration there is nothing to scrub, so the readout simply moves
+        // left rather than a dead track being drawn.
+        if transport.scrubbable {
+            let duration = transport.duration.unwrap_or(0.0);
+            let mut track = slider(0.0..=duration, transport.position, move |seconds| {
+                on(WidgetEvent::Transport(TransportRequest::SeekTo(seconds)))
+            })
+            .step(0.05_f32)
+            .height(height * 0.5)
+            .width(Length::Fill);
+            if !live {
+                // Inert, not absent: the presenter can still see the playhead.
+                track = slider(0.0..=duration, transport.position, move |_| {
+                    on(WidgetEvent::Ignored)
+                })
+                .step(0.05_f32)
+                .height(height * 0.5)
+                .width(Length::Fill);
+            }
+            controls = controls.push(track);
+        } else {
+            controls = controls.push(iced::widget::space::horizontal());
+        }
+
+        controls = controls.push(readout);
+
+        if transport.mutable {
+            let muted = transport.muted;
+            let mut sound = button(
+                text(if muted { "\u{1F507}" } else { "\u{1F509}" })
+                    .size((height * 0.36).clamp(11.0, 18.0))
+                    .center()
+                    .width(Length::Fill),
+            )
+            .width(Length::Fixed(height))
+            .height(Length::Fixed(height))
+            .padding(0)
+            .style(theme::ambient::back_button);
+            if live {
+                sound = sound.on_press(on(WidgetEvent::Transport(TransportRequest::SetMuted(
+                    !muted,
+                ))));
+            }
+            controls = controls.push(sound);
+        }
+
+        container(controls)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(Padding::from([0.0, 2.0]))
+            .center_y(Length::Fill)
+            .into()
+    })
+    .into()
+}

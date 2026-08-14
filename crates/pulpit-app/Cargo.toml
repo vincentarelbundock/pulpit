@@ -1,0 +1,65 @@
+[package]
+name = "pulpit-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pulpit"
+path = "src/main.rs"
+
+[features]
+default = ["pdfium"]
+pdfium = ["pulpit-render/pdfium"]
+
+[dependencies]
+pulpit-core = { workspace = true }
+pulpit-media = { workspace = true }
+pulpit-render = { workspace = true }
+
+# "canvas": presenter annotations are drawn as geometry, not as images.
+iced = { workspace = true, features = ["image", "tokio", "advanced", "wgpu", "canvas", "svg"] }
+# iced's own building blocks, by their real names. Only `src/vendor/` uses
+# these: the widgets vendored there are written against them, and naming them
+# directly is what keeps that code a copy rather than a rewrite. They are the
+# same crates and versions `iced` already resolves to, so nothing extra is
+# compiled.
+iced_core = "0.14"
+iced_widget = { version = "0.14.2", features = ["canvas"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The same `Bytes` iced's image handles hold, so cached pixels can back a
+# handle without being copied.
+bytes = "1"
+notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing-appender = { workspace = true }
+rfd = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# The X11 and Wayland adapters, and the Niri app ids the presenter window is
+# labelled with, exist only in a Linux build. The workspace declares
+# `pulpit-display` with `default-features = false`, so these must be asked for
+# explicitly — leaving them off silently compiles the adapters out.
+#
+# D-Bus is the Linux desktop's own interface, and `platform::linux` is the only
+# module that names it. Windows and macOS reach their desktops through the
+# frameworks their own adapters link against, which need no crate here.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+pulpit-display = { workspace = true, features = ["x11", "wayland"] }
+zbus = { workspace = true }
+
+# Elsewhere the display crate builds without a session backend; the Win32 and
+# CoreGraphics adapters are selected by target inside the crate itself.
+[target.'cfg(not(all(unix, not(target_os = "macos"))))'.dependencies]
+pulpit-display = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

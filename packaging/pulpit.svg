@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- The application icon is logo.svg on a badge: a desktop panel gives an
+       icon no background of its own, and the bare strokes disappear against a
+       dark one. Same artwork, mapped from the logo's 182-unit square into 64
+       with padding. -->
+  <rect width="64" height="64" rx="8" fill="#1d1f24"/>
+  <g transform="translate(-3.14 8) scale(0.2857)"
+     stroke="#f4f4f5" stroke-width="6">
+    <!-- Large display -->
+    <path d="M92 34 H188 Q193 34 193 39 V105 Q193 110 188 110 H132"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M92 34 Q87 34 87 39 V74"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Laptop screen -->
+    <rect x="61" y="84" width="57" height="43" rx="2"/>
+
+    <!-- Laptop base -->
+    <path d="M53 129 H126" stroke-linecap="round"/>
+  </g>
+</svg>

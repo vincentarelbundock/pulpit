@@ -1,0 +1,5 @@
+# Captured with pulpit-topology on a real laptop (X11/XRandR).
+# Note the fractional scale factor: Xft.dpi is 154, not a multiple of 96.
+
+step capture-1
+  monitor eDP-1 builtin 2880x1800+0+0 @1.6041666666666667 make=LEN model=ATNA40HQ10-0 mm=300x190 primary

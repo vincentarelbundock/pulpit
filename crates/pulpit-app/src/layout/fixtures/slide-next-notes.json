@@ -1,0 +1,172 @@
+{
+  "format_version": 1,
+  "name": "Slide + Next + Notes",
+  "design_ratio": "sixteen-nine",
+  "root": {
+    "type": "split",
+    "id": 0,
+    "name": "Presenter screen",
+    "direction": "horizontal",
+    "children": [
+      {
+        "type": "leaf",
+        "id": 1,
+        "widget": {
+          "kind": "current-slide",
+          "style": {
+            "variant": "standard",
+            "scale": 1.0,
+            "alignment": "center"
+          },
+          "config": {
+            "slide": {
+              "fit": "fit"
+            }
+          }
+        },
+        "padding": 0.0,
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel"
+      },
+      {
+        "type": "split",
+        "id": 2,
+        "name": "Look-ahead rail",
+        "direction": "vertical",
+        "children": [
+          {
+            "type": "leaf",
+            "id": 3,
+            "widget": {
+              "kind": "next-slide",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "slide": {
+                  "fit": "fit"
+                }
+              }
+            },
+            "padding": 0.0,
+            "background": "none",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 4,
+            "widget": {
+              "kind": "speaker-notes",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "notes": {
+                  "font_size": 18.0,
+                  "line_spacing": 1.5,
+                  "source": "current-slide"
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 5,
+            "widget": {
+              "kind": "annotations",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "annotations": {
+                  "tool": "ink",
+                  "ink_color": "red",
+                  "highlight_color": "yellow",
+                  "pointer_color": "red",
+                  "pointer_spotlight": false,
+                  "ink_width": 0.004,
+                  "highlight_width": 0.025,
+                  "eraser_radius": 0.02,
+                  "pointer_radius": 0.012,
+                  "spotlight_radius": 0.08,
+                  "audience_visible": false
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 6,
+            "widget": {
+              "kind": "slide-slider",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 7,
+            "widget": {
+              "kind": "slide-buttons",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "buttons": {
+                  "back": true,
+                  "forward": true,
+                  "labels": true
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          }
+        ],
+        "sizes": [
+          0.385,
+          0.385,
+          0.06,
+          0.07,
+          0.1
+        ],
+        "gap": 8.0,
+        "min_child": 0.05
+      }
+    ],
+    "sizes": [
+      0.72,
+      0.28
+    ],
+    "gap": 8.0,
+    "min_child": 0.05
+  }
+}

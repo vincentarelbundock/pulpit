@@ -1,0 +1,16 @@
+# Exact mirror, then an unequal mirror, then back to extended
+step extended
+  monitor eDP-1 builtin 3840x2160+0+0 @2 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+3840+0 @1 make=ACME model=Projector id=ACM-9001
+
+step exact-mirror
+  monitor eDP-1 builtin 1920x1080+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+0+0 @1 make=ACME model=Projector id=ACM-9001
+
+step unequal-mirror
+  monitor eDP-1 builtin 3840x2160+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+0+0 @1 make=ACME model=Projector id=ACM-9001
+
+step extended-again
+  monitor eDP-1 builtin 3840x2160+0+0 @2 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+3840+0 @1 make=ACME model=Projector id=ACM-9001

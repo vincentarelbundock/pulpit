@@ -1,0 +1,16 @@
+# The pdfpc defect: the same projector returns first in enumeration, at a
+# different resolution and scale. Placement must use the fresh parameters.
+step both
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+  monitor HDMI-1 1920x1080+1920+0 @1 make=ACME model=Projector id=ACM-9001
+
+step projector-gone
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+
+step projector-back-different
+  monitor HDMI-2 3840x2160-3840-200 @2 make=ACME model=Projector id=ACM-9001
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
+
+step settled
+  monitor HDMI-2 3840x2160-3840-200 @2 make=ACME model=Projector id=ACM-9001
+  monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001

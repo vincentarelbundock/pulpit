@@ -1,0 +1,79 @@
+//! Drawing speaker notes.
+
+use iced::widget::{column, container, image, scrollable, text};
+use iced::{ContentFit, Element, Length};
+
+use pulpit_render::cache::FrameKind;
+
+use crate::theme;
+use crate::widgets::context::{DocumentData, Mode, SlideData};
+use crate::widgets::Widget;
+
+pub fn view<Message: 'static>(
+    widget: &Widget,
+    slides: &SlideData<'_>,
+    document: &DocumentData<'_>,
+    mode: Mode,
+    accent: iced::Color,
+) -> Element<'static, Message> {
+    let options = widget.notes();
+    // Notes follow the *preview* slide, not the committed one: reading ahead
+    // is the whole point of the pane.
+    let slide = options.source.slide(slides.preview);
+
+    // Text first. A deck that carries its notes as text has said what they
+    // are; cropping a region of a page is the fallback for decks that only
+    // draw them.
+    let written = slides
+        .text_notes
+        .and_then(|notes| notes.for_slide(slide))
+        .map(str::to_string);
+
+    let body: Element<'static, Message> = match written {
+        Some(written) => scrollable(
+            text(written)
+                .size(options.font_size)
+                .line_height(options.line_spacing)
+                .color(theme::ambient::text()),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        None => match slides
+            .frames
+            .frame(slide, FrameKind::Notes, slides.preview_width)
+        {
+            Some(handle) => image(handle)
+                .content_fit(ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            None if mode.is_sample() => text(document.sample_notes.to_string())
+                .size(options.font_size)
+                .line_height(options.line_spacing)
+                .color(theme::ambient::text())
+                .into(),
+            None => text(
+                "No notes for this slide. Choose a notes mapping in the presenter window if your \
+                 deck carries them.",
+            )
+            .size(options.font_size * 0.85)
+            .line_height(options.line_spacing)
+            .color(theme::ambient::muted())
+            .into(),
+        },
+    };
+
+    column![
+        text("Speaker Notes").size(13).color(accent),
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(14)
+            .style(theme::ambient::surface),
+    ]
+    .spacing(8)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}

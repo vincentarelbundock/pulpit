@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: VincentArelBundock.Pulpit
+PackageVersion: 0.1.0
+InstallerType: inno
+# Per-user by design: an ordinary install writes under %LOCALAPPDATA% and
+# raises no UAC prompt (SPEC-package.md 6.1).
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: 2026-01-01
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/vincentarelbundock/pulpit/releases/download/v0.1.0/pulpit-0.1.0-windows-x64-setup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0

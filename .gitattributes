@@ -1,0 +1,27 @@
+# Line endings are normalised to LF in the working tree on every platform.
+#
+# Git on Windows checks text files out as CRLF by default. Two things in this
+# repository break when it does:
+#
+#   * The layout fixtures are compared *byte for byte* against what the
+#     exporter produces, and the exporter emits `\n`. A CRLF checkout fails
+#     `every_fixture_round_trips_byte_for_byte` on Windows only.
+#   * The packaging scripts run under Git Bash. A `.sh` file with CRLF endings
+#     fails with a "bad interpreter" error naming a path that looks correct,
+#     which is among the more baffling ways to lose an afternoon.
+*               text=auto eol=lf
+
+# Binary files must never be line-ending normalised.
+*.png           binary
+*.ico           binary
+*.icns          binary
+*.pdf           binary
+*.gz            binary
+*.tgz           binary
+*.7z            binary
+*.zip           binary
+*.dmg           binary
+*.exe           binary
+*.dll           binary
+*.so            binary
+*.dylib         binary

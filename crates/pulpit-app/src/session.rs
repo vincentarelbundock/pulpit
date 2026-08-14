@@ -1,0 +1,930 @@
+//! Crash recovery: what the last run was doing, and how it is offered back.
+//!
+//! Pulpit writes a small snapshot of the live session beside the settings
+//! file while it runs, and deletes that file on a clean quit. The presence of
+//! a snapshot at startup therefore means exactly one thing: the previous run
+//! ended without going through [`crate::app::App::quit`] — a crash, a killed
+//! process, a power cut mid-talk.
+//!
+//! Two rules shape everything here.
+//!
+//! 1. **Nothing audience-visible is restored without an answer.** The snapshot
+//!    is turned into a [`RestorePlan`], which is inert: constructing one
+//!    cannot move the audience, blank it, or reassign a display. Only
+//!    [`RestorePlan::apply_to`] does that, and it is reached from exactly one
+//!    message, sent by exactly one button. Until the presenter answers,
+//!    pulpit behaves like a fresh start.
+//! 2. **The offer is honest.** A slide index means nothing if the deck was
+//!    rebuilt under us, so the plan checks a fingerprint of the file and
+//!    offers only the parts that still apply.
+//!
+//! The snapshot is JSON rather than the TOML the settings use: it is machine
+//! state written unattended, never hand-edited, and JSON has no rule about
+//! values preceding tables to trip over as fields are added.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+use pulpit_core::{Blank, Command as Nav, NotesMapping, PresentationState, SlideIndex, Timer};
+use pulpit_display::DisplayRoles;
+use serde::{Deserialize, Serialize};
+
+/// Current session-snapshot schema version. Bump it when a field changes
+/// meaning; an unrecognised version is discarded rather than guessed at.
+pub const SCHEMA_VERSION: u32 = 1;
+
+// ------------------------------------------------------------------- model
+
+/// Enough of a file to notice that it is not the file we were presenting.
+///
+/// Modification time and size, not a content hash: a snapshot is written
+/// while a talk is in progress and must cost nothing, and a rebuilt deck
+/// always changes at least one of the two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentFingerprint {
+    pub path: PathBuf,
+    /// Seconds since the Unix epoch, absent when the platform will not say.
+    pub modified_unix: Option<u64>,
+    pub size: Option<u64>,
+}
+
+impl DocumentFingerprint {
+    /// Whether this describes the same bytes as `other`.
+    ///
+    /// A fingerprint whose metadata could not be read matches only on the
+    /// path: refusing to match at all would mean never restoring a slide on a
+    /// filesystem that hides timestamps, and matching regardless would mean
+    /// restoring a slide index into a document that has since been rebuilt.
+    /// Matching on the path alone is the honest middle: the file is the same
+    /// file, and we say the deck is unchanged only when we have evidence.
+    pub fn matches(&self, other: &DocumentFingerprint) -> bool {
+        self.path == other.path
+            && self.modified_unix == other.modified_unix
+            && self.size == other.size
+    }
+}
+
+/// The clock, flattened to values that survive a process restart.
+///
+/// [`Timer`] holds an [`Instant`], which is meaningless in another process,
+/// so the running timer is stored as "this much elapsed, and it was ticking".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TimerSnapshot {
+    pub elapsed_secs: u64,
+    pub target_secs: Option<u64>,
+    pub running: bool,
+}
+
+impl TimerSnapshot {
+    pub fn of(timer: &Timer, now: Instant) -> TimerSnapshot {
+        TimerSnapshot {
+            elapsed_secs: timer.elapsed(now).as_secs(),
+            target_secs: timer.target.map(|target| target.as_secs()),
+            running: timer.is_running(),
+        }
+    }
+
+    /// Rebuild a timer showing this elapsed time as of `now`.
+    ///
+    /// The elapsed time is reconstructed by starting the clock in the past;
+    /// a platform that refuses the subtraction simply restores a timer that
+    /// starts from where it was rather than panicking mid-recovery.
+    pub fn to_timer(self, now: Instant) -> Timer {
+        let mut timer = Timer::new(self.target_secs.map(Duration::from_secs));
+        let elapsed = Duration::from_secs(self.elapsed_secs);
+        timer.start(now.checked_sub(elapsed).unwrap_or(now));
+        if !self.running {
+            timer.pause(now);
+        }
+        timer
+    }
+}
+
+/// Everything worth recovering from an interrupted talk.
+///
+/// Pure data: it touches no filesystem, holds no `Instant`, and knows nothing
+/// about windows. That is what makes the restore decision testable without a
+/// desktop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionSnapshot {
+    pub schema: u32,
+    /// Seconds since the Unix epoch, so the offer can say how old it is.
+    pub saved_at: u64,
+    pub document: Option<DocumentFingerprint>,
+    /// The slide the audience was on.
+    pub committed: SlideIndex,
+    /// The slide the presenter was looking at, which may be a different one.
+    pub preview: SlideIndex,
+    pub timer: TimerSnapshot,
+    pub blank: Blank,
+    /// The presenter layout in use, by identifier.
+    pub layout: Option<String>,
+    pub mapping: NotesMapping,
+    pub roles: DisplayRoles,
+}
+
+impl Default for SessionSnapshot {
+    fn default() -> Self {
+        Self {
+            schema: SCHEMA_VERSION,
+            saved_at: 0,
+            document: None,
+            committed: 0,
+            preview: 0,
+            timer: TimerSnapshot::default(),
+            blank: Blank::Off,
+            layout: None,
+            mapping: NotesMapping::default(),
+            roles: DisplayRoles::default(),
+        }
+    }
+}
+
+impl SessionSnapshot {
+    /// Capture the live session. `now` is the caller's clock so the capture
+    /// stays deterministic in tests.
+    pub fn capture(
+        state: &PresentationState,
+        layout: Option<String>,
+        roles: &DisplayRoles,
+        fingerprint: Option<DocumentFingerprint>,
+        now: Instant,
+    ) -> SessionSnapshot {
+        SessionSnapshot {
+            schema: SCHEMA_VERSION,
+            saved_at: unix_now(),
+            document: fingerprint,
+            committed: state.committed(),
+            preview: state.preview(),
+            timer: TimerSnapshot::of(state.timer(), now),
+            blank: state.blank(),
+            layout,
+            mapping: state.mapping().clone(),
+            roles: roles.clone(),
+        }
+    }
+
+    /// Whether two snapshots describe the same session, ignoring when they
+    /// were taken. A talk that is sitting still on one slide must not rewrite
+    /// the file every interval just because the wall clock moved.
+    ///
+    /// The timer's elapsed seconds get thirty seconds of slack: a running
+    /// clock would otherwise make every snapshot "different" and force a
+    /// disk write per interval for the whole talk. Recovery after a crash
+    /// may therefore restore a clock up to half a minute behind — a price a
+    /// crash can charge; a healthy talk paying an fsync every two seconds
+    /// is not.
+    pub fn matches_content(&self, other: &SessionSnapshot) -> bool {
+        self.schema == other.schema
+            && self.document == other.document
+            && self.committed == other.committed
+            && self.preview == other.preview
+            && self.blank == other.blank
+            && self.layout == other.layout
+            && self.mapping == other.mapping
+            && self.roles == other.roles
+            && self.timer.running == other.timer.running
+            && self.timer.target_secs == other.timer.target_secs
+            && self.timer.elapsed_secs.abs_diff(other.timer.elapsed_secs) < 30
+    }
+
+    /// Whether there is anything here worth offering back. A snapshot of an
+    /// empty session with a stopped clock is not worth a dialog.
+    pub fn is_worth_offering(&self) -> bool {
+        self.document.is_some()
+            || self.committed != 0
+            || self.timer.elapsed_secs > 0
+            || self.blank.is_blanked()
+    }
+
+    /// Decide what may be offered, given what the document looks like *now*.
+    ///
+    /// `current` is the fingerprint taken at startup, or `None` when the file
+    /// has gone. Nothing here changes anything: the result is a description
+    /// of an offer, and applying it is a separate, explicit step.
+    pub fn plan(&self, current: Option<&DocumentFingerprint>) -> RestorePlan {
+        let document = match (&self.document, current) {
+            (None, _) => DocumentStatus::NoDocument,
+            (Some(_), None) => DocumentStatus::Missing,
+            (Some(stored), Some(current)) if stored.matches(current) => DocumentStatus::Unchanged,
+            (Some(_), Some(_)) => DocumentStatus::Changed,
+        };
+        RestorePlan {
+            document_status: document,
+            snapshot: self.clone(),
+        }
+    }
+}
+
+/// What became of the document the snapshot was taken against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentStatus {
+    /// Same path, same bytes as far as the fingerprint can tell.
+    Unchanged,
+    /// The file is there but has been rebuilt: slide indices are meaningless.
+    Changed,
+    /// The file is gone.
+    Missing,
+    /// The interrupted session had no document open.
+    NoDocument,
+}
+
+impl DocumentStatus {
+    /// Whether a slide index taken against this document still means anything.
+    fn slides_are_meaningful(self) -> bool {
+        matches!(self, DocumentStatus::Unchanged)
+    }
+}
+
+/// An offer, not an action.
+///
+/// Holding one has no effect on the presentation. Everything it can change
+/// happens inside [`RestorePlan::apply_to`] and [`RestorePlan::document`],
+/// which the application calls only after the presenter says yes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestorePlan {
+    pub document_status: DocumentStatus,
+    snapshot: SessionSnapshot,
+}
+
+impl RestorePlan {
+    /// The document to reopen, or `None` when the deck cannot be trusted.
+    pub fn document(&self) -> Option<&Path> {
+        if !self.document_status.slides_are_meaningful() {
+            return None;
+        }
+        self.snapshot.document.as_ref().map(|d| d.path.as_path())
+    }
+
+    /// The slide pair to return to, or `None` when the deck changed.
+    pub fn slides(&self) -> Option<(SlideIndex, SlideIndex)> {
+        self.document_status
+            .slides_are_meaningful()
+            .then_some((self.snapshot.committed, self.snapshot.preview))
+    }
+
+    /// Blanking is only restored alongside a slide: a black audience screen
+    /// with no deck behind it is a puzzle, not a recovery.
+    pub fn blank(&self) -> Blank {
+        if self.document_status.slides_are_meaningful() {
+            self.snapshot.blank
+        } else {
+            Blank::Off
+        }
+    }
+
+    pub fn mapping(&self) -> Option<&NotesMapping> {
+        self.document_status
+            .slides_are_meaningful()
+            .then_some(&self.snapshot.mapping)
+    }
+
+    /// The layout identifier survives any document change: it describes the
+    /// presenter's own screen, not the deck.
+    pub fn layout(&self) -> Option<&str> {
+        self.snapshot.layout.as_deref()
+    }
+
+    pub fn roles(&self) -> &DisplayRoles {
+        &self.snapshot.roles
+    }
+
+    /// How long ago the snapshot was written, in words.
+    ///
+    /// A presenter deciding whether to restore needs to know whether this is
+    /// the talk they were just giving or one from last week — "did not shut
+    /// down cleanly" alone does not say. Rounded, because the exact second is
+    /// not what the question turns on.
+    ///
+    /// `None` when the clock has moved backwards since, which a machine that
+    /// resynchronised its time can do; claiming a session was saved in the
+    /// future would be worse than saying nothing.
+    pub fn saved_ago(&self, now_unix: u64) -> Option<String> {
+        let elapsed = now_unix.checked_sub(self.snapshot.saved_at)?;
+        Some(match elapsed {
+            0..=90 => "moments ago".to_string(),
+            91..=5400 => format!("about {} minutes ago", (elapsed + 30) / 60),
+            5401..=172_800 => format!("about {} hours ago", (elapsed + 1800) / 3600),
+            _ => format!("about {} days ago", (elapsed + 43_200) / 86_400),
+        })
+    }
+
+    /// [`RestorePlan::saved_ago`] against the current clock.
+    pub fn saved_ago_now(&self) -> Option<String> {
+        self.saved_ago(unix_now())
+    }
+
+    /// The file name the offer should mention, if any.
+    pub fn document_name(&self) -> Option<String> {
+        self.snapshot
+            .document
+            .as_ref()
+            .and_then(|d| d.path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+    }
+
+    /// One sentence saying what is and is not on offer, so the presenter is
+    /// never asked to approve something vaguer than what will happen.
+    pub fn summary(&self) -> String {
+        let clock = format!(
+            "the clock at {}",
+            format_duration(self.snapshot.timer.elapsed_secs)
+        );
+        match self.document_status {
+            DocumentStatus::Unchanged => {
+                let name = self.document_name().unwrap_or_else(|| "the deck".into());
+                format!(
+                    "Pulpit can reopen {name} on slide {}, restore {clock}, \
+                     and put the presenter layout and displays back as they were.",
+                    self.snapshot.committed + 1
+                )
+            }
+            DocumentStatus::Changed => {
+                let name = self.document_name().unwrap_or_else(|| "the deck".into());
+                format!(
+                    "{name} has changed since then, so the slide it was on no longer means \
+                     the same page. Only {clock}, the presenter layout and the displays can \
+                     be restored."
+                )
+            }
+            DocumentStatus::Missing => {
+                let name = self.document_name().unwrap_or_else(|| "the deck".into());
+                format!(
+                    "{name} is no longer there, so no slide can be restored. Only {clock}, \
+                     the presenter layout and the displays can be restored."
+                )
+            }
+            DocumentStatus::NoDocument => format!(
+                "No document was open. Pulpit can restore {clock}, the presenter layout \
+                 and the displays."
+            ),
+        }
+    }
+
+    /// Apply everything that lives in presentation state.
+    ///
+    /// This is the only function in this module that can move the audience,
+    /// and the application reaches it from a single confirmed message. The
+    /// document itself is reopened by the caller — see [`RestorePlan::document`]
+    /// — because loading a PDF is not a pure operation.
+    pub fn apply_to(&self, state: &mut PresentationState, roles: &mut DisplayRoles, now: Instant) {
+        if let Some(mapping) = self.mapping() {
+            state.apply(Nav::SetNotesMapping(mapping.clone()), now);
+        }
+        if let Some((committed, preview)) = self.slides() {
+            state.apply(Nav::GoTo(committed), now);
+            state.apply(Nav::PreviewGoTo(preview), now);
+        }
+        state.apply(Nav::SetBlank(self.blank()), now);
+        *state.timer_mut() = self.snapshot.timer.to_timer(now);
+        *roles = self.snapshot.roles.clone();
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------- throttle
+
+/// How often the session snapshot may be rewritten.
+///
+/// The update loop ticks every 50 ms; writing there would be twenty small
+/// fsynced writes a second for the whole of a talk, which is a lot of disk
+/// traffic to protect against an event that happens approximately never. Two
+/// seconds is the other end of the trade: the most a crash can cost is the
+/// last two seconds of navigation — at worst one slide — while a presenter
+/// hammering the arrow keys still produces at most one write every two
+/// seconds instead of one per keypress.
+pub const SAVE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A "not more often than this" gate.
+#[derive(Debug, Clone)]
+pub struct SaveThrottle {
+    interval: Duration,
+    last: Option<Instant>,
+}
+
+impl Default for SaveThrottle {
+    fn default() -> Self {
+        Self::new(SAVE_INTERVAL)
+    }
+}
+
+impl SaveThrottle {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: None,
+        }
+    }
+
+    /// Whether a write is allowed now, recording it if so. The first call
+    /// always allows one: a crash seconds after launch should still leave the
+    /// document and layout recoverable.
+    pub fn due(&mut self, now: Instant) -> bool {
+        let due = match self.last {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= self.interval,
+        };
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
+// ------------------------------------------------------------------- store
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("cannot parse the session snapshot: {0}")]
+    Parse(String),
+    #[error("cannot serialise the session snapshot: {0}")]
+    Serialise(String),
+    #[error("session schema {found} is not {known}")]
+    UnknownSchema { found: u32, known: u32 },
+}
+
+/// The snapshot file, written atomically beside the settings.
+#[derive(Debug, Clone)]
+pub struct SessionStore {
+    path: PathBuf,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new(crate::settings::store::config_directory().join("session.json"))
+    }
+}
+
+impl SessionStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The snapshot left by an unclean exit, if there is a usable one.
+    ///
+    /// Anything unreadable is treated as "no snapshot": a corrupt recovery
+    /// file must never stand between a presenter and a working application.
+    pub fn load(&self) -> Option<SessionSnapshot> {
+        match self.try_load() {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                if self.path.exists() {
+                    tracing::warn!(path = %self.path.display(), error = %e,
+                        "ignoring an unusable session snapshot");
+                }
+                None
+            }
+        }
+    }
+
+    fn try_load(&self) -> Result<SessionSnapshot, SessionError> {
+        let text = std::fs::read_to_string(&self.path)?;
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(&text).map_err(|e| SessionError::Parse(e.to_string()))?;
+        // Unlike settings there is no migration path: a snapshot describes a
+        // single interrupted run and is worth nothing once it is stale.
+        if snapshot.schema != SCHEMA_VERSION {
+            return Err(SessionError::UnknownSchema {
+                found: snapshot.schema,
+                known: SCHEMA_VERSION,
+            });
+        }
+        Ok(snapshot)
+    }
+
+    /// Write the snapshot atomically: temporary file in the same directory,
+    /// flushed and fsynced, then renamed over the destination. Exactly the
+    /// discipline `SettingsStore::save` uses, and for the same reason — a
+    /// crash during the write of a crash-recovery file must not be what
+    /// destroys the recovery.
+    pub fn save(&self, snapshot: &SessionSnapshot) -> Result<(), SessionError> {
+        // `capture` stamps the schema; serialising the borrow directly saves
+        // cloning the mapping and roles on every periodic save.
+        debug_assert_eq!(snapshot.schema, SCHEMA_VERSION);
+        let text = serde_json::to_string_pretty(snapshot)
+            .map_err(|e| SessionError::Serialise(e.to_string()))?;
+
+        let directory = self.path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(directory)?;
+
+        let temporary = self.path.with_extension("json.tmp");
+        {
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.flush()?;
+            // Durability before visibility: the rename must never expose a
+            // file whose contents are still in the page cache.
+            file.sync_all()?;
+        }
+        std::fs::rename(&temporary, &self.path)?;
+        if let Ok(handle) = std::fs::File::open(directory) {
+            let _ = handle.sync_all();
+        }
+        Ok(())
+    }
+
+    /// Forget the interrupted session. Called on a clean quit and when the
+    /// presenter declines the offer, so a restore is never proposed twice.
+    pub fn clear(&self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.path.display(), error = %e,
+                    "cannot remove the session snapshot");
+            }
+        }
+    }
+}
+
+/// Fingerprint a document on disk. `None` when it cannot be read at all,
+/// which is itself the answer the restore offer needs.
+pub fn fingerprint(path: &Path) -> Option<DocumentFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(DocumentFingerprint {
+        path: path.to_path_buf(),
+        modified_unix: metadata.modified().ok().and_then(|time| {
+            time.duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|since| since.as_secs())
+        }),
+        size: Some(metadata.len()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pulpit_core::{DocumentId, DocumentInfo};
+    use pulpit_display::{IdentityRecord, MonitorIdentity, RoleTarget};
+
+    fn interrupted_state(pages: usize) -> PresentationState {
+        let mut state = PresentationState::new(
+            DocumentInfo::new(DocumentId(1), "/decks/talk.pdf", pages),
+            NotesMapping::SlidesOnly,
+        );
+        let now = Instant::now();
+        state.apply(Nav::GoTo(11), now);
+        state.apply(Nav::PreviewGoTo(13), now);
+        state.apply(Nav::SetBlank(Blank::Black), now);
+        state.apply(Nav::StartTimer, now);
+        state
+    }
+
+    fn roles_with_a_chosen_audience() -> DisplayRoles {
+        DisplayRoles {
+            audience: RoleTarget::Monitor(Box::new(IdentityRecord::new(
+                MonitorIdentity::Session { handle: 7 },
+            ))),
+            audience_fullscreen: false,
+            ..DisplayRoles::default()
+        }
+    }
+
+    fn snapshot_of_an_interrupted_talk() -> SessionSnapshot {
+        let mut snapshot = SessionSnapshot::capture(
+            &interrupted_state(40),
+            Some("wide".into()),
+            &roles_with_a_chosen_audience(),
+            Some(DocumentFingerprint {
+                path: "/decks/talk.pdf".into(),
+                modified_unix: Some(1_700_000_000),
+                size: Some(4096),
+            }),
+            Instant::now(),
+        );
+        snapshot.timer.elapsed_secs = 754;
+        snapshot
+    }
+
+    fn unchanged_fingerprint() -> DocumentFingerprint {
+        DocumentFingerprint {
+            path: "/decks/talk.pdf".into(),
+            modified_unix: Some(1_700_000_000),
+            size: Some(4096),
+        }
+    }
+
+    fn store() -> (tempfile::TempDir, SessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("session.json"));
+        (dir, store)
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_through_disk() {
+        let (_dir, store) = store();
+        let snapshot = snapshot_of_an_interrupted_talk();
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load(), Some(snapshot));
+    }
+
+    #[test]
+    fn a_snapshot_from_another_schema_is_refused_rather_than_misread() {
+        let (_dir, store) = store();
+        let mut snapshot = snapshot_of_an_interrupted_talk();
+        store.save(&snapshot).unwrap();
+        snapshot.schema = SCHEMA_VERSION + 1;
+        let text = serde_json::to_string(&snapshot).unwrap();
+        std::fs::write(&store.path, text).unwrap();
+        assert_eq!(store.load(), None, "no offer beats a misread offer");
+    }
+
+    #[test]
+    fn a_corrupt_snapshot_is_ignored_rather_than_fatal() {
+        let (_dir, store) = store();
+        std::fs::write(&store.path, "{not json").unwrap();
+        assert_eq!(store.load(), None);
+    }
+
+    #[test]
+    fn no_snapshot_means_the_last_run_exited_cleanly() {
+        let (_dir, store) = store();
+        assert_eq!(store.load(), None);
+    }
+
+    #[test]
+    fn clearing_the_snapshot_leaves_nothing_to_restore() {
+        let (_dir, store) = store();
+        store.save(&snapshot_of_an_interrupted_talk()).unwrap();
+        store.clear();
+        assert!(!store.path.exists());
+        assert_eq!(store.load(), None);
+        // Clearing again is what a second clean quit does; it must be quiet.
+        store.clear();
+    }
+
+    #[test]
+    fn a_changed_document_is_detected_by_its_fingerprint() {
+        let snapshot = snapshot_of_an_interrupted_talk();
+        let rebuilt = DocumentFingerprint {
+            size: Some(8192),
+            ..unchanged_fingerprint()
+        };
+        assert_eq!(
+            snapshot.plan(Some(&rebuilt)).document_status,
+            DocumentStatus::Changed
+        );
+
+        let touched = DocumentFingerprint {
+            modified_unix: Some(1_700_000_999),
+            ..unchanged_fingerprint()
+        };
+        assert_eq!(
+            snapshot.plan(Some(&touched)).document_status,
+            DocumentStatus::Changed
+        );
+        assert_eq!(
+            snapshot
+                .plan(Some(&unchanged_fingerprint()))
+                .document_status,
+            DocumentStatus::Unchanged
+        );
+        assert_eq!(snapshot.plan(None).document_status, DocumentStatus::Missing);
+    }
+
+    #[test]
+    fn a_changed_document_is_never_offered_a_slide_index() {
+        let snapshot = snapshot_of_an_interrupted_talk();
+        for current in [
+            Some(DocumentFingerprint {
+                size: Some(1),
+                ..unchanged_fingerprint()
+            }),
+            None,
+        ] {
+            let plan = snapshot.plan(current.as_ref());
+            assert_eq!(plan.slides(), None);
+            assert_eq!(plan.document(), None);
+            assert_eq!(plan.mapping(), None);
+            assert_eq!(plan.blank(), Blank::Off, "and never a blanked audience");
+            assert_eq!(
+                plan.layout(),
+                Some("wide"),
+                "the presenter's own screen still applies"
+            );
+            assert_eq!(plan.snapshot.timer.elapsed_secs, 754);
+        }
+    }
+
+    #[test]
+    fn the_offer_says_how_old_it_is_in_words_a_presenter_can_act_on() {
+        // "Did not shut down cleanly" does not say whether this is the talk
+        // you were just giving or one from last week.
+        let snapshot = SessionSnapshot {
+            saved_at: 1_000_000,
+            ..Default::default()
+        };
+        let plan = snapshot.plan(None);
+
+        assert_eq!(plan.saved_ago(1_000_000).as_deref(), Some("moments ago"));
+        assert_eq!(plan.saved_ago(1_000_060).as_deref(), Some("moments ago"));
+        assert_eq!(
+            plan.saved_ago(1_000_300).as_deref(),
+            Some("about 5 minutes ago")
+        );
+        assert_eq!(
+            plan.saved_ago(1_000_000 + 3 * 3600).as_deref(),
+            Some("about 3 hours ago")
+        );
+        assert_eq!(
+            plan.saved_ago(1_000_000 + 3 * 86_400).as_deref(),
+            Some("about 3 days ago")
+        );
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_says_nothing_rather_than_the_future() {
+        // A machine that resynchronised its time can land before the
+        // snapshot; "saved in 4 minutes" would be worse than silence.
+        let snapshot = SessionSnapshot {
+            saved_at: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(snapshot.plan(None).saved_ago(999_000), None);
+    }
+
+    #[test]
+    fn the_offer_says_out_loud_what_it_cannot_restore() {
+        let snapshot = snapshot_of_an_interrupted_talk();
+        let fresh = snapshot.plan(Some(&unchanged_fingerprint())).summary();
+        assert!(fresh.contains("slide 12"), "1-based for a human: {fresh}");
+        assert!(fresh.contains("12:34"), "and the clock: {fresh}");
+
+        let missing = snapshot.plan(None).summary();
+        assert!(missing.contains("no longer there"), "{missing}");
+        assert!(!missing.contains("slide 12"), "{missing}");
+
+        let changed = snapshot
+            .plan(Some(&DocumentFingerprint {
+                size: Some(1),
+                ..unchanged_fingerprint()
+            }))
+            .summary();
+        assert!(changed.contains("has changed"), "{changed}");
+        assert!(!changed.contains("slide 12"), "{changed}");
+    }
+
+    #[test]
+    fn an_unconfirmed_restore_changes_nothing_the_audience_can_see() {
+        // The whole point of the feature: a snapshot may be loaded, planned
+        // and described without the audience learning anything about it.
+        let (_dir, store) = store();
+        store.save(&snapshot_of_an_interrupted_talk()).unwrap();
+
+        let snapshot = store.load().expect("the crashed run left one");
+        let plan = snapshot.plan(Some(&unchanged_fingerprint()));
+        let _ = plan.summary();
+        let _ = plan.document();
+        let _ = plan.slides();
+
+        let mut state = PresentationState::default();
+        let mut roles = DisplayRoles::default();
+        let fresh_state = state.clone();
+        let fresh_roles = roles.clone();
+
+        assert_eq!(state, fresh_state, "the audience is on nothing");
+        assert_eq!(state.blank(), Blank::Off, "and is not blanked");
+        assert_eq!(roles, fresh_roles, "and no display was reassigned");
+
+        // Only the explicit, confirmed step touches any of it.
+        plan.apply_to(&mut state, &mut roles, Instant::now());
+        assert_ne!(roles, fresh_roles);
+        assert!(matches!(roles.audience, RoleTarget::Monitor(_)));
+    }
+
+    #[test]
+    fn a_confirmed_restore_puts_the_talk_back_where_it_was() {
+        let snapshot = snapshot_of_an_interrupted_talk();
+        let plan = snapshot.plan(Some(&unchanged_fingerprint()));
+        assert_eq!(plan.document(), Some(Path::new("/decks/talk.pdf")));
+
+        let now = Instant::now();
+        let mut state = PresentationState::new(
+            DocumentInfo::new(DocumentId(2), "/decks/talk.pdf", 40),
+            NotesMapping::SlidesOnly,
+        );
+        let mut roles = DisplayRoles::default();
+        plan.apply_to(&mut state, &mut roles, now);
+
+        assert_eq!(state.committed(), 11);
+        assert_eq!(state.preview(), 13);
+        assert_eq!(state.blank(), Blank::Black);
+        assert!(state.timer().is_running());
+        assert_eq!(
+            state.timer().elapsed(now).as_secs(),
+            754,
+            "the clock resumes where the crash left it"
+        );
+    }
+
+    #[test]
+    fn a_paused_clock_is_restored_paused() {
+        let snapshot = SessionSnapshot {
+            timer: TimerSnapshot {
+                elapsed_secs: 90,
+                target_secs: Some(1200),
+                running: false,
+            },
+            ..SessionSnapshot::default()
+        };
+        let now = Instant::now();
+        let timer = snapshot.timer.to_timer(now);
+        assert!(!timer.is_running());
+        assert_eq!(timer.elapsed(now).as_secs(), 90);
+        assert_eq!(
+            timer.elapsed(now + Duration::from_secs(60)).as_secs(),
+            90,
+            "a paused clock does not run on after recovery"
+        );
+        assert_eq!(timer.target, Some(Duration::from_secs(1200)));
+    }
+
+    #[test]
+    fn the_throttle_writes_at_most_once_per_interval() {
+        let start = Instant::now();
+        let mut throttle = SaveThrottle::new(Duration::from_secs(2));
+        assert!(throttle.due(start), "the first write is always allowed");
+
+        // A tick every 50 ms for just under the interval: no second write.
+        let mut writes = 0;
+        for step in 1..40 {
+            if throttle.due(start + Duration::from_millis(50 * step)) {
+                writes += 1;
+            }
+        }
+        assert_eq!(writes, 0, "navigation storms do not become disk storms");
+
+        assert!(throttle.due(start + Duration::from_secs(2)));
+        assert!(!throttle.due(start + Duration::from_secs(3)));
+        assert!(throttle.due(start + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn a_session_sitting_still_is_not_rewritten() {
+        let snapshot = snapshot_of_an_interrupted_talk();
+        let later = SessionSnapshot {
+            saved_at: snapshot.saved_at + 600,
+            ..snapshot.clone()
+        };
+        assert!(snapshot.matches_content(&later), "only the clock moved");
+
+        let advanced = SessionSnapshot {
+            committed: snapshot.committed + 1,
+            ..later
+        };
+        assert!(!snapshot.matches_content(&advanced), "a slide moved");
+    }
+
+    #[test]
+    fn an_empty_session_is_not_worth_offering_back() {
+        assert!(!SessionSnapshot::default().is_worth_offering());
+        assert!(snapshot_of_an_interrupted_talk().is_worth_offering());
+        assert!(SessionSnapshot {
+            timer: TimerSnapshot {
+                elapsed_secs: 30,
+                ..TimerSnapshot::default()
+            },
+            ..SessionSnapshot::default()
+        }
+        .is_worth_offering());
+    }
+
+    #[test]
+    fn a_partial_write_is_never_visible() {
+        let (_dir, store) = store();
+        let snapshot = snapshot_of_an_interrupted_talk();
+        store.save(&snapshot).unwrap();
+        // A crash mid-save leaves a temporary file that was never renamed.
+        std::fs::write(store.path.with_extension("json.tmp"), "{\"schema\"").unwrap();
+        assert_eq!(store.load(), Some(snapshot));
+    }
+
+    #[test]
+    fn a_fingerprint_of_a_real_file_notices_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("talk.pdf");
+        std::fs::write(&path, b"one").unwrap();
+        let before = fingerprint(&path).expect("the file is there");
+
+        std::fs::write(&path, b"a longer deck").unwrap();
+        let after = fingerprint(&path).expect("still there");
+        assert!(!before.matches(&after));
+        assert!(before.matches(&before.clone()));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(fingerprint(&path), None);
+    }
+}

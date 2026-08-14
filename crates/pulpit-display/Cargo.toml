@@ -1,0 +1,30 @@
+[package]
+name = "pulpit-display"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pulpit-topology"
+path = "src/bin/topology.rs"
+
+[features]
+default = ["x11", "wayland"]
+x11 = ["dep:x11rb"]
+wayland = ["dep:serde_json", "dep:smithay-client-toolkit", "dep:wayland-client"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# X11 and Wayland exist only where there is an X11 or Wayland session to talk
+# to. The `x11`/`wayland` features stay on by default — they are what a Linux
+# build wants — but on Windows and macOS they resolve to nothing, and the
+# modules behind them are gated on the same condition in `lib.rs`.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { workspace = true, optional = true, features = ["randr"] }
+smithay-client-toolkit = { workspace = true, optional = true }
+wayland-client = { workspace = true, optional = true }

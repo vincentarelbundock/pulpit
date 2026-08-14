@@ -1,0 +1,12 @@
+# A desktop with no built-in panel, and two identical monitor models
+step two-identical-twins
+  monitor DP-1 1920x1080+0+0 @1 make=ACME model=Twin
+  monitor DP-2 1920x1080+1920+0 @1 make=ACME model=Twin
+
+step one-twin-removed
+  monitor DP-1 1920x1080+0+0 @1 make=ACME model=Twin
+
+step twin-returned-with-a-projector
+  monitor DP-1 1920x1080+0+0 @1 make=ACME model=Twin
+  monitor DP-2 1920x1080+1920+0 @1 make=ACME model=Twin
+  monitor HDMI-1 1280x720+3840+0 @1 make=ACME model=Projector id=ACM-9001
