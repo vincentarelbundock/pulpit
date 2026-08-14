@@ -206,3 +206,70 @@ fn embedded_pdfpc_notes_are_read_from_a_real_pdf() {
     backend.close(document);
     std::fs::remove_file(path).ok();
 }
+
+/// How long PDFium actually takes on a real deck, at the sizes the two
+/// windows ask for.
+///
+/// Ignored because it is a measurement, not an assertion: it needs a deck
+/// that is not a fixture, and there is no threshold that would be honest on
+/// every machine. It exists because "the renders are slow" is the conclusion
+/// every other measurement in this project has eventually pointed at, and the
+/// only way to tell a slow rasteriser from a queue that is merely deep is to
+/// time the rasteriser with nothing else running.
+///
+///     cargo test -p pulpit-render --test pdfium_real -- --ignored --nocapture
+///
+/// `PULPIT_BENCH_DECK` chooses the deck; it defaults to the stress deck in
+/// `examples/`.
+#[test]
+#[ignore]
+fn how_long_a_page_takes_to_rasterise() {
+    let Some(backend) = shared() else { return };
+    let mut backend = backend.lock().unwrap();
+    let deck = std::env::var("PULPIT_BENCH_DECK").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/stress-test-730.pdf")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let path = PathBuf::from(&deck);
+    if !path.exists() {
+        eprintln!("skipping: no deck at {deck}");
+        return;
+    }
+    let document = backend.open(&path).unwrap();
+    let metadata = backend.metadata(document).unwrap();
+    let pages = metadata.page_count.min(12);
+    let aspect = metadata.first_page_size.width / metadata.first_page_size.height.max(1.0);
+    println!("\n{deck}: {} pages", metadata.page_count);
+
+    // The widths that actually get asked for: a warming thumbnail, a
+    // presenter panel on a HiDPI display, and an audience frame.
+    for width in [240u32, 480, 1024, 2048, 3840] {
+        let height = ((width as f32 / aspect).max(1.0)) as u32;
+        let mut total = 0.0f64;
+        let mut worst = 0.0f64;
+        for page in 0..pages {
+            let request = RenderRequest {
+                document,
+                page,
+                region: Region::FULL,
+                width,
+                height,
+            };
+            let start = std::time::Instant::now();
+            let rendered = backend.render(&request, &NeverCancel).unwrap();
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            std::hint::black_box(rendered);
+            total += ms;
+            if ms > worst {
+                worst = ms;
+            }
+        }
+        println!(
+            "  {width:>5}×{height:<5} {:>8.1} ms/page mean, {:>8.1} ms worst  ({pages} pages)",
+            total / pages as f64,
+            worst
+        );
+    }
+}

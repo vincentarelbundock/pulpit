@@ -220,6 +220,16 @@ pub struct RenderDiagnostics {
     /// Cache accounting, when the application has reported it.
     pub cache: Option<crate::cache::CacheStats>,
     pub cache_budget_bytes: Option<u64>,
+    /// Time a worker spent actually producing frames, measured from the
+    /// moment each job was handed to it.
+    ///
+    /// The application knows when it submitted a job, so this is the half
+    /// that splits the wait: submission to dispatch is queueing, dispatch to
+    /// frame is work. A slow rasteriser and a deep queue look identical
+    /// without it, and they call for opposite fixes.
+    pub worked_total: Duration,
+    pub worked_worst: Duration,
+    pub worked_count: u64,
 }
 
 /// Failure reasons kept for the report. Older ones say nothing the newest
@@ -401,6 +411,18 @@ struct Counters {
     workers_given_up: usize,
     cache: Option<crate::cache::CacheStats>,
     cache_budget_bytes: Option<u64>,
+    worked_total: Duration,
+    worked_worst: Duration,
+    worked_count: u64,
+}
+
+impl Counters {
+    /// Note how long a worker held a job it was actually working on.
+    fn record_worked(&mut self, elapsed: Duration) {
+        self.worked_total += elapsed;
+        self.worked_worst = self.worked_worst.max(elapsed);
+        self.worked_count += 1;
+    }
 }
 
 impl Counters {
@@ -431,6 +453,14 @@ impl Counters {
 #[derive(Debug)]
 struct InFlight {
     job: RenderJob,
+    /// When this job was handed to its worker.
+    ///
+    /// The application already knows when it submitted the job, so this is
+    /// the number that splits the wait in two: everything before it is time
+    /// spent in a queue, everything after is the worker actually working.
+    /// Without the split, a deep queue and a slow rasteriser are the same
+    /// measurement — and they call for opposite fixes.
+    dispatched: Instant,
 }
 
 /// How many inline-frame jobs a worker may hold at once.
@@ -730,6 +760,9 @@ impl RendererSupervisor {
             workers_given_up: self.counters.workers_given_up,
             cache: self.counters.cache,
             cache_budget_bytes: self.counters.cache_budget_bytes,
+            worked_total: self.counters.worked_total,
+            worked_worst: self.counters.worked_worst,
+            worked_count: self.counters.worked_count,
         }
     }
 
@@ -1014,6 +1047,7 @@ impl RendererSupervisor {
                         worker.region.as_slice()[..bytes as usize].to_vec()
                     }
                 };
+                self.counters.record_worked(in_flight.dispatched.elapsed());
                 self.counters.record_frame(width, height, quality);
                 events.push(RenderEvent::Frame {
                     job: in_flight.job,
@@ -1318,7 +1352,10 @@ impl RendererSupervisor {
                 // an idle worker's silence was innocent and ends here.
                 worker.last_progress = Instant::now();
             }
-            worker.in_flight.push(InFlight { job });
+            worker.in_flight.push(InFlight {
+                job,
+                dispatched: Instant::now(),
+            });
             self.counters.dispatched += 1;
         }
     }

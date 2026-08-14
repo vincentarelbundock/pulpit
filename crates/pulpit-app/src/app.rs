@@ -1221,6 +1221,22 @@ impl App {
                 millis(warming.worst),
             ));
         }
+        // The half of that wait a worker was actually working. Everything
+        // above it and below the figures above is time a job spent queued —
+        // and a deep queue and a slow rasteriser call for opposite fixes.
+        if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
+            if render.worked_count > 0 {
+                let mean = render
+                    .worked_total
+                    .checked_div(render.worked_count as u32)
+                    .unwrap_or_default();
+                report.push_str(&format!(
+                    "- of which a worker was working: {} typical, {} worst (the rest was queued)\n",
+                    millis(mean),
+                    millis(render.worked_worst),
+                ));
+            }
+        }
         // Everything below happens on the event loop, where the interface is
         // not drawing. That is the whole reason to count it separately from
         // a render, which happens in another process entirely.
