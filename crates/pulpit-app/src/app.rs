@@ -453,6 +453,11 @@ pub struct App {
     pub audience_window: Option<window::Id>,
     pub audience_size: Size,
     pub preview_size: Size,
+    /// The presenter window in logical points, which is what the layout's
+    /// fractions are fractions *of*. `preview_size` is 45% of it and cannot
+    /// be un-multiplied back into it without assuming that number is right,
+    /// which is the assumption this branch exists to remove.
+    presenter_size: Size,
     /// Physical pixels per logical pixel on the presenter's display. Asked
     /// for, never assumed: it decides how wide a panel's frame has to be to
     /// look sharp, and guessing high is four times the pixels for nothing.
@@ -823,6 +828,9 @@ impl App {
             audience_window: None,
             audience_size: Size::new(1280.0, 720.0),
             preview_size: Size::new(640.0, 360.0),
+            // Replaced by the first resize, which arrives before any panel
+            // render is asked for.
+            presenter_size: Size::new(1422.0, 800.0),
             presenter_scale: 1.0,
             show_diagnostics: false,
             last_poll: now,
@@ -1718,6 +1726,7 @@ impl App {
                 if Some(id) == self.audience_window {
                     self.audience_size = size;
                 } else {
+                    self.presenter_size = size;
                     self.preview_size = Size::new(size.width * 0.45, size.height * 0.45);
                     // A resize is also how a window arrives on a display with
                     // a different pixel ratio, so the ratio is re-read here
@@ -4803,17 +4812,22 @@ impl App {
         // pressure until a complete replacement is allocated.
         let count = self.state.slide_count();
         let committed = self.state.committed();
-        let width = self.presenter_width();
         let mut candidates = vec![self.last_audience, self.last_presenter];
+        // Each page at the width the panel that draws it uses, and the page
+        // after this one also at the current-slide width, because that is the
+        // picture the next turn swaps to.
         for slide in [
-            committed.checked_sub(2),
             committed.checked_sub(1),
             Some(committed),
             Some(committed + 1),
-            Some(committed + 2),
         ] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
+                let width = self.panel_width(slide);
                 candidates.push(self.ready_frame_key(slide, FrameKind::Slide, width));
+                let current = self.slide_widths().current;
+                if width != current {
+                    candidates.push(self.ready_frame_key(slide, FrameKind::Slide, current));
+                }
             }
         }
         // The projector's own frames for the pages one step away, which is
@@ -4946,17 +4960,37 @@ impl App {
     /// megabytes each, on a deck where the cache was already full and
     /// evicting. They were rendered, cached, and thrown away before anything
     /// could use them.
-    fn panel_pages(&self) -> Vec<usize> {
-        panel_pages(
-            self.state.committed(),
-            self.state.preview(),
-            self.state.slide_count(),
+    /// The width each slide panel of the active layout draws at.
+    ///
+    /// Computed from the layout rather than guessed, because a guess cannot
+    /// be right for two panels of different sizes and a custom layout can
+    /// make them any size at all. See `layout::panels`.
+    fn slide_widths(&self) -> crate::layout::panels::SlideWidths {
+        crate::layout::panels::slide_widths(
+            &self.active_layout,
+            (self.presenter_size.width, self.presenter_size.height),
+            self.presenter_scale,
+            self.slide_aspect(),
         )
     }
 
-    /// The one width every live presenter slide panel is rendered at.
-    fn presenter_width(&self) -> u32 {
-        canonical_presenter_width(self.preview_size.width, self.presenter_scale)
+    /// Which panel draws this page, and therefore how wide its picture is.
+    ///
+    /// The current-slide panel shows the committed page and nothing else;
+    /// every other slide panel shows a neighbour. One page can therefore be
+    /// wanted at two widths at once — small in the next-slide panel now, and
+    /// large in the current-slide panel after the turn — which is why both
+    /// are asked for ahead of the turn rather than after it.
+    fn panel_role(&self, slide: usize) -> crate::layout::panels::Role {
+        if slide == self.state.committed() {
+            crate::layout::panels::Role::Current
+        } else {
+            crate::layout::panels::Role::Neighbour
+        }
+    }
+
+    fn panel_width(&self, slide: usize) -> u32 {
+        self.slide_widths().for_role(self.panel_role(slide))
     }
 
     /// Ask the runtime what the presenter window's pixel ratio is.
@@ -5008,16 +5042,23 @@ impl App {
     /// of pictures for four panels — cost a texture copy of the entire atlas
     /// every time the budget refilled it.
     pub fn presenter_resident_handles(&self) -> Vec<iced::widget::image::Handle> {
-        let width = self.presenter_width();
         let committed = self.state.committed();
         let count = self.state.slide_count();
+        let widths = self.slide_widths();
         // The stand-in ahead of the slot it is standing in for: it is on
         // screen this pass, and the slot's own frame is by definition of the
         // page the operator has already left.
         let mut keys = vec![self.presenter_stand_in(), self.last_presenter];
         for slide in [Some(committed + 1), committed.checked_sub(1)] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
-                keys.push(self.ready_frame_key(slide, FrameKind::Slide, width));
+                // What the neighbour panel draws now, and what the
+                // current-slide panel will draw the moment this page is
+                // turned to. Uploading the second one now is what keeps that
+                // turn a swap rather than a wait.
+                keys.push(self.ready_frame_key(slide, FrameKind::Slide, widths.neighbour));
+                if widths.current != widths.neighbour {
+                    keys.push(self.ready_frame_key(slide, FrameKind::Slide, widths.current));
+                }
             }
         }
         if self.state.mapping().has_notes() {
@@ -5077,7 +5118,7 @@ impl App {
     fn note_answer(&mut self, surface: crate::latency::Surface, key: FrameKey) {
         let exact_width = match surface {
             crate::latency::Surface::Audience => self.audience_width(),
-            crate::latency::Surface::Presenter => self.presenter_width(),
+            crate::latency::Surface::Presenter => self.slide_widths().current,
         };
         let answer = if key.width >= exact_width {
             crate::latency::Answer::Exact
@@ -5091,7 +5132,7 @@ impl App {
     /// What a presenter panel draws for one page.
     ///
     /// `max_width` is the panel's own width, and only notes are chosen by it:
-    /// slide panels all share [`canonical_presenter_width`], because a picture
+    /// slide panels use the width their own panel draws at, because a picture
     /// that changes size changes texture, and a texture change is a blink.
     /// Current Slide reads its display slot, plus the same coarse stand-in the
     /// projector uses while a cold page renders; the other panels draw their
@@ -5109,7 +5150,7 @@ impl App {
             })
         } else {
             let width = if kind == FrameKind::Slide {
-                self.presenter_width()
+                self.panel_width(slide)
             } else {
                 max_width.max(64)
             };
@@ -5225,7 +5266,7 @@ impl App {
     /// Atomically advance Current Slide when its canonical texture is ready.
     fn remember_presenter_frame(&mut self) {
         let slide = self.state.committed();
-        let width = self.presenter_width();
+        let width = self.slide_widths().current;
         let candidate = self.ready_frame_key(slide, FrameKind::Slide, width);
         let next = ready_transition(self.last_presenter, slide, candidate);
         if next != self.last_presenter {
@@ -5447,7 +5488,7 @@ impl App {
         // Widths only: every height comes from `frame_shape` below, so a zoom
         // crop's height is the same number in the plan and in every lookup.
         let audience_width = self.audience_width();
-        let presenter_width = self.presenter_width();
+        let widths = self.slide_widths();
         let coarse_width = self.coarse_width();
         let preview_width = (self.preview_size.width.max(240.0)) as u32;
 
@@ -5459,9 +5500,9 @@ impl App {
         // page is already prefetched and the stand-in is never displayed.
         let mut wanted = live_slide_plan(
             committed,
-            self.panel_pages(),
+            self.state.slide_count(),
             audience_width,
-            presenter_width,
+            widths,
             (coarse_width < audience_width && self.wants_coarse_stand_in()).then_some(coarse_width),
         );
         // The pages on either side of the committed one, at audience size, so
@@ -6192,9 +6233,9 @@ type RenderWant = (usize, FrameKind, Priority, Quality, u32);
 /// first.
 fn live_slide_plan(
     committed: usize,
-    priority_slides: Vec<usize>,
+    count: usize,
     audience: u32,
-    presenter: u32,
+    widths: crate::layout::panels::SlideWidths,
     coarse: Option<u32>,
 ) -> Vec<RenderWant> {
     let mut wanted: Vec<RenderWant> = coarse
@@ -6216,49 +6257,43 @@ fn live_slide_plan(
         Quality::Refined,
         audience,
     ));
-    for (index, slide) in priority_slides.into_iter().enumerate() {
-        let priority = match index {
-            0 | 1 => Priority::Presenter,
-            2 => Priority::Next,
-            _ => Priority::Adjacent,
-        };
-        wanted.push((
-            slide,
-            FrameKind::Slide,
-            priority,
-            Quality::Refined,
-            presenter,
-        ));
+
+    // The page on screen, at the width the current-slide panel draws it.
+    let push = |slide: usize, width: u32, priority: Priority, wanted: &mut Vec<RenderWant>| {
+        if slide >= count {
+            return;
+        }
+        // One page at one width is one picture, whatever priority asked for
+        // it. The first ask wins, and the first ask is the more urgent one,
+        // so a layout whose panels are all the same size costs exactly what
+        // it did before rather than paying twice for one image.
+        if wanted
+            .iter()
+            .any(|(other, _, _, _, other_width)| *other == slide && *other_width == width)
+        {
+            return;
+        }
+        wanted.push((slide, FrameKind::Slide, priority, Quality::Refined, width));
+    };
+    push(committed, widths.current, Priority::Presenter, &mut wanted);
+
+    // Each neighbour twice, and deliberately: at the width the neighbour
+    // panel draws it now, and at the current-slide width it will need the
+    // instant it is turned to. Asking for the second one only after the turn
+    // would make every turn wait for a render — which is what the settled
+    // figure of about a millisecond is currently buying by having it ready.
+    //
+    // When a layout makes both panels the same size the two collapse into one
+    // request, so a strip of equal panels costs exactly what it did before.
+    for (slide, priority) in [
+        (Some(committed + 1), Priority::Presenter),
+        (committed.checked_sub(1), Priority::Next),
+    ] {
+        let Some(slide) = slide else { continue };
+        push(slide, widths.neighbour, priority, &mut wanted);
+        push(slide, widths.current, Priority::Adjacent, &mut wanted);
     }
     wanted
-}
-
-/// One render width shared by every live presenter slide panel.
-///
-/// The application records `preview_size` as 45% of the presenter window, and
-/// the largest slide panel in a shipped layout is about that wide — so the
-/// panel's own *physical* width is `preview_width × scale_factor`, plus a
-/// quarter for layouts that give Current Slide a little more room. Coarse
-/// buckets keep ordinary resize noise from minting a new texture identity.
-///
-/// The scale factor is asked for rather than assumed. This width used to be a
-/// flat double, which is right for a HiDPI laptop and twice too much on a 4K
-/// display at scale 1 — and being twice too wide is four times the pixels, in
-/// every one of the five frames the panels keep resident. On a 4K presenter
-/// that was 128 MiB of a 256 MiB cache budget for the panels alone, which put
-/// the projector's own prefetched frames on the eviction list and re-requested
-/// them on the next pass: a render treadmill on exactly the frames the
-/// prefetch exists to have ready.
-fn canonical_presenter_width(preview_width: f32, scale: f32) -> u32 {
-    const BUCKET: u32 = 128;
-    const PANEL_HEADROOM: f32 = 1.25;
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
-    let wanted = ((preview_width.max(1.0) * PANEL_HEADROOM * scale).ceil() as u32).max(512);
-    wanted.div_ceil(BUCKET) * BUCKET
 }
 
 /// A duration as whole milliseconds, which is the resolution a page turn is
@@ -6274,33 +6309,6 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
         Some(at) => format!(" (soft at {})", millis(at)),
         None => String::new(),
     }
-}
-
-/// The pages the presenter's slide panels draw, most urgent first.
-///
-/// Pure so the rule is testable, and because it is a claim about the *view*
-/// that lives in the render plan: if the panels ever draw a fourth page, this
-/// and they must be changed together, and a test is the cheapest way to be
-/// told about it.
-fn panel_pages(committed: usize, preview: usize, count: usize) -> Vec<usize> {
-    let mut pages: Vec<usize> = Vec::with_capacity(5);
-    let push = |slide: usize, pages: &mut Vec<usize>| {
-        if slide < count && !pages.contains(&slide) {
-            pages.push(slide);
-        }
-    };
-    push(committed, &mut pages);
-    push(committed + 1, &mut pages);
-    if let Some(previous) = committed.checked_sub(1) {
-        push(previous, &mut pages);
-    }
-    // Browsing ahead moves the preview without moving the room. Asked for
-    // only then, so the ordinary case stays at three pages.
-    if preview != committed {
-        push(preview, &mut pages);
-        push(preview + 1, &mut pages);
-    }
-    pages
 }
 
 /// Whether a window holding `holding` should take a coarse stand-in for
@@ -6344,7 +6352,7 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
 
 #[cfg(test)]
 mod canonical_frame_tests {
-    use super::{canonical_presenter_width, ready_transition, wants_stand_in};
+    use super::{ready_transition, wants_stand_in};
     use pulpit_core::RenderGeneration;
     use pulpit_render::cache::{FrameKey, FrameKind};
     use pulpit_render::protocol::Quality;
@@ -6358,32 +6366,6 @@ mod canonical_frame_tests {
             width,
             height: width / 2,
         }
-    }
-
-    /// Three panels, three pages. The renderer's warming order reaches two
-    /// either side, which is right for warming and wrong here: those frames
-    /// are nine megabytes each and no layout draws them.
-    #[test]
-    fn only_the_pages_a_panel_can_draw_are_rendered_at_panel_size() {
-        assert_eq!(super::panel_pages(10, 10, 100), vec![10, 11, 9]);
-        // The deck's edges, where a neighbour does not exist.
-        assert_eq!(super::panel_pages(0, 0, 100), vec![0, 1]);
-        assert_eq!(super::panel_pages(99, 99, 100), vec![99, 98]);
-    }
-
-    /// Browsing ahead is the one case that needs more, and only while it
-    /// lasts: the room stays where it is and the presenter looks on.
-    #[test]
-    fn browsing_ahead_asks_for_the_pages_being_browsed() {
-        let pages = super::panel_pages(10, 20, 100);
-        assert!(pages.starts_with(&[10, 11, 9]), "the room comes first");
-        assert!(pages.contains(&20) && pages.contains(&21));
-        // And nothing twice, however the two positions overlap.
-        let mut sorted = pages.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), pages.len());
-        assert_eq!(super::panel_pages(10, 11, 100), vec![10, 11, 9, 12]);
     }
 
     #[test]
@@ -6401,30 +6383,14 @@ mod canonical_frame_tests {
         assert!(!wants_stand_in(None, 4));
     }
 
-    #[test]
-    fn every_presenter_panel_uses_one_quantized_width() {
-        assert_eq!(canonical_presenter_width(640.0, 1.0), 896);
-        assert_eq!(canonical_presenter_width(700.0, 1.0), 896);
-        assert_eq!(canonical_presenter_width(100.0, 1.0), 512);
-    }
-
-    #[test]
-    fn a_panel_is_rendered_for_the_pixels_the_display_actually_has() {
-        // The same window on a HiDPI display needs twice the pixels, and on a
-        // large display at scale 1 it does not: a flat doubling was right for
-        // one of those and four times too many pixels for the other.
-        assert_eq!(canonical_presenter_width(864.0, 2.0), 2176);
-        assert_eq!(canonical_presenter_width(1728.0, 1.0), 2176);
-        // Nonsense from the runtime never becomes a nonsense render.
-        assert_eq!(
-            canonical_presenter_width(864.0, 0.0),
-            canonical_presenter_width(864.0, 1.0)
-        );
-    }
+    const WIDTHS: crate::layout::panels::SlideWidths = crate::layout::panels::SlideWidths {
+        current: 2688,
+        neighbour: 1024,
+    };
 
     #[test]
     fn the_live_plan_has_no_progressive_presenter_ladder() {
-        let plan = super::live_slide_plan(4, vec![4, 5, 3], 3840, 1280, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, None);
         assert!(plan.iter().all(|request| request.3 == Quality::Refined));
         assert_eq!(
             plan.iter()
@@ -6432,15 +6398,45 @@ mod canonical_frame_tests {
                 .count(),
             1
         );
+        // Every panel render is at one of the two widths the layout actually
+        // draws — never a third, which would be a texture nobody displays.
         assert!(plan
             .iter()
             .filter(|request| request.2 != pulpit_render::protocol::Priority::Audience)
-            .all(|request| request.4 == 1280));
+            .all(|request| request.4 == WIDTHS.current || request.4 == WIDTHS.neighbour));
+    }
+
+    /// A page is wanted small while it is the next slide and large the
+    /// instant it is turned to. Both are asked for before the turn, because
+    /// asking after it is what makes a turn wait for a render.
+    #[test]
+    fn a_neighbour_is_asked_for_at_both_widths_before_the_turn() {
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, None);
+        let for_next: Vec<u32> = plan
+            .iter()
+            .filter(|request| request.0 == 5)
+            .map(|request| request.4)
+            .collect();
+        assert!(for_next.contains(&WIDTHS.neighbour), "the next-slide panel");
+        assert!(for_next.contains(&WIDTHS.current), "and the turn to come");
+    }
+
+    /// A layout whose panels are all the same size costs exactly what it did
+    /// before: one width, one render, no duplicate.
+    #[test]
+    fn equal_panels_collapse_to_one_request_per_page() {
+        let equal = crate::layout::panels::SlideWidths {
+            current: 1536,
+            neighbour: 1536,
+        };
+        let plan = super::live_slide_plan(4, 100, 3840, equal, None);
+        let for_next = plan.iter().filter(|request| request.0 == 5).count();
+        assert_eq!(for_next, 1);
     }
 
     #[test]
     fn one_coarse_stand_in_is_asked_for_first_and_serves_both_windows() {
-        let plan = super::live_slide_plan(4, vec![4, 5, 3], 3840, 1280, Some(640));
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, Some(640));
         let coarse = plan.first().expect("a plan");
         assert_eq!(coarse.3, Quality::Coarse);
         assert_eq!(coarse.4, 640);
