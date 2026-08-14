@@ -1203,7 +1203,29 @@ impl Marks {
     }
 }
 
+/// The padding inside the writing box, which is a fraction of the text rather
+/// than a constant.
+///
+/// Six pixels is comfortable around twelve-point text and looks like a
+/// mistake around sixty-point text, and annotation text is sized as a
+/// fraction of the page, so the same box has to hold both.
+fn text_editor_padding(font_size: f32) -> f32 {
+    (font_size * 0.35).clamp(8.0, 28.0)
+}
+
+/// How wide and tall the writing box has to be to show what is in it.
+///
+/// The width per character is deliberately generous. The text is drawn in a
+/// proportional font, so a character is anywhere between about a third of an
+/// em and a full em wide; estimating with the average hides the tail of any
+/// line that leans on capitals or wide letters, and a box that hides what you
+/// just typed is worse than one that is wider than it needed to be. The extra
+/// character on the end is the caret's room, which is otherwise the first
+/// thing to fall off the edge.
 fn text_editor_size(content: &str, font_size: f32, padding: f32) -> Size {
+    const EM_PER_CHARACTER: f32 = 0.68;
+    // Iced's default, and the box is sized to what iced will draw.
+    const LINE_HEIGHT: f32 = 1.3;
     let mut line_count = 0_usize;
     let mut longest = 0_usize;
     for line in content.split('\n') {
@@ -1211,9 +1233,29 @@ fn text_editor_size(content: &str, font_size: f32, padding: f32) -> Size {
         longest = longest.max(line.chars().count());
     }
     Size::new(
-        (longest.max(4) as f32 * font_size * 0.6) + padding * 2.0,
-        (line_count.max(1) as f32 * font_size * 1.2) + padding * 2.0,
+        ((longest.max(4) + 1) as f32 * font_size * EM_PER_CHARACTER) + padding * 2.0,
+        (line_count.max(1) as f32 * font_size * LINE_HEIGHT) + padding * 2.0,
     )
+}
+
+/// Where the writing box sits so that it stays on the page.
+///
+/// A box is anchored to the mark, but a mark near the right or bottom edge
+/// leaves no room to the right or below it. Clamping the box to the space
+/// that remains is what hid the text: place a mark an inch from the edge and
+/// the box became an inch wide. So the box slides back onto the page instead,
+/// and only gives up size when the page itself is smaller than the box.
+fn text_editor_placement(
+    anchor: (f32, f32),
+    desired: Size,
+    page_origin: (f32, f32),
+    page_end: (f32, f32),
+) -> (f32, f32, f32, f32) {
+    let width = desired.width.min((page_end.0 - page_origin.0).max(1.0));
+    let height = desired.height.min((page_end.1 - page_origin.1).max(1.0));
+    let left = anchor.0.min(page_end.0 - width).max(page_origin.0);
+    let top = anchor.1.min(page_end.1 - height).max(page_origin.1);
+    (left, top, width, height)
 }
 
 /// The marks as an element to stack over a slide picture.
@@ -1262,15 +1304,20 @@ pub fn marks<'a, Message: 'a>(
                     ) else {
                         continue;
                     };
-                    let padding = 6.0;
                     let font_size = (mark.size * page.width / crop.width.max(0.001)).max(8.0);
+                    let padding = text_editor_padding(font_size);
                     let desired = text_editor_size(&mark.text, font_size, padding);
-                    let left = (rect.x - padding).max(0.0);
-                    let top = (rect.y - padding).max(0.0);
-                    let max_width = ((page.x + page.width).min(panel.width) - left).max(1.0);
-                    let max_height = ((page.y + page.height).min(panel.height) - top).max(1.0);
-                    let width = desired.width.min(max_width);
-                    let height = desired.height.min(max_height);
+                    // The box is offset by its own padding so the text inside
+                    // it starts where the mark is, not where the frame is.
+                    let (left, top, width, height) = text_editor_placement(
+                        (rect.x - padding, rect.y - padding),
+                        desired,
+                        (page.x.max(0.0), page.y.max(0.0)),
+                        (
+                            (page.x + page.width).min(panel.width),
+                            (page.y + page.height).min(panel.height),
+                        ),
+                    );
                     let (red, green, blue) = mark.color.rgb();
                     let source = text(if mark.text.is_empty() {
                         " ".to_owned()
@@ -1604,6 +1651,43 @@ mod tests {
         let lines = text_editor_size("a longer label\nsecond line", 20.0, 6.0);
         assert!(word.width > empty.width);
         assert!(lines.height > word.height);
+        // Wide enough for capitals and a caret, not for the average letter.
+        assert!(word.width > "a longer label".len() as f32 * 20.0 * 0.6 + 12.0);
+        // Tall enough for the line iced actually draws, both of them.
+        assert!(lines.height >= 2.0 * 20.0 * 1.3 + 12.0);
+    }
+
+    /// The box grows with the text, so its breathing room has to grow too:
+    /// the padding that suits small text reads as a mistake around large.
+    #[test]
+    fn the_writing_box_pads_in_proportion_to_its_text() {
+        assert!(text_editor_padding(60.0) > text_editor_padding(12.0));
+        // And never disappears, however small the text on the page is.
+        assert!(text_editor_padding(4.0) >= 8.0);
+    }
+
+    /// A mark near an edge used to clamp its box to the sliver of page left
+    /// beside it, which hid the text. The box moves instead.
+    #[test]
+    fn a_box_near_an_edge_slides_back_onto_the_page_instead_of_shrinking() {
+        let desired = Size::new(200.0, 60.0);
+        let (left, top, width, height) =
+            text_editor_placement((980.0, 30.0), desired, (0.0, 0.0), (1000.0, 500.0));
+        assert_eq!((width, height), (200.0, 60.0), "full size is kept");
+        assert_eq!(left, 800.0, "slid back inside the right edge");
+        assert_eq!(top, 30.0, "and left alone where there was room");
+
+        // The bottom edge behaves the same way.
+        let (_, top, _, _) =
+            text_editor_placement((10.0, 480.0), desired, (0.0, 0.0), (1000.0, 500.0));
+        assert_eq!(top, 440.0);
+
+        // Only a page smaller than the box costs the box its size, and then
+        // it sits at the page's own origin rather than off the top left.
+        let (left, top, width, height) =
+            text_editor_placement((60.0, 60.0), desired, (50.0, 50.0), (150.0, 90.0));
+        assert_eq!((width, height), (100.0, 40.0));
+        assert_eq!((left, top), (50.0, 50.0));
     }
 
     #[test]
