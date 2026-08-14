@@ -50,6 +50,14 @@ build:  ## Build the release binary
 launch:  ## Launch the app in the dev shell (optionally: make launch DECK=deck.pdf)
 	nix develop . --command $(CARGO) run -p pulpit-app -- $(DECK)
 
+# The same launcher, optimised. Any statement about how fast pulpit is has to
+# come from this one: `launch` builds a debug binary, where PDFium is still
+# the optimised library it ships as but every frame copy and every worker
+# response around it is not. A debug session reads as a sluggish application
+# and measures as one, which has already cost a long investigation.
+launch-release: ## Launch the optimised build — the only one worth timing
+	nix develop . --command $(CARGO) run --release -p pulpit-app -- $(DECK)
+
 # A file target, so the download happens once and again only when the pin
 # moves: the script carries the release tag and per-platform hashes.
 $(PDFIUM_LIB): scripts/fetch-pdfium.sh

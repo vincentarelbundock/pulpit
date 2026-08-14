@@ -147,7 +147,24 @@ impl DiagnosticsBundle {
         out.push_str(&format!("display backend: {}\n", self.display_backend));
         out.push_str(&format!("pdf backend: {pdf_backend}\n"));
         out.push_str(&format!("capabilities: {}\n", self.capabilities));
-        out.push_str(&format!("version: {}\n\n", env!("CARGO_PKG_VERSION")));
+        out.push_str(&format!("version: {}\n", env!("CARGO_PKG_VERSION")));
+        // Which build this is, stated before any number below it.
+        //
+        // Every timing in this report is meaningless without it, and the
+        // specification says so outright: debug builds never set targets.
+        // PDFium is a prebuilt optimised library, so rasterising looks the
+        // same in both, while everything around it — the frame copies, the
+        // encode and decode of every worker response — is unoptimised. A
+        // report that did not say this was read for several rounds as
+        // evidence about the application's design.
+        out.push_str(&format!(
+            "build: {}\n\n",
+            if cfg!(debug_assertions) {
+                "debug — timings below are not representative"
+            } else {
+                "release"
+            }
+        ));
 
         out.push_str("## Roles\n");
         for (role, target) in &self.roles {
