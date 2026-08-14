@@ -5,3 +5,5 @@ dist/
 .calepin/
 result
 result-*
+# Coding-agent settings and the temp files they write mid-command.
+.claude/
