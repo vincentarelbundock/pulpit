@@ -31,6 +31,7 @@
 //! so a window must be asked to keep only what it draws.
 
 use std::cell::RefCell;
+use std::time::Duration;
 
 use iced::advanced::image::Id;
 use iced::advanced::image::Renderer as _;
@@ -38,6 +39,11 @@ use iced::advanced::widget::{self, Widget};
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::widget::image::{Allocation, Handle};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
+
+/// An upload long enough to be worth naming in the log. A frame at sixty
+/// hertz is about sixteen milliseconds, so anything at or above this cost the
+/// window a frame it could otherwise have drawn.
+const SLOW_UPLOAD: Duration = Duration::from_millis(8);
 
 /// Draw `content`, keeping `wanted` uploaded in this window's renderer.
 ///
@@ -99,7 +105,20 @@ impl Held {
         let Some(missing) = next_missing(wanted, &resident) else {
             return;
         };
-        match renderer.load_image(&missing) {
+        // Timed because this blocks: it is the one place a page turn can stop
+        // on a GPU upload, and it is invisible from the application, which
+        // owns no part of a window's residency. A slow one is reported rather
+        // than inferred.
+        let start = std::time::Instant::now();
+        let outcome = renderer.load_image(&missing);
+        let elapsed = start.elapsed();
+        if elapsed >= SLOW_UPLOAD {
+            tracing::debug!(
+                millis = elapsed.as_millis(),
+                "a picture blocked the event loop while it uploaded"
+            );
+        }
+        match outcome {
             Ok(allocation) => held.push((missing.id(), allocation)),
             // Nothing to do but move on to the next picture: the frame is
             // still the best thing this window has, and refusing to draw it

@@ -404,6 +404,35 @@ about this attempt, worth retrying; "the call errored" is a bug. Collapsing
 all three into `false` is how an application ends up silently doing nothing on
 a projector.
 
+== What a page turn spends its time on
+
+`pulpit_app::latency` records every page turn and reports it in the
+diagnostics bundle, because every performance question asked of this
+application so far has been answered by reading the source and arguing, and
+the arguments have been wrong about as often as right.
+
+A *turn* is timed from the state moving to the moment each surface showed the
+page that was asked for, and is reported two ways: _settled_, the last
+surface to answer, and _first picture_, the earliest correct thing on either
+screen — which are the answers to two different complaints, "it did not
+respond" and "it looked soft for a moment". A turn overtaken by the next key
+press is abandoned rather than averaged in: a presenter holding the arrow key
+down is not waiting for any of the pages in between.
+
+A *stage* is a named piece of synchronous work, reported with its worst case
+as well as its mean. Stages count only what happens on the event loop, where
+a millisecond is a millisecond the interface is not drawing — planning
+renders, following the committed page with media, and taking delivery of
+frames, which includes copying a large one out of shared memory on this
+thread. Work inside a worker process is not a stage; it is already visible as
+render latency.
+
+There is deliberately no upload stage. Which pictures a window has on the GPU
+is that window's own widget state, and the application holds no reference to
+it, so `residency` logs an upload that blocked long enough to cost a frame
+rather than posting a number the application would have to smuggle across the
+view boundary.
+
 == Capabilities over OS checks
 
 `Capabilities` reports the backend, the quality of display identity

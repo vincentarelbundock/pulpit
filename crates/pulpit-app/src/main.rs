@@ -9,6 +9,7 @@ mod designer;
 mod designer_view;
 mod display;
 mod doc;
+mod latency;
 mod layout;
 mod layout_renderer;
 mod media;

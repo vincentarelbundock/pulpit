@@ -390,6 +390,13 @@ pub struct App {
     /// When the windows have had long enough to upload the frames that have
     /// arrived. Keeps the fast tick until then; see [`UPLOAD_SETTLE`].
     uploads_settle_by: Option<Instant>,
+    /// Where a page turn's time actually goes. Always on: it costs a couple
+    /// of clock reads per event, and the alternative is arguing from the
+    /// source about which of five plausible delays is the real one.
+    pub latency: crate::latency::Latency,
+    /// When each outstanding render was submitted, so a frame can report how
+    /// long it took. Separate from `pending` because it is diagnostic only.
+    submitted_at: std::collections::HashMap<RequestId, Instant>,
     pub documents: DocumentManager,
     pub coordinator: DisplayCoordinator,
     pub diagnostics: DiagnosticsBundle,
@@ -770,6 +777,8 @@ impl App {
             supervisor,
             render_wakeup,
             uploads_settle_by: None,
+            latency: crate::latency::Latency::default(),
+            submitted_at: std::collections::HashMap::new(),
             coordinator,
             diagnostics,
             inhibitor: Inhibitor::new(),
@@ -1129,6 +1138,85 @@ impl App {
         report
     }
 
+    /// Where a page turn's time went, in the terms a presenter would use.
+    ///
+    /// Settled is the honest headline — the last surface to answer — and the
+    /// first picture is next to it because they answer different complaints:
+    /// "it did not respond" is the first, "it looked soft for a moment" is
+    /// the gap between them. The stages below are only there to locate the
+    /// time when the headline is bad.
+    fn latency_report(&self) -> String {
+        let mut report = String::from("\n## Page turns\n");
+        let Some((typical, worst)) = self.latency.settled_summary() else {
+            report.push_str("- nothing measured yet\n");
+            return report;
+        };
+        let turns = self.latency.turns();
+        let first: Duration = turns
+            .iter()
+            .map(|turn| turn.first_picture())
+            .sum::<Duration>()
+            / turns.len() as u32;
+        report.push_str(&format!(
+            "- {} turns: settled {} typical, {} worst; first picture {} typical\n",
+            turns.len(),
+            millis(typical),
+            millis(worst),
+            millis(first),
+        ));
+        if let Some(turn) = turns.back() {
+            report.push_str(&format!(
+                "- last turn (slide {}): projector {}{}, panel {}{}\n",
+                turn.slide + 1,
+                millis(turn.audience_exact),
+                stand_in_note(turn.audience_stand_in),
+                millis(turn.presenter_exact),
+                stand_in_note(turn.presenter_stand_in),
+            ));
+        }
+        if self.latency.abandoned() > 0 {
+            report.push_str(&format!(
+                "- {} turns abandoned, overtaken by the next one\n",
+                self.latency.abandoned(),
+            ));
+        }
+        let render = self.latency.render();
+        report.push_str(&format!(
+            "- renders: {} finished, {} typical, {} worst\n",
+            render.calls,
+            millis(render.mean()),
+            millis(render.worst),
+        ));
+        // Everything below happens on the event loop, where the interface is
+        // not drawing. That is the whole reason to count it separately from
+        // a render, which happens in another process entirely.
+        let stages = self.latency.stages();
+        for (name, stage) in [
+            ("planning renders", stages.plan_renders),
+            ("following media", stages.service_media),
+            ("taking delivery of frames", stages.drain_renderer),
+        ] {
+            if stage.calls == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "- on the event loop, {name}: {} calls, {} typical, {} worst\n",
+                stage.calls,
+                millis(stage.mean()),
+                millis(stage.worst),
+            ));
+        }
+        let copies = self.latency.copies();
+        if copies.frames > 0 {
+            report.push_str(&format!(
+                "- {} large frames copied out of shared memory on this thread, {:.0} MiB in total\n",
+                copies.frames,
+                copies.bytes as f64 / 1_048_576.0,
+            ));
+        }
+        report
+    }
+
     fn build_diagnostics_report(&self) -> String {
         let mut report = self.diagnostics.to_report();
         report.push_str("\n## Session inhibition\n");
@@ -1157,6 +1245,7 @@ impl App {
                 stats.pinned_overcommit_bytes as f64 / 1_048_576.0,
             ));
         }
+        report.push_str(&self.latency_report());
         if let Some(media) = self.media_supervisor.as_ref() {
             let counters = media.worker_counters();
             report.push_str("\n## Media pipeline\n");
@@ -1328,6 +1417,12 @@ impl App {
                 self.scrubbing = matches!(command, Nav::PreviewGoTo(_));
                 let changed = self.state.apply(command, self.now);
                 if changed.committed {
+                    // The clock starts here: the state has moved, and every
+                    // millisecond after this is one the presenter is waiting.
+                    // The wall clock, not `self.now`, which is as old as the
+                    // last tick — the very error this exists to find.
+                    self.latency
+                        .begin_turn(self.state.committed(), Instant::now());
                     // Marks belong to the slide they were made on, so they go
                     // with it — into the cache, where they wait in case the
                     // presenter comes back. A link highlight is about this
@@ -1343,7 +1438,10 @@ impl App {
                     // page's declarations are fetched, so navigation between
                     // known pages would otherwise leave the previous slide's
                     // media running and the new slide's suspended.
+                    let start = Instant::now();
                     self.service_media();
+                    self.latency
+                        .record_stage(|stages| &mut stages.service_media, start.elapsed());
                 }
                 if changed.any() {
                     self.diagnostics.note(format!(
@@ -1352,7 +1450,10 @@ impl App {
                         self.state.preview() + 1
                     ));
                 }
+                let start = Instant::now();
                 self.request_renders();
+                self.latency
+                    .record_stage(|stages| &mut stages.plan_renders, start.elapsed());
                 Task::none()
             }
             Message::OpenDialog => Task::perform(
@@ -2596,6 +2697,11 @@ impl App {
     /// Shared by the tick and by the doorbell so a frame reaches the windows
     /// by whichever arrives first, with identical effects either way.
     fn pump_renderer(&mut self) {
+        // Timed around the drain rather than around `pump` alone: copying a
+        // large frame out of the shared region happens inside `pump`, and
+        // turning it into a texture handle happens in the loop below. Both
+        // are on the event loop, and a turn pays for both.
+        let start = Instant::now();
         let events = self
             .supervisor
             .as_mut()
@@ -2607,6 +2713,8 @@ impl App {
         for event in events {
             self.on_render_event(event);
         }
+        self.latency
+            .record_stage(|stages| &mut stages.drain_renderer, start.elapsed());
         // One overlay-index rebuild for the whole batch of Overlays events
         // drained above, however many pages announced themselves.
         self.flush_overlay_rebuild();
@@ -3008,6 +3116,16 @@ impl App {
                 self.media.attachment_failed(&name, &reason);
             }
             RenderEvent::Frame { job, frame } => {
+                // How long the render itself took, and how much of this
+                // thread's time its pixels cost to take delivery of. Recorded
+                // before the early returns below: a frame that arrives too
+                // late to be wanted was still rendered and still copied.
+                if let Some(submitted) = self.submitted_at.remove(&job.id) {
+                    self.latency.note_render(submitted.elapsed());
+                }
+                if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
+                    self.latency.note_copy(frame.cpu_bytes());
+                }
                 // Whether this was warming work has to be read before
                 // `take_pending`, which forgets it.
                 let was_thumbnail = self.thumbnail_requests.contains(&job.id);
@@ -4404,6 +4522,8 @@ impl App {
             .pending
             .iter()
             .position(|(pending, _)| *pending == id)?;
+        // Whatever becomes of this request, nobody will time it again.
+        self.submitted_at.remove(&id);
         Some(self.pending.remove(position).1)
     }
 
@@ -4429,6 +4549,13 @@ impl App {
         self.uploads_settle_by = Some(Instant::now() + UPLOAD_SETTLE);
         for evicted in self.cache.take_evicted() {
             self.handles.remove(&evicted);
+        }
+        // The panel's stand-in is a view-time choice with no slot of its own,
+        // so it is noticed here, by asking the very function the view asks —
+        // and before the slots move below, while the slot still holds the
+        // page being left, which is what makes a stand-in a stand-in.
+        if let Some(key) = self.presenter_stand_in() {
+            self.note_answer(crate::latency::Surface::Presenter, key);
         }
         self.remember_presenter_frame();
         self.mark_audience_frame();
@@ -4671,9 +4798,31 @@ impl App {
                     width = key.width,
                     "audience frame change"
                 );
+                self.note_answer(crate::latency::Surface::Audience, key);
             }
             self.last_audience = Some(key);
         }
+    }
+
+    /// Record that a surface's picture just changed, for the turn timing.
+    ///
+    /// A frame at the projector's or the panel's own width is that surface's
+    /// real answer; anything narrower is the coarse stand-in. Reading the
+    /// width rather than tracking a separate flag keeps this honest if the
+    /// stand-in rules change: whatever is on screen is classified by what it
+    /// actually is.
+    fn note_answer(&mut self, surface: crate::latency::Surface, key: FrameKey) {
+        let exact_width = match surface {
+            crate::latency::Surface::Audience => self.audience_width(),
+            crate::latency::Surface::Presenter => self.presenter_width(),
+        };
+        let answer = if key.width >= exact_width {
+            crate::latency::Answer::Exact
+        } else {
+            crate::latency::Answer::StandIn
+        };
+        self.latency
+            .answered(surface, answer, key.slide, Instant::now());
     }
 
     /// What a presenter panel draws for one page.
@@ -4823,6 +4972,7 @@ impl App {
                     width = key.width,
                     "presenter frame change"
                 );
+                self.note_answer(crate::latency::Surface::Presenter, key);
             }
             self.last_presenter = next;
         }
@@ -5015,6 +5165,7 @@ impl App {
                 region_name: String::new(),
             });
             self.pending.push((id, key));
+            self.submitted_at.insert(id, Instant::now());
             self.thumbnail_requests.insert(id);
             room -= 1;
         }
@@ -5175,6 +5326,7 @@ impl App {
         for id in obsolete {
             supervisor.cancel(id);
             self.thumbnail_requests.remove(&id);
+            self.submitted_at.remove(&id);
         }
         for (key, source, priority, quality, width, height, document) in jobs {
             let id = supervisor.next_request_id();
@@ -5191,6 +5343,7 @@ impl App {
                 region_name: String::new(),
             });
             self.pending.push((id, key));
+            self.submitted_at.insert(id, Instant::now());
         }
 
         // The outline and the unsupported-feature report are per document, so
@@ -5829,6 +5982,21 @@ fn canonical_presenter_width(preview_width: f32, scale: f32) -> u32 {
     };
     let wanted = ((preview_width.max(1.0) * PANEL_HEADROOM * scale).ceil() as u32).max(512);
     wanted.div_ceil(BUCKET) * BUCKET
+}
+
+/// A duration as whole milliseconds, which is the resolution a page turn is
+/// argued about in. Sub-millisecond stages print as `0 ms`, which is the
+/// truthful answer to "is this what is slowing us down".
+fn millis(duration: Duration) -> String {
+    format!("{} ms", duration.as_millis())
+}
+
+/// How a stand-in reads in the report, or nothing when there was none.
+fn stand_in_note(stand_in: Option<Duration>) -> String {
+    match stand_in {
+        Some(at) => format!(" (soft at {})", millis(at)),
+        None => String::new(),
+    }
 }
 
 /// Whether a window holding `holding` should take a coarse stand-in for
