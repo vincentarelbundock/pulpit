@@ -34,7 +34,7 @@ jobs:
         # media crate's browser worker hides an application that never asked
         # for it — and an application without it plays no media at all.
         # Building it on its own is the only thing that catches that.
-        run: cargo build -p pulpit-app
+        run: cargo build -p pulpit
       - name: Tests without PDFium
         # The fixture backend keeps every layer above the binding under test
         # even when no libpdfium is present.
@@ -149,12 +149,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: The OS-facing contracts and the pure domain crates
         # The platform boundary, the layout model and the settings store now
-        # live inside pulpit-app as modules, so their tests run with it.
+        # live inside pulpit as modules, so their tests run with it.
         run: >
           cargo test
           -p pulpit-core
           -p pulpit-display
-          -p pulpit-app
+          -p pulpit
 
   # The macOS package, built and signed exactly as a release builds it.
   #
@@ -243,7 +243,7 @@ jobs:
         # This also runs build.rs, which embeds the icon and version block.
         # A missing resource compiler only warns, so watch for that warning
         # rather than trusting a green build to mean the icon is there.
-        run: cargo build --release -p pulpit-app
+        run: cargo build --release -p pulpit
       - name: Build the portable zip and the installer
         # Inno Setup is preinstalled on the GitHub Windows image. If that ever
         # stops being true the script skips the installer and still produces

@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-08-14
+
+### Changed
+
+- The application crate is named `pulpit`, not `pulpit-app`, so `cargo install
+  pulpit` installs the `pulpit` binary. The crate directory moved to
+  `crates/pulpit/` and its redundant `[[bin]]` block is gone — the package name
+  already names the binary.
+
+### Fixed
+
+- Every crate now carries the `description` and `repository` metadata
+  crates.io requires. Without them `cargo publish` refuses the upload, which
+  the 0.0.1 publish would have hit as soon as its registry token was set.
+
 ## [0.0.1] — 2026-08-14
 
 The first published release. A complete presenter: two-window presentation,

@@ -1,13 +1,11 @@
 [package]
-name = "pulpit-app"
+name = "pulpit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "pulpit"
-path = "src/main.rs"
+repository.workspace = true
+description = "A PDF presenter that does not screw up your projector."
 
 [features]
 default = ["pdfium"]

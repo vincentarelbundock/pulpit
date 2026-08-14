@@ -48,6 +48,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -eu
-          for crate in pulpit-core pulpit-display pulpit-render pulpit-media pulpit-app; do
+          for crate in pulpit-core pulpit-display pulpit-render pulpit-media pulpit; do
             cargo publish -p "$crate" --locked --token "${CARGO_REGISTRY_TOKEN}"
           done

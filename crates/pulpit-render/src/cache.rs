@@ -8,7 +8,7 @@
 //! textures made from those bitmaps belong to a window's renderer, one copy
 //! per window that draws them, and neither their size nor their lifetime is
 //! visible from here — so they are not guessed at. Keeping a window's set of
-//! them small is `pulpit_app::residency`'s job.
+//! them small is `pulpit::residency`'s job.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -690,7 +690,7 @@ mod fixtures {
     }
 
     /// Rewrite the fixtures. Run with
-    /// `PULPIT_WRITE_FIXTURES=1 cargo test -p pulpit-app fixtures`
+    /// `PULPIT_WRITE_FIXTURES=1 cargo test -p pulpit fixtures`
     /// after a deliberate format change, then read the diff.
     #[test]
     fn fixtures_are_current() {

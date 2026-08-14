@@ -3,7 +3,7 @@
 //!
 //! This module owns no process, socket, decoder or filesystem handle. It
 //! parses what a producer wrote into the PDF and decides what that *means*;
-//! acting on the meaning belongs to `pulpit-media` and `pulpit-app`.
+//! acting on the meaning belongs to `pulpit-media` and `pulpit`.
 
 use std::collections::BTreeMap;
 

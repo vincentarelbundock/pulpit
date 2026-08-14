@@ -3,7 +3,7 @@
 //! This crate owns runtime discovery, capability-based selection, worker
 //! supervision, the continuous frame transport and the runtime adapters. It
 //! knows nothing about PDF dictionaries — `pulpit-render` interprets
-//! those — and nothing about Iced: `pulpit-app` composites and routes
+//! those — and nothing about Iced: `pulpit` composites and routes
 //! input. The two never depend on one another; they exchange pure
 //! `pulpit-core` descriptors through the application.
 //!

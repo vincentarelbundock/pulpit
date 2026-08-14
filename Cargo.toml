@@ -5,15 +5,15 @@ members = [
     "crates/pulpit-display",
     "crates/pulpit-media",
     "crates/pulpit-render",
-    "crates/pulpit-app",
+    "crates/pulpit",
 ]
 # `cargo run` at the workspace root means the application. The other two
 # binaries — the render worker and the topology capture tool — are asked for
 # by name.
-default-members = ["crates/pulpit-app"]
+default-members = ["crates/pulpit"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"

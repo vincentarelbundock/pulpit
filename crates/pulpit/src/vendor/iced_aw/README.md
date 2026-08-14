@@ -59,7 +59,7 @@ is not purely mechanical.
    and it is reproducible.
 
 Upstream's own unit tests came with the files and run in this crate's test
-suite (`cargo test -p pulpit-app vendor::`) — 170 of them, and they are
+suite (`cargo test -p pulpit vendor::`) — 170 of them, and they are
 the check that the port did not break anything.
 
 ## Re-vendoring a later version
@@ -74,7 +74,7 @@ sed -i -e 's|crate::iced_aw_font::advanced_text|crate::vendor::iced_aw::glyphs|g
        -e 's|\bcrate::widget::|crate::vendor::iced_aw::widget::|g' \
        -e 's|^use crate::{|use crate::vendor::iced_aw::{|' \
        -e 's|^pub use crate::{|pub use crate::vendor::iced_aw::{|' *.rs
-cargo fmt --all && cargo test -p pulpit-app vendor::
+cargo fmt --all && cargo test -p pulpit vendor::
 ```
 
 The `mod.rs` files in this tree are written here, not copied: upstream's are
