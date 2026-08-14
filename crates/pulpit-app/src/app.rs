@@ -1537,7 +1537,7 @@ impl App {
                     }
                     return Task::none();
                 }
-                if settings_back_key(self.page, key.as_deref()) {
+                if back_to_presenter_key(self.page, key.as_deref(), self.layout_dialog.is_some()) {
                     return self.update(Message::ShowPresenter);
                 }
                 if self.page != crate::designer::Page::Presenter {
@@ -5980,10 +5980,24 @@ fn is_modifier(key: Option<&str>) -> bool {
     )
 }
 
-/// Settings is a navigation page, so Escape means the same thing as its Back
-/// button rather than an editor command.
-fn settings_back_key(page: crate::designer::Page, key: Option<&str>) -> bool {
-    page == crate::designer::Page::Settings && key == Some("Escape")
+/// Escape means Back on the pages that are places rather than modes.
+///
+/// Settings and the layout library both take the whole window and both offer
+/// a Back button as the way out, so Escape means that button — the presenter
+/// is one press from the room whichever of them is open. The editor is not on
+/// this list: it holds work in progress, where Escape means cancel what you
+/// are doing, not leave.
+///
+/// `dismissable` is whatever is open *in front* of the page. That takes the
+/// first press and the page takes the second, which is the ordinary reading
+/// of Escape everywhere else in the application.
+fn back_to_presenter_key(
+    page: crate::designer::Page,
+    key: Option<&str>,
+    dismissable: bool,
+) -> bool {
+    use crate::designer::Page;
+    key == Some("Escape") && !dismissable && matches!(page, Page::Settings | Page::Library)
 }
 
 /// Is this warning worth putting in front of the presenter at all?
@@ -6096,14 +6110,31 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
 
 #[cfg(test)]
 mod key_prompt_tests {
-    use super::{is_modifier, offers_binding, settings_back_key};
+    use super::{back_to_presenter_key, is_modifier, offers_binding};
     use crate::designer::Page;
 
     #[test]
-    fn escape_selects_back_from_settings() {
-        assert!(settings_back_key(Page::Settings, Some("Escape")));
-        assert!(!settings_back_key(Page::Settings, Some("Enter")));
-        assert!(!settings_back_key(Page::Editor, Some("Escape")));
+    fn escape_selects_back_from_a_whole_window_page() {
+        // Both pages that take the window read Escape as their Back button.
+        assert!(back_to_presenter_key(Page::Settings, Some("Escape"), false));
+        assert!(back_to_presenter_key(Page::Library, Some("Escape"), false));
+        assert!(!back_to_presenter_key(Page::Settings, Some("Enter"), false));
+        // The editor holds work in progress: Escape cancels, it does not
+        // leave.
+        assert!(!back_to_presenter_key(Page::Editor, Some("Escape"), false));
+        assert!(!back_to_presenter_key(
+            Page::Presenter,
+            Some("Escape"),
+            false
+        ));
+    }
+
+    /// A dialog over the page takes the first Escape and the page takes the
+    /// second, so leaving is never a surprise on top of a dismissal.
+    #[test]
+    fn something_open_in_front_of_the_page_takes_the_press_first() {
+        assert!(!back_to_presenter_key(Page::Library, Some("Escape"), true));
+        assert!(back_to_presenter_key(Page::Library, Some("Escape"), false));
     }
 
     #[test]
