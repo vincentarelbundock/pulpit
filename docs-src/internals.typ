@@ -324,6 +324,27 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   as licence for it: the tick still runs, still drains, and still owns the
   deadline and restart checks — the doorbell only removes the poll's latency
   from the path a page turn takes.
++ *Measure the build you ship.* A page turn that felt slow was chased
+  through six rounds of instrumentation, and the four largest causes were
+  found in this order, none of them by reading the code: a debug binary
+  (PDFium ships optimised, so rasterising measures the same and everything
+  around it does not); a `workers = 2` left in a settings file from before
+  `default_workers` existed, so an improved default never reached the machine
+  that needed it; a worker pipeline sixteen jobs deep, which had been right
+  when the supervisor was polled and became the bottleneck once the doorbell
+  removed the poll; and panel-size renders of pages no layout draws. The
+  report names the build for this reason, and a figure taken from a debug
+  session sets no target. The end state on a 730-page deck is a settled turn
+  of about a millisecond.
++ *A queue you cannot see is a queue you cannot steer.* Work handed to a
+  worker has left the only queue the supervisor can reorder or cancel
+  cheaply, so a worker is given a little work in hand and no more. When that
+  depth was sixteen, a page turn's half-second was 6 ms rasterising, 4 ms in
+  the supervisor's queue, and 507 ms sitting in a worker's inbox. Whenever a
+  latency is being hunted, split the wait by *where* it is spent before
+  changing anything: every aggregate in that investigation hid the thing it
+  was built to find, and each split moved the answer by an order of
+  magnitude.
 + *The render queue order is settled.* The committed audience page first, then
   the presenter panels, then the audience-size prefetch of the neighbours,
   which is a background luxury costing roughly ten panel frames apiece.
