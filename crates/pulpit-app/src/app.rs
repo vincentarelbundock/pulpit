@@ -6192,7 +6192,7 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
 /// told about it.
 fn panel_pages(committed: usize, preview: usize, count: usize) -> Vec<usize> {
     let mut pages: Vec<usize> = Vec::with_capacity(5);
-    let mut push = |slide: usize, pages: &mut Vec<usize>| {
+    let push = |slide: usize, pages: &mut Vec<usize>| {
         if slide < count && !pages.contains(&slide) {
             pages.push(slide);
         }
