@@ -1236,6 +1236,23 @@ impl App {
                 millis(total.mean().saturating_sub(worked.mean())),
             ));
         }
+        // The distinction that decides everything: a render for the page a
+        // window is showing is one a presenter waits on, and a render for
+        // the page after it is not. Both are "live"; only one is urgent.
+        for (name, stage) in [
+            ("for the page on screen", self.latency.on_screen()),
+            ("for a page one step away", self.latency.prefetch()),
+        ] {
+            if stage.calls == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "    {name}: {} finished, {} typical, {} worst\n",
+                stage.calls,
+                millis(stage.mean()),
+                millis(stage.worst),
+            ));
+        }
         // Everything below happens on the event loop, where the interface is
         // not drawing. That is the whole reason to count it separately from
         // a render, which happens in another process entirely.
@@ -1434,6 +1451,9 @@ impl App {
                         return self.update(Message::Nav(Nav::CancelPreview));
                     }
                     return Task::none();
+                }
+                if settings_back_key(self.page, key.as_deref()) {
+                    return self.update(Message::ShowPresenter);
                 }
                 if self.page != crate::designer::Page::Presenter {
                     return self.editor_key(key, shift, control);
@@ -3214,8 +3234,12 @@ impl App {
                 // before the early returns below: a frame that arrives too
                 // late to be wanted was still rendered and still copied.
                 if let Some(submitted) = self.submitted_at.remove(&job.id) {
+                    // The two top tiers are the page a window is showing;
+                    // everything below is for a page one step away.
+                    let on_screen =
+                        matches!(job.priority, Priority::Audience | Priority::Presenter);
                     self.latency
-                        .note_render(submitted.elapsed(), worked, was_thumbnail);
+                        .note_render(submitted.elapsed(), worked, was_thumbnail, on_screen);
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());
@@ -5772,6 +5796,12 @@ fn is_modifier(key: Option<&str>) -> bool {
     )
 }
 
+/// Settings is a navigation page, so Escape means the same thing as its Back
+/// button rather than an editor command.
+fn settings_back_key(page: crate::designer::Page, key: Option<&str>) -> bool {
+    page == crate::designer::Page::Settings && key == Some("Escape")
+}
+
 /// Is this warning worth putting in front of the presenter at all?
 ///
 /// Working on one screen is a normal way to run: rehearsing, writing the
@@ -5882,7 +5912,15 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
 
 #[cfg(test)]
 mod key_prompt_tests {
-    use super::{is_modifier, offers_binding};
+    use super::{is_modifier, offers_binding, settings_back_key};
+    use crate::designer::Page;
+
+    #[test]
+    fn escape_selects_back_from_settings() {
+        assert!(settings_back_key(Page::Settings, Some("Escape")));
+        assert!(!settings_back_key(Page::Settings, Some("Enter")));
+        assert!(!settings_back_key(Page::Editor, Some("Escape")));
+    }
 
     #[test]
     fn typing_never_offers_a_binding() {

@@ -192,6 +192,18 @@ pub struct Latency {
     /// slow upload to the log where it happens rather than posting a number
     /// here that would have to be smuggled across the view boundary.
     render: Stage,
+    /// Of the live renders, the ones for the page a window is showing right
+    /// now — the only ones a presenter is ever actually waiting on.
+    ///
+    /// The rest are prefetch: the neighbours, and the panels two pages either
+    /// side. They are "live" in the sense that they are not deck warming, and
+    /// they are not live in the sense that matters, because nothing on screen
+    /// is missing while they run. Reported together, as they were, a hundred
+    /// speculative renders queued behind each other set the typical figure
+    /// and the handful anyone waited for disappeared into it.
+    on_screen: Stage,
+    /// Renders for a page one step away, wanted soon, waited for by nobody.
+    prefetch: Stage,
     /// The part of `render` a worker was holding the job. What is left is the
     /// wait in this process's queue.
     render_worked: Stage,
@@ -299,13 +311,24 @@ impl Latency {
     /// The difference between the two figures is the wait in this process's
     /// own queue, which is the only part anything here can do something
     /// about.
-    pub fn note_render(&mut self, elapsed: Duration, worked: Duration, warming: bool) {
+    pub fn note_render(
+        &mut self,
+        elapsed: Duration,
+        worked: Duration,
+        warming: bool,
+        on_screen: bool,
+    ) {
         if warming {
             self.warming.record(elapsed);
             self.warming_worked.record(worked);
+            return;
+        }
+        self.render.record(elapsed);
+        self.render_worked.record(worked);
+        if on_screen {
+            self.on_screen.record(elapsed);
         } else {
-            self.render.record(elapsed);
-            self.render_worked.record(worked);
+            self.prefetch.record(elapsed);
         }
     }
 
@@ -335,6 +358,14 @@ impl Latency {
 
     pub fn render_worked(&self) -> &Stage {
         &self.render_worked
+    }
+
+    pub fn on_screen(&self) -> &Stage {
+        &self.on_screen
+    }
+
+    pub fn prefetch(&self) -> &Stage {
+        &self.prefetch
     }
 
     pub fn warming_worked(&self) -> &Stage {

@@ -239,7 +239,14 @@ fn how_long_a_page_takes_to_rasterise() {
     }
     let document = backend.open(&path).unwrap();
     let metadata = backend.metadata(document).unwrap();
-    let pages = metadata.page_count.min(12);
+    let sample: Vec<usize> = {
+        let count = metadata.page_count.max(1);
+        // Spread across the whole deck. Sampling only the front is how the
+        // first run of this concluded that rasterising was cheap: a deck can
+        // get heavier as it goes, and a presenter is rarely on page one.
+        (0..12).map(|i| i * count / 12).collect()
+    };
+    let pages = sample.len();
     let aspect = metadata.first_page_size.width / metadata.first_page_size.height.max(1.0);
     println!("\n{deck}: {} pages", metadata.page_count);
 
@@ -249,7 +256,7 @@ fn how_long_a_page_takes_to_rasterise() {
         let height = ((width as f32 / aspect).max(1.0)) as u32;
         let mut total = 0.0f64;
         let mut worst = 0.0f64;
-        for page in 0..pages {
+        for &page in &sample {
             let request = RenderRequest {
                 document,
                 page,
