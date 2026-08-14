@@ -18,6 +18,7 @@ pub mod builtin;
 pub mod fit;
 pub mod history;
 pub mod model;
+pub mod panels;
 pub mod store;
 pub mod thumbnail;
 pub mod tree;
