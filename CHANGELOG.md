@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.1] — 2026-08-14
+
+The first published release. A complete presenter: two-window presentation,
+display reconciliation, presenter layouts and their designer, speaker notes,
+PDF links, presenter annotations, session recovery, and media overlays for
+animated images and interactive HTML.
+
 ### Added
 
 - The macOS disk image carries one universal `Pulpit.app`: the binary and the
@@ -53,10 +60,3 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `logo.svg` is used across the package: the README, the website logo and
   favicon, and the application icon in `packaging/pulpit.svg`, which is now
   the same artwork on a badge instead of unrelated placeholder shapes.
-
-## [0.1.0]
-
-Initial working presenter: two-window presentation, display reconciliation,
-presenter layouts and their designer, speaker notes, PDF links, presenter
-annotations, session recovery, and media overlays for animated images and
-interactive HTML.
