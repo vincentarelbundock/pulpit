@@ -481,16 +481,30 @@ struct InFlight {
 ///
 /// Large frames own the shared region until the supervisor's next pump copies
 /// them out, so at most one may be in flight per worker. Inline frames travel
-/// in the pipe and need no such exclusivity; holding a few lets the worker
-/// start the next render the instant one is sent instead of idling until the
-/// application's next tick — which measurement showed was ~97% of warming
-/// time. The worker drains its own inbox highest-priority-first and honours
-/// cancels anywhere in it, so depth never delays an audience frame behind a
-/// thumbnail and never pins obsolete work. An inline job in the pipeline
-/// costs nothing but its place in line — the frame is sent the moment it is
-/// rendered, not held — so the depth is set by how much work it is
-/// reasonable to have committed to one process when it dies, not by memory.
-const SMALL_PIPELINE_DEPTH: usize = 16;
+/// in the pipe and need no such exclusivity, so a worker is given a little
+/// work in hand: enough that it starts the next render the instant it
+/// finishes one, and no more.
+///
+/// This was sixteen, and sixteen was right for the application it was
+/// measured against: a worker that ran dry then idled until the *next
+/// application tick*, which was ~97% of warming time. The doorbell removed
+/// that wait — a finished frame now wakes the supervisor, which dispatches
+/// again in the same breath — and the depth outlived the reason for it.
+///
+/// Depth is not free, because a job in a worker's inbox has left the only
+/// queue the supervisor can manage. It cannot be reordered when a page turn
+/// makes something else urgent, and cancelling it costs a round trip rather
+/// than a `retain`. Measured on a 730-page deck, that inbox was where a page
+/// turn's time went: 6 ms rasterising, 4 ms in the supervisor's queue, and
+/// 507 ms sitting inside a worker.
+///
+/// Four is one job rendering and three in hand: enough to cover the jitter
+/// between a frame arriving and the next dispatch, and few enough that a
+/// worker cannot accumulate work the supervisor has lost the ability to
+/// steer. It is also the point at which `MAX_INLINE_IN_FLIGHT_BYTES` still
+/// binds first for frames near the inline threshold, which is the property
+/// `inline_bytes_in_flight_are_capped` exists to hold.
+const SMALL_PIPELINE_DEPTH: usize = 4;
 
 struct Worker {
     index: usize,

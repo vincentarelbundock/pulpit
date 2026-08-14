@@ -1286,6 +1286,15 @@ impl App {
         // stage. Counting only the stages, as this once did, said the event
         // loop was innocent while the one thing that blocks it for tens of
         // milliseconds went unmeasured.
+        // The pool, because a queue only means something next to the number
+        // of things draining it. Workers are spawned on contention rather
+        // than up front, so "configured" is a ceiling and not a count.
+        if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
+            report.push_str(&format!(
+                "- renderer: {} of {} workers up, {} queued here, {} in worker hands\n",
+                render.workers_alive, render.workers_configured, render.queued, render.in_flight,
+            ));
+        }
         let upload = self.upload_meter.get();
         if upload.calls > 0 {
             report.push_str(&format!(
