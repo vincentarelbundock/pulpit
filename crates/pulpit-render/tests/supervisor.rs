@@ -452,6 +452,12 @@ fn a_burst_of_frames_is_one_wakeup() {
     });
     assert_eq!(frames(&events).len(), 6, "all six rendered: {events:?}");
 
+    // A reader thread posts its message and *then* rings, so collecting the
+    // six frames does not mean the six rings have all been attempted yet.
+    // Let the stragglers land, otherwise this counts a ring that arrives
+    // between two waits and calls coalescing a queue.
+    std::thread::sleep(Duration::from_millis(500));
+
     // Six frames have been drained. However many rings they produced, the
     // channel holds at most the one that says "there may be more".
     let mut rings = 0;
