@@ -40,6 +40,10 @@ tracing-appender = { workspace = true }
 rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+typst = { workspace = true }
+typst-assets = { workspace = true }
+typst-layout = { workspace = true }
+typst-svg = { workspace = true }
 
 # The X11 and Wayland adapters, and the Niri app ids the presenter window is
 # labelled with, exist only in a Linux build. The workspace declares

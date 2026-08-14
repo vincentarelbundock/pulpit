@@ -109,6 +109,7 @@ fn panel<Message: Clone + 'static>(
         let annotations = std::sync::Arc::clone(slides.annotations);
         let marks_cache = std::rc::Rc::clone(&slides.marks_cache);
         let annotation_style = slides.annotation_style;
+        let rendered_text = std::sync::Arc::clone(slides.rendered_text);
         // The presenter always sees their own marks; the audience window
         // decides for itself (see `crate::view::audience`).
         let armed = annotations.is_armed();
@@ -129,6 +130,7 @@ fn panel<Message: Clone + 'static>(
                 aspect,
                 fit,
                 crop,
+                &rendered_text,
             );
             // The outline goes on last so it is never hidden by a video or
             // an overlay drawn on top of the link it belongs to.
@@ -156,6 +158,7 @@ fn panel<Message: Clone + 'static>(
         let annotations = std::sync::Arc::clone(slides.annotations);
         let marks_cache = std::rc::Rc::clone(&slides.marks_cache);
         let annotation_style = slides.annotation_style;
+        let rendered_text = std::sync::Arc::clone(slides.rendered_text);
         let (aspect, crop) = (slides.aspect, slides.crop);
         responsive(move |size| {
             annotate(
@@ -173,6 +176,7 @@ fn panel<Message: Clone + 'static>(
                 aspect,
                 fit,
                 crop,
+                &rendered_text,
             )
         })
         .into()
@@ -294,6 +298,7 @@ pub fn composite<'a, Message: Clone + 'a>(
 /// Above the media overlays on purpose: a mark is about what is on screen,
 /// including a video, and one hidden behind the thing it was pointing at
 /// would be worse than useless.
+#[allow(clippy::too_many_arguments)]
 fn annotate<'a, Message: Clone + 'a>(
     page: Element<'a, Message>,
     annotations: &std::sync::Arc<pulpit_core::annotation::Annotations>,
@@ -302,13 +307,25 @@ fn annotate<'a, Message: Clone + 'a>(
     aspect: f32,
     fit: ContentFit,
     crop: pulpit_core::notes::Region,
+    rendered_text: &std::sync::Arc<
+        std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
+    >,
 ) -> Element<'a, Message> {
     use iced::widget::stack;
 
     // Always a stack, empty or not: see the note in `composite`. Ink appears
     // and disappears under the presenter's hand, and the picture underneath
     // must not be rebuilt each time it does.
-    match crate::widgets::annotations::view::marks(annotations, cache, style, aspect, fit, crop) {
+    match crate::widgets::annotations::view::marks(
+        annotations,
+        cache,
+        style,
+        aspect,
+        fit,
+        crop,
+        true,
+        rendered_text,
+    ) {
         Some(marks) => stack![page, marks].into(),
         None => stack![page].into(),
     }

@@ -169,6 +169,8 @@ fn audience(app: &App) -> Element<'_, Message> {
                     aspect,
                     ContentFit::Contain,
                     crop,
+                    false,
+                    app.rendered_text_snapshot(),
                 ) {
                     Some(marks) => stack![picture, marks].into(),
                     None => stack![picture].into(),

@@ -1,4 +1,4 @@
-//! Presenter annotations: temporary ink, highlighting and erasing.
+//! Presenter annotations: temporary ink, highlighting, text and erasing.
 //!
 //! Everything here is in the same normalised top-left page coordinates as
 //! [`crate::notes::Region`], so an annotation drawn on the presenter screen
@@ -33,17 +33,20 @@ pub enum AnnotationTool {
     Highlighter,
     /// Removes a stroke touched by the eraser gesture.
     Eraser,
+    /// Places a text label, then sends keyboard input to it until committed.
+    Text,
 }
 
 impl AnnotationTool {
     /// The tools the palette offers a control for, in the order it draws
     /// them. [`AnnotationTool::Spotlight`] is absent because it is armed from
     /// the pointer control's options rather than from a button of its own.
-    pub const ALL: [AnnotationTool; 4] = [
+    pub const ALL: [AnnotationTool; 5] = [
         AnnotationTool::Pointer,
         AnnotationTool::Ink,
         AnnotationTool::Highlighter,
         AnnotationTool::Eraser,
+        AnnotationTool::Text,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,6 +56,7 @@ impl AnnotationTool {
             AnnotationTool::Ink => "Ink",
             AnnotationTool::Highlighter => "Highlighter",
             AnnotationTool::Eraser => "Eraser",
+            AnnotationTool::Text => "Text",
         }
     }
 }
@@ -77,15 +81,16 @@ impl StrokeKind {
 
 /// The ink colours on offer.
 ///
-/// Five named ones and a mixed one, in that order of prominence. The five are
+/// Six named ones and a mixed one, in that order of prominence. The colours are
 /// chosen to stay legible over both a white slide and a dark one, which an
 /// arbitrary colour is not — so they are what the palette shows, and mixing
 /// is a deliberate step past them rather than the first thing on offer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InkColor {
-    /// Legible on a white slide, which most slides are.
     #[default]
+    Black,
+    /// Legible on a white slide, which most slides are.
     Red,
     Yellow,
     Cyan,
@@ -93,7 +98,7 @@ pub enum InkColor {
     White,
     /// A colour the presenter mixed, in sRGB bytes.
     ///
-    /// The five above are the ones that survive being projected onto somebody
+    /// The named colours above are the ones that survive being projected onto somebody
     /// else's slide, and they stay the palette. This is the escape hatch for
     /// the deck that is entirely one of them already — a red diagram wants
     /// anything but red ink — and for matching a house colour.
@@ -105,7 +110,8 @@ pub enum InkColor {
 }
 
 impl InkColor {
-    pub const ALL: [InkColor; 5] = [
+    pub const ALL: [InkColor; 6] = [
+        InkColor::Black,
         InkColor::Red,
         InkColor::Yellow,
         InkColor::Cyan,
@@ -116,6 +122,7 @@ impl InkColor {
     /// Straight sRGB components, so no UI toolkit type appears in the model.
     pub fn rgb(self) -> (f32, f32, f32) {
         match self {
+            InkColor::Black => (0.0, 0.0, 0.0),
             InkColor::Red => (0.90, 0.16, 0.22),
             InkColor::Yellow => (0.98, 0.80, 0.16),
             InkColor::Cyan => (0.16, 0.78, 0.94),
@@ -150,6 +157,7 @@ impl InkColor {
 
     pub fn label(self) -> &'static str {
         match self {
+            InkColor::Black => "Black",
             InkColor::Red => "Red",
             InkColor::Yellow => "Yellow",
             InkColor::Cyan => "Cyan",
@@ -248,6 +256,20 @@ pub struct InkStroke {
     pub kind: StrokeKind,
 }
 
+/// A temporary text label anchored in normalised page coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextMark {
+    /// Stable within this process, so an asynchronous renderer can reject a
+    /// result for a label that has since been edited or erased.
+    #[serde(default)]
+    pub id: u64,
+    pub position: (f32, f32),
+    pub text: String,
+    /// Cap height as a fraction of the page width.
+    pub size: f32,
+    pub color: InkColor,
+}
+
 impl InkStroke {
     /// A stroke of one point is a dot, which is a mark a presenter means to
     /// make; a stroke of none is the residue of a press that went nowhere.
@@ -262,6 +284,8 @@ impl InkStroke {
 #[serde(default)]
 pub struct Annotations {
     pub strokes: Vec<InkStroke>,
+    #[serde(default)]
+    pub texts: Vec<TextMark>,
     /// Where the pointer dot is, when the pointer tool is armed and the
     /// pointer is over the page.
     pub pointer: Option<(f32, f32)>,
@@ -282,6 +306,11 @@ pub struct Annotations {
     /// took are taken back together rather than one press-worth at a time.
     #[serde(skip)]
     erasing: bool,
+    /// Index of the label currently receiving keyboard input.
+    #[serde(skip)]
+    typing: Option<usize>,
+    #[serde(skip)]
+    next_text_id: u64,
     /// What has been done to the marks, oldest first, and what has been taken
     /// back off the end of it. Neither is serialised: an edit history is
     /// about a session at a lectern, not about a document.
@@ -301,12 +330,15 @@ impl Default for Annotations {
     fn default() -> Self {
         Self {
             strokes: Vec::new(),
+            texts: Vec::new(),
             pointer: None,
             spotlight: None,
             tool: None,
             audience_visible: true,
             drawing: false,
             erasing: false,
+            typing: None,
+            next_text_id: 1,
             history: Vec::new(),
             future: Vec::new(),
             revision: Revision::default(),
@@ -323,9 +355,21 @@ impl Default for Annotations {
 enum Edit {
     /// A stroke was drawn, and sits at the end of the list.
     Added(InkStroke),
-    /// Strokes were erased, with the positions they held. Ascending, so
-    /// putting them back in order restores the original list exactly.
-    Removed(Vec<(usize, InkStroke)>),
+    /// Marks erased in one sweep, with their original positions.
+    Removed(RemovedMarks),
+    AddedText(TextMark),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RemovedMarks {
+    strokes: Vec<(usize, InkStroke)>,
+    texts: Vec<(usize, TextMark)>,
+}
+
+impl RemovedMarks {
+    fn is_empty(&self) -> bool {
+        self.strokes.is_empty() && self.texts.is_empty()
+    }
 }
 
 /// A monotonic change counter that deliberately compares equal to any other,
@@ -360,6 +404,9 @@ impl Annotations {
     /// faster than a hand moves, and an unbounded stroke is an unbounded
     /// path to tessellate every frame.
     pub const MAX_POINTS_PER_STROKE: usize = 1024;
+
+    /// Text is live UI state, so bound it before it reaches shaping/layout.
+    pub const MAX_TEXT_BYTES: usize = 4096;
 
     /// How far the pointer must travel before a point is worth keeping, as a
     /// fraction of the page. Below this the points describe the tremor in a
@@ -403,7 +450,7 @@ impl Annotations {
 
     /// Is there an edit to take back?
     pub fn can_undo(&self) -> bool {
-        !self.history.is_empty() || self.drawing
+        !self.history.is_empty() || self.drawing || self.typing.is_some()
     }
 
     /// Is there an edit to put back?
@@ -488,7 +535,7 @@ impl Annotations {
         self.erase_at(point, radius)
     }
 
-    /// Remove strokes touched by a circular stroke eraser.
+    /// Remove ink or text touched by a circular eraser.
     ///
     /// Stroke erasing is deliberate here: it keeps undo meaningful and
     /// avoids leaving tiny disconnected fragments that are hard to clear in
@@ -499,7 +546,7 @@ impl Annotations {
         } else {
             0.02
         };
-        let mut removed: Vec<(usize, InkStroke)> = Vec::new();
+        let mut removed = RemovedMarks::default();
         let mut index = 0;
         self.strokes.retain(|stroke| {
             let hit_radius = radius + stroke.width / 2.0;
@@ -517,7 +564,17 @@ impl Annotations {
             let position = index;
             index += 1;
             if hit {
-                removed.push((position, stroke.clone()));
+                removed.strokes.push((position, stroke.clone()));
+            }
+            !hit
+        });
+        let mut text_index = 0;
+        self.texts.retain(|mark| {
+            let hit = text_mark_hit(mark, point, radius);
+            let position = text_index;
+            text_index += 1;
+            if hit {
+                removed.texts.push((position, mark.clone()));
             }
             !hit
         });
@@ -534,15 +591,25 @@ impl Annotations {
                 // the sweep began. Shifting the new ones past every stroke
                 // the sweep already took is what puts both in the same
                 // coordinates, so undo can insert them all in one pass.
-                for (position, stroke) in removed {
+                for (position, stroke) in removed.strokes {
                     let mut position = position;
-                    for (taken, _) in sweep.iter() {
+                    for (taken, _) in &sweep.strokes {
                         if *taken <= position {
                             position += 1;
                         }
                     }
-                    sweep.push((position, stroke));
-                    sweep.sort_by_key(|(position, _)| *position);
+                    sweep.strokes.push((position, stroke));
+                    sweep.strokes.sort_by_key(|(position, _)| *position);
+                }
+                for (position, mark) in removed.texts {
+                    let mut position = position;
+                    for (taken, _) in &sweep.texts {
+                        if *taken <= position {
+                            position += 1;
+                        }
+                    }
+                    sweep.texts.push((position, mark));
+                    sweep.texts.sort_by_key(|(position, _)| *position);
                 }
                 self.future.clear();
             }
@@ -599,6 +666,101 @@ impl Annotations {
         }
     }
 
+    /// Start a label at `point`. An unfinished empty label is harmless and is
+    /// discarded when typing ends.
+    pub fn begin_text(&mut self, point: (f32, f32), size: f32, color: InkColor) -> bool {
+        if !Self::is_on_page(point) {
+            return false;
+        }
+        self.finish_text();
+        let id = self
+            .texts
+            .iter()
+            .map(|mark| mark.id)
+            .max()
+            .unwrap_or(0)
+            .wrapping_add(1)
+            .max(self.next_text_id)
+            .max(1);
+        self.next_text_id = self.next_text_id.wrapping_add(1).max(1);
+        self.texts.push(TextMark {
+            id,
+            position: point,
+            text: String::new(),
+            size: if size.is_finite() {
+                size.clamp(0.008, 0.12)
+            } else {
+                0.025
+            },
+            color,
+        });
+        self.typing = Some(self.texts.len() - 1);
+        self.bump();
+        true
+    }
+
+    /// Append composed keyboard text to the active label.
+    pub fn type_text(&mut self, value: &str) -> bool {
+        let Some(mark) = self.typing.and_then(|index| self.texts.get_mut(index)) else {
+            return false;
+        };
+        let remaining = Self::MAX_TEXT_BYTES.saturating_sub(mark.text.len());
+        if remaining == 0 {
+            return false;
+        }
+        let end = value
+            .char_indices()
+            .map(|(index, ch)| index + ch.len_utf8())
+            .take_while(|end| *end <= remaining)
+            .last()
+            .unwrap_or(0);
+        if end == 0 {
+            return false;
+        }
+        mark.text.push_str(&value[..end]);
+        self.bump();
+        true
+    }
+
+    pub fn backspace_text(&mut self) -> bool {
+        let Some(mark) = self.typing.and_then(|index| self.texts.get_mut(index)) else {
+            return false;
+        };
+        if mark.text.pop().is_some() {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Commit the active label as one undoable edit.
+    pub fn finish_text(&mut self) -> bool {
+        let Some(index) = self.typing.take() else {
+            return false;
+        };
+        if self
+            .texts
+            .get(index)
+            .is_some_and(|mark| mark.text.is_empty())
+        {
+            self.texts.remove(index);
+        } else if let Some(mark) = self.texts.get(index).cloned() {
+            self.record(Edit::AddedText(mark));
+        }
+        self.bump();
+        true
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.typing.is_some()
+    }
+
+    /// The mark receiving input, for presenter-only editing affordances.
+    pub fn typing_index(&self) -> Option<usize> {
+        self.typing
+    }
+
     /// Is a stroke currently being drawn?
     pub fn is_drawing(&self) -> bool {
         self.drawing
@@ -617,6 +779,7 @@ impl Annotations {
         if self.drawing {
             self.end_stroke();
         }
+        self.finish_text();
         let Some(edit) = self.history.pop() else {
             return false;
         };
@@ -625,10 +788,17 @@ impl Annotations {
                 self.strokes.pop();
             }
             Edit::Removed(removed) => {
-                for (position, stroke) in removed {
+                for (position, stroke) in &removed.strokes {
                     let position = (*position).min(self.strokes.len());
                     self.strokes.insert(position, stroke.clone());
                 }
+                for (position, mark) in &removed.texts {
+                    let position = (*position).min(self.texts.len());
+                    self.texts.insert(position, mark.clone());
+                }
+            }
+            Edit::AddedText(_) => {
+                self.texts.pop();
             }
         }
         self.future.push(edit);
@@ -641,6 +811,7 @@ impl Annotations {
         if self.drawing {
             self.end_stroke();
         }
+        self.finish_text();
         let Some(edit) = self.future.pop() else {
             return false;
         };
@@ -649,12 +820,18 @@ impl Annotations {
             Edit::Removed(removed) => {
                 // Descending, so each removal cannot move the position of the
                 // one after it.
-                for (position, _) in removed.iter().rev() {
+                for (position, _) in removed.strokes.iter().rev() {
                     if *position < self.strokes.len() {
                         self.strokes.remove(*position);
                     }
                 }
+                for (position, _) in removed.texts.iter().rev() {
+                    if *position < self.texts.len() {
+                        self.texts.remove(*position);
+                    }
+                }
             }
+            Edit::AddedText(mark) => self.texts.push(mark.clone()),
         }
         self.history.push(edit);
         self.bump();
@@ -665,10 +842,12 @@ impl Annotations {
     /// alone: clearing the page is not putting the pen down.
     pub fn clear(&mut self) {
         self.strokes.clear();
+        self.texts.clear();
         self.pointer = None;
         self.spotlight = None;
         self.drawing = false;
         self.erasing = false;
+        self.typing = None;
         self.forget_history();
         self.bump();
     }
@@ -685,14 +864,18 @@ impl Annotations {
     }
 
     /// Take the marks off this slide, leaving the presenter's settings alone.
-    fn take_strokes(&mut self) -> Vec<InkStroke> {
+    fn take_marks(&mut self) -> (Vec<InkStroke>, Vec<TextMark>) {
         self.pointer = None;
         self.spotlight = None;
         self.drawing = false;
         self.erasing = false;
+        self.finish_text();
         self.forget_history();
         self.bump();
-        std::mem::take(&mut self.strokes)
+        (
+            std::mem::take(&mut self.strokes),
+            std::mem::take(&mut self.texts),
+        )
     }
 
     /// Move the pointer dot, or take it away. A point off the page takes it
@@ -724,7 +907,10 @@ impl Annotations {
 
     /// Is there nothing at all to draw?
     pub fn is_empty(&self) -> bool {
-        self.strokes.is_empty() && self.pointer.is_none() && self.spotlight.is_none()
+        self.strokes.is_empty()
+            && self.texts.is_empty()
+            && self.pointer.is_none()
+            && self.spotlight.is_none()
     }
 
     /// Arm a tool, or put the pointer back to its ordinary duties. Changing
@@ -734,6 +920,9 @@ impl Annotations {
         self.tool = tool;
         self.drawing = false;
         self.erasing = false;
+        if tool != Some(AnnotationTool::Text) {
+            self.finish_text();
+        }
         if tool != Some(AnnotationTool::Pointer) {
             self.pointer = None;
         }
@@ -765,7 +954,7 @@ impl Annotations {
 /// if it came back unbidden at the next talk.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InkCache {
-    by_slide: std::collections::BTreeMap<usize, Vec<InkStroke>>,
+    by_slide: std::collections::BTreeMap<usize, (Vec<InkStroke>, Vec<TextMark>)>,
     /// The slide the live annotations currently belong to.
     slide: Option<usize>,
 }
@@ -786,11 +975,11 @@ impl InkCache {
             return;
         }
         if let Some(previous) = self.slide {
-            let strokes = live.take_strokes();
-            if strokes.is_empty() {
+            let marks = live.take_marks();
+            if marks.0.is_empty() && marks.1.is_empty() {
                 self.by_slide.remove(&previous);
             } else {
-                self.by_slide.insert(previous, strokes);
+                self.by_slide.insert(previous, marks);
                 while self.by_slide.len() > Self::MAX_SLIDES {
                     let Some(oldest) = self.by_slide.keys().next().copied() else {
                         break;
@@ -799,9 +988,11 @@ impl InkCache {
                 }
             }
         } else {
-            live.take_strokes();
+            live.take_marks();
         }
-        live.strokes = self.by_slide.get(&slide).cloned().unwrap_or_default();
+        let (strokes, texts) = self.by_slide.get(&slide).cloned().unwrap_or_default();
+        live.strokes = strokes;
+        live.texts = texts;
         live.bump();
         self.slide = Some(slide);
     }
@@ -830,6 +1021,25 @@ fn distance_squared(left: (f32, f32), right: (f32, f32)) -> f32 {
     let x = left.0 - right.0;
     let y = left.1 - right.1;
     x * x + y * y
+}
+
+/// Hit-test the same approximate text block the canvas lays out. Exact glyph
+/// outlines would couple the pure model to a renderer; a rectangular label
+/// target is also much easier to erase deliberately at presentation speed.
+fn text_mark_hit(mark: &TextMark, point: (f32, f32), radius: f32) -> bool {
+    let mut lines = 0_usize;
+    let mut longest = 0_usize;
+    for line in mark.text.split('\n') {
+        lines += 1;
+        longest = longest.max(line.chars().count());
+    }
+    let width = longest as f32 * mark.size * 0.6;
+    let height = lines.max(1) as f32 * mark.size * 1.2;
+    let nearest = (
+        point.0.clamp(mark.position.0, mark.position.0 + width),
+        point.1.clamp(mark.position.1, mark.position.1 + height),
+    );
+    distance_squared(point, nearest) <= radius * radius
 }
 
 fn distance_to_segment_squared(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
@@ -1227,6 +1437,28 @@ mod tests {
         assert!(annotations.strokes.is_empty());
     }
 
+    #[test]
+    fn one_eraser_sweep_removes_text_and_ink_and_undo_restores_both() {
+        let mut annotations = Annotations::default();
+        annotations.begin_stroke((0.25, 0.22), WIDTH, RED);
+        annotations.end_stroke();
+        annotations.begin_text((0.2, 0.2), 0.03, InkColor::Black);
+        annotations.type_text("erase me");
+        annotations.finish_text();
+
+        annotations.begin_erase((0.25, 0.22), 0.02);
+        annotations.end_stroke();
+        assert!(annotations.strokes.is_empty());
+        assert!(annotations.texts.is_empty());
+
+        assert!(annotations.undo_stroke());
+        assert_eq!(annotations.strokes.len(), 1);
+        assert_eq!(annotations.texts[0].text, "erase me");
+        assert!(annotations.redo_stroke());
+        assert!(annotations.strokes.is_empty());
+        assert!(annotations.texts.is_empty());
+    }
+
     /// Draw one stroke on the slide the presenter is currently on.
     fn scribble(live: &mut Annotations, y: f32) {
         assert!(live.begin_stroke((0.2, y), WIDTH, RED));
@@ -1296,6 +1528,35 @@ mod tests {
         cache.follow(1, &mut live);
         assert!(live.strokes.is_empty(), "cleared ink came back");
         assert_eq!(cache.annotated_slides(), 0);
+    }
+
+    #[test]
+    fn text_is_live_then_committed_as_one_undoable_mark() {
+        let mut annotations = Annotations::default();
+        assert!(annotations.begin_text((0.2, 0.3), 0.025, InkColor::White));
+        assert!(annotations.type_text("Energy = mc²"));
+        assert_eq!(annotations.texts[0].text, "Energy = mc²");
+        assert!(annotations.is_typing());
+        assert!(annotations.finish_text());
+        assert!(!annotations.is_typing());
+        assert!(annotations.undo_stroke());
+        assert!(annotations.texts.is_empty());
+        assert!(annotations.redo_stroke());
+        assert_eq!(annotations.texts[0].text, "Energy = mc²");
+    }
+
+    #[test]
+    fn text_follows_the_slide_like_ink() {
+        let mut cache = InkCache::default();
+        let mut live = Annotations::default();
+        cache.follow(1, &mut live);
+        live.begin_text((0.1, 0.1), 0.03, InkColor::Cyan);
+        live.type_text("Remember this");
+        live.finish_text();
+        cache.follow(2, &mut live);
+        assert!(live.texts.is_empty());
+        cache.follow(1, &mut live);
+        assert_eq!(live.texts[0].text, "Remember this");
     }
 
     #[test]

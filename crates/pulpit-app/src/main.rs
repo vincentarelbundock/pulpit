@@ -21,6 +21,7 @@ mod settings;
 mod theme;
 mod thumbnails;
 mod toast;
+mod typst_annotation;
 mod vendor;
 mod view;
 mod widgets;
@@ -46,6 +47,10 @@ fn main() -> iced::Result {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--render-worker" => worker = true,
+            "--typst-worker" => {
+                crate::typst_annotation::run_worker();
+                return Ok(());
+            }
             // A media worker is another role of this same executable, so the
             // supervisor spawns one without a second installed binary.
             _ if argument.starts_with("--media-worker=") => {

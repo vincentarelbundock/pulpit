@@ -30,6 +30,24 @@ back/forward — all bound by default. A remote whose keys the toolkit cannot
 name is still usable: press the key and the presenter window offers to bind
 it, storing the raw scancode in `settings.toml`.
 
+= Annotations
+
+The annotations palette includes ink, highlight, eraser, and a typewriter
+`T` tool. Ink and text start in black. Select the text tool, click the slide,
+and type into the translucent expanding field; `Enter` commits the label and
+`Ctrl+Enter` inserts a line, and `Ctrl/Cmd+V` pastes text. Text is a separate object, so the eraser can
+remove it without treating its glyph outlines as ink.
+
+Text labels are complete Typst 0.15.1 documents, not Markdown. Markup, math,
+set rules, functions, tables, and other built-in Typst features render live
+after a short typing pause. Files, packages, plugins, network access, and the
+clock are deliberately unavailable. Compilation happens in a supervised
+worker; presenter and audience reuse the same transparent SVG and bundled
+fonts, and an invalid or slow replacement never displaces the last complete
+audience rendering. Compilation errors appear only on the presenter. Labels
+follow Typst's math syntax exactly: for example, multiplication is
+`$e=m c^2$`, with whitespace between variables.
+
 In the layout designer: `Ctrl/Cmd+Z` and `Ctrl/Cmd+Shift+Z` undo and redo,
 `Ctrl/Cmd+S` saves, and with a divider focused the arrow keys move it 1% at a
 time (5% with `Shift`).

@@ -23,6 +23,7 @@ pub struct AnnotationOptions {
     pub ink_color: InkColor,
     pub highlight_color: InkColor,
     pub pointer_color: InkColor,
+    pub text_color: InkColor,
     /// Whether the pointer control lights a circle rather than showing a dot.
     ///
     /// One control with a mode rather than two buttons: pointing at a line
@@ -34,6 +35,8 @@ pub struct AnnotationOptions {
     pub highlight_width: f32,
     /// Radius of the stroke eraser as a fraction of the page width.
     pub eraser_radius: f32,
+    /// Text height as a fraction of the page width.
+    pub text_size: f32,
     /// Radius of the pointer dot as a fraction of the page width.
     pub pointer_radius: f32,
     /// Spotlight radius as a fraction of the page width.
@@ -53,10 +56,12 @@ impl Default for AnnotationOptions {
             ink_color: InkColor::default(),
             highlight_color: InkColor::Yellow,
             pointer_color: style.pointer_color,
+            text_color: InkColor::Black,
             pointer_spotlight: false,
             ink_width: style.ink_width,
             highlight_width: 0.025,
             eraser_radius: 0.02,
+            text_size: 0.025,
             pointer_radius: style.pointer_radius,
             spotlight_radius: style.spotlight_radius,
             audience_visible: true,
@@ -74,6 +79,7 @@ impl AnnotationOptions {
         self.pointer_radius = style.pointer_radius;
         self.highlight_width = bound(self.highlight_width, 0.025, HIGHLIGHT_WIDTH_RANGE);
         self.eraser_radius = bound(self.eraser_radius, 0.02, ERASER_RADIUS_RANGE);
+        self.text_size = bound(self.text_size, 0.025, (0.008, 0.12));
     }
 
     /// The drawing measures these options imply. Only the dimming behind the
@@ -117,6 +123,8 @@ pub enum AnnotationPatch {
     PointerColor(InkColor),
     PointerRadius(f32),
     PointerSpotlight(bool),
+    TextColor(InkColor),
+    TextSize(f32),
     AudienceVisible(bool),
 }
 
@@ -133,6 +141,8 @@ impl AnnotationPatch {
             AnnotationPatch::PointerColor(value) => options.pointer_color = value,
             AnnotationPatch::PointerRadius(value) => options.pointer_radius = value,
             AnnotationPatch::PointerSpotlight(value) => options.pointer_spotlight = value,
+            AnnotationPatch::TextColor(value) => options.text_color = value,
+            AnnotationPatch::TextSize(value) => options.text_size = value,
             AnnotationPatch::AudienceVisible(value) => options.audience_visible = value,
         }
     }
@@ -193,6 +203,8 @@ mod tests {
             "a mark is drawn to be seen; hiding it is the deliberate choice"
         );
         assert_eq!(options.tool, AnnotationTool::Ink);
+        assert_eq!(options.ink_color, InkColor::Black);
+        assert_eq!(options.text_color, InkColor::Black);
     }
 
     #[test]

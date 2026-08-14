@@ -94,9 +94,15 @@ pub enum Message {
     RenderReady,
     Key {
         key: Option<String>,
+        text: Option<String>,
         scancode: Option<u32>,
         shift: bool,
         control: bool,
+    },
+    /// Text read asynchronously after Paste while a label is active.
+    PasteAnnotationText {
+        target: u64,
+        value: Option<String>,
     },
     Do(Action),
     Nav(Nav),
@@ -571,6 +577,9 @@ pub struct App {
     /// [`App::sync_annotation_layers`] only when the model changed, so a
     /// view pass shares a reference instead of copying every stroke.
     annotations_view: std::sync::Arc<pulpit_core::annotation::Annotations>,
+    /// Last complete Typst SVGs, compiled out of process and shared by both
+    /// windows so the audience never sees a partial replacement.
+    typst_annotations: crate::typst_annotation::Coordinator,
     /// Tessellated annotation geometry per drawing site, replayed between
     /// changes.
     marks_caches: crate::widgets::annotations::view::MarksCaches,
@@ -863,6 +872,7 @@ impl App {
             scrubbing: false,
             annotations: pulpit_core::annotation::Annotations::default(),
             annotations_view: std::sync::Arc::new(pulpit_core::annotation::Annotations::default()),
+            typst_annotations: Default::default(),
             marks_caches: Default::default(),
             marks_signature: None,
             section_cache: std::cell::RefCell::new(None),
@@ -1024,14 +1034,16 @@ impl App {
         // timer when it changes.
         let interval = if self.is_live() { TICK } else { SETTLED_TICK };
         let ticks = iced::time::every(interval).map(Message::Tick);
-        let keys = iced::event::listen_with(|event, _status, _window| match event {
+        let keys = iced::event::listen_with(|event, status, _window| match event {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key,
                 physical_key,
                 modifiers,
+                text,
                 ..
             }) => Some(Message::Key {
                 key: describe_key(&key),
+                text: text.map(|value| value.to_string()),
                 scancode: physical_scancode(&physical_key),
                 shift: modifiers.shift(),
                 control: modifiers.command() || modifiers.control(),
@@ -1059,6 +1071,9 @@ impl App {
                 describe_key(&key).map(Message::KeyReleased)
             }
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                if status == iced::event::Status::Captured {
+                    return None;
+                }
                 let (x, y) = match delta {
                     iced::mouse::ScrollDelta::Lines { x, y } => {
                         // Lines are what a notched wheel reports; a browser
@@ -1110,12 +1125,21 @@ impl App {
         }
         self.marks_signature = Some(signature);
         self.annotations_view = std::sync::Arc::new(self.annotations.clone());
+        self.typst_annotations
+            .sync(&self.annotations, std::time::Instant::now());
         self.marks_caches.invalidate();
     }
 
     /// The annotation snapshot the views draw from.
     pub fn annotations_snapshot(&self) -> &std::sync::Arc<pulpit_core::annotation::Annotations> {
         &self.annotations_view
+    }
+
+    pub fn rendered_text_snapshot(
+        &self,
+    ) -> &std::sync::Arc<std::collections::HashMap<u64, crate::typst_annotation::RenderedText>>
+    {
+        self.typst_annotations.snapshot()
     }
 
     /// The audience window's annotation-geometry cache.
@@ -1402,10 +1426,46 @@ impl App {
             }
             Message::Key {
                 key,
+                text,
                 scancode,
                 shift,
                 control,
             } => {
+                if self.annotations.is_typing() {
+                    match key.as_deref() {
+                        Some(key) if control && key.eq_ignore_ascii_case("v") => {
+                            let Some(target) = self
+                                .annotations
+                                .typing_index()
+                                .and_then(|index| self.annotations.texts.get(index))
+                                .map(|mark| mark.id)
+                            else {
+                                return Task::none();
+                            };
+                            return iced::clipboard::read()
+                                .map(move |value| Message::PasteAnnotationText { target, value });
+                        }
+                        Some("Enter") if control => {
+                            self.annotations.type_text("\n");
+                        }
+                        Some("Enter") => {
+                            self.annotations.finish_text();
+                        }
+                        Some("Escape") => {
+                            self.annotations.finish_text();
+                        }
+                        Some("Backspace") => {
+                            self.annotations.backspace_text();
+                        }
+                        _ if !control => {
+                            if let Some(value) = text.as_deref() {
+                                self.annotations.type_text(value);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Task::none();
+                }
                 if key.as_deref() == Some("Escape") && self.confirm_reset_colors {
                     self.confirm_reset_colors = false;
                     return Task::none();
@@ -1523,6 +1583,17 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::PasteAnnotationText { target, value } => {
+                let still_editing_target = self
+                    .annotations
+                    .typing_index()
+                    .and_then(|index| self.annotations.texts.get(index))
+                    .is_some_and(|mark| mark.id == target);
+                if let Some(value) = value.filter(|_| still_editing_target) {
+                    self.annotations.type_text(&value);
+                }
+                Task::none()
             }
             Message::Do(action) => self.on_action(action),
             Message::Nav(command) => {
@@ -2271,6 +2342,18 @@ impl App {
                 } else {
                     &crate::widgets::sample::ANNOTATIONS
                 },
+                rendered_text: if live {
+                    self.typst_annotations.snapshot()
+                } else {
+                    static EMPTY: std::sync::LazyLock<
+                        std::sync::Arc<
+                            std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
+                        >,
+                    > = std::sync::LazyLock::new(|| {
+                        std::sync::Arc::new(std::collections::HashMap::new())
+                    });
+                    &EMPTY
+                },
                 marks_cache: if live {
                     std::rc::Rc::clone(&self.marks_caches.live)
                 } else {
@@ -2851,6 +2934,7 @@ impl App {
     fn on_tick(&mut self, now: Instant) -> Task<Message> {
         let previous = self.now;
         self.now = now;
+        self.typst_annotations.service(&self.annotations, now);
         let mut tasks = Vec::new();
 
         // 0. Did the machine just wake up? The monotonic clock stops while
@@ -3900,6 +3984,7 @@ impl App {
                 self.annotations
                     .extend_erase(point, self.annotation_options().eraser_radius);
             }
+            Some(AnnotationTool::Text) => {}
             None => {}
         }
     }
@@ -3936,6 +4021,11 @@ impl App {
             AnnotationTool::Eraser => {
                 self.annotations
                     .begin_erase(point, self.annotation_options().eraser_radius);
+            }
+            AnnotationTool::Text => {
+                let options = self.annotation_options();
+                self.annotations
+                    .begin_text(point, options.text_size, options.text_color);
             }
         }
         true
@@ -4166,6 +4256,7 @@ impl App {
                     AnnotationTool::Pointer => {
                         self.annotation_controls.options.pointer_radius = value
                     }
+                    AnnotationTool::Text => self.annotation_controls.options.text_size = value,
                 }
                 self.annotation_controls.options.sanitise();
             }
@@ -4178,6 +4269,7 @@ impl App {
                     AnnotationTool::Pointer => {
                         self.annotation_controls.options.pointer_color = color
                     }
+                    AnnotationTool::Text => self.annotation_controls.options.text_color = color,
                     AnnotationTool::Spotlight | AnnotationTool::Eraser => {}
                 }
                 // A colour chosen from the wheel is the wheel finished.

@@ -8,8 +8,8 @@
 //! function and cannot disagree about where a stroke is.
 
 use iced::widget::{
-    button, canvas, column, container, mouse_area, responsive, row, slider, space, text, tooltip,
-    Row,
+    button, canvas, column, container, mouse_area, responsive, row, scrollable, slider, space,
+    text, tooltip, Row,
 };
 use iced::{Alignment, ContentFit, Element, Length, Padding, Rectangle, Size};
 
@@ -407,6 +407,9 @@ fn overflow_menu<Message: Clone + 'static>(
                     }
                     AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
                     AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
+                    AnnotationTool::Text => {
+                        tool_glyph(theme::Icon::Type, glyph, options.text_color)
+                    }
                 };
                 let mut arm = button(
                     row![icon, text(armable.label()).size(theme::type_scale::CAPTION)]
@@ -506,6 +509,7 @@ fn tool_control<Message: Clone + 'static>(
         AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph, options.pointer_color),
         AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
         AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
+        AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph, options.text_color),
     };
     let mut main = button(icon)
         .padding(Padding::from([size * 0.12, size * 0.2]))
@@ -598,6 +602,7 @@ fn colour_of(tool: AnnotationTool, options: crate::widgets::AnnotationOptions) -
         AnnotationTool::Ink => options.ink_color,
         AnnotationTool::Highlighter => options.highlight_color,
         AnnotationTool::Pointer => options.pointer_color,
+        AnnotationTool::Text => options.text_color,
         AnnotationTool::Spotlight | AnnotationTool::Eraser => options.ink_color,
     }
 }
@@ -618,6 +623,7 @@ fn options_panel<Message: Clone + 'static>(
         AnnotationTool::Eraser => (options.eraser_radius, ERASER_RADIUS_RANGE),
         AnnotationTool::Pointer => (options.pointer_radius, POINTER_RADIUS_RANGE),
         AnnotationTool::Spotlight => (options.spotlight_radius, SPOTLIGHT_RADIUS_RANGE),
+        AnnotationTool::Text => (options.text_size, (0.008, 0.12)),
     };
     // The track carries a position from 0 to 1 rather than the measure
     // itself, because these ranges span an order of magnitude: laid out
@@ -705,14 +711,18 @@ fn options_panel<Message: Clone + 'static>(
     // it has no colour to pick; everything else that lays down colour does.
     if matches!(
         armable,
-        AnnotationTool::Ink | AnnotationTool::Highlighter | AnnotationTool::Pointer
+        AnnotationTool::Ink
+            | AnnotationTool::Highlighter
+            | AnnotationTool::Pointer
+            | AnnotationTool::Text
     ) {
         let selected = match armable {
             AnnotationTool::Ink => options.ink_color,
             AnnotationTool::Highlighter => options.highlight_color,
+            AnnotationTool::Text => options.text_color,
             _ => options.pointer_color,
         };
-        let mut swatches = Row::new().spacing(theme::space::S);
+        let mut swatches = Row::new().spacing(theme::space::XS);
         for colour in InkColor::ALL {
             let (r, g, b) = colour.rgb();
             let mut swatch = button(space::horizontal())
@@ -1193,11 +1203,25 @@ impl Marks {
     }
 }
 
+fn text_editor_size(content: &str, font_size: f32, padding: f32) -> Size {
+    let mut line_count = 0_usize;
+    let mut longest = 0_usize;
+    for line in content.split('\n') {
+        line_count += 1;
+        longest = longest.max(line.chars().count());
+    }
+    Size::new(
+        (longest.max(4) as f32 * font_size * 0.6) + padding * 2.0,
+        (line_count.max(1) as f32 * font_size * 1.2) + padding * 2.0,
+    )
+}
+
 /// The marks as an element to stack over a slide picture.
 ///
 /// `None` when there is nothing to draw, so a slide with no annotations
 /// carries no extra layer — and, more to the point, no transparent layer over
 /// the picture that could take a press meant for a link.
+#[allow(clippy::too_many_arguments)]
 pub fn marks<'a, Message: 'a>(
     annotations: &std::sync::Arc<Annotations>,
     cache: &std::rc::Rc<canvas::Cache>,
@@ -1205,23 +1229,157 @@ pub fn marks<'a, Message: 'a>(
     aspect: f32,
     fit: ContentFit,
     crop: Region,
+    show_text_editor: bool,
+    rendered_text: &std::sync::Arc<
+        std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
+    >,
 ) -> Option<Element<'a, Message>> {
     if annotations.is_empty() {
         return None;
     }
+    let annotations = std::sync::Arc::clone(annotations);
+    let cache = std::rc::Rc::clone(cache);
+    let rendered_text = std::sync::Arc::clone(rendered_text);
     Some(
-        canvas(Marks::new(
-            std::sync::Arc::clone(annotations),
-            std::rc::Rc::clone(cache),
-            style,
-            aspect,
-            fit,
-            crop,
-        ))
-        .width(Length::Fill)
-        .height(Length::Fill)
+        responsive(move |panel| {
+            let ink = canvas(Marks::new(
+                std::sync::Arc::clone(&annotations),
+                std::rc::Rc::clone(&cache),
+                style,
+                aspect,
+                fit,
+                crop,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill);
+            let mut layers = iced::widget::Stack::new().push(ink);
+            for (index, mark) in annotations.texts.iter().enumerate() {
+                if show_text_editor && annotations.typing_index() == Some(index) {
+                    let region = Region::new(mark.position.0, mark.position.1, 1.0, 1.0);
+                    let (Some(rect), Some(page)) = (
+                        place(panel, aspect, fit, crop, region),
+                        PageBox::fit(panel, aspect, fit),
+                    ) else {
+                        continue;
+                    };
+                    let padding = 6.0;
+                    let font_size = (mark.size * page.width / crop.width.max(0.001)).max(8.0);
+                    let desired = text_editor_size(&mark.text, font_size, padding);
+                    let left = (rect.x - padding).max(0.0);
+                    let top = (rect.y - padding).max(0.0);
+                    let max_width = ((page.x + page.width).min(panel.width) - left).max(1.0);
+                    let max_height = ((page.y + page.height).min(panel.height) - top).max(1.0);
+                    let width = desired.width.min(max_width);
+                    let height = desired.height.min(max_height);
+                    let (red, green, blue) = mark.color.rgb();
+                    let source = text(if mark.text.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        mark.text.clone()
+                    })
+                    .size(font_size)
+                    .color(iced::Color::from_rgb(red, green, blue));
+                    let palette = theme::ambient::palette();
+                    let editor =
+                        container(scrollable(source).width(Length::Fill).height(Length::Fill))
+                            .padding(padding)
+                            .width(Length::Fixed(width))
+                            .height(Length::Fixed(height))
+                            .style(move |_| container::Style {
+                                background: Some(iced::Background::Color(iced::Color {
+                                    a: 0.58,
+                                    ..palette.surface
+                                })),
+                                border: iced::Border {
+                                    color: iced::Color {
+                                        a: 0.9,
+                                        ..palette.accent
+                                    },
+                                    width: 2.0,
+                                    radius: theme::radius::SMALL.into(),
+                                },
+                                ..container::Style::default()
+                            });
+                    layers = layers.push(
+                        container(editor)
+                            .padding(Padding {
+                                top,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left,
+                            })
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    );
+                    continue;
+                }
+                let Some(rendered) = rendered_text.get(&mark.id) else {
+                    continue;
+                };
+                let region = Region::new(mark.position.0, mark.position.1, 1.0, 1.0);
+                let Some(rect) = place(panel, aspect, fit, crop, region) else {
+                    continue;
+                };
+                if let Some(handle) = &rendered.handle {
+                    let Some(page) = PageBox::fit(panel, aspect, fit) else {
+                        continue;
+                    };
+                    let available_width =
+                        ((page.x + page.width).min(panel.width) - rect.x).max(0.0);
+                    let available_height =
+                        ((page.y + page.height).min(panel.height) - rect.y).max(0.0);
+                    let (width, height) =
+                        fit_svg_viewport(available_width, available_height, rendered.aspect);
+                    let picture = iced::widget::svg(handle.clone())
+                        .width(Length::Fixed(width))
+                        .height(Length::Fixed(height));
+                    layers = layers.push(
+                        container(picture)
+                            .padding(Padding {
+                                top: rect.y,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: rect.x,
+                            })
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    );
+                }
+                if show_text_editor {
+                    if let Some(error) = &rendered.error {
+                        let diagnostic = text(format!("Typst: {error}"))
+                            .size(theme::type_scale::CAPTION)
+                            .color(theme::ambient::alert());
+                        layers = layers.push(
+                            container(diagnostic)
+                                .padding(Padding {
+                                    top: rect.y + 8.0,
+                                    right: 8.0,
+                                    bottom: 0.0,
+                                    left: rect.x + 8.0,
+                                })
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        );
+                    }
+                }
+            }
+            layers.into()
+        })
         .into(),
     )
+}
+
+fn fit_svg_viewport(max_width: f32, max_height: f32, aspect: f32) -> (f32, f32) {
+    let max_width = max_width.max(0.0);
+    let max_height = max_height.max(0.0);
+    let aspect = aspect.max(0.001);
+    let natural_height = max_width / aspect;
+    if natural_height > max_height {
+        (max_height * aspect, max_height)
+    } else {
+        (max_width, natural_height)
+    }
 }
 
 #[cfg(test)]
@@ -1409,6 +1567,7 @@ mod tests {
     fn a_slide_with_no_marks_carries_no_layer_over_the_picture() {
         let empty = std::sync::Arc::new(Annotations::default());
         let cache = std::rc::Rc::new(canvas::Cache::new());
+        let rendered = std::sync::Arc::new(std::collections::HashMap::new());
         let layer: Option<Element<'_, ()>> = marks(
             &empty,
             &cache,
@@ -1416,6 +1575,8 @@ mod tests {
             WIDE,
             ContentFit::Contain,
             Region::FULL,
+            true,
+            &rendered,
         );
         assert!(layer.is_none());
 
@@ -1430,7 +1591,24 @@ mod tests {
             WIDE,
             ContentFit::Contain,
             Region::FULL,
+            true,
+            &rendered,
         );
         assert!(layer.is_some());
+    }
+
+    #[test]
+    fn the_text_editor_grows_with_words_and_lines() {
+        let empty = text_editor_size("", 20.0, 6.0);
+        let word = text_editor_size("a longer label", 20.0, 6.0);
+        let lines = text_editor_size("a longer label\nsecond line", 20.0, 6.0);
+        assert!(word.width > empty.width);
+        assert!(lines.height > word.height);
+    }
+
+    #[test]
+    fn a_tall_svg_is_scaled_to_fit_without_clipping() {
+        assert_eq!(fit_svg_viewport(300.0, 100.0, 1.5), (150.0, 100.0));
+        assert_eq!(fit_svg_viewport(300.0, 200.0, 1.5), (300.0, 200.0));
     }
 }

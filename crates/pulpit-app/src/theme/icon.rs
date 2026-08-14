@@ -59,6 +59,8 @@ pub enum Icon {
     Close,
     /// Edit in place: `pencil`.
     Pencil,
+    /// Text annotation: `type`.
+    Type,
     /// Back to where this came from: `arrow-left`.
     ArrowLeft,
     /// Opens the presenter menu: `menu`.
@@ -87,6 +89,7 @@ impl Icon {
             Icon::ChevronDown => include_bytes!("../../assets/icons/chevron-down.svg"),
             Icon::Close => include_bytes!("../../assets/icons/x.svg"),
             Icon::Pencil => include_bytes!("../../assets/icons/pencil.svg"),
+            Icon::Type => include_bytes!("../../assets/icons/type.svg"),
             Icon::ArrowLeft => include_bytes!("../../assets/icons/arrow-left.svg"),
             Icon::Menu => include_bytes!("../../assets/icons/menu.svg"),
             Icon::Ellipsis => include_bytes!("../../assets/icons/ellipsis.svg"),
@@ -103,7 +106,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 18] = [
+    const ALL: [Icon; 19] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -118,6 +121,7 @@ impl Icon {
         Icon::ChevronDown,
         Icon::Close,
         Icon::Pencil,
+        Icon::Type,
         Icon::ArrowLeft,
         Icon::Menu,
         Icon::Ellipsis,

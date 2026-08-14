@@ -15,7 +15,7 @@ default-members = ["crates/pulpit-app"]
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vincentarelbundock/pulpit"
 
@@ -43,6 +43,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typst = "=0.15.1"
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
+typst-layout = "=0.15.1"
+typst-svg = "=0.15.1"
 smithay-client-toolkit = { version = "0.21", default-features = false }
 wayland-client = "0.31"
 x11rb = "0.14"

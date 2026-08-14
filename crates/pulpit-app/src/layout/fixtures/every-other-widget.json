@@ -266,13 +266,15 @@
           "config": {
             "annotations": {
               "tool": "ink",
-              "ink_color": "red",
+              "ink_color": "black",
               "highlight_color": "yellow",
               "pointer_color": "red",
+              "text_color": "black",
               "pointer_spotlight": false,
               "ink_width": 0.004,
               "highlight_width": 0.025,
               "eraser_radius": 0.02,
+              "text_size": 0.025,
               "pointer_radius": 0.012,
               "spotlight_radius": 0.08,
               "audience_visible": false

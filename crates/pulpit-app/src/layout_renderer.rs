@@ -241,6 +241,16 @@ mod tests {
                 overlays: Vec::new(),
                 crop: pulpit_core::notes::Region::FULL,
                 annotations: &sample::ANNOTATIONS,
+                rendered_text: {
+                    static EMPTY: std::sync::LazyLock<
+                        std::sync::Arc<
+                            std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
+                        >,
+                    > = std::sync::LazyLock::new(|| {
+                        std::sync::Arc::new(std::collections::HashMap::new())
+                    });
+                    &EMPTY
+                },
                 marks_cache: std::rc::Rc::new(iced::widget::canvas::Cache::new()),
                 annotation_controls: crate::widgets::AnnotationControls::default(),
                 annotation_style: pulpit_core::annotation::AnnotationStyle::default(),

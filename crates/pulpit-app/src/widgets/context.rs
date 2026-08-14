@@ -114,6 +114,8 @@ pub struct SlideData<'a> {
     /// pointer is armed to do. Shared: the panel that draws them keeps a
     /// reference-counted handle rather than a copy of every stroke.
     pub annotations: &'a std::sync::Arc<pulpit_core::annotation::Annotations>,
+    pub rendered_text:
+        &'a std::sync::Arc<std::collections::HashMap<u64, crate::typst_annotation::RenderedText>>,
     /// The geometry cache the marks layer replays between annotation
     /// changes. Owned: an `Arc` clone is two words, and `canvas::Cache` is
     /// not `Sync`, so the sample context could not borrow one from a static.
