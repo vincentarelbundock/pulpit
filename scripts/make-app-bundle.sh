@@ -26,23 +26,67 @@ fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="$(awk -F'"' '/^version/ {print $2; exit}' "$root/Cargo.toml")"
-target="${1:-$root/target/release/pulpit}"
 out="$root/dist/Pulpit.app"
 
-if [ ! -x "$target" ]; then
-  echo "no release binary at $target — run 'cargo build --release' first" >&2
-  exit 1
+# `--universal` fuses the two per-architecture builds into one bundle that
+# runs natively on both Apple Silicon and Intel, which is what `make
+# app-universal` and the release workflow use. Without it the bundle carries
+# whatever single binary it was handed, which is what a local `make app` on
+# one machine wants.
+#
+# Every Mach-O in the bundle has to be fat, not just the executable: dyld
+# never sees libpdfium — it is opened by explicit path with `dlopen` — so an
+# arm64-only library inside a universal app fails at run time on Intel, and
+# silently, because the app degrades to the fixture backend rather than
+# crashing.
+universal=false
+if [ "${1:-}" = "--universal" ]; then
+  universal=true
+  shift
 fi
-if [ ! -f "$root/lib/libpdfium.dylib" ]; then
-  echo "no lib/libpdfium.dylib — run ./scripts/fetch-pdfium.sh first" >&2
-  exit 1
+target="${1:-$root/target/release/pulpit}"
+
+# The inputs `--universal` needs, named once. `make app-universal` produces
+# both halves; a missing one is an error here rather than a thin bundle
+# published as a fat one.
+arm_binary="$root/target/aarch64-apple-darwin/release/pulpit"
+intel_binary="$root/target/x86_64-apple-darwin/release/pulpit"
+arm_pdfium="$root/lib/libpdfium.dylib"
+intel_pdfium="$root/lib/mac-x64/libpdfium.dylib"
+
+if $universal; then
+  for input in "$arm_binary" "$intel_binary" "$arm_pdfium" "$intel_pdfium"; do
+    if [ ! -f "$input" ]; then
+      echo "missing $input — run 'make app-universal', which builds both" \
+        "architectures and fetches both PDFium artifacts" >&2
+      exit 1
+    fi
+  done
+else
+  if [ ! -x "$target" ]; then
+    echo "no release binary at $target — run 'cargo build --release' first" >&2
+    exit 1
+  fi
+  if [ ! -f "$arm_pdfium" ]; then
+    echo "no lib/libpdfium.dylib — run ./scripts/fetch-pdfium.sh first" >&2
+    exit 1
+  fi
 fi
 
 rm -rf "$out"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
 
-install -m755 "$target" "$out/Contents/MacOS/pulpit"
-install -m644 "$root/lib/libpdfium.dylib" "$out/Contents/MacOS/libpdfium.dylib"
+if $universal; then
+  lipo -create "$arm_binary" "$intel_binary" \
+    -output "$out/Contents/MacOS/pulpit"
+  chmod 755 "$out/Contents/MacOS/pulpit"
+  lipo -create "$arm_pdfium" "$intel_pdfium" \
+    -output "$out/Contents/MacOS/libpdfium.dylib"
+  chmod 644 "$out/Contents/MacOS/libpdfium.dylib"
+else
+  install -m755 "$target" "$out/Contents/MacOS/pulpit"
+  install -m644 "$arm_pdfium" "$out/Contents/MacOS/libpdfium.dylib"
+fi
 
 # The icon. `iconutil` is part of the developer tools and needs no account;
 # the `.iconset` is checked in so this step needs no SVG rasterizer on the
@@ -108,5 +152,23 @@ codesign --force --sign - --timestamp=none "$out"
 # A signature that does not verify is worse than none: it fails at launch on
 # the user's machine rather than here.
 codesign --verify --strict --verbose=2 "$out"
+
+# A universal bundle that lost a slice is the failure this cannot ship: it
+# looks correct everywhere except on the architecture that is missing, where
+# it either refuses to launch or quietly renders nothing.
+if $universal; then
+  for macho in "$out/Contents/MacOS/pulpit" "$out/Contents/MacOS/libpdfium.dylib"; do
+    archs="$(lipo -archs "$macho")"
+    case " $archs " in
+      *" arm64 "*) ;;
+      *) echo "ERROR: $macho has no arm64 slice (got: $archs)" >&2; exit 1 ;;
+    esac
+    case " $archs " in
+      *" x86_64 "*) ;;
+      *) echo "ERROR: $macho has no x86_64 slice (got: $archs)" >&2; exit 1 ;;
+    esac
+    echo "universal: $(basename "$macho") — $archs"
+  done
+fi
 
 echo "bundle: $out"

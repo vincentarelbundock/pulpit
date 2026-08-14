@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The macOS disk image carries one universal `Pulpit.app`: the binary and the
+  bundled libpdfium both have an arm64 and an x86_64 slice, so Intel Macs are
+  supported by the same download. `make app-universal` builds it and CI
+  asserts both slices are present.
+
+- Every package now says where media comes from. The Nix build pins libmpv
+  and a Chromium-family browser, the Homebrew cask installs mpv alongside the
+  app, and the `.deb`, `.rpm` and AUR packages recommend mpv beside the
+  browser they already recommended. Nothing is bundled and nothing is
+  required: pulpit `dlopen`s libmpv and spawns the browser as a child, so a
+  deck with no media needs neither.
+
 ### Fixed
 
 - Slide changes no longer flicker. The audience window holds its last frame

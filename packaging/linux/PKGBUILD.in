@@ -30,7 +30,8 @@ depends=('glibc' 'libxkbcommon' 'vulkan-icd-loader' 'libx11' 'libxcursor'
 
 # Without a browser, overlays fall back to their posters and the deck still
 # presents — so this is optional, never required, and pulpit never bundles one.
-optdepends=('chromium: media overlays — animated images, video, interactive HTML')
+optdepends=('chromium: media overlays — animated images, video, interactive HTML'
+            'mpv: video and animated images, decoded without a browser')
 
 provides=('pulpit')
 conflicts=('pulpit')

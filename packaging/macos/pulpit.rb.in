@@ -8,15 +8,22 @@ cask "pulpit" do
   version "__VERSION__"
   sha256 "__SHA256__"
 
-  url "https://github.com/vincentarelbundock/pulpit/releases/download/v#{version}/pulpit-#{version}-macos-arm64.dmg"
+  url "https://github.com/vincentarelbundock/pulpit/releases/download/v#{version}/pulpit-#{version}-macos-universal.dmg"
   name "Pulpit"
   desc "PDF presenter built around connecting and disconnecting displays"
   homepage "https://github.com/vincentarelbundock/pulpit"
 
-  # Apple Silicon only: the Intel build needs a second pinned PDFium and a
-  # lipo pass. LSMinimumSystemVersion in the bundle says the same thing.
-  depends_on arch: :arm64
+  # Universal: the binary and the bundled libpdfium both carry an arm64 and an
+  # x86_64 slice, so there is no architecture condition to state. The macOS
+  # floor matches LSMinimumSystemVersion in the bundle.
   depends_on macos: ">= :big_sur"
+
+  # Video and animated images play through libmpv when it is installed, which
+  # the app finds in the Homebrew prefix without configuration. It is a
+  # formula, not a cask, and pulling it in here is why `brew install --cask
+  # pulpit` needs no follow-up step. mpv is not bundled: pulpit dlopens it and
+  # links nothing, which keeps this MIT-or-Apache app clear of mpv's GPL.
+  depends_on formula: "mpv"
 
   app "Pulpit.app"
 
@@ -32,7 +39,11 @@ cask "pulpit" do
 
       brew install --cask --no-quarantine vincentarelbundock/tap/pulpit
 
-    Media overlays need a Chromium-family browser installed.
+    Interactive and web media overlays need a Chromium-family browser —
+    Google Chrome, Chromium, Microsoft Edge or Brave in /Applications.
+    Pulpit drives it headless in a private profile it creates itself; your
+    own browser profile is never touched. Video and animated images use the
+    mpv installed alongside this cask.
   EOS
 
   zap trash: [

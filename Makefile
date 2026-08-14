@@ -27,7 +27,8 @@ PDFIUM_LIB := lib/pdfium.dll
 endif
 
 .PHONY: help all build launch test check lint pdfium install uninstall bundle \
-        linux-packages app icons windows website serve version bump release clean
+        linux-packages app app-universal icons windows website serve version \
+        bump release clean
 
 help:  ## Display this help screen
 	@echo -e "\033[1mAvailable commands:\033[0m\n"
@@ -79,6 +80,21 @@ linux-packages: build $(PDFIUM_LIB)  ## Build the .deb and .rpm into dist/ (Linu
 # executable where the PDFium search order already looks. macOS only.
 app: build $(PDFIUM_LIB)  ## Build and ad-hoc sign dist/Pulpit.app (macOS only)
 	./scripts/make-app-bundle.sh
+
+# The released macOS artifact: one bundle that runs natively on both Apple
+# Silicon and Intel. Either architecture can build it — the Apple toolchain
+# cross-compiles between them with no extra linker — so this needs one runner
+# and produces one disk image and one Homebrew cask.
+#
+# Both PDFium artifacts are fetched, because `lipo` fuses libpdfium too: it is
+# dlopen'd by explicit path, so a thin library inside a fat app is a run-time
+# failure on the other architecture rather than a build error here.
+app-universal: $(PDFIUM_LIB)  ## Build the universal dist/Pulpit.app (macOS only)
+	rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	./scripts/fetch-pdfium.sh --platform mac-x64 --dest lib/mac-x64
+	$(CARGO) build --release -p pulpit-app --target aarch64-apple-darwin
+	$(CARGO) build --release -p pulpit-app --target x86_64-apple-darwin
+	./scripts/make-app-bundle.sh --universal
 
 # The Windows artifacts: the portable zip Scoop installs from, and the
 # per-user installer winget runs. Windows only.

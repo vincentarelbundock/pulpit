@@ -45,6 +45,12 @@ recommends:
   # overlays fall back to their posters and the deck still presents — so this
   # is recommended, never required.
   - chromium
+  # Video and animated images prefer an installed libmpv, which decodes them
+  # without a browser in the loop; the browser remains the fallback. Loaded
+  # with dlopen by soname, so the *library* package is what matters, not the
+  # mpv player. Debian carries libmpv2 on trixie and newer and libmpv1
+  # before it; an alternative keeps one package description working on both.
+  - libmpv2 | libmpv1
 
 overrides:
   # Arch gets the dlopen set, but *not* the browser recommendation: nfpm's
@@ -76,6 +82,9 @@ overrides:
       - libwayland-client
     recommends:
       - chromium
+      # Fedora and openSUSE both name the libmpv shared library package
+      # mpv-libs, and neither understands Debian's `|` alternative syntax.
+      - mpv-libs
 
 contents:
   - src: ./dist/linux-staging/pulpit

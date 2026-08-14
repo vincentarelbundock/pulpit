@@ -104,7 +104,11 @@
         # overlays at all.
         mkPulpit = { withMedia }: pkgs.rustPlatform.buildRustPackage {
           pname = "pulpit";
-          version = "0.1.0";
+          # Read from the workspace manifest, which `make bump` is the only
+          # thing that edits. A second copy here drifts the moment a release
+          # is cut and nothing catches it.
+          version =
+            (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
 

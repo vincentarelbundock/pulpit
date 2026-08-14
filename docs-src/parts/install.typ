@@ -20,7 +20,8 @@ Or install it by hand:
 That refusal happens because the app is not registered with Apple, which costs
 money, even for free open source projects.
 
-Builds are for Apple Silicon Macs only at present.
+One download covers both Apple Silicon and Intel Macs, running natively on
+each. macOS 11 Big Sur or newer.
 
 == Windows
 
@@ -85,4 +86,40 @@ versions still accept with a deprecation warning.
 
 The packaged build starts with no setup at all: it already knows where to find
 the libraries it loads while running. That matters most on NixOS, where those
-libraries do not sit in the usual system-wide location.
+libraries do not sit in the usual system-wide location. It also carries the
+two media players below, so video and interactive slides work immediately.
+
+== Slides with video or interactive content
+
+Pulpit plays no media itself. It borrows two programs that are already good at
+it, and it finds them on its own — there is nothing to configure.
+
++ *A Chromium-based browser* plays everything: video, animated images, and
+  interactive HTML such as a live chart or a small web app. Google Chrome,
+  Chromium, Microsoft Edge and Brave all qualify. Firefox and Safari do not,
+  because Pulpit drives the browser through a control protocol only this
+  family speaks.
++ *mpv* plays video and animated images, and Pulpit prefers it for those when
+  it is installed. It cannot play interactive content, so a browser is still
+  the one to have if you install only one.
+
+On macOS, install either or both:
+
+```sh
+brew install --cask google-chrome
+brew install mpv
+```
+
+The Homebrew Cask installs `mpv` for you. On Linux, the `.deb` and `.rpm`
+suggest both, so your package manager offers them at install time; otherwise
+install `chromium` and `mpv` the usual way. On Windows there is nothing to do:
+Edge is already there. And the Nix package carries both itself.
+
+Pulpit never uses your own browser session. It starts the browser hidden, in a
+private profile it creates for the deck, so your extensions, cookies, logins
+and history are untouched — a slide is untrusted code and does not belong
+inside your browsing session.
+
+Without either program a deck still presents. Media slides show their poster
+image, which is what a printed handout of the same deck would show, and
+everything else behaves normally.

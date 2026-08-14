@@ -152,7 +152,7 @@ jobs:
             On NixOS, use the flake instead: `nix profile add .`
 
   macos:
-    name: macOS arm64 app
+    name: macOS universal app
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,11 +161,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `make app` fetches the pinned PDFium, builds the release binary, lays
-      # out `Pulpit.app` and ad-hoc signs it. A hash mismatch on PDFium fails
-      # the release rather than shipping an unverified library.
-      - name: Build and sign the app bundle
-        run: make app
+      # `make app-universal` fetches both pinned PDFium artifacts, builds the
+      # binary for both Apple architectures, `lipo`s each Mach-O, lays out
+      # `Pulpit.app` and ad-hoc signs it. A hash mismatch on PDFium fails the
+      # release rather than shipping an unverified library, and a bundle that
+      # lost an architecture slice fails it rather than reaching an Intel Mac
+      # as a silently broken app.
+      - name: Build and sign the universal app bundle
+        run: make app-universal
 
       # The disk image is the shape a Homebrew Cask expects and the shape a
       # human expects from a download: mount, drag onto Applications.
@@ -177,7 +180,7 @@ jobs:
           staging="$(mktemp -d)"
           cp -R dist/Pulpit.app "$staging/"
           ln -s /Applications "$staging/Applications"
-          dmg="dist/pulpit-${version}-macos-arm64.dmg"
+          dmg="dist/pulpit-${version}-macos-universal.dmg"
           hdiutil create -volname Pulpit -srcfolder "$staging" \
             -ov -format UDZO "$dmg"
           shasum -a 256 "$dmg" > "$dmg.sha256"
@@ -195,7 +198,15 @@ jobs:
             See CHANGELOG.md.
 
             The disk image carries `Pulpit.app`, which bundles its own
-            libpdfium. Drag it onto Applications.
+            libpdfium. Drag it onto Applications. The binary and the bundled
+            libpdfium are both universal, so one download runs natively on
+            Apple Silicon and on Intel.
+
+            Media overlays need a Chromium-family browser — Google Chrome,
+            Chromium, Edge or Brave in `/Applications` — and `brew install
+            mpv` additionally plays video and animated images without a
+            browser in the loop. Neither is bundled; a deck with no media
+            needs neither.
 
             The app is **ad-hoc signed, not notarized**. Notarization needs a
             paid Developer ID and no release is gated on one
@@ -204,8 +215,7 @@ jobs:
             Open Anyway, once. Installing through the Homebrew Cask with
             `--no-quarantine` avoids the step entirely.
 
-            Apple Silicon only for now: the Intel build needs a second PDFium
-            artifact and a `lipo` pass that this workflow does not yet do.
+            macOS 11 Big Sur or newer, on either architecture.
 
       # Update the Homebrew Cask, so `brew install --cask` works off this tag
       # without a hand edit. Conditional on the token for the same reason the
@@ -243,7 +253,7 @@ jobs:
         run: |
           set -eu
           version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
-          dmg="dist/pulpit-${version}-macos-arm64.dmg"
+          dmg="dist/pulpit-${version}-macos-universal.dmg"
           # The hash of the artifact actually published, read back from the
           # file just uploaded rather than recomputed from a rebuild.
           checksum="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"

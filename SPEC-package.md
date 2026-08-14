@@ -291,7 +291,11 @@ packaging problem MUST be diagnosable from the diagnostics report a user sends.
   the bundle layout and, on macOS, that the signature is acceptable to the
   kernel. It proves **nothing about placement, reconciliation or the swap**,
   which need two real displays.
-- macOS ships arm64 only, Windows x64 only.
+- macOS ships one universal bundle — arm64 and x86_64 slices in both the
+  binary and the bundled libpdfium — and CI asserts both slices exist. The
+  Intel half is nevertheless **never executed**: no runner in either workflow
+  is an Intel Mac, so what is proven is that the slice is there, not that it
+  runs. Windows x64 only.
 
 ## 11. TODO — getting this to users
 
@@ -346,9 +350,10 @@ Ordered. Each step is a thing only the maintainer can do.
 
 ### Later
 
-11. **Multi-architecture**: macOS Intel needs a second pinned PDFium and a
-    `lipo` pass; Windows arm64 needs its own build. Both pins already exist in
-    `scripts/fetch-pdfium.sh`.
+11. **Multi-architecture**: Windows arm64 needs its own build; its pin already
+    exists in `scripts/fetch-pdfium.sh`. macOS is done — `make app-universal`
+    fetches both Apple PDFium artifacts and `lipo`s both Mach-Os — but the
+    Intel slice wants one run on a real Intel Mac before it is believed.
 12. **`App Paths`** registry lookup for browsers installed in unusual places
     (§6.2).
 13. Make an installed PDFium unconditional on the non-Nix paths: `make install`

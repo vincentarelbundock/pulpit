@@ -180,10 +180,12 @@ jobs:
         # With lib/libpdfium.dylib now present, the PDFium tests stop skipping
         # and actually render. This is the only place that happens on macOS.
         run: cargo test -p pulpit-render
-      - name: Build the release binary
-        run: cargo build --release -p pulpit-app
-      - name: Build and ad-hoc sign the bundle
-        run: ./scripts/make-app-bundle.sh
+      - name: Build and ad-hoc sign the universal bundle
+        # The release builds it exactly this way: both architectures, both
+        # PDFium artifacts, lipo'd and signed. Building it here is what keeps
+        # the Intel half from being discovered broken at tag time, on the one
+        # architecture no runner in this workflow executes.
+        run: make app-universal
       - name: The signed binary runs
         # `--version` exits before any window is opened, so this is a real
         # check on a runner with no display: it proves the signature is
@@ -199,6 +201,18 @@ jobs:
           test -f dist/Pulpit.app/Contents/MacOS/libpdfium.dylib
           test -f dist/Pulpit.app/Contents/Resources/pulpit.icns
           codesign --verify --strict --verbose=2 dist/Pulpit.app
+      - name: Both architectures are present
+        # An Intel Mac is the case no runner here executes, so the slice
+        # itself is the evidence. A thin libpdfium inside a fat app would
+        # degrade to the fixture backend on Intel rather than fail loudly.
+        run: |
+          set -eu
+          for macho in pulpit libpdfium.dylib; do
+            archs="$(lipo -archs "dist/Pulpit.app/Contents/MacOS/$macho")"
+            echo "$macho: $archs"
+            case "$archs" in *arm64*) ;; *) exit 1 ;; esac
+            case "$archs" in *x86_64*) ;; *) exit 1 ;; esac
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: Pulpit.app
