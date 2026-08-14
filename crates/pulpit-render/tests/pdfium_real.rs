@@ -280,3 +280,214 @@ fn how_long_a_page_takes_to_rasterise() {
         );
     }
 }
+
+/// Render one page of a document to RGBA at a fixed size, for comparing what
+/// a file looked like before and after it was stamped.
+fn frame(backend: &PdfiumBackend, document: pulpit_render::pdf::BackendDocumentId) -> Vec<u8> {
+    backend
+        .render(
+            &RenderRequest {
+                document,
+                page: 0,
+                region: Region::FULL,
+                width: 400,
+                height: 300,
+            },
+            &NeverCancel,
+        )
+        .unwrap()
+        .pixels
+}
+
+fn red_stroke() -> pulpit_core::annotation::InkStroke {
+    pulpit_core::annotation::InkStroke {
+        // A diagonal across the middle of the page, well clear of its edges.
+        points: vec![(0.2, 0.2), (0.5, 0.5), (0.8, 0.8)],
+        width: 0.02,
+        color: pulpit_core::annotation::InkColor::Red,
+        kind: pulpit_core::annotation::StrokeKind::Ink,
+    }
+}
+
+#[test]
+fn an_exported_copy_carries_the_marks_and_leaves_the_source_alone() {
+    let Some(backend) = shared() else { return };
+    let mut backend = backend.lock().unwrap();
+    let dir = temp_dir("export");
+    let source = dir.join("deck.pdf");
+    let destination = dir.join("deck-annotated.pdf");
+    let _ = std::fs::remove_file(&destination);
+    write_pdf(&source, 3, None).unwrap();
+    let before = std::fs::read(&source).unwrap();
+
+    let document = backend.open(&source).unwrap();
+    let plain = frame(&backend, document);
+
+    backend
+        .export_annotated(
+            &source,
+            &destination,
+            &[pulpit_render::pdf::PageStamp {
+                page: 0,
+                region: Region::FULL,
+                strokes: vec![red_stroke()],
+                images: Vec::new(),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        before,
+        "an export never writes to the document it copied"
+    );
+    // The open document is the one the audience is rendered from; stamping a
+    // copy must not have reached into it.
+    assert_eq!(
+        frame(&backend, document),
+        plain,
+        "the document held open for rendering is untouched"
+    );
+
+    let exported = backend.open(&destination).unwrap();
+    assert_eq!(
+        backend.page_count(exported).unwrap(),
+        3,
+        "every page survives"
+    );
+    let stamped = frame(&backend, exported);
+    assert_ne!(stamped, plain, "the marks reached the page");
+
+    // The stroke runs through the middle of the page, so the centre pixel is
+    // the ink's colour rather than the slide's.
+    let centre = (150 * 400 + 200) * 4;
+    assert!(
+        stamped[centre] > 180 && stamped[centre + 1] < 120 && stamped[centre + 2] < 120,
+        "the centre of the page is red ink, not slide: {:?}",
+        &stamped[centre..centre + 4]
+    );
+    // A corner the stroke never reaches is exactly as it was.
+    let corner = (10 * 400 + 10) * 4;
+    assert_eq!(stamped[corner..corner + 4], plain[corner..corner + 4]);
+
+    backend.close(document);
+    backend.close(exported);
+}
+
+#[test]
+fn a_page_the_document_does_not_have_is_skipped_rather_than_failing_the_save() {
+    let Some(backend) = shared() else { return };
+    let mut backend = backend.lock().unwrap();
+    let dir = temp_dir("export-range");
+    let source = dir.join("deck.pdf");
+    let destination = dir.join("out.pdf");
+    let _ = std::fs::remove_file(&destination);
+    write_pdf(&source, 2, None).unwrap();
+
+    backend
+        .export_annotated(
+            &source,
+            &destination,
+            &[pulpit_render::pdf::PageStamp {
+                page: 99,
+                region: Region::FULL,
+                strokes: vec![red_stroke()],
+                images: Vec::new(),
+            }],
+        )
+        .unwrap();
+
+    let exported = backend.open(&destination).unwrap();
+    assert_eq!(backend.page_count(exported).unwrap(), 2);
+    backend.close(exported);
+}
+
+#[test]
+fn a_malformed_picture_is_refused_before_a_file_is_written() {
+    let Some(backend) = shared() else { return };
+    let backend = backend.lock().unwrap();
+    let dir = temp_dir("export-invalid");
+    let source = dir.join("deck.pdf");
+    let destination = dir.join("never.pdf");
+    let _ = std::fs::remove_file(&destination);
+    write_pdf(&source, 1, None).unwrap();
+
+    let result = backend.export_annotated(
+        &source,
+        &destination,
+        &[pulpit_render::pdf::PageStamp {
+            page: 0,
+            region: Region::FULL,
+            strokes: Vec::new(),
+            images: vec![pulpit_render::pdf::StampImage {
+                x: 0.1,
+                y: 0.1,
+                width: 0.5,
+                pixel_width: 4,
+                pixel_height: 4,
+                // Four pixels short of the size it claims.
+                rgba: vec![0; 60],
+            }],
+        }],
+    );
+    assert!(matches!(result, Err(PdfError::Invalid(_))));
+    assert!(
+        !destination.exists(),
+        "a refused export leaves no half-written file behind"
+    );
+}
+
+#[test]
+fn a_rasterised_annotation_lands_where_it_was_placed() {
+    let Some(backend) = shared() else { return };
+    let mut backend = backend.lock().unwrap();
+    let dir = temp_dir("export-image");
+    let source = dir.join("deck.pdf");
+    let destination = dir.join("out.pdf");
+    let _ = std::fs::remove_file(&destination);
+    write_pdf(&source, 1, None).unwrap();
+
+    // A solid opaque blue square, filling the left half of the page from a
+    // quarter of the way down.
+    let pixels = 32;
+    let mut rgba = Vec::with_capacity(pixels * pixels * 4);
+    for _ in 0..pixels * pixels {
+        rgba.extend_from_slice(&[0, 0, 255, 255]);
+    }
+    backend
+        .export_annotated(
+            &source,
+            &destination,
+            &[pulpit_render::pdf::PageStamp {
+                page: 0,
+                region: Region::FULL,
+                strokes: Vec::new(),
+                images: vec![pulpit_render::pdf::StampImage {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    pixel_width: pixels as u32,
+                    pixel_height: pixels as u32,
+                    rgba,
+                }],
+            }],
+        )
+        .unwrap();
+
+    let exported = backend.open(&destination).unwrap();
+    let stamped = frame(&backend, exported);
+    // The picture spans x 0.25..0.75 of the width; its height follows its own
+    // square aspect, so it covers y 0.25 down by the same number of points.
+    let inside = (150 * 400 + 200) * 4;
+    assert!(
+        stamped[inside + 2] > 180 && stamped[inside] < 100,
+        "the middle of the picture is blue: {:?}",
+        &stamped[inside..inside + 4]
+    );
+    let outside = (10 * 400 + 380) * 4;
+    assert!(
+        stamped[outside + 2] < 200 || stamped[outside] > 100,
+        "the top-right corner is untouched slide"
+    );
+    backend.close(exported);
+}

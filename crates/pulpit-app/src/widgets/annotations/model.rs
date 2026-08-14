@@ -171,6 +171,9 @@ pub struct AnnotationControls {
     /// dragging inside a panel that is itself floating over the slide is one
     /// layer of floating too many.
     pub wheel: Option<AnnotationTool>,
+    /// Whether there is anything to write out: marks somewhere in the deck,
+    /// and a document on disk to write a copy of.
+    pub can_save: bool,
 }
 
 impl AnnotationControls {
@@ -180,6 +183,7 @@ impl AnnotationControls {
             open: None,
             overflow: false,
             wheel: None,
+            can_save: false,
         }
     }
 }

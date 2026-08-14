@@ -108,6 +108,9 @@ pub enum Message {
     Nav(Nav),
     OpenDialog,
     Opened(Option<PathBuf>),
+    /// Where the presenter chose to write an annotated copy, or `None` if
+    /// they dismissed the dialog.
+    ExportAnnotatedTo(Option<PathBuf>),
     /// The media runtime probes, run on a helper thread at startup.
     MediaProbed(Vec<pulpit_media::RuntimeProbe>),
     WindowOpened {
@@ -1820,10 +1823,20 @@ impl App {
                 }
                 self.follow_link()
             }
+            // Saving is the one palette command that leaves the process, so
+            // it answers with a task rather than a state change.
+            Message::Annotate(crate::widgets::event::AnnotationCommand::Save) => {
+                self.ask_where_to_export()
+            }
             Message::Annotate(command) => {
                 self.on_annotation_command(command);
                 Task::none()
             }
+            Message::ExportAnnotatedTo(Some(path)) => {
+                self.export_annotations(path);
+                Task::none()
+            }
+            Message::ExportAnnotatedTo(None) => Task::none(),
             Message::Alarm(command) => self.on_alarm_command(command),
             Message::Timer(command) => self.on_timer_command(command),
             Message::Transport(request) => {
@@ -2369,7 +2382,10 @@ impl App {
                     std::rc::Rc::clone(&self.marks_caches.sample)
                 },
                 annotation_controls: if live {
-                    self.annotation_controls
+                    crate::widgets::AnnotationControls {
+                        can_save: self.can_export_annotations(),
+                        ..self.annotation_controls
+                    }
                 } else {
                     crate::widgets::AnnotationControls::default()
                 },
@@ -3335,6 +3351,25 @@ impl App {
             RenderEvent::AttachmentFailed { name, reason, .. } => {
                 tracing::debug!(name, reason, "attachment unavailable");
                 self.media.attachment_failed(&name, &reason);
+            }
+            RenderEvent::Exported {
+                destination, pages, ..
+            } => {
+                let name = std::path::Path::new(&destination)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or(destination);
+                self.notify_done(format!(
+                    "Saved {name} with the marks on {} {}",
+                    pages,
+                    if pages == 1 { "slide" } else { "slides" }
+                ));
+            }
+            // A save that failed is worth stopping for: the presenter asked
+            // for a file and does not have one, and nothing else in the
+            // presentation will tell them so.
+            RenderEvent::ExportFailed { reason, .. } => {
+                self.notify_error(format!("Could not save the annotated copy: {reason}"), None);
             }
             RenderEvent::Frame {
                 job,
@@ -4310,6 +4345,9 @@ impl App {
             // it must also wipe what the cache is holding for that slide, or
             // the marks would come back on the next visit.
             AnnotationCommand::Clear => self.ink.clear_current(&mut self.annotations),
+            // Saving leaves the process, so it is answered with a task at the
+            // message boundary rather than as a state change here.
+            AnnotationCommand::Save => {}
             AnnotationCommand::ToggleAudience => {
                 let visible = !self.annotations.audience_visible;
                 self.annotations.set_audience_visible(visible);
@@ -4323,6 +4361,113 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Whether there is an annotated copy to be written: marks somewhere in
+    /// the talk, and a document on disk to copy.
+    fn can_export_annotations(&self) -> bool {
+        self.state.document().is_some()
+            && (self.ink.annotated_slides() > 0
+                || !self.annotations.strokes.is_empty()
+                || !self.annotations.texts.is_empty())
+    }
+
+    /// Ask where the annotated copy should go.
+    ///
+    /// The dialog is offered a name beside the deck rather than the deck's
+    /// own: overwriting the source is the one outcome a presenter cannot
+    /// undo, and the marks are a performance layered over someone's
+    /// document, not a correction to it.
+    fn ask_where_to_export(&mut self) -> Task<Message> {
+        let Some(document) = self.state.document() else {
+            return Task::none();
+        };
+        let directory = document
+            .path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = document
+            .path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "deck".to_string());
+        Task::perform(
+            async move {
+                rfd::AsyncFileDialog::new()
+                    .add_filter("PDF", &["pdf"])
+                    .set_directory(directory)
+                    .set_file_name(format!("{stem}-annotated.pdf"))
+                    .save_file()
+                    .await
+                    .map(|handle| handle.path().to_path_buf())
+            },
+            Message::ExportAnnotatedTo,
+        )
+    }
+
+    /// Hand the marks to a renderer worker to be written into a copy of the
+    /// deck.
+    ///
+    /// Everything expensive happens over there: this compiles the text
+    /// annotations, which is the one part that needs Typst and so cannot,
+    /// and then the presenter's window is free again.
+    fn export_annotations(&mut self, destination: PathBuf) {
+        let Some(document) = self.state.document() else {
+            return;
+        };
+        let source = document.path.clone();
+        let pdf_pages = document.pdf_pages;
+        let fallback = document.first_page_size.map(|size| size.width);
+        let sizes = document.page_sizes.clone();
+        let marks = self.ink.marks(&self.annotations);
+        if marks.is_empty() {
+            self.notify("There are no marks to save".to_string());
+            return;
+        }
+        let export = crate::annotation_export::build(
+            &marks,
+            self.state.mapping(),
+            pdf_pages,
+            |page: usize| {
+                sizes
+                    .get(page)
+                    .map(|size| size.width)
+                    .or(fallback)
+                    // A deck that never reported a page size still exports;
+                    // the number only sets the resolution a text annotation
+                    // is rasterised at, and US Letter is a fair guess.
+                    .unwrap_or(612.0)
+            },
+        );
+        for diagnostic in &export.diagnostics {
+            self.notify(diagnostic.clone());
+        }
+        if export.pages.is_empty() {
+            self.notify("There are no marks to save".to_string());
+            return;
+        }
+
+        let pages = export.pages.len();
+        let Some(supervisor) = self.supervisor.as_mut() else {
+            self.notify_error(
+                "Cannot save an annotated copy: no renderer is running".to_string(),
+                None,
+            );
+            return;
+        };
+        let id = supervisor.next_request_id();
+        supervisor.request_export(
+            id,
+            &source.to_string_lossy(),
+            &destination.to_string_lossy(),
+            export.pages,
+        );
+        tracing::info!(
+            destination = %destination.display(),
+            pages,
+            "asked a worker for an annotated copy"
+        );
     }
 
     /// The outline section the audience page falls in, if the document has

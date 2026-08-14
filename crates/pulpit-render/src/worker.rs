@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -110,6 +111,7 @@ pub fn run(
                             | Request::Navigation { .. }
                             | Request::Capabilities { .. }
                             | Request::Attachment { .. }
+                            | Request::ExportAnnotated { .. }
                     )
                 );
                 if deferrable_control {
@@ -322,6 +324,30 @@ pub fn run(
                         document,
                         name,
                         reason: format!("document {document} is not open"),
+                    },
+                };
+                write_message(&mut output, &response)?;
+            }
+            Work::Control(Request::ExportAnnotated {
+                id,
+                source,
+                destination,
+                pages,
+            }) => {
+                let stamped = pages.len();
+                let response = match backend.export_annotated(
+                    Path::new(&source),
+                    Path::new(&destination),
+                    &pages,
+                ) {
+                    Ok(()) => Response::Exported {
+                        id,
+                        destination,
+                        pages: stamped,
+                    },
+                    Err(e) => Response::ExportFailed {
+                        id,
+                        reason: e.to_string(),
                     },
                 };
                 write_message(&mut output, &response)?;
@@ -881,6 +907,49 @@ mod tests {
         assert!(
             matches!(&responses[2], Response::AttachmentFailed { reason, .. } if reason.contains("not open")),
             "{responses:?}"
+        );
+    }
+
+    /// A backend that cannot write PDFs says so and keeps working. The
+    /// fixture backend is exactly that case, and it is also the shape of a
+    /// build with no PDFium: the presenter is told, the worker lives on.
+    #[test]
+    fn an_export_a_backend_cannot_perform_fails_without_killing_the_worker() {
+        let destination = std::env::temp_dir().join("pulpit-worker-export-test.pdf");
+        let _ = std::fs::remove_file(&destination);
+        let responses = run_worker(vec![
+            Request::Open {
+                document: 1,
+                path: "fixture:pages=3".into(),
+            },
+            Request::ExportAnnotated {
+                id: RequestId(4),
+                source: "fixture:pages=3".into(),
+                destination: destination.to_string_lossy().into_owned(),
+                pages: vec![crate::pdf::PageStamp {
+                    page: 0,
+                    region: pulpit_core::notes::Region::FULL,
+                    strokes: Vec::new(),
+                    images: Vec::new(),
+                }],
+            },
+            Request::Links {
+                document: 1,
+                page: 0,
+            },
+            Request::Shutdown,
+        ]);
+        assert!(
+            matches!(&responses[1], Response::ExportFailed { id, .. } if *id == RequestId(4)),
+            "{responses:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a backend that refuses the write leaves no file"
+        );
+        assert!(
+            matches!(&responses[2], Response::Links { .. }),
+            "the worker is still answering afterwards"
         );
     }
 

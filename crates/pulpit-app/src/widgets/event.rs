@@ -159,6 +159,8 @@ pub enum AnnotationCommand {
     Redo,
     /// Take away every mark on this slide.
     Clear,
+    /// Write a copy of the deck with every slide's marks drawn into it.
+    Save,
     /// Show the marks on the audience screen, or stop showing them.
     ToggleAudience,
 }

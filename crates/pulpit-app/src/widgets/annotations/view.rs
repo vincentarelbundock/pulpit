@@ -139,6 +139,17 @@ fn palette<Message: Clone + 'static>(
             false,
             has_marks,
         ),
+        // Saving is offered whenever the talk has marks anywhere, not only on
+        // this slide: the file it writes is the whole deck, and a presenter
+        // who has just turned past the diagram they drew on should not have
+        // to go back to it to keep the drawing.
+        (
+            "Save an annotated copy",
+            theme::Icon::Save,
+            AnnotationCommand::Save,
+            false,
+            controls.can_save || mode.is_sample(),
+        ),
         // The audience toggle draws its *current* state rather than one fixed
         // glyph: a struck-through eye says the marks are the presenter's
         // alone, which is the thing worth being sure of before drawing on a

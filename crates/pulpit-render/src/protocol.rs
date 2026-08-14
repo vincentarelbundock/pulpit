@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the wire format changes. A worker that does not answer
 /// with the same version is shut down rather than trusted.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Hard ceiling on one encoded message.
 ///
@@ -208,6 +208,17 @@ pub enum Request {
         document: u64,
         name: String,
     },
+    /// Write a copy of a document with the presenter's marks stamped in.
+    ///
+    /// Carries the source path rather than an open document id: the export
+    /// loads its own copy, so a save can never disturb the handle the
+    /// audience frame is being rendered from.
+    ExportAnnotated {
+        id: RequestId,
+        source: String,
+        destination: String,
+        pages: Vec<crate::pdf::PageStamp>,
+    },
     /// Cancel one in-flight or queued request.
     Cancel {
         id: RequestId,
@@ -316,6 +327,19 @@ pub enum Response {
         document: u64,
         name: String,
         bytes: Vec<u8>,
+    },
+    /// An annotated copy was written.
+    Exported {
+        id: RequestId,
+        destination: String,
+        /// How many pages carried marks into the file.
+        pages: usize,
+    },
+    /// The copy could not be written. Never fatal: the presentation, and the
+    /// source document, are exactly as they were.
+    ExportFailed {
+        id: RequestId,
+        reason: String,
     },
     /// A missing, oversized or unreadable attachment. Never fatal: the static
     /// PDF page is still what the audience sees.

@@ -37,6 +37,8 @@ pub enum PdfError {
     Cancelled,
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("this backend cannot {0}")]
+    Unsupported(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, PdfError>;
@@ -176,6 +178,82 @@ pub fn collect_page_sizes(
     (sizes, page_count > tracked)
 }
 
+/// One page's presenter marks, ready to be stamped into a copy of a document.
+///
+/// The marks arrive in the normalised coordinates the domain keeps them in —
+/// top-left origin, sizes as fractions of the *region*'s width — and are
+/// mapped onto the page by whoever stamps them. Carrying the region rather
+/// than pre-multiplying it is what lets a split-page deck, where a slide is
+/// half of a physical page, export its marks over the half they were drawn
+/// on rather than smeared across the sheet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageStamp {
+    /// Physical PDF page index.
+    pub page: usize,
+    /// The part of that page the marks were drawn over.
+    pub region: Region,
+    pub strokes: Vec<pulpit_core::annotation::InkStroke>,
+    pub images: Vec<StampImage>,
+}
+
+/// A picture stamped onto a page: a text annotation, already rasterised.
+///
+/// Text marks are Typst, and Typst's glyphs are not PDFium's — the only way
+/// the exported file says what the projector said is to carry the pixels that
+/// were on it. Vector strokes take the other path and stay vector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StampImage {
+    /// Top-left corner, normalised within the region.
+    pub x: f32,
+    pub y: f32,
+    /// Fraction of the region's width the picture spans, before it is scaled
+    /// down to fit whatever height is left below it.
+    pub width: f32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Tightly packed RGBA8, `pixel_width * pixel_height * 4` bytes.
+    pub rgba: Vec<u8>,
+}
+
+impl StampImage {
+    /// The largest picture worth stamping: 4096² is well past the resolution
+    /// any projector shows a text annotation at, and bounds one message.
+    pub const MAX_PIXELS: u64 = 4096 * 4096;
+
+    pub fn is_consistent(&self) -> bool {
+        self.pixel_width > 0
+            && self.pixel_height > 0
+            && u64::from(self.pixel_width) * u64::from(self.pixel_height) <= Self::MAX_PIXELS
+            && self.rgba.len() == self.pixel_width as usize * self.pixel_height as usize * 4
+    }
+}
+
+impl PageStamp {
+    /// More marks than a slide a presenter drew on by hand ever carries;
+    /// bounds what one export message can be asked to hold.
+    pub const MAX_STROKES: usize = pulpit_core::annotation::Annotations::MAX_STROKES * 4;
+    pub const MAX_IMAGES: usize = 256;
+
+    pub fn validate(&self) -> Result<()> {
+        if !self.region.is_valid() {
+            return Err(PdfError::Invalid("stamp region outside the page".into()));
+        }
+        if self.strokes.len() > Self::MAX_STROKES || self.images.len() > Self::MAX_IMAGES {
+            return Err(PdfError::Invalid(format!(
+                "page {} carries more marks than an export accepts",
+                self.page
+            )));
+        }
+        if !self.images.iter().all(StampImage::is_consistent) {
+            return Err(PdfError::Invalid(format!(
+                "page {} carries a malformed picture",
+                self.page
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// A cancellation flag shared with the caller. The PDFium progressive API
 /// polls it through its pause callback, so obsolete work yields promptly
 /// instead of holding a worker hostage.
@@ -273,6 +351,21 @@ pub trait PdfBackend: Send {
     /// which is also what a deck without bookmarks looks like.
     fn outline(&self, _document: BackendDocumentId) -> Result<Outline> {
         Ok(Outline::default())
+    }
+
+    /// Write a copy of `source` to `destination` with `pages`' marks stamped
+    /// into the page content.
+    ///
+    /// Never touches `source`, and never touches a document this backend has
+    /// open for rendering: the copy is loaded, drawn on and closed on its own.
+    /// The audience frame is unaffected by an export, including a failed one.
+    fn export_annotated(
+        &self,
+        _source: &Path,
+        _destination: &Path,
+        _pages: &[PageStamp],
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("write an annotated PDF"))
     }
 
     /// Evidence of features pulpit will flatten or ignore. A backend that

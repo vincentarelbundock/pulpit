@@ -4,6 +4,7 @@
 //! run with `--render-worker` it is a renderer worker process, which is how
 //! the supervisor spawns its pool without needing a second installed binary.
 
+mod annotation_export;
 mod app;
 mod designer;
 mod designer_view;

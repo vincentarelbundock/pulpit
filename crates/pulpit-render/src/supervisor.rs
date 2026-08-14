@@ -179,6 +179,18 @@ pub enum RenderEvent {
         name: String,
         bytes: Vec<u8>,
     },
+    /// An annotated copy of the deck reached disk.
+    Exported {
+        id: RequestId,
+        destination: String,
+        pages: usize,
+    },
+    /// The annotated copy could not be written. Nothing else is affected:
+    /// the source document and the presentation are as they were.
+    ExportFailed {
+        id: RequestId,
+        reason: String,
+    },
     /// An attachment that could not be delivered. The static page is
     /// unaffected.
     AttachmentFailed {
@@ -852,6 +864,27 @@ impl RendererSupervisor {
         });
     }
 
+    /// Ask one worker to write an annotated copy of a document. The answer
+    /// arrives as [`RenderEvent::Exported`] or [`RenderEvent::ExportFailed`].
+    ///
+    /// The request names the source *file*, not an open document: the worker
+    /// loads its own copy to draw on, so nothing the presentation is
+    /// currently rendering from is touched.
+    pub fn request_export(
+        &mut self,
+        id: RequestId,
+        source: &str,
+        destination: &str,
+        pages: Vec<crate::pdf::PageStamp>,
+    ) {
+        self.ask(Request::ExportAnnotated {
+            id,
+            source: source.to_string(),
+            destination: destination.to_string(),
+            pages,
+        });
+    }
+
     /// Send a question to a live worker, preferring an idle one. Some of
     /// these questions are not cheap — a capabilities scan walks hundreds of
     /// pages' annotations — and always picking the first worker piled every
@@ -1160,6 +1193,20 @@ impl RendererSupervisor {
                     name,
                     bytes,
                 });
+            }
+            WorkerPayload::Response(Response::Exported {
+                id,
+                destination,
+                pages,
+            }) => {
+                events.push(RenderEvent::Exported {
+                    id,
+                    destination,
+                    pages,
+                });
+            }
+            WorkerPayload::Response(Response::ExportFailed { id, reason }) => {
+                events.push(RenderEvent::ExportFailed { id, reason });
             }
             WorkerPayload::Response(Response::AttachmentFailed {
                 document,

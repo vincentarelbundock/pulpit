@@ -1015,6 +1015,29 @@ impl InkCache {
     pub fn annotated_slides(&self) -> usize {
         self.by_slide.len()
     }
+
+    /// Every annotated slide's marks, in slide order.
+    ///
+    /// The live annotations stand in for the slide the presenter is on: those
+    /// marks have not been stashed yet, and the stroke drawn a second ago is
+    /// exactly the one an export is being asked for.
+    pub fn marks(&self, live: &Annotations) -> Vec<(usize, Vec<InkStroke>, Vec<TextMark>)> {
+        let mut marks: Vec<_> = self
+            .by_slide
+            .iter()
+            .filter(|(slide, _)| Some(**slide) != self.slide)
+            .map(|(slide, (strokes, texts))| (*slide, strokes.clone(), texts.clone()))
+            .collect();
+        if let Some(slide) = self.slide {
+            // The pointer and the spotlight are where the hand is, not marks
+            // on the page, so a slide carrying only those exports as blank.
+            if !live.strokes.is_empty() || !live.texts.is_empty() {
+                marks.push((slide, live.strokes.clone(), live.texts.clone()));
+            }
+        }
+        marks.sort_by_key(|(slide, ..)| *slide);
+        marks
+    }
 }
 
 fn distance_squared(left: (f32, f32), right: (f32, f32)) -> f32 {

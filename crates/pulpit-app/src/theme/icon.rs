@@ -49,6 +49,8 @@ pub enum Icon {
     Redo,
     /// Discard everything: `trash-2`.
     Trash,
+    /// Write the marks out as a file: `save`.
+    Save,
     /// The audience can see the marks: `eye`.
     Eye,
     /// The marks are the presenter's alone: `eye-off`.
@@ -94,6 +96,7 @@ impl Icon {
             Icon::Menu => include_bytes!("../../assets/icons/menu.svg"),
             Icon::Ellipsis => include_bytes!("../../assets/icons/ellipsis.svg"),
             Icon::Gear => include_bytes!("../../assets/icons/settings.svg"),
+            Icon::Save => include_bytes!("../../assets/icons/save.svg"),
         }
     }
 
@@ -106,7 +109,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 19] = [
+    const ALL: [Icon; 20] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -126,6 +129,7 @@ impl Icon {
         Icon::Menu,
         Icon::Ellipsis,
         Icon::Gear,
+        Icon::Save,
     ];
 
     /// The handle for this icon, built once per process.

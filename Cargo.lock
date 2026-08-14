@@ -4101,6 +4101,7 @@ dependencies = [
  "pulpit-display",
  "pulpit-media",
  "pulpit-render",
+ "resvg",
  "rfd",
  "serde",
  "serde_json",
