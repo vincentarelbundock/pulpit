@@ -7,10 +7,11 @@
 
 LATEXMK ?= latexmk
 PDFLATEX ?= pdflatex
+MAGICK ?= magick
 PYTHON ?= python3
 TYPST ?= typst
 
-PDFS := combined.pdf mosaic.pdf
+PDFS := beamer.pdf mosaic.pdf
 
 ASSETS := \
 	media-assets/bouncing.gif \
@@ -24,7 +25,11 @@ ASSETS := \
 
 all: $(PDFS)
 
-combined.pdf: combined.tex $(ASSETS)
+# The title slide's logo, rasterised from the website's source SVG.
+logo.pdf: logo.svg
+	$(MAGICK) -density 600 -background none $< $@
+
+beamer.pdf: beamer.tex logo.pdf $(ASSETS)
 	@if command -v $(LATEXMK) >/dev/null 2>&1; then \
 		$(LATEXMK) -pdf -interaction=nonstopmode $<; \
 	else \
@@ -32,7 +37,7 @@ combined.pdf: combined.tex $(ASSETS)
 		$(PDFLATEX) -interaction=nonstopmode $<; \
 	fi
 
-mosaic.pdf: mosaic.typ $(ASSETS)
+mosaic.pdf: mosaic.typ logo.svg $(ASSETS)
 	$(TYPST) compile $< $@
 
 # All six assets come out of one deterministic script, so they share a rule.
@@ -43,11 +48,11 @@ assets:
 	./make-media-assets.sh
 
 verify: $(PDFS)
-	$(PYTHON) verify-media-pdf.py combined.pdf
+	$(PYTHON) verify-media-pdf.py beamer.pdf
 	$(PYTHON) verify-media-pdf.py mosaic.pdf
 
 clean:
 	rm -f *.aux *.log *.nav *.out *.snm *.toc *.fls *.fdb_latexmk *.vrb
 
 distclean: clean
-	rm -f $(PDFS)
+	rm -f $(PDFS) logo.pdf

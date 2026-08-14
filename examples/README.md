@@ -1,7 +1,8 @@
 # Example decks
 
-There are two versions of the same complete example deck: one in Beamer and
-one in Typst with Mosaic's standard default theme.
+There are two versions of the same four-slide example deck — one in Beamer and
+one in Typst with Mosaic's standard default theme: a title slide, then one
+slide each for an animated GIF, a video and an interactive HTML page.
 
 A third file, `stress-test-730.pdf`, is not an example to read but a scaling
 fixture: a 730-page real-world lecture deck, 30 MB, used to exercise page-count
@@ -11,9 +12,8 @@ the terms it comes under.
 
 ## `mosaic.pdf` — Typst and Mosaic
 
-`mosaic.typ` presents the same text and media-overlay examples as
-`combined.tex`. Its posters are ordinary Typst links around images, and its
-incremental example uses Mosaic's native reveal command:
+`mosaic.typ` presents the same slides as `beamer.tex`. Its posters are
+ordinary Typst links around images:
 
 ```typ
 #link("run:media-assets/clip.mp4?autostart&mute")[#image("poster.png")]
@@ -22,12 +22,12 @@ incremental example uses Mosaic's native reveal command:
 Build it with `make mosaic.pdf`. It requires Typst 0.15 or newer and the local
 Mosaic 0.0.2 package from `~/repos/mosaic` (`make install` in that repository).
 
-## `combined.pdf` — the example deck
+## `beamer.pdf` — the example deck
 
-`combined.tex` brings the basic Beamer slides and every media-overlay example
-into one deck. Open it with `make launch DECK=examples/combined.pdf`, or the
-Typst version with `make launch DECK=examples/mosaic.pdf`. The test suite
-reads this Beamer deck as its standard-deck fixture.
+`beamer.tex` is the same deck in ordinary Beamer, in the Warsaw theme. Open it
+with `make launch DECK=examples/beamer.pdf`, or the Typst version with
+`make launch DECK=examples/mosaic.pdf`. The test suite reads this Beamer deck
+as its standard-deck fixture.
 
 It is ordinary beamer. A media overlay is a plain link around a
 poster image:
@@ -47,15 +47,10 @@ scheme to learn.
 
 | Frame | Declares | Demonstrates |
 |---|---|---|
-| 3 | `run:media-assets/bouncing.gif?autostart&loop` | an animated GIF |
-| 4 | `run:media-assets/clip.mp4?autostart&mute` | video |
-| 5 | `run:media-assets/bouncing-balls.html` | an interactive HTML page |
-| 6 | the same video link on three `\pause` steps | one overlay, one session |
-
-Frame 6 is the interesting one. Beamer compiles a `\pause` sequence into
-several physical PDF pages, each repeating the identical link. pulpit
-collapses them into one overlay, so advancing through the bullets does not
-restart the video.
+| 1 | — | the title slide, with `logo.svg` |
+| 2 | `run:media-assets/bouncing.gif?autostart&loop` | an animated GIF |
+| 3 | `run:media-assets/clip.mp4?autostart&mute` | video |
+| 4 | `run:media-assets/bouncing-balls.html` | an interactive HTML page |
 
 ### What pulpit reads
 
@@ -76,7 +71,7 @@ it.
 
 ### The one piece of TeX bookkeeping
 
-`&` separates query parameters, and in TeX it is an alignment tab. `combined.tex`
+`&` separates query parameters, and in TeX it is an alignment tab. `beamer.tex`
 therefore defines its URIs inside a `\catcode`&`=12` group. Without that the
 parameters are silently eaten and the video plays with defaults — which is
 exactly what `playback_intent_survives_the_latex_to_pdf_round_trip` in
@@ -95,7 +90,9 @@ The Beamer deck requires `latexmk` or `pdflatex`; the Mosaic deck requires
 Typst 0.15 or newer and Mosaic 0.0.2 installed as a local package. Regenerating
 the assets additionally needs ImageMagick 7 (`magick`) and `ffmpeg`; the
 generated assets are checked in, so this is only needed when changing them.
+`logo.pdf`, the title slide's logo for Beamer, is rasterised from `logo.svg`
+with `magick`; the Typst deck reads the SVG directly.
 
 `crates/pulpit-render/tests/media_deck.rs` runs the real discovery
-pipeline against `combined.pdf` and is the authoritative check — it needs no
+pipeline against `beamer.pdf` and is the authoritative check — it needs no
 Python and runs in the ordinary test suite.

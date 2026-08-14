@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regenerate every asset examples/combined.tex references.
+# Regenerate every asset examples/beamer.tex references.
 #
 # Deterministic: the same tools and the same script produce the same bytes,
 # so the checked-in assets can be rebuilt and diffed.

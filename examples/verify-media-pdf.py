@@ -8,7 +8,7 @@ every one of them survived the LaTeX round trip verbatim, since `&` is an
 alignment tab in TeX unless the deck fixes its catcode, and that each file
 named actually sits beside the document.
 
-Requires pypdf.  Usage: python3 verify-media-pdf.py combined.pdf
+Requires pypdf.  Usage: python3 verify-media-pdf.py beamer.pdf
 """
 
 import sys
@@ -19,7 +19,6 @@ from pypdf import PdfReader
 EXPECTED = {
     "media-assets/bouncing.gif?autostart&loop",
     "media-assets/clip.mp4?autostart&mute",
-    "media-assets/clip.mp4?loop&mute",
     "media-assets/bouncing-balls.html",
 }
 
@@ -66,15 +65,6 @@ def main(path):
         if expected not in found:
             problems.append(f"missing or mangled: {expected!r}")
 
-    # The reveal-continuity frame repeats one link on three physical pages.
-    repeated = {target: pages for target, pages in found.items() if len(pages) > 1}
-    if not repeated:
-        problems.append("no link repeats across pages; the \\pause frame is not doing its job")
-    else:
-        print("\nRepeated across reveal steps (one overlay, one session):")
-        for target, pages in sorted(repeated.items()):
-            print(f"  {target}  on pages {', '.join(map(str, pages))}")
-
     print("\nAssets beside the document:")
     directory = Path(path).resolve().parent
     for target in sorted(found):
@@ -95,4 +85,4 @@ def main(path):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "combined.pdf"))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "beamer.pdf"))

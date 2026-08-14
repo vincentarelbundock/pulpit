@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" width="240" height="180" fill="none">
+  <!-- Large display -->
+  <path d="M92 34 H188 Q193 34 193 39 V105 Q193 110 188 110 H132"
+        stroke="#222222" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 34 Q87 34 87 39 V74"
+        stroke="#222222" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Laptop screen -->
+  <rect x="61" y="84" width="57" height="43" rx="2"
+        stroke="#222222" stroke-width="6"/>
+
+  <!-- Laptop base -->
+  <path d="M53 129 H126"
+        stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+</svg>

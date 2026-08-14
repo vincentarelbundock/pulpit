@@ -1,6 +1,6 @@
 //! End-to-end overlay discovery against the example deck.
 //!
-//! `examples/combined.pdf` is written in ordinary beamer — a `\href{run:...}`
+//! `examples/beamer.pdf` is written in ordinary beamer — a `\href{run:...}`
 //! around a poster, the convention pdfpc and Impressive already use — so this
 //! doubles as the test that pulpit reads a *standard* deck. hyperref
 //! turns `run:` into a `/Launch` action, so it also pins the rule that a
@@ -27,11 +27,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn deck() -> Option<PathBuf> {
-    let path = workspace_root().join("examples/combined.pdf");
+    let path = workspace_root().join("examples/beamer.pdf");
     if path.is_file() {
         Some(path)
     } else {
-        eprintln!("skipping: examples/combined.pdf has not been built");
+        eprintln!("skipping: examples/beamer.pdf has not been built");
         None
     }
 }
@@ -172,18 +172,12 @@ fn playback_intent_survives_the_latex_to_pdf_round_trip() {
 }
 
 #[test]
-fn a_reveal_sequence_collapses_into_one_overlay_across_its_pages() {
+fn every_overlay_covers_a_contiguous_run_of_pages() {
     let Some(index) = discover() else { return };
-    let spanning: Vec<_> = index
-        .all()
-        .iter()
-        .filter(|overlay| overlay.pages.len() > 1)
-        .collect();
-    assert!(
-        !spanning.is_empty(),
-        "the incremental-reveal frame should produce one overlay covering several pages"
-    );
-    for overlay in spanning {
+    // The stripped example deck has no reveal sequence, so a multi-page
+    // overlay is not guaranteed here; when one occurs its pages must still
+    // form a single contiguous run that the index agrees with.
+    for overlay in index.all() {
         for window in overlay.pages.windows(2) {
             assert_eq!(
                 window[1],

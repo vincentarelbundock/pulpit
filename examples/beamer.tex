@@ -1,16 +1,18 @@
-% The complete pulpit example deck: ordinary Beamer slides followed by
-% the media-overlay demonstrations from media.tex.
+% The pulpit example deck: a title slide and one slide per media kind.
 %
-% Build with `make -C examples combined.pdf`.
+% Build with `make -C examples beamer.pdf`.
 
 \documentclass[aspectratio=169]{beamer}
 
+% The classic Beamer look, so the deck is recognisable at a glance.
+\usetheme{Warsaw}
+
+\usepackage{lmodern}
 \usepackage[T1]{fontenc}
 \usepackage{graphicx}
-\usepackage{booktabs}
 
 \hypersetup{
-  pdftitle={pulpit example deck},
+  pdftitle={Pulpit},
   pdfauthor={pulpit}
 }
 
@@ -21,7 +23,6 @@
 \gdef\defrunlink#1#2{\gdef#1{#2}}
 \defrunlink\gifuri{run:media-assets/bouncing.gif?autostart&loop}
 \defrunlink\videouri{run:media-assets/clip.mp4?autostart&mute}
-\defrunlink\loopvideouri{run:media-assets/clip.mp4?loop&mute}
 \defrunlink\htmluri{run:media-assets/bouncing-balls.html}
 \endgroup
 
@@ -29,160 +30,32 @@
   \href{#2}{\includegraphics[width=#1]{#3}}%
 }
 
-\newcommand{\uri}[1]{{\small\texttt{#1}}}
-
-\title{pulpit example deck}
-\subtitle{Presentation basics and media overlays}
-\author{pulpit}
-\date{}
-
 \begin{document}
 
 \begin{frame}
-  \titlepage
-\end{frame}
-
-\section{Presentation basics}
-
-\begin{frame}{One simple idea}
-  \begin{itemize}
-    \item Present a standard PDF slide deck.
-    \item Keep the audience focused on the current slide.
-    \item Move forward when you are ready.
-  \end{itemize}
-\end{frame}
-
-\begin{frame}{A clear structure}
-  \begin{enumerate}
-    \item Introduce the topic.
-    \item Develop the main argument.
-    \item Finish with a memorable conclusion.
-  \end{enumerate}
-\end{frame}
-
-\begin{frame}{Two useful views}
-  \begin{columns}[T]
-    \begin{column}{0.45\textwidth}
-      \begin{block}{Presenter}
-        Controls the pace and previews what comes next.
-      \end{block}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{block}{Audience}
-        Sees a clean, focused version of the current slide.
-      \end{block}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Keep it readable}
-  \begin{itemize}
-    \item Use short headings.
-    \item Prefer a few strong points per slide.
-    \item Leave enough space for every idea to breathe.
-  \end{itemize}
-
-  \begin{alertblock}{Remember}
-    Slides support the presentation; they are not the presentation.
-  \end{alertblock}
-\end{frame}
-
-\begin{frame}{Ready to present}
   \centering
-  \Large Open the PDF, check the display, and begin.
+  \includegraphics[width=0.32\textwidth]{logo.pdf}
+
+  \vspace{1em}
+  {\Huge\bfseries Pulpit}
+
+  \vspace{0.5em}
+  {\large A Snappy and Snazzy PDF Projector}
 \end{frame}
 
-\section{Media overlays}
-
-\begin{frame}{How a deck declares media}
-  A media overlay is a link around a poster:
-
-  \begin{center}
-    \uri{\textbackslash href\{run:clip.mp4?autostart\}\{\textbackslash includegraphics\{poster\}\}}
-  \end{center}
-
-  \texttt{run:} is the convention pdfpc and Impressive already read, so a deck
-  written for them needs no changes. The link rectangle is the overlay region,
-  and the poster is what every other PDF reader shows.
+\begin{frame}
+  \centering
+  \overlay[0.62\textwidth]{\gifuri}{media-assets/bouncing-still.png}
 \end{frame}
 
-\begin{frame}{Animated GIF}
-  The poster is the GIF's own first frame; pulpit replaces it with the
-  running animation.
-
-  \begin{center}
-    \overlay{\gifuri}{media-assets/bouncing-still.png}
-
-    \uri{run:media-assets/bouncing.gif?autostart\&loop}
-  \end{center}
+\begin{frame}
+  \centering
+  \overlay[0.62\textwidth]{\videouri}{media-assets/poster.png}
 \end{frame}
 
-\begin{frame}{Video}
-  The clip sits beside the document, which keeps the PDF small and the asset
-  editable without rebuilding the deck.
-
-  \begin{center}
-    \overlay{\videouri}{media-assets/poster.png}
-
-    \uri{run:media-assets/clip.mp4?autostart\&mute}
-  \end{center}
-\end{frame}
-
-\begin{frame}{Interactive HTML}
-  The same convention extends to a page: the HTML file's own directory is
-  served to it, so its stylesheet and script resolve exactly as on disk. On
-  the slide it becomes live and clickable.
-
-  \begin{center}
-    \overlay[0.58\textwidth]{\htmluri}{media-assets/balls-poster.png}
-
-    \uri{run:media-assets/bouncing-balls.html}
-  \end{center}
-\end{frame}
-
-\begin{frame}{Incremental reveal continuity}
-  Each reveal step repeats the identical link, and pulpit collapses the
-  repetitions into one overlay --- so the video keeps playing rather than
-  restarting as the bullets appear.
-
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \overlay[\textwidth]{\loopvideouri}{media-assets/poster.png}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \begin{itemize}
-        \item The video starts on the first step.
-        \pause
-        \item It does not restart here.
-        \pause
-        \item Nor here: one overlay, one session.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{What pulpit reads}
-  \begin{center}
-    \small
-    \begin{tabular}{ll}
-      \toprule
-      Written in the deck & What it declares \\
-      \midrule
-      \texttt{run:clip.mp4} & video beside the document \\
-      \texttt{run:spin.gif} & animated image beside the document \\
-      \texttt{run:page.html} & interactive HTML \\
-      \midrule
-      \texttt{?autostart} & start on commit (also spelt \texttt{?autoplay}) \\
-      \texttt{?loop} & repeat \\
-      \texttt{?mute} & silence (video) \\
-      \texttt{?start=12.5} & seek, in seconds (video) \\
-      \bottomrule
-    \end{tabular}
-
-    \vspace{1em}
-    A \texttt{run:} link to anything that is not a media file is never
-    executed and never becomes an overlay.
-  \end{center}
+\begin{frame}
+  \centering
+  \overlay[0.52\textwidth]{\htmluri}{media-assets/balls-poster.png}
 \end{frame}
 
 \end{document}

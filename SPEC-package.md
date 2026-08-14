@@ -303,8 +303,10 @@ Ordered. Each step is a thing only the maintainer can do.
 
 ### Before any release
 
-1. **Enable GitHub Pages** — Settings → Pages → Source: *GitHub Actions*. The
-   Pages workflow fails on every `docs/` push until this is set.
+1. **Enable GitHub Pages** — Settings → Pages → Source: *Deploy from a
+   branch*, `main` / `docs`. The website is built locally with `make website`
+   and the generated `docs/` is committed and pushed by hand; there is no
+   deployment workflow.
 2. **Confirm the bundle identifier** `com.arelbundock.pulpit` in
    `scripts/make-app-bundle.sh`. It is baked into the `.app` and must never
    change afterwards: an upgrade with a different identifier installs *beside*
