@@ -516,7 +516,7 @@ is a courtesy; the bundle is the record.
   inset: 0.55em,
   [*Platform*], [*Enumeration and identity*], [*Targeted fullscreen*], [*Notes*],
   [X11], [XRandR + EDID], [yes, via EWMH], [reference platform],
-  [Wayland], [`wl_output` + `xdg_output`], [*no* — compositor placement, explained in the UI], [needs the toplevel object, which Iced does not expose],
+  [Wayland], [`wl_output` + `xdg_output`], [*no* — compositor placement, explained in the UI], [Iced fullscreens on the monitor it picks; accepted permanently],
   [Windows / macOS], [none], [falls back], [not in this build],
 )
 
@@ -586,11 +586,21 @@ the UI surfaces the ones the user must act on. *Refusal is detected by the
 absence of `Applied`, never assumed to be success.*
 
 On Wayland `xdg_toplevel.set_fullscreen(output)` is the only mechanism, and it
-must be issued on the toolkit's own toplevel object, which Iced 0.14 does not
-expose. The adapter therefore reports `targeted_fullscreen: false`, and the
-application falls back to compositor fullscreen while saying so in the UI.
-This is the single capability that the upstream Iced change would unlock;
-nothing else in the design depends on it. A second, subtler limitation: this
+must be issued on the toolkit's own toplevel object. winit can do it —
+`Fullscreen::Borderless(Some(monitor))` sends exactly that request — but Iced
+0.14 gives the application no way to name the output: `window::Mode::Fullscreen`
+carries no monitor, and `iced_winit` fullscreens on `current_monitor()`. The
+gap is an API one, not a protocol one.
+
+*This is accepted as a permanent limitation.* Closing it means forking or
+vendoring `iced_winit`, and carrying a toolkit fork is a worse standing cost
+than the fallback. The adapter therefore reports `targeted_fullscreen: false`,
+and the application falls back to compositor fullscreen while saying so in the
+UI. On a Wayland session the presenter may have to move the audience window
+once, by hand, exactly as in a tiling compositor — a supported configuration,
+not a broken one. Nothing else in the design depends on this capability.
+
+A second, subtler limitation: this
 adapter opens its own Wayland connection, so its outputs are correlated with
 winit's windows by connector name rather than object identity.
 
@@ -639,3 +649,255 @@ monotonic one — is a resume. On resume the application re-enumerates the
 topology, reconciles, and re-requests the frames both windows need, while
 page, preview, timer, blanking state and display roles are deliberately
 untouched.
+
+= Presenter layouts and widgets
+
+The tree model lives in `crates/pulpit-app/src/layout` and each widget family
+in `crates/pulpit-app/src/widgets/<family>/`. Both are pure — no UI types, no
+clock, no rendering — so every structural rule is unit-tested without a
+display. The designer and the presenter view are two projections of the same
+values, which is what makes "what you designed is what you present" true
+rather than aspirational.
+
+== The tree
+
+Two node types only:
+
+- a *split* with two or more children in one direction, plus their relative
+  sizes, a gap and a minimum child size;
+- a *leaf* cell holding at most one widget, plus padding, background and what
+  to do when it is empty. Neighbouring cells are separated by one muted
+  hairline in the split gutter; cells and widgets do not draw perimeter
+  borders.
+
+The tree is kept *canonical*: a split never directly contains a child split of
+the same direction. That single rule is what makes divider behaviour
+predictable:
+
+- Splitting a cell *in the same direction as its parent* inserts a divider
+  into the parent. Splitting the middle of a three-across row left-and-right
+  gives four across, not three-across-with-a-nested-pair.
+- Splitting *perpendicular* always nests.
+- The selected cell's space is halved; its siblings keep their sizes.
+- Deleting a node gives its space back to its siblings in proportion. A split
+  left with one child dissolves, and if the survivor now sits inside a split
+  of its own direction it is flattened in.
+
+Layouts are stored proportionally, so they scale to any screen without
+letterboxing or reflow. The editor's aspect-ratio selector changes only what
+the canvas previews — never the saved layout. When the presenter screen's real
+ratio is far from the design ratio, the presenter window shows one dismissible
+notice suggesting a review at that ratio.
+
+== Widgets
+
+One directory per family — slides, notes, timing, navigation, status — each
+with a pure `model.rs` (configuration, defaults, bounds, capabilities,
+patches, the display decisions, and its own validation) and a `view.rs` that
+takes only the input facets it draws.
+
+Every presentation property — variant, scale, alignment, and slide fit — is a
+constant in `widgets/tokens.rs`, not a per-widget setting. Colour comes only
+from the seven global roles in the active Light or Dark palette. Widgets size
+themselves to the cell they are given.
+
+One widget is *compound* — `Previous + Current + Next` — and it counts as its
+constituents everywhere: placing it satisfies the current-slide requirement,
+and a bare `Current Slide` may then not be placed beside it. The timer, the
+clock and navigation are deliberately _not_ compound: a layout may put the
+buttons along the bottom and the slider in a rail, or leave either out.
+
+Single-instance widgets are exactly: Speaker Notes, Slide Buttons, Slide
+Slider, Pause or Resume, End Presentation, Annotations, Media Transport.
+Everything else may repeat. A single-instance widget already in the layout
+shows *Already in Layout* on its library card and cannot be dragged.
+
+=== Media Transport
+
+Play, pause and scrub whatever video or animation is on the slide the
+_audience_ is seeing — never the slide the presenter has previewed ahead to,
+since pressing play must not start a clip nobody is watching.
+
+It exists on the presenter's layout rather than inside the media because the
+two views consume the same overlay frames: a control drawn in the content is a
+control on the projector. The generated wrapper pages therefore draw nothing,
+and this widget reaches them through the media protocol instead.
+
+What it offers follows what the content can answer. A clip gets a scrub bar
+and a mute button; an animation has no playhead and no audio, so it gets the
+button alone. Media whose runtime never started still gets a transport, drawn
+inert and reading *Not playing*.
+
+=== Accent colours
+
+Cyan (default), amber, white or slate — the sanctioned palette, no arbitrary
+colours. *Amber is reserved for timing displays.* The Timer takes it by
+default and other widgets are not offered it; choosing it elsewhere is refused
+with an explanation rather than silently accepted, so the timer stays the one
+thing on the screen that reads as urgent.
+
+== Editing
+
+There is no properties panel. Everything is done on the canvas or from the
+toolbar, and the canvas draws the real widgets.
+
+#table(
+  columns: (1fr, 2fr),
+  stroke: none,
+  inset: 0.55em,
+  [*Action*], [*How*],
+  [Select a pane], [click it],
+  [Add a pane], [*Pane left / right / above / below* in the toolbar, beside the selection],
+  [Place a widget], [drag a card from the library onto a pane, or onto a pane's edge to split and place in one gesture],
+  [Move a widget], [drag it between panes],
+  [Clear a pane], [right-click it, or ✕ in the toolbar],
+  [Remove a pane], [the same again on an empty pane],
+  [Resize], [drag a divider; grab it near a corner to move a whole line of aligned dividers; `←`/`→` moves a focused divider 1%, `Shift` 5%],
+  [Even split], [double-click a divider],
+  [Undo / redo], [↺ and ↻ in the toolbar, `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`],
+  [Save], [`Ctrl/Cmd+S`, or *Save* when leaving],
+)
+
+Four add-pane buttons replace the ready-made shapes: three across is *Pane
+right* twice, and where the new pane lands is always obvious from the button
+you pressed.
+
+Dropping onto an occupied cell asks: *Replace Existing Widget*, *Swap Widgets*
+(between two cells) or *Cancel*. Nothing is destroyed in one press: removing a
+pane takes its widget first and the pane itself on the next press, and both
+steps are undoable. Removing a split takes only the panes on either side of
+it.
+
+There is no save button and no discard button. Leaving the editor with unsaved
+changes asks *Save*, *Discard* or *Cancel*, which is the moment both questions
+mean something; a toolbar that can throw work away is a mis-click looking for
+somewhere to happen. Validation warnings are reported when you save rather
+than in a panel.
+
+Undo covers every editing action — structure, resizes, placement — is
+unbounded within the session, and is _not_ cleared by saving, so you can undo
+past a save. Closing the editor clears it.
+
+== Validation
+
+Validation inspects *configuration, not presence*: a Slide Buttons widget with
+its forward button hidden does not satisfy the forward-navigation requirement.
+
+Warnings — no current slide, no forward or backward control, notes too small,
+a widget that does not fit its cell, empty cells, an unreadable timer — are
+explained and then allowed. A presenter may deliberately want a layout with no
+notes. Only structural corruption and instance-limit violations block, which
+is what protects an import from a hand-edited file. Geometry warnings depend
+on the screen the layout is checked at, so the aspect-ratio selector changes
+what the checks say.
+
+
+== Built-ins
+
+#table(
+  columns: (1fr, 2fr),
+  stroke: none,
+  inset: 0.55em,
+  [*Layout*], [*For*],
+  [*Slide + Next + Notes*], [The slide-first default: current slide at 72% width, with next slide, notes and navigation in a rail.],
+  [*Slide + Notes Beside*], [A 75/25 split that fits a 4:3 slide without padding on a 16:9 presenter display.],
+  [*Slide + Time Below*], [A 90/10 split that fits a 16:9 slide above the natural spare strip on a 16:10 display; time and a draggable slider share the strip.],
+  [*Slide + Time Beside*], [A 75/25 split for a full-height 4:3 slide, with time and navigation in the side rail.],
+)
+
+The names describe fixed geometry. Pulpit does not choose or rearrange a
+layout based on the deck or display aspect ratio. Built-ins cannot be renamed,
+overwritten or deleted. *Duplicate to Customize* makes an editable copy and
+opens it.
+
+
+= PDFium
+
+PDFium is not vendored in this repository and not linked into the binaries:
+it is loaded dynamically at run time, so a build without it still succeeds and
+the application degrades visibly rather than silently.
+== Binaries
+
+`scripts/fetch-pdfium.sh` downloads a pinned release from
+`bblanchon/pdfium-binaries` and verifies its SHA-256 before installing it into
+`./lib`. Treat that project as an *unaffiliated third-party supply-chain
+dependency*:
+
+- The release tag (`chromium/NNNN`) and the per-target SHA-256 are pinned in
+  the script. Never replace them with "latest".
+- A target with no recorded hash refuses to install and prints the observed
+  hash for review. Verify independently before pinning it.
+- Archive the downloaded artefact alongside release inputs so a build can be
+  reproduced after the upstream release is deleted.
+- Review upstream changes (PDFium version, build flags, third-party notices)
+  when bumping.
+
+Currently pinned: `chromium/7999`, `pdfium-linux-x64.tgz`,
+`c3af580f9df0fef9545b44115bc5ea440f286956b5f231df69fb373b8efc4f69`.
+
+If the service disappears, PDFium can be built from source with `depot_tools`
+and the same GN args the upstream project publishes (`args.gn` ships inside
+each artefact and is worth archiving). The application only needs a shared
+library exporting the standard `FPDF_*` symbols; nothing in this codebase
+depends on that project specifically.
+
+PDFium is BSD-3-Clause. Redistribution obligations, including the bundled
+third-party notices shipped as `lib/PDFIUM-LICENSE`, are release requirements
+and must be included in any package that ships the library.
+
+== Discovery
+
+Search order in `PdfiumBackend::bind`:
+
++ `PULPIT_PDFIUM_PATH` (a file or a directory)
++ the directory containing the executable, and `<exe dir>/lib`
++ `./lib` and `.`
++ the system loader path
+
+Failure at every step is reported once, listing the paths tried, and the
+renderer worker exits: PDFium ships with every supported package, so this is a
+broken installation and placeholder pages on the projector would be worse than
+stopping. `PULPIT_FORCE_FIXTURE_BACKEND=1` selects the fixture backend
+explicitly, which is how the tests run without PDFium.
+
+
+= Notes mapping contract
+
+Slide indices are logical, so the mapping — not the PDF — decides how many
+slides the deck has. Changing the mapping advances the render generation and
+clamps the current slide into the new space.
+
+== Where a mapping comes from
+
+In priority order:
+
++ A mapping you chose for *this document* (`notes.per_document` in
+  `settings.toml`). Nothing overrides it.
++ A recognised *metadata contract* in the PDF, if
+  `notes.honour_metadata_contract` is on.
++ Your *default mapping* (`notes.default_mapping`).
+
+== The metadata contract (Typst/Mosaic)
+
+A generator can declare the mapping in any PDF metadata string — `Keywords`,
+`Subject` or `Title` — as a single whitespace-delimited directive:
+
+```text
+pulpit:mapping=slides-only
+pulpit:mapping=split;slide=0,0,0.5,1;notes=0.5,0,0.5,1
+pulpit:mapping=alternating;notes-first=false
+pulpit:mapping=two-ranges;notes-first=true
+```
+
+Regions are `x,y,width,height` as fractions of the page, origin top-left. A
+malformed or unknown directive is *rejected*, not approximated: the document
+then falls back to your default mapping.
+
+In Typst:
+
+```typ
+#set document(keywords: ("pulpit:mapping=alternating;notes-first=false",))
+```
+
+The intended pipeline is *Typst/Mosaic → PDF → Pulpit*, while ordinary PDFs
+keep working without any of this.

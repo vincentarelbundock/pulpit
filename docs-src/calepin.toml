@@ -8,8 +8,15 @@ favicon = "assets/favicon.svg"
 
 pdf = false
 
+[toc]
+enabled = true
+depth = 3
+
 [static]
 include = ["assets/**"]
+
+[pages]
+exclude = ["parts/*.typ", "internals.typ"]
 
 [[menus.social]]
 target = "https://github.com/vincentarelbundock/pulpit"
@@ -24,21 +31,3 @@ aria-label = "GitHub"
   [[footer.item]]
   target = "https://vincentarelbundock.github.io/calepin"
   label = "Made with Calepin"
-
-[sidebar]
-fold = false
-
-[[sidebar.section]]
-title = "Pulpit"
-
-  [[sidebar.section.item]]
-  target = "index.typ"
-
-  [[sidebar.section.item]]
-  target = "install.typ"
-
-  [[sidebar.section.item]]
-  target = "usage.typ"
-
-  [[sidebar.section.item]]
-  target = "internals.typ"

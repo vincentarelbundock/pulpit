@@ -25,62 +25,15 @@
     <link rel="icon" href="assets/favicon.svg">
     
     
-    <meta name="color-scheme" content="light dark">
-    
-    
-      
-    
-      
-    
-      
-    
-      
-    
-      
-    
-      
-    <script
-      data-calepin-theme-storage-key="calepin-website-theme"
-      data-calepin-theme-param="theme">
-(() => {
-  "use strict";
-
-  const currentScript = document.currentScript;
-  const storageKey = currentScript?.dataset?.calepinThemeStorageKey || "calepin-website-theme";
-  const param = currentScript?.dataset?.calepinThemeParam || "theme";
-  const normalize = (value) => (value === "light" || value === "dark" ? value : "");
-  const root = document.documentElement;
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  const systemTheme = () => (media && media.matches ? "dark" : "light");
-
-  let mode = "";
-  if (param) {
-    try {
-      mode = normalize(new URL(window.location.href).searchParams.get(param) || "");
-    } catch {
-      mode = "";
-    }
-  }
-
-  if (!mode) {
-    try {
-      mode = normalize(localStorage.getItem(storageKey) || "");
-    } catch {
-      mode = "";
-    }
-  }
-
-  const theme = mode || systemTheme();
-  root.dataset.calepinThemeMode = mode;
-  root.dataset.theme = theme;
-  root.style.colorScheme = theme;
-})();
-
+    <meta name="color-scheme" content="light">
+    <script>
+      (() => {
+        const root = document.documentElement;
+        root.dataset.calepinThemeMode = "light";
+        root.dataset.theme = "light";
+        root.style.colorScheme = "light";
+      })();
     </script>
-      
-    
-      
-    
 
     <style>
 @charset "UTF-8";/*!
@@ -2573,16 +2526,12 @@ html:not([data-theme]) {
 
 
 
-<script id="calepin-website-source-data" type="application/json">"#set document(title: [Pulpit])\n#metadata((tags: (\"overview\",))) <website-metadata>\n\n#title()\n\n#align(center)[#image(\"assets/logo.svg\", width: 45%)]\n\n*Pulpit is the PDF presenter that does not screw up your projector.*\n\nIt runs a presenter window on your display and an audience window on the\nprojector, and it treats connection, disconnection, mirroring, swapping,\nsuspend/resume and mixed DPI as the _main_ engineering problem — not as\npolish.\n\n```sh\npulpit path/to/deck.pdf\n```\n\n= Status\n\nThe presenter is complete and in use: two-window presentation, display\nreconciliation, layouts, speaker notes, PDF links, presenter annotations,\nsession recovery, and media overlays for animated images and interactive HTML.\n\nFour things are deliberately left undone: the upstream Iced contribution\n(without which portable targeted fullscreen on Wayland is impossible),\nphysical-hardware qualification, packaging beyond Nix, and screen-reader\nsupport — which is blocked on Iced exposing an accessibility tree at all.\n\n= Where to go next\n\n- #link(\"install.html\")[Installation] — Nix, other distributions, and PDFium.\n- #link(\"usage.html\")[Usage] — keys, presenter layouts, and speaker notes.\n- #link(\"internals.html\")[Internals] — architecture, invariants, the platform\n  boundary, and the display-control findings the design rests on.\n\n= Licence\n\nMIT or Apache-2.0. PDFium is BSD-3-Clause and is _not_ vendored here.\n"</script>
+<script id="calepin-website-source-data" type="application/json">"#set document(title: [Pulpit])\n#metadata((tags: (\"overview\",))) <website-metadata>\n\n#html.elem(\"div\", attrs: (style: \"text-align: center; margin-block: 0 1.5rem;\"))[\n  #html.elem(\n    \"img\",\n    attrs: (\n      src: \"assets/logo.svg\",\n      alt: \"Pulpit\",\n      style: \"width: 100%; max-width: 15rem; display: block;\"\n        + \" margin: 0 auto -0.75rem;\",\n    ),\n  )\n  #html.elem(\n    \"div\",\n    attrs: (\n      style: \"font-family: Helvetica, Arial, sans-serif; font-size: 3rem;\"\n        + \" font-weight: 700; letter-spacing: 0.12em; line-height: 1;\",\n    ),\n  )[PULPIT]\n  #html.elem(\n    \"p\",\n    attrs: (\n      style: \"font-size: 1.5rem; font-weight: 600; line-height: 1.3;\"\n        + \" margin: 0.75rem auto 0;\",\n    ),\n  )[A Snappy and Snazzy PDF Projector]\n  #html.elem(\n    \"p\",\n    attrs: (\n      style: \"font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;\",\n    ),\n  )[\n    Interactive media · Speaker notes · Annotations · Custom layouts ·\n    Jump to page · Timers · And more!\n  ]\n]\n\n= Installation\n\n#include \"parts/install.typ\"\n\n#include \"parts/usage.typ\"\n\n= Licence\n\nMIT or Apache-2.0. PDFium is BSD-3-Clause and is _not_ vendored here.\n"</script>
 </head><body>
 
     <header class="calepin-website-topbar calepin-site-topbar">
         <nav class="calepin-site-nav">
             <ul>
-                
-                <li>
-                    <button class="calepin-website-nav-toggle calepin-nav-toggle outline secondary" type="button" aria-expanded="false" aria-controls="calepin-website-sidebar" aria-label="Toggle navigation menu"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg></button>
-                </li>
                 
                 <li>
                                 <a class="calepin-site-brand contrast" href="index.html" aria-label="Pulpit home">
@@ -2594,15 +2543,13 @@ html:not([data-theme]) {
             </ul>
             <ul>
                 
-                                <li><a href="install.html" aria-label="Documentation">Documentation</a></li>
-                
                 
                                 <li><a href="https://github.com/vincentarelbundock/pulpit" aria-label="GitHub"><span class="calepin-nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5c.08-1.25-.27-2.48-1-3.5c.28-1.15.28-2.35 0-3.5c0 0-1 0-3 1.5c-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5c-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></g></svg></span></a></li>
                 
                 <li class="calepin-website-theme-item">
                     
                     
-                    <button class="calepin-site-theme-toggle" type="button" aria-label="Theme" title="Theme" data-calepin-theme-toggle data-calepin-theme-storage-key="calepin-website-theme" data-calepin-theme-param="theme">Theme</button>
+                    
                 </li>
                 
                 
@@ -2611,7 +2558,7 @@ html:not([data-theme]) {
                     <select id="calepin-website-view-mode" class="calepin-website-view-mode" aria-label="Choose page view" data-calepin-view-mode>
                         <option value="rendered">HTML</option>
                         <option value="source">Source</option>
-                        <option value="pdf">PDF</option>
+                        
                     </select>
                 </li>
                 
@@ -2619,68 +2566,28 @@ html:not([data-theme]) {
         </nav>
     </header>
     <div class="calepin-website-shell grid">
-        <div class="calepin-website-nav-backdrop" aria-hidden="true"></div>
-                <aside id="calepin-website-sidebar" class="calepin-website-sidebar">
-            <nav class="calepin-website-mobile-drawer-nav" aria-label="Site navigation">
-                <p><strong>Site</strong></p>
-                <ul>
-                    
-                                    <li><a href="install.html" aria-label="Documentation">Documentation</a></li>
-                    
-                    
-                                    <li><a href="https://github.com/vincentarelbundock/pulpit" aria-label="GitHub"><span class="calepin-nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5c.08-1.25-.27-2.48-1-3.5c.28-1.15.28-2.35 0-3.5c0 0-1 0-3 1.5c-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5c-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></g></svg></span></a></li>
-                    
-                </ul>
-                <div class="calepin-website-mobile-drawer-actions" aria-label="Site controls">
-                    
-                    
-                    <button class="calepin-site-theme-toggle" type="button" aria-label="Theme" title="Theme" data-calepin-theme-toggle data-calepin-theme-storage-key="calepin-website-theme" data-calepin-theme-param="theme">Theme</button>
-                    
-                    
-                    <select class="calepin-website-view-mode" aria-label="Choose page view" data-calepin-view-mode>
-                        <option value="rendered">HTML</option>
-                        <option value="source">Source</option>
-                        <option value="pdf">PDF</option>
-                    </select>
-                    
-                </div>
-            </nav>
-            <nav aria-label="Documentation">
-                
-                    
-                    
-                    
-                    
-                    <p><strong>Pulpit</strong></p>
-                    
-                    <ul>
-                        
-                        
-<li class="calepin-website-sidebar-link"><a href="index.html" aria-label="Pulpit" class="active" aria-current="page">Pulpit</a></li>
-
-                        
-                        
-<li class="calepin-website-sidebar-link"><a href="install.html" aria-label="Installation">Installation</a></li>
-
-                        
-                        
-<li class="calepin-website-sidebar-link"><a href="usage.html" aria-label="Usage">Usage</a></li>
-
-                        
-                        
-<li class="calepin-website-sidebar-link"><a href="internals.html" aria-label="Internals">Internals</a></li>
-
-                        
-                    </ul>
-                    
-                    
-                    
-                
-            </nav>
-        </aside>
         <main class="calepin-website-main calepin-content" data-pagefind-body>
-            <h1 id="pulpit">Pulpit</h1><p><strong>Pulpit is the PDF presenter that does not screw up your projector.</strong></p><p>It runs a presenter window on your display and an audience window on the projector, and it treats connection, disconnection, mirroring, swapping, suspend/resume and mixed DPI as the <em>main</em> engineering problem — not as polish.</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">pulpit</span> path/to/deck.pdf
-</code></pre></div><h2 id="status">Status</h2><p>The presenter is complete and in use: two-window presentation, display reconciliation, layouts, speaker notes, PDF links, presenter annotations, session recovery, and media overlays for animated images and interactive HTML.</p><p>Four things are deliberately left undone: the upstream Iced contribution (without which portable targeted fullscreen on Wayland is impossible), physical-hardware qualification, packaging beyond Nix, and screen-reader support — which is blocked on Iced exposing an accessibility tree at all.</p><h2 id="where-to-go-next">Where to go next</h2><ul><li><a href="install.html">Installation</a> — Nix, other distributions, and PDFium.</li><li><a href="usage.html">Usage</a> — keys, presenter layouts, and speaker notes.</li><li><a href="internals.html">Internals</a> — architecture, invariants, the platform boundary, and the display-control findings the design rests on.</li></ul><h2 id="licence">Licence</h2><p>MIT or Apache-2.0. PDFium is BSD-3-Clause and is <em>not</em> vendored here.</p>
+            <div style="text-align: center; margin-block: 0 1.5rem;"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNDAgMTgwIiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjE4MCIgZmlsbD0ibm9uZSI+CiAgPCEtLSBMYXJnZSBkaXNwbGF5IC0tPgogIDxwYXRoIGQ9Ik05MiAzNCBIMTg4IFExOTMgMzQgMTkzIDM5IFYxMDUgUTE5MyAxMTAgMTg4IDExMCBIMTMyIgogICAgICAgIHN0cm9rZT0iIzIyMjIyMiIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNOTIgMzQgUTg3IDM0IDg3IDM5IFY3NCIKICAgICAgICBzdHJva2U9IiMyMjIyMjIiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CgogIDwhLS0gTGFwdG9wIHNjcmVlbiAtLT4KICA8cmVjdCB4PSI2MSIgeT0iODQiIHdpZHRoPSI1NyIgaGVpZ2h0PSI0MyIgcng9IjIiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiLz4KCiAgPCEtLSBMYXB0b3AgYmFzZSAtLT4KICA8cGF0aCBkPSJNNTMgMTI5IEgxMjYiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K" alt="Pulpit" style="width: 100%; max-width: 15rem; display: block; margin: 0 auto -0.75rem;"><div style="font-family: Helvetica, Arial, sans-serif; font-size: 3rem; font-weight: 700; letter-spacing: 0.12em; line-height: 1;">PULPIT</div><p style="font-size: 1.5rem; font-weight: 600; line-height: 1.3; margin: 0.75rem auto 0;">A Snappy and Snazzy PDF Projector</p><p style="font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;">Interactive media · Speaker notes · Annotations · Custom layouts · Jump to page · Timers · And more!</p></div><h2 id="installation">Installation</h2><h3 id="macos">macOS</h3><p>With Homebrew:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">brew</span> install<span class="calepin-syntax-scope-3"> --</span><span class="calepin-syntax-scope-5">cask</span><span class="calepin-syntax-scope-3"> --</span><span class="calepin-syntax-scope-5">no-quarantine</span> vincentarelbundock/tap/pulpit</code></pre></div><p>Or install it by hand:</p><ol><li>Download the disk image from the releases page.</li><li>Open it and drag <code>Pulpit.app</code> onto Applications.</li><li>Launch Pulpit. macOS refuses this first launch.</li><li>Open System Settings, then Privacy &amp; Security, and click <strong>Open Anyway</strong> next to the message about Pulpit.</li><li>Launch Pulpit again. It opens, and the refusal does not come back, this version or any later one.</li></ol><p>That refusal happens because the app is not registered with Apple, which costs money, even for free open source projects.</p><p>Builds are for Apple Silicon Macs only at present.</p><h3 id="windows">Windows</h3><p>With a package manager:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">winget</span> install VincentArelBundock.Pulpit
+<span class="calepin-syntax-scope-1">scoop</span> install pulpit</code></pre></div><p>Or install it by hand:</p><ol><li>Download the installer from the releases page. A portable <code>.zip</code> is published beside it if you would rather not install anything.</li><li>Run the installer. It installs for your account only, so it never asks for an administrator password.</li><li>Windows may warn you that it does not recognise the publisher. Click <strong>More info</strong>, then <strong>Run anyway</strong>.</li></ol><p>That warning happens because the builds are not signed, which costs money, even for free open source projects.</p><p>Builds are 64-bit Intel only at present. Windows on ARM runs them anyway.</p><h3 id="linux">Linux</h3><p>Install the package for your distribution:</p><ol><li>Download the appropriate package from the releases page.</li><li>Install it with your package manager.</li></ol><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">sudo</span> apt install ./pulpit_<span class="calepin-syntax-scope-3">*</span>_amd64.deb
+<span class="calepin-syntax-scope-1">sudo</span> dnf install ./pulpit-<span class="calepin-syntax-scope-3">*</span>.x86_64.rpm
+<span class="calepin-syntax-scope-1">sudo</span> pacman<span class="calepin-syntax-scope-3"> -</span><span class="calepin-syntax-scope-5">U</span> ./pulpit-<span class="calepin-syntax-scope-3">*</span>-x86_64.pkg.tar.zst</code></pre></div><p>The package installs what Pulpit depends on alongside it, and suggests a Chromium-based browser so that slides with video or interactive content work on a fresh install.</p><p>Building from source works too, and the repository’s <code>README</code> covers it.</p><h3 id="nix">Nix</h3><p>Nix is a cross-platform package manager that runs on Linux and macOS; its <a href="https://nixos.org/download/">download page</a> covers installing it. If you already have it, this runs Pulpit once, without installing anything:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">nix</span> run github:vincentarelbundock/pulpit<span class="calepin-syntax-scope-3"> --</span> path/to/deck.pdf</code></pre></div><p>And this installs it for your user, so it stays:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">nix</span> profile install github:vincentarelbundock/pulpit</code></pre></div><p>The packaged build starts with no setup at all: it already knows where to find the libraries it loads while running. That matters most on NixOS, where those libraries do not sit in the usual system-wide location.</p><h2 id="keys">Keys</h2><table><tr><td><strong>Key</strong></td><td><strong>Action</strong></td></tr><tr><td><code>→</code> <code>↓</code> <code>Space</code> <code>PageDown</code></td><td>next slide (audience follows)</td></tr><tr><td><code>←</code> <code>↑</code> <code>PageUp</code> <code>Backspace</code></td><td>previous slide</td></tr><tr><td><code>Home</code> / <code>End</code></td><td>first / last</td></tr><tr><td><code>Tab</code> / <code>Shift+Tab</code></td><td>look ahead / back on your screen only, leaving the audience where it is</td></tr><tr><td><code>Enter</code></td><td>show the slide you were looking at to the audience</td></tr><tr><td><code>Esc</code></td><td>go back to the slide the audience is on</td></tr><tr><td><code>b</code> / <code>w</code></td><td>blank black / blank white</td></tr><tr><td><code>p</code> / <code>r</code></td><td>start-pause / reset the timer</td></tr><tr><td><code>s</code></td><td>swap presenter and audience displays</td></tr><tr><td><code>f</code></td><td>toggle audience fullscreen</td></tr><tr><td><code>o</code> / <code>F5</code></td><td>open / reload</td></tr><tr><td><code>d</code></td><td>diagnostics bundle</td></tr><tr><td><code>q</code></td><td>quit</td></tr></table><p>Presenter remotes usually emit <code>PageUp</code>/<code>PageDown</code>, media keys or browser back/forward, all of which are bound by default. A remote whose keys the toolkit cannot name is still usable: press the key and the presenter window offers to bind it, storing the raw scancode in <code>settings.toml</code>.</p><h2 id="navigation">Navigation</h2><p>Four ways to move through the deck:</p><ul><li><strong>Keys</strong>, listed above. Arrows, <code>Space</code> and <code>PageUp</code>/<code>PageDown</code> move the audience with you. <code>Tab</code> and <code>Shift+Tab</code> instead look ahead or back on your own screen while the audience stays put, which is how you check what is coming without showing it. <code>Enter</code> then shows the slide you landed on, and <code>Esc</code> returns you to the one the audience is seeing.</li><li><strong>Back and forward buttons</strong>, a widget you can place in any layout cell, with or without words beside the arrows.</li><li><strong>Slider</strong>, a draggable track across the whole deck.</li><li><strong>Jump menu</strong> (<code>j</code>), the whole deck as thumbnails, so you land on a slide by eye rather than by number. Picking one closes the menu.</li></ul><h2 id="annotations">Annotations</h2><p>The palette offers five controls:</p><ul><li><strong>Pointer</strong>: a dot that follows the pointer. Its options also arm <strong>Spotlight</strong>, which lights a circle and dims the rest of the page.</li><li><strong>Ink</strong>: freehand strokes that stay until the slide changes, black by default.</li><li><strong>Highlighter</strong>: a broad translucent stroke that leaves slide content readable.</li><li><strong>Eraser</strong>: removes the stroke or label it touches.</li><li><strong>Text</strong> (<code>T</code>): places a typewritten label, black by default.</li></ul><p>Select the text tool, click the slide, and type into the translucent expanding field; <code>Enter</code> commits the label and <code>Ctrl+Enter</code> inserts a line, and <code>Ctrl/Cmd+V</code> pastes text.</p><p>Text labels are complete Typst 0.15.1 documents. Markup, math, set rules, functions, tables, and other built-in Typst features render live after a short typing pause. Labels follow Typst’s math syntax exactly: for example, multiplication is <code>$e=m c^2$</code>, with whitespace between variables.</p><h2 id="windows-2">Windows</h2><p>Pulpit runs two windows.</p><p>The <strong>Presenter Window</strong> is the one you look at: slides, notes, timers and controls, arranged by the active layout. It opens on its own when Pulpit starts.</p><p>The <strong>Audience Window</strong> is the one the room looks at: the current slide and nothing else. You start it when you are ready, with <strong>Start ▾</strong> beside the hamburger, a split button whose <strong>Start</strong> half uses the saved audience display, while the arrow lists the connected displays so one click both picks the projector and starts the window. <strong>Stop</strong> removes it again.</p><p>Two starting modes:</p><ul><li><strong>Fullscreen</strong>: the window takes the chosen display immediately. A five-second delayed start is offered too, which leaves you time to switch to the projector workspace during the count.</li><li><strong>Windowed</strong>: the window opens as an ordinary window so you can drag it onto the right display or desktop position yourself, then press <code>f</code> to make it fullscreen where it sits. This is the reliable route on compositors that place windows themselves.</li></ul><h2 id="layouts">Layouts</h2><p>The presenter screen is not hard-coded. It is a <strong>layout</strong>: a tree of splits and cells with a widget in each cell, rendered proportionally into whatever window it lands in. Four built-in layouts ship with the application, and any of them can be duplicated into an editable copy.</p><p>The <strong>Layout: …</strong> button in the presenter window opens the layout library, and a layout opens from there into the designer.</p><p>Layouts <strong>import and export as JSON</strong>. A custom layout is a file in <code>&lt;config>/layouts/&lt;id>.json</code>, written atomically: exporting one is copying it out, importing one is copying it in, and the file itself is the interchange format. The shape, with a <code>format_version</code>:</p><div class="sourceCode" data-lang="json"><pre><code data-lang="json">{
+  <span class="calepin-syntax-scope-3">"</span>format_version<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">1</span><span class="calepin-syntax-scope-3">,</span>
+  <span class="calepin-syntax-scope-3">"</span>name<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>Conference Layout<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+  <span class="calepin-syntax-scope-3">"</span>design_ratio<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>sixteen-nine<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+  <span class="calepin-syntax-scope-3">"</span>root<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> {
+    <span class="calepin-syntax-scope-3">"</span>type<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>leaf<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>id<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>widget<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> {
+      <span class="calepin-syntax-scope-3">"</span>kind<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>timer<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+      <span class="calepin-syntax-scope-3">"</span>style<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>variant<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>standard<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span> <span class="calepin-syntax-scope-3">"</span>scale<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">1</span><span class="calepin-syntax-scope-3">.</span><span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span> <span class="calepin-syntax-scope-3">"</span>alignment<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>center<span class="calepin-syntax-scope-3">"</span> }<span class="calepin-syntax-scope-3">,</span>
+      <span class="calepin-syntax-scope-3">"</span>config<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>timer<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>warning_minutes<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">5</span> } }
+    }<span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>padding<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">8</span><span class="calepin-syntax-scope-3">.</span><span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>background<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>none<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>border<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>none<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
+    <span class="calepin-syntax-scope-3">"</span>empty_behavior<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>show-blank-panel<span class="calepin-syntax-scope-3">"</span>
+  }
+}</code></pre></div><p><code>border</code> remains in format 1 files for compatibility, but is no longer rendered. New built-in layouts write <code>"none"</code>; the split gutter owns visual separation so adjacent cells cannot produce doubled edges or an outer frame.</p><p>A widget carries its kind, the style every widget has, and the configuration only its family can have. The two must agree: a file claiming a title holds notes options is refused rather than repaired.</p><p>On import Pulpit runs the full validation, renumbers node ids so they cannot collide, and appends a numeric suffix if the name is taken. An imported layout is always a custom layout, even if it was exported from a built-in.</p><h2 id="speaker-notes">Speaker notes</h2><p>Notes mapping is <strong>explicit and deterministic</strong>. Pulpit does not guess which half of a page is notes, and no heuristic may silently override a mapping you chose. The active mapping is always visible in the presenter window.</p><table><tr><td><strong>Mapping</strong></td><td><strong>Meaning</strong></td></tr><tr><td><strong>Slides only</strong></td><td>PDF page <em>N</em> is audience slide <em>N</em>. No notes.</td></tr><tr><td><strong>Split page</strong></td><td>Configured regions of each page are the slide and the notes (<code>left/right</code> and <code>top/bottom</code> presets ship in the UI).</td></tr><tr><td><strong>Paired pages, alternating</strong></td><td>Pages alternate slide, notes, slide, notes… (<code>notes_first</code> reverses it).</td></tr><tr><td><strong>Paired pages, two ranges</strong></td><td>The document is slides followed by notes, or the reverse.</td></tr></table><p>Slide indices are logical, so the mapping, not the PDF, decides how many slides the deck has. Changing the mapping advances the render generation and clamps the current slide into the new space.</p><h2 id="licence">Licence</h2><p>MIT or Apache-2.0. PDFium is BSD-3-Clause and is <em>not</em> vendored here.</p>
         </main>
                 
         <aside class="calepin-website-toc is-floating">
@@ -2688,9 +2595,27 @@ html:not([data-theme]) {
             <nav aria-label="On this page">
                 <ul>
                     
-                    <li class="level-2"><a href="#status">Status</a></li>
+                    <li class="level-2"><a href="#installation">Installation</a></li>
                     
-                    <li class="level-2"><a href="#where-to-go-next">Where to go next</a></li>
+                    <li class="level-3"><a href="#macos">macOS</a></li>
+                    
+                    <li class="level-3"><a href="#windows">Windows</a></li>
+                    
+                    <li class="level-3"><a href="#linux">Linux</a></li>
+                    
+                    <li class="level-3"><a href="#nix">Nix</a></li>
+                    
+                    <li class="level-2"><a href="#keys">Keys</a></li>
+                    
+                    <li class="level-2"><a href="#navigation">Navigation</a></li>
+                    
+                    <li class="level-2"><a href="#annotations">Annotations</a></li>
+                    
+                    <li class="level-2"><a href="#windows-2">Windows</a></li>
+                    
+                    <li class="level-2"><a href="#layouts">Layouts</a></li>
+                    
+                    <li class="level-2"><a href="#speaker-notes">Speaker notes</a></li>
                     
                     <li class="level-2"><a href="#licence">Licence</a></li>
                     
@@ -2699,62 +2624,6 @@ html:not([data-theme]) {
         </aside>
         
     </div>
-    
-    
-    
-        
-        
-            
-            
-        
-        
-        
-    
-        
-        
-            
-            
-        
-        
-            
-        
-        
-    
-        
-        
-        
-            
-        
-        
-    
-        
-        
-        
-            
-        
-        
-    
-
-    
-    <footer class="calepin-website-page-nav" aria-label="Page navigation">
-      <div class="calepin-website-page-nav-inner">
-        
-        <span class="calepin-website-page-nav-empty" aria-hidden="true"></span>
-        
-
-        
-        <a class="calepin-website-page-nav-link calepin-website-page-nav-link--next outline secondary" href="install.html" role="button">
-          <span class="calepin-website-page-nav-content">
-            <span class="calepin-website-page-nav-kind">Next</span>
-            <span class="calepin-website-page-nav-title">Installation</span>
-          </span>
-          <span class="calepin-website-page-nav-arrow" aria-hidden="true">&rarr;</span>
-        </a>
-        
-      </div>
-    </footer>
-    
-    
 
 
 
