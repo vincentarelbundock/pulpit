@@ -1217,8 +1217,30 @@ impl App {
         report
     }
 
+    /// The whole report: what the session is, then every summary, then the
+    /// event log at the back.
+    ///
+    /// Order is the whole usability of this thing. It is read through a box a
+    /// few lines tall, and the event log gains a line per page turn, so with
+    /// the log in the middle — where it used to be — a presenter who had
+    /// turned fifty pages had fifty lines between them and the numbers.
     fn build_diagnostics_report(&self) -> String {
         let mut report = self.diagnostics.to_report();
+        // Which PDF backend is really in use, asked of the supervisor that
+        // knows. The bundle's own field was only ever set by a test, so every
+        // report a user could produce said "pdf backend: " and left the first
+        // question any rendering bug raises unanswered.
+        if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
+            report.push_str(&format!(
+                "pdf backend: {}{}\n",
+                render.backend.as_deref().unwrap_or("not yet reported"),
+                render
+                    .backend_version
+                    .as_deref()
+                    .map(|version| format!(" ({version})"))
+                    .unwrap_or_default(),
+            ));
+        }
         report.push_str("\n## Session inhibition\n");
         report.push_str(&format!("- {}\n", self.inhibitor.state().describe()));
         for attempt in self.inhibitor.state().attempts() {
@@ -1276,6 +1298,9 @@ impl App {
             self.active_layout.name,
             self.active_layout.design_ratio.label()
         ));
+        // Last, deliberately: it is the longest section and the least often
+        // the answer.
+        report.push_str(&self.diagnostics.events_report());
         report
     }
 
@@ -1444,11 +1469,16 @@ impl App {
                         .record_stage(|stages| &mut stages.service_media, start.elapsed());
                 }
                 if changed.any() {
-                    self.diagnostics.note(format!(
-                        "slide {} committed, preview {}",
-                        self.state.committed() + 1,
-                        self.state.preview() + 1
-                    ));
+                    // The log, not the bundle. Ordinary navigation is the one
+                    // event a talk produces hundreds of, and noting each one
+                    // pushed every genuine event — a placement refusal, a
+                    // reload, a worker crash — out of a four-hundred-entry
+                    // ring before the interesting part of a long talk.
+                    tracing::debug!(
+                        committed = self.state.committed() + 1,
+                        preview = self.state.preview() + 1,
+                        "navigated"
+                    );
                 }
                 let start = Instant::now();
                 self.request_renders();
@@ -1939,7 +1969,13 @@ impl App {
                 Task::none()
             }
             Message::CopyDiagnostics => {
-                let report = self.diagnostics.to_report();
+                // The very report the page is showing. It used to copy the
+                // display bundle alone, so everything the application adds to
+                // it — the frame cache, the page turns, the media pipeline,
+                // the active layout — was on screen and absent from the
+                // clipboard, and a pasted "full" report stopped without
+                // saying that it had.
+                let report = self.diagnostics_report();
                 self.notify_done("Diagnostics copied.".to_string());
                 iced::clipboard::write(report)
             }

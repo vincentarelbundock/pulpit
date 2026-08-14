@@ -170,10 +170,30 @@ impl DiagnosticsBundle {
             None => out.push_str("- (no snapshot taken yet)\n"),
         }
 
-        out.push_str("\n## Recent events\n");
+        out
+    }
+
+    /// The event log, rendered separately so a caller can put it *after* its
+    /// own summaries.
+    ///
+    /// It is the longest section by a wide margin and the least often the
+    /// answer, and the report is read through a box a few lines tall: printed
+    /// before the summaries, as it once was, several hundred events stood
+    /// between the reader and every number that had been added for them to
+    /// read. An appendix goes at the back.
+    pub fn events_report(&self) -> String {
+        let mut out = String::from("\n## Recent events\n");
         for event in &self.events {
             out.push_str(&format!("- {event}\n"));
         }
+        out
+    }
+
+    /// The whole bundle, summaries then appendix, for a caller with nothing
+    /// of its own to add.
+    pub fn to_full_report(&self) -> String {
+        let mut out = self.to_report();
+        out.push_str(&self.events_report());
         out
     }
 }
@@ -270,13 +290,34 @@ mod tests {
         );
         bundle.record_outcome(&outcome);
 
-        let report = bundle.to_report();
+        let report = bundle.to_full_report();
         assert!(report.contains("linux/x11"));
         assert!(report.contains("x11-randr"));
         assert!(report.contains("HDMI-1"));
         assert!(report.contains("audience: ACM-1234"));
         assert!(report.contains("topology #3"));
         assert!(report.contains("warning:"));
+    }
+
+    /// The split exists so a caller can put the log after its own summaries.
+    /// If `to_report` ever grew the log back, every such caller would print
+    /// it twice — and a caller that only wanted the summaries would be back
+    /// to burying them.
+    #[test]
+    fn the_event_log_is_an_appendix_not_part_of_the_summary() {
+        let mut bundle = DiagnosticsBundle::new("test");
+        bundle.note("something happened");
+
+        assert!(!bundle.to_report().contains("Recent events"));
+        assert!(bundle.events_report().contains("something happened"));
+        let full = bundle.to_full_report();
+        assert!(full.contains("pulpit diagnostics"));
+        assert!(full.contains("something happened"));
+        assert_eq!(
+            full.matches("## Recent events").count(),
+            1,
+            "the log appears once"
+        );
     }
 
     #[test]
@@ -286,7 +327,7 @@ mod tests {
             bundle.note(format!("event {i}"));
         }
         assert_eq!(bundle.events().count(), MAX_EVENTS);
-        assert!(bundle.to_report().contains("event 1999"));
+        assert!(bundle.to_full_report().contains("event 1999"));
     }
 
     #[test]
