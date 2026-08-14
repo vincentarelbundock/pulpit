@@ -29,6 +29,27 @@
 
         buildTools = with pkgs; [ pkg-config makeWrapper ];
 
+        # Media playback needs an *installed* libmpv and an *installed*
+        # Chromium-family browser; pulpit ships neither engine and discovers
+        # both at run time. On a distribution with a global /usr that
+        # discovery finds whatever the user installed, but `nix run` on a
+        # machine with neither in its profile produces a presenter whose
+        # media overlays silently never start. Declaring them here is what
+        # makes the packaged build self-sufficient.
+        #
+        # Both are wired with `--set-default`, so an explicitly configured
+        # browser or libmpv still wins and neither pin overrides a user's
+        # own choice.
+        mediaRuntimes = {
+          libmpv = "${pkgs.mpv-unwrapped}/lib/libmpv.so.2";
+          browser = pkgs.lib.getExe pkgs.chromium;
+        };
+
+        mediaFlags = withMedia:
+          pkgs.lib.optionalString withMedia
+          ("--set-default PULPIT_LIBMPV ${mediaRuntimes.libmpv} "
+            + "--set-default PULPIT_BROWSER ${mediaRuntimes.browser}");
+
         buildLibraries = with pkgs; [ dbus ] ++ runtimeLibraries;
 
         # PDFium is not vendored: a pinned prebuilt copy is fetched with a
@@ -76,7 +97,12 @@
           meta.license = pkgs.lib.licenses.bsd3;
         };
 
-        pulpit = pkgs.rustPlatform.buildRustPackage {
+        # `withMedia` decides whether the media engines join the closure.
+        # They are large — a Chromium is most of a gigabyte — so the lean
+        # build stays available as `packages.pulpit-minimal` for anyone who
+        # already has a browser and mpv installed, or who does not use media
+        # overlays at all.
+        mkPulpit = { withMedia }: pkgs.rustPlatform.buildRustPackage {
           pname = "pulpit";
           version = "0.1.0";
           src = pkgs.lib.cleanSource ./.;
@@ -107,7 +133,7 @@
 
             wrapProgram $out/bin/pulpit \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibraries}" \
-              --set-default PULPIT_PDFIUM_PATH "${pdfium}/lib"
+              --set-default PULPIT_PDFIUM_PATH "${pdfium}/lib" ${mediaFlags withMedia}
           '';
 
           # The test suite spawns worker processes and touches /dev/shm, both
@@ -122,10 +148,13 @@
             mainProgram = "pulpit";
           };
         };
+
+        pulpit = mkPulpit { withMedia = true; };
       in {
         packages = {
           default = pulpit;
           inherit pulpit pdfium;
+          pulpit-minimal = mkPulpit { withMedia = false; };
         };
 
         apps.default = flake-utils.lib.mkApp { drv = pulpit; };
@@ -142,9 +171,16 @@
 
           PULPIT_PDFIUM_PATH = "${pdfium}/lib";
 
+          # The same media engines the packaged build pins, so `cargo run`
+          # from this shell plays overlays on a machine with neither mpv nor
+          # a browser installed.
+          PULPIT_LIBMPV = mediaRuntimes.libmpv;
+          PULPIT_BROWSER = mediaRuntimes.browser;
+
           shellHook = ''
             echo "pulpit dev shell: cargo run -- deck.pdf"
             echo "PDFium: $PULPIT_PDFIUM_PATH"
+            echo "media:  $PULPIT_LIBMPV, $PULPIT_BROWSER"
           '';
         };
       });
