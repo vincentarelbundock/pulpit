@@ -53,6 +53,10 @@ install -m644 "$root/LICENSES/ICED_AW-LICENSE" \
 install -m644 "$root/LICENSES/LUCIDE-LICENSE" \
   "$out/share/licenses/LUCIDE-LICENSE"
 install -m644 "$root/packaging/pulpit.desktop" "$out/share/"
+# The desktop entry says `Icon=pulpit`, so the icon has to travel with it —
+# otherwise anything installing from this tarball (the AUR package among them)
+# lands a menu entry with no icon.
+install -m644 "$root/packaging/pulpit.svg" "$out/share/"
 
 cat > "$out/pulpit" <<'LAUNCHER'
 #!/usr/bin/env bash

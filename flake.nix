@@ -131,7 +131,9 @@
         apps.default = flake-utils.lib.mkApp { drv = pulpit; };
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = buildTools ++ (with pkgs; [ cargo rustc rustfmt clippy rust-analyzer ]);
+          # nfpm builds the .deb and the .rpm from one description
+          # (`make linux-packages`); rpm is not otherwise needed to develop.
+          nativeBuildInputs = buildTools ++ (with pkgs; [ cargo rustc rustfmt clippy rust-analyzer nfpm ]);
           buildInputs = buildLibraries;
 
           # A cargo-built binary from this shell needs the same loader path

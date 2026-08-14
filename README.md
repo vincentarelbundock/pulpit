@@ -29,7 +29,7 @@ support — which is blocked on Iced exposing an accessibility tree at all.
 ### Nix / NixOS — the supported installation
 
 ```sh
-nix run . -- path/to/deck.pdf        # or: nix profile install .
+nix run . -- path/to/deck.pdf        # or: nix profile add .  (pre-2.30: install)
 nix develop                          # dev shell, then: cargo run -- deck.pdf
 make launch                          # development launcher
 make launch DECK=examples/mosaic.pdf # development launcher, Mosaic example
@@ -40,7 +40,33 @@ PDFium, so it starts with no environment setup at all. This matters on NixOS
 specifically: winit, wgpu and PDFium are all `dlopen`ed at run time, and a
 plain `cargo install` binary finds nothing without a global `/usr/lib`.
 
-### Other distributions
+### Other distributions — the `.deb` and the `.rpm`
+
+Download the package for your distribution from the
+[latest release](https://github.com/vincentarelbundock/pulpit/releases) and
+install it:
+
+```sh
+sudo apt install ./pulpit_*_amd64.deb        # Debian, Ubuntu
+sudo dnf install ./pulpit-*.x86_64.rpm       # Fedora, openSUSE
+sudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst # Arch, Manjaro
+```
+
+Nothing else is needed. The package declares what pulpit actually uses — the
+desktop libraries as dependencies, and a Chromium-family browser as a
+*recommendation*, so media overlays work on a default install instead of
+falling back to posters — and it carries the pinned `libpdfium`, which the
+binary finds by itself.
+
+The Arch package is the exception to the recommendation: the generator emits
+no `optdepend`, so install `chromium` alongside it if you use media overlays.
+The AUR `PKGBUILD` published with each release states it properly.
+
+Flatpak, Snap and AppImage are deliberately not targets: a sandbox blocks the
+browser pulpit has to launch as a child process, and a self-contained image
+cannot carry the graphics drivers, which are the part that actually breaks.
+
+To build from source instead:
 
 ```sh
 ./scripts/fetch-pdfium.sh            # pinned, hash-verified PDFium into ./lib
@@ -49,18 +75,9 @@ cargo run --release -- path/to/deck.pdf
 
 This needs the usual desktop libraries present (`libxcursor`, `libxkbcommon`,
 a Vulkan loader). If they are missing, pulpit says which ones and how to
-install them rather than crashing.
-
-`.deb` and `.rpm` packages are the planned Linux install and do not exist yet.
-They are the right answer because they can declare what pulpit actually
-needs — the desktop libraries as dependencies, and a Chromium-family browser
-as a *recommendation*, so media overlays work on a default install instead of
-falling back to posters. Flatpak, Snap and AppImage are deliberately not
-targets: a sandbox blocks the browser pulpit has to launch as a child
-process, and a self-contained image cannot carry the graphics drivers, which
-are the part that actually breaks. Until the native packages exist,
-`make install` and `scripts/make-bundle.sh` are best-effort helpers and not a
-tested surface.
+install them rather than crashing. `make install` and
+`scripts/make-bundle.sh` are best-effort helpers, not a tested surface;
+`make linux-packages` builds the same packages the release publishes.
 
 `libpdfium` is required, not optional. Every package installs it; if it is
 missing, pulpit tells you where it looked and exits, rather than showing

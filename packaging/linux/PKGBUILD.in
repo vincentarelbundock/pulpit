@@ -1,0 +1,63 @@
+# Maintainer: Vincent Arel-Bundock <vincent@arelbundock.com>
+#
+# The AUR package. Rendered from this template by the release workflow —
+# __VERSION__ and __SHA256__ are substituted from the published tarball — and
+# then pushed to the AUR, so a hand edit of the published PKGBUILD is
+# overwritten on the next release.
+#
+# This exists *as well as* the `.pkg.tar.zst` the release publishes, because
+# the two are not equivalent. nfpm's archlinux packager emits no `optdepend`
+# field at all, so the downloaded package cannot state that a Chromium-family
+# browser is what renders media overlays (SPEC-package.md §2.3). A PKGBUILD
+# can, and the AUR is where Arch users look in any case.
+#
+# It repackages the release tarball rather than building from source: the
+# binary is the same one every other platform ships, and PDFium is a pinned,
+# hash-verified prebuilt that is never fetched at build time (§3).
+
+pkgname=pulpit-bin
+pkgver=__VERSION__
+pkgrel=1
+pkgdesc="PDF presenter built for real projectors"
+arch=('x86_64')
+url="https://github.com/vincentarelbundock/pulpit"
+license=('MIT' 'Apache-2.0')
+
+# The dlopen set (§2.1). winit, wgpu and PDFium resolve these at run time, so
+# having them at build time is not enough.
+depends=('glibc' 'libxkbcommon' 'vulkan-icd-loader' 'libx11' 'libxcursor'
+         'libxrandr' 'libxi' 'libglvnd' 'wayland')
+
+# Without a browser, overlays fall back to their posters and the deck still
+# presents — so this is optional, never required, and pulpit never bundles one.
+optdepends=('chromium: media overlays — animated images, video, interactive HTML')
+
+provides=('pulpit')
+conflicts=('pulpit')
+
+source=("${url}/releases/download/v${pkgver}/pulpit-${pkgver}-x86_64.tar.gz")
+sha256sums=('__SHA256__')
+
+package() {
+  cd "pulpit-${pkgver}-x86_64"
+
+  install -Dm755 bin/pulpit "${pkgdir}/usr/bin/pulpit"
+
+  # The pinned build, not the distribution's own PDFium. The binary derives
+  # this path from its own location, so there is no wrapper and no
+  # environment variable.
+  install -Dm644 lib/libpdfium.so "${pkgdir}/usr/lib/pulpit/libpdfium.so"
+
+  install -Dm644 share/pulpit.desktop \
+    "${pkgdir}/usr/share/applications/pulpit.desktop"
+  install -Dm644 share/pulpit.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/pulpit.svg"
+
+  install -Dm644 share/README.md "${pkgdir}/usr/share/doc/pulpit/README.md"
+  for notice in share/licenses/*; do
+    install -Dm644 "${notice}" \
+      "${pkgdir}/usr/share/licenses/${pkgname}/$(basename "${notice}")"
+  done
+  install -Dm644 share/PDFIUM-LICENSE \
+    "${pkgdir}/usr/share/licenses/${pkgname}/PDFIUM-LICENSE"
+}

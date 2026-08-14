@@ -1,0 +1,108 @@
+# One description, two packages (SPEC-package.md §5.1).
+#
+# `.deb` and `.rpm` are the only formats that can *state* pulpit's dependency
+# structure: the dlopen set as hard dependencies, so the graphics stack lands
+# on the default loader path and no wrapper is needed, and a Chromium-family
+# browser as a *recommendation*, so media overlays work on a default install
+# without the package refusing to install where no browser exists.
+#
+# Rendered by scripts/make-linux-packages.sh, which supplies the environment
+# variables below. Nothing here resolves a version at build time.
+
+name: pulpit
+version: ${PULPIT_VERSION}
+arch: ${PULPIT_ARCH}
+platform: linux
+maintainer: Vincent Arel-Bundock <vincent@arelbundock.com>
+description: |
+  PDF presenter built for real projectors.
+  Pulpit opens a presenter window on the operator's display and an audience
+  window on the projector, and treats connection, disconnection, mirroring,
+  swapping, suspend/resume and mixed DPI as the main problem rather than as
+  polish.
+vendor: Vincent Arel-Bundock
+homepage: https://github.com/vincentarelbundock/pulpit
+license: MIT OR Apache-2.0
+section: graphics
+priority: optional
+
+depends:
+  # The dlopen set (§2.1). winit, wgpu and PDFium resolve these at run time,
+  # so having them at build time is not enough.
+  - libc6
+  - libxkbcommon0
+  - libvulkan1
+  - libx11-6
+  - libxcursor1
+  - libxrandr2
+  - libxi6
+  - libgl1
+  - libwayland-client0
+
+recommends:
+  # §2.3: every media overlay is rendered by an installed Chromium-family
+  # browser, spawned as a direct child with its fds intact. Without one,
+  # overlays fall back to their posters and the deck still presents — so this
+  # is recommended, never required.
+  - chromium
+
+overrides:
+  # Arch gets the dlopen set, but *not* the browser recommendation: nfpm's
+  # archlinux packager writes no `optdepend` field, so `recommends` here would
+  # be silently dropped. packaging/linux/PKGBUILD.in states it instead, which
+  # is why the AUR package exists alongside this one (SPEC-package.md §5.2).
+  archlinux:
+    depends:
+      - glibc
+      - libxkbcommon
+      - vulkan-icd-loader
+      - libx11
+      - libxcursor
+      - libxrandr
+      - libxi
+      - libglvnd
+      - wayland
+
+  rpm:
+    depends:
+      - glibc
+      - libxkbcommon
+      - vulkan-loader
+      - libX11
+      - libXcursor
+      - libXrandr
+      - libXi
+      - libglvnd-glx
+      - libwayland-client
+    recommends:
+      - chromium
+
+contents:
+  - src: ./dist/linux-staging/pulpit
+    dst: /usr/bin/pulpit
+
+  # The pinned build, not the distribution's own PDFium (§5.1). The binary
+  # derives this path from its own location, so there is no wrapper and no
+  # environment variable.
+  - src: ./lib/libpdfium.so
+    dst: /usr/lib/pulpit/libpdfium.so
+
+  - src: ./packaging/pulpit.desktop
+    dst: /usr/share/applications/pulpit.desktop
+  - src: ./packaging/pulpit.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/pulpit.svg
+
+  - src: ./README.md
+    dst: /usr/share/doc/pulpit/README.md
+  - src: ./LICENSES/README.md
+    dst: /usr/share/doc/pulpit/licenses/README.md
+  - src: ./LICENSES/LICENSE-MIT
+    dst: /usr/share/doc/pulpit/licenses/LICENSE-MIT
+  - src: ./LICENSES/LICENSE-APACHE
+    dst: /usr/share/doc/pulpit/licenses/LICENSE-APACHE
+  - src: ./LICENSES/ICED_AW-LICENSE
+    dst: /usr/share/doc/pulpit/licenses/ICED_AW-LICENSE
+  - src: ./LICENSES/LUCIDE-LICENSE
+    dst: /usr/share/doc/pulpit/licenses/LUCIDE-LICENSE
+  - src: ./lib/PDFIUM-LICENSE
+    dst: /usr/share/doc/pulpit/licenses/PDFIUM-LICENSE

@@ -38,7 +38,6 @@ pub enum Action {
     ToggleAudienceFullscreen,
     OpenDocument,
     ReloadDocument,
-    ShowDiagnostics,
     /// The whole deck as thumbnails, to jump by eye rather than by number.
     ShowOverview,
     // Annotations. Arming a tool is a toggle: the same key puts it down
@@ -68,7 +67,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 28] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -85,7 +84,6 @@ impl Action {
         Action::ToggleAudienceFullscreen,
         Action::OpenDocument,
         Action::ReloadDocument,
-        Action::ShowDiagnostics,
         Action::ShowOverview,
         Action::AnnotateInk,
         Action::AnnotateHighlighter,
@@ -118,7 +116,6 @@ impl Action {
             Action::ToggleAudienceFullscreen => "Audience fullscreen",
             Action::OpenDocument => "Open…",
             Action::ReloadDocument => "Reload document",
-            Action::ShowDiagnostics => "Diagnostics",
             Action::ShowOverview => "Slide overview",
             Action::AnnotateInk => "Draw on the slide",
             Action::AnnotateHighlighter => "Highlight on the slide",
@@ -199,7 +196,6 @@ impl Default for Keymap {
                 named("f", Action::ToggleAudienceFullscreen),
                 named("o", Action::OpenDocument),
                 named("F5", Action::ReloadDocument),
-                named("d", Action::ShowDiagnostics),
                 // "j" for jump: the deck at a glance, to land on a slide by
                 // eye rather than by number.
                 named("j", Action::ShowOverview),
@@ -356,7 +352,6 @@ mod tests {
             Action::ToggleAudienceFullscreen,
             Action::OpenDocument,
             Action::ReloadDocument,
-            Action::ShowDiagnostics,
             Action::Quit,
         ];
         for action in actions {

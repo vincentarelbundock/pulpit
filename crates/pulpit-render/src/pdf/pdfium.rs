@@ -143,7 +143,8 @@ impl PdfiumBackend {
     /// Bind to a `libpdfium` shared library.
     ///
     /// Search order: `PULPIT_PDFIUM_PATH`, the directory next to the
-    /// executable, `./lib`, then the system loader path.
+    /// executable, the installed `../lib/pulpit` beside it, `./lib`, then the
+    /// system loader path.
     pub fn bind() -> Result<Self> {
         // PDFium is a process-global, non-reentrant library: one instance per
         // process, initialised once. This is the invariant that makes the
@@ -162,6 +163,15 @@ impl PdfiumBackend {
             if let Some(dir) = exe.parent() {
                 attempts.push(dir.to_path_buf());
                 attempts.push(dir.join("lib"));
+                // A native package installs the binary as `<prefix>/bin/pulpit`
+                // and the pinned library as `<prefix>/lib/pulpit/libpdfium.so`
+                // (SPEC-package.md §1). Deriving that from the executable is
+                // what lets a `.deb` or `.rpm` ship no wrapper and set no
+                // environment variable.
+                if let Some(prefix) = dir.parent() {
+                    attempts.push(prefix.join("lib/pulpit"));
+                    attempts.push(prefix.join("lib64/pulpit"));
+                }
             }
         }
         attempts.push(PathBuf::from("./lib"));

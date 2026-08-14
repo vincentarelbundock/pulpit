@@ -17,7 +17,6 @@
   [`s`], [swap presenter and audience displays],
   [`f`], [toggle audience fullscreen],
   [`o` / `F5`], [open / reload],
-  [`d`], [diagnostics bundle],
   [`q`], [quit],
 )
 
@@ -138,21 +137,29 @@ is always a custom layout, even if it was exported from a built-in.
 
 = Speaker notes
 
-Notes mapping is *explicit and deterministic*. Pulpit does not guess which
-half of a page is notes, and no heuristic may silently override a mapping you
-chose. The active mapping is always visible in the presenter window.
+Notes come in two formats.
 
-#table(
-  columns: (1fr, 2fr),
-  stroke: none,
-  inset: 0.55em,
-  [*Mapping*], [*Meaning*],
-  [*Slides only*], [PDF page _N_ is audience slide _N_. No notes.],
-  [*Split page*], [Configured regions of each page are the slide and the notes (`left/right` and `top/bottom` presets ship in the UI).],
-  [*Paired pages, alternating*], [Pages alternate slide, notes, slide, notes… (`notes_first` reverses it).],
-  [*Paired pages, two ranges*], [The document is slides followed by notes, or the reverse.],
-)
+The first is a *split page*: each PDF page is twice as wide as the slide, with
+the slide on one half and the notes on the other. Pulpit shows the audience
+the slide half and keeps the notes half for you. This is what beamer produces
+with
 
-Slide indices are logical, so the mapping, not the PDF, decides how many
-slides the deck has. Changing the mapping advances the render generation and
-clamps the current slide into the new space.
+```tex
+\setbeameroption{show notes on second screen=right}
+```
+
+A doubled page is recognised on open, with the slide taken to be the left
+half, which is what beamer writes. If your notes are on the left instead,
+*Swap halves* in the presenter window flips it.
+
+Notes can also live on pages of their own, either alternating with the slides
+or gathered after them, and you choose that in the presenter window.
+
+The second is *pdfpc*, where the notes are text stored inside the PDF rather
+than drawn on a page. Anything that writes that format works, including
+beamer with the `pdfpc` package, and
+#link("https://vincentarelbundock.github.io/mosaic")[Mosaic], which embeds
+the notes in the PDF it produces.
+
+Whichever format a deck uses, the one in force is shown in the presenter
+window.

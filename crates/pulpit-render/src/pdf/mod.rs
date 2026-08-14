@@ -60,6 +60,8 @@ pub fn missing_pdfium_message(reason: &str) -> String {
         "",
         "  Nix / NixOS    use the packaged build, which points the binary at a",
         "                 pinned PDFium:   nix run <flake> -- deck.pdf",
+        "  Debian / RPM   install the pulpit package, which carries the pinned",
+        "                 library in <prefix>/lib/pulpit",
         "  From source    ./scripts/fetch-pdfium.sh   (pinned, hash-verified)",
         "  Anywhere       PULPIT_PDFIUM_PATH=/dir/with/libpdfium pulpit deck.pdf",
         "",

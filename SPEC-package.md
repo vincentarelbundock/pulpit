@@ -49,8 +49,10 @@ with a global `/usr/lib` and fails on NixOS.
   which would put something on the projector that is not the presenter's deck.
 - The fixture backend is reachable only when a test asks for it by name, via
   `PULPIT_FORCE_FIXTURE_BACKEND`.
-- Search order: `PULPIT_PDFIUM_PATH`, the directory beside the executable,
-  `./lib`, then the system loader path.
+- Search order: `PULPIT_PDFIUM_PATH`, the directory beside the executable, the
+  installed `<prefix>/lib/pulpit` derived from it, `./lib`, then the system
+  loader path. The derived step is what lets a `.deb` or `.rpm` install to
+  §1's layout and start with no wrapper and no environment variable.
 
 ### 2.3 A browser is a *recommended* dependency
 
@@ -91,7 +93,7 @@ into the repository.
 ## 4. Nix is the supported installation
 
 ```sh
-nix run . -- deck.pdf     # or: nix profile install .
+nix run . -- deck.pdf     # or: nix profile add .   (`install` before Nix 2.30)
 nix develop               # dev shell
 ```
 
@@ -121,11 +123,31 @@ normal executable pulpit can spawn as a direct child; and the desktop entry,
 icon and uninstall are what the format already does.
 
 - Both SHOULD be generated from one description in CI rather than maintained
-  twice.
+  twice. They are: `packaging/linux/nfpm.yaml`, built by
+  `scripts/make-linux-packages.sh` (`make linux-packages`), with per-packager
+  dependency names as the only overrides.
 - Both MUST install the *pinned* `libpdfium` into `lib/pulpit/`. A
   distribution's own PDFium is not the build pulpit is tested against.
 
-### 5.2 Flatpak, Snap and AppImage are rejected
+### 5.2 Arch: the same description, plus a PKGBUILD
+
+The same description also emits an Arch `.pkg.tar.zst`, which `pacman -U`
+installs with the dlopen set as dependencies. It is **not** the whole answer,
+for one specific reason: the generator emits no `optdepend` field, so that
+package cannot state §2.3's browser recommendation — the exact defect that
+disqualifies the formats in §5.3.
+
+- `packaging/linux/PKGBUILD.in` therefore carries the recommendation as a real
+  `optdepends`, and the AUR is where Arch users look in any case. It
+  repackages the published tarball rather than building from source, so the
+  binary and the pinned PDFium are the ones every other platform ships.
+- The release renders it against the published tarball's hash and attaches it
+  as an asset. Pushing to the AUR needs an account and an SSH key that CI does
+  not have, which leaves it where winget and Scoop are: written, not submitted.
+- If the generator gains `optdepend`, the downloaded package becomes complete
+  on its own and the PKGBUILD becomes a convenience rather than the fix.
+
+### 5.3 Flatpak, Snap and AppImage are rejected
 
 A decision, not a deferral:
 
@@ -140,7 +162,7 @@ A decision, not a deferral:
 - Neither can express a *recommended* dependency, so neither can promise a
   working HTML overlay on a default install.
 
-### 5.3 Building from source
+### 5.4 Building from source
 
 ```sh
 ./scripts/fetch-pdfium.sh
@@ -243,7 +265,7 @@ packaging problem MUST be diagnosable from the diagnostics report a user sends.
 ## 9. Deliberately not done
 
 - Vendoring a browser engine, a graphics stack, or PDFium sources.
-- Flatpak, Snap and AppImage (§5.2).
+- Flatpak, Snap and AppImage (§5.3).
 - Resolving any dependency version at build time rather than from a pin.
 - Installing helper executables beside the binary; workers are roles of it.
 
@@ -253,7 +275,9 @@ packaging problem MUST be diagnosable from the diagnostics report a user sends.
 |---|---|---|---|
 | Nix | yes | yes | yes |
 | Linux tarball | yes | yes | no |
-| Linux `.deb`/`.rpm` | **no** | — | — |
+| Linux `.deb`/`.rpm` | yes | yes — the `.deb` is installed and run | **no** |
+| Arch `.pkg.tar.zst` | yes | built only, never installed | **no** |
+| AUR `PKGBUILD` | rendered | **no** — never submitted | no |
 | macOS `.app` + `.dmg` | yes | yes | **no** |
 | Homebrew cask | yes | **no** — skipped for prereleases | no |
 | Windows zip + installer | yes | yes | **no** |
@@ -310,17 +334,22 @@ Ordered. Each step is a thing only the maintainer can do.
 
 ### Linux distribution
 
-9. **`.deb` and `.rpm`** (§5.1). This is the primary Linux deliverable, not a
-   nice-to-have: until it exists every Linux user outside Nix installs from
-   source. Generate both from one description in CI, with the `Depends` and
-   `Recommends` lines above.
+9. **Submit `pulpit-bin` to the AUR.** The rendered `PKGBUILD` ships as a
+   release asset; pushing it needs an AUR account and an SSH key. Until then
+   Arch users install the `.pkg.tar.zst`, which cannot state the browser
+   recommendation (§5.2).
+10. **Install the `.rpm` on a real Fedora machine.** Both packages are built
+    and published (§5.1), and the release workflow installs the `.deb`, runs
+    the binary and checks the installed layout — but the `.rpm` is only
+    *generated* on Debian, never installed anywhere. Its dependency names are
+    the one part of the description that no CI step exercises.
 
 ### Later
 
-10. **Multi-architecture**: macOS Intel needs a second pinned PDFium and a
+11. **Multi-architecture**: macOS Intel needs a second pinned PDFium and a
     `lipo` pass; Windows arm64 needs its own build. Both pins already exist in
     `scripts/fetch-pdfium.sh`.
-11. **`App Paths`** registry lookup for browsers installed in unusual places
+12. **`App Paths`** registry lookup for browsers installed in unusual places
     (§6.2).
-12. Make an installed PDFium unconditional on the non-Nix paths: `make install`
+13. Make an installed PDFium unconditional on the non-Nix paths: `make install`
     and `make bundle` still leave the packager to run `make pdfium` first.

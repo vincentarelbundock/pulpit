@@ -135,7 +135,6 @@ pub enum Message {
     BindUnboundKey(Action),
     /// Stop offering to bind it.
     ForgetUnboundKey,
-    ToggleDiagnostics,
     /// The left mouse button came up, anywhere. Ends a slider drag.
     PointerReleased,
     /// The overview was scrolled; the grid builds only what is on screen.
@@ -465,7 +464,6 @@ pub struct App {
     /// for, never assumed: it decides how wide a panel's frame has to be to
     /// look sharp, and guessing high is four times the pixels for nothing.
     presenter_scale: f32,
-    pub show_diagnostics: bool,
     pub last_poll: Instant,
     pub now: Instant,
     watcher: Option<DocumentWatcher>,
@@ -835,7 +833,6 @@ impl App {
             // render is asked for.
             presenter_size: Size::new(1422.0, 800.0),
             presenter_scale: 1.0,
-            show_diagnostics: false,
             last_poll: now,
             now,
             watcher: None,
@@ -1843,10 +1840,6 @@ impl App {
                 self.on_transport_request(request);
                 Task::none()
             }
-            Message::ToggleDiagnostics => {
-                self.show_diagnostics = !self.show_diagnostics;
-                Task::none()
-            }
             Message::PointerReleased => {
                 // The thumbnail belongs to the drag and nothing else: the
                 // moment the button is up it goes, whether the slider took
@@ -2728,7 +2721,6 @@ impl App {
                 let actions = self.documents.open_initial(now);
                 self.run_document_actions(actions)
             }
-            Action::ShowDiagnostics => self.update(Message::ToggleDiagnostics),
             Action::ShowOverview => self.update(Message::ToggleOverview),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
             Action::AnnotateHighlighter => self.arm_from_key(AnnotationTool::Highlighter),

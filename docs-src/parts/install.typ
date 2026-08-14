@@ -77,8 +77,11 @@ nix run github:vincentarelbundock/pulpit -- path/to/deck.pdf
 And this installs it for your user, so it stays:
 
 ```sh
-nix profile install github:vincentarelbundock/pulpit
+nix profile add github:vincentarelbundock/pulpit
 ```
+
+On Nix older than 2.30 the subcommand is `nix profile install`, which newer
+versions still accept with a deprecation warning.
 
 The packaged build starts with no setup at all: it already knows where to find
 the libraries it loads while running. That matters most on NixOS, where those

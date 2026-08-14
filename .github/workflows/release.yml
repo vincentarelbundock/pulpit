@@ -8,9 +8,10 @@ name: Release
 # relocatable directory carrying libpdfium and a launcher that sets the loader
 # path. That bundle, not the executable, is the artifact.
 #
-# `.deb` and `.rpm` remain the intended Linux deliverable (SPEC-package.md): only a
-# native package can declare the dlopen set as dependencies and a
-# Chromium-family browser as a recommendation.
+# `.deb` and `.rpm` are the *primary* Linux deliverable (SPEC-package.md §5.1):
+# only a native package can declare the dlopen set as dependencies and a
+# Chromium-family browser as a recommendation. Both are generated from one
+# description, packaging/linux/nfpm.yaml, rather than maintained twice.
 
 on:
   push:
@@ -25,7 +26,7 @@ env:
 
 jobs:
   bundle:
-    name: Linux x86_64 bundle
+    name: Linux x86_64 packages
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +57,62 @@ jobs:
           sha256sum "${archive}" > "${archive}.sha256"
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
 
+      # Pinned deliberately, like every other dependency here: the version is
+      # updated by editing this file, never resolved at build time. The hash is
+      # checked so a replaced asset fails the release instead of building the
+      # packages with an unverified tool.
+      - name: Install nfpm
+        env:
+          NFPM_VERSION: 2.47.0
+          NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
+        run: |
+          set -eu
+          url="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o /tmp/nfpm.tar.gz "$url"
+          echo "${NFPM_SHA256}  /tmp/nfpm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/nfpm.tar.gz -C /tmp nfpm
+          sudo install -m755 /tmp/nfpm /usr/local/bin/nfpm
+
+      # The primary Linux deliverable. `bundle` already built the binary and
+      # fetched the pinned PDFium, so this only lays them out and describes
+      # the dependencies.
+      - name: Build the .deb and .rpm
+        run: make linux-packages
+
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          for artifact in *.deb *.rpm *.pkg.tar.zst; do
+            sha256sum "$artifact" > "$artifact.sha256"
+          done
+          ls -l
+
+      # The AUR PKGBUILD, rendered from the template against the tarball
+      # actually published. Publishing it needs an AUR account and an SSH key,
+      # which CI does not have, so it ships as a release asset for the
+      # maintainer to push — the same position winget and Scoop are in.
+      - name: Render the AUR PKGBUILD
+        run: |
+          set -eu
+          version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
+          checksum="$(cut -d' ' -f1 < "${{ steps.archive.outputs.archive }}.sha256")"
+          sed -e "s/__VERSION__/${version}/g" -e "s/__SHA256__/${checksum}/g" \
+            packaging/linux/PKGBUILD.in > dist/PKGBUILD
+          cat dist/PKGBUILD
+
+      # Proves the package is installable and that the installed binary finds
+      # its PDFium with no wrapper and no environment variable — the whole
+      # point of the layout in §1.
+      - name: Install the .deb and run it
+        run: |
+          set -eu
+          sudo apt-get install -y ./dist/*.deb
+          pulpit --version
+          test -f /usr/lib/pulpit/libpdfium.so
+          test -f /usr/share/applications/pulpit.desktop
+          sudo apt-get remove -y pulpit
+
       - uses: softprops/action-gh-release@v2
         with:
           # A tag with a hyphen is a rehearsal: publish the artifacts, but
@@ -64,8 +121,27 @@ jobs:
           files: |
             ${{ steps.archive.outputs.archive }}
             ${{ steps.archive.outputs.archive }}.sha256
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
+            dist/*.pkg.tar.zst
+            dist/*.pkg.tar.zst.sha256
+            dist/PKGBUILD
           body: |
             See CHANGELOG.md.
+
+            On Debian or Ubuntu install the `.deb`, on Fedora or openSUSE the
+            `.rpm`, and on Arch the `.pkg.tar.zst`. They are the supported
+            Linux packages: they pull in the graphics libraries pulpit loads at
+            run time, carry the pinned libpdfium, and install the desktop entry
+            and icon.
+
+            The `.deb` and `.rpm` additionally *recommend* a Chromium-family
+            browser, which is what renders media overlays. The Arch package
+            cannot say so — the tooling emits no `optdepend` — so install
+            `chromium` alongside it, or use the AUR `pulpit-bin`, whose
+            PKGBUILD carries the optional dependency.
 
             The tarball is a relocatable directory: unpack it and run
             `pulpit/pulpit deck.pdf`. It carries its own libpdfium. The usual
@@ -73,7 +149,7 @@ jobs:
             must be present on the machine; Pulpit says which ones are missing
             rather than crashing.
 
-            On NixOS, use the flake instead: `nix profile install .`
+            On NixOS, use the flake instead: `nix profile add .`
 
   macos:
     name: macOS arm64 app

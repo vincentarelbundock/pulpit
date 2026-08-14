@@ -1,5 +1,7 @@
 target/
 lib/
+# Build output: bundles, .app, the Windows artifacts, the .deb and the .rpm.
+dist/
 .calepin/
 result
 result-*

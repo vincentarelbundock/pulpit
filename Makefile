@@ -27,7 +27,7 @@ PDFIUM_LIB := lib/pdfium.dll
 endif
 
 .PHONY: help all build launch test check lint pdfium install uninstall bundle \
-        app icons windows website serve version bump release clean
+        linux-packages app icons windows website serve version bump release clean
 
 help:  ## Display this help screen
 	@echo -e "\033[1mAvailable commands:\033[0m\n"
@@ -69,6 +69,12 @@ pdfium: $(PDFIUM_LIB)  ## Fetch the pinned, hash-verified PDFium into ./lib
 bundle: build $(PDFIUM_LIB)  ## Build a relocatable directory with libpdfium and a launcher
 	./scripts/make-bundle.sh
 
+# The primary Linux deliverable: a .deb and a .rpm generated from one
+# description, declaring the dlopen set as dependencies and a Chromium-family
+# browser as a recommendation. Needs nfpm, which the dev shell carries.
+linux-packages: build $(PDFIUM_LIB)  ## Build the .deb and .rpm into dist/ (Linux only)
+	./scripts/make-linux-packages.sh
+
 # The macOS application bundle: ad-hoc signed, with libpdfium beside the
 # executable where the PDFium search order already looks. macOS only.
 app: build $(PDFIUM_LIB)  ## Build and ad-hoc sign dist/Pulpit.app (macOS only)
@@ -106,7 +112,7 @@ website:  ## Compile docs-src/ into docs/ with Calepin
 	calepin compile docs-src docs
 
 serve: website  ## Build and serve the website at http://$(HOST):$(PORT)
-	calepin serve docs --host $(HOST) --port $(PORT)
+	calepin serve docs --host $(HOST) --port $(PORT) --open
 
 # ==============================================================================
 # Installation targets
@@ -167,7 +173,7 @@ install:  ## Install the built binary and its data files under $(PREFIX)
 		install -Dm644 lib/PDFIUM-LICENSE \
 			$(DESTDIR)$(PREFIX)/share/doc/pulpit/PDFIUM-LICENSE 2>/dev/null || true; \
 		echo "installed libpdfium into $(PREFIX)/lib/pulpit"; \
-		echo "run with PULPIT_PDFIUM_PATH=$(PREFIX)/lib/pulpit"; \
+		echo "the binary finds it there by itself; no PULPIT_PDFIUM_PATH needed"; \
 	else \
 		echo "no lib/libpdfium.so — run 'make pdfium' first for real rendering"; \
 	fi
