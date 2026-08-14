@@ -1138,6 +1138,24 @@ impl App {
         report
     }
 
+    /// Which PDF backend is really in use, asked of the supervisor that knows.
+    ///
+    /// The bundle carries a field of its own for this, but only a test ever
+    /// set it, so every report a user could produce said "pdf backend: " and
+    /// left the first question any rendering bug raises unanswered.
+    fn pdf_backend(&self) -> String {
+        let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) else {
+            return "no renderer".into();
+        };
+        match (render.backend, render.backend_version) {
+            (Some(backend), Some(version)) => format!("{backend} ({version})"),
+            (Some(backend), None) => backend,
+            // A worker announces its backend on the first thing it is asked
+            // to do, so this is the honest answer before any document opens.
+            (None, _) => "not yet reported".into(),
+        }
+    }
+
     /// Where a page turn's time went, in the terms a presenter would use.
     ///
     /// Settled is the honest headline — the last surface to answer — and the
@@ -1180,13 +1198,25 @@ impl App {
                 self.latency.abandoned(),
             ));
         }
+        // Submitted to frame in hand, so the queue wait is in it: that wait
+        // is part of what a turn spends, and hiding it would flatter the
+        // number that matters.
         let render = self.latency.render();
         report.push_str(&format!(
-            "- renders: {} finished, {} typical, {} worst\n",
+            "- renders a window waited for: {} finished, {} typical, {} worst\n",
             render.calls,
             millis(render.mean()),
             millis(render.worst),
         ));
+        let warming = self.latency.warming();
+        if warming.calls > 0 {
+            report.push_str(&format!(
+                "- deck warming, which nobody waits for: {} finished, {} typical, {} worst\n",
+                warming.calls,
+                millis(warming.mean()),
+                millis(warming.worst),
+            ));
+        }
         // Everything below happens on the event loop, where the interface is
         // not drawing. That is the whole reason to count it separately from
         // a render, which happens in another process entirely.
@@ -1225,22 +1255,7 @@ impl App {
     /// the log in the middle — where it used to be — a presenter who had
     /// turned fifty pages had fifty lines between them and the numbers.
     fn build_diagnostics_report(&self) -> String {
-        let mut report = self.diagnostics.to_report();
-        // Which PDF backend is really in use, asked of the supervisor that
-        // knows. The bundle's own field was only ever set by a test, so every
-        // report a user could produce said "pdf backend: " and left the first
-        // question any rendering bug raises unanswered.
-        if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
-            report.push_str(&format!(
-                "pdf backend: {}{}\n",
-                render.backend.as_deref().unwrap_or("not yet reported"),
-                render
-                    .backend_version
-                    .as_deref()
-                    .map(|version| format!(" ({version})"))
-                    .unwrap_or_default(),
-            ));
-        }
+        let mut report = self.diagnostics.to_report_with_backend(&self.pdf_backend());
         report.push_str("\n## Session inhibition\n");
         report.push_str(&format!("- {}\n", self.inhibitor.state().describe()));
         for attempt in self.inhibitor.state().attempts() {
@@ -1257,9 +1272,15 @@ impl App {
             self.cache.budget_bytes() as f64 / 1_048_576.0,
             stats.evictions,
         ));
+        // Hits and misses are deliberately absent. They are counted only by
+        // `FrameCache::get`, which the application never calls — every
+        // lookup goes through `best_exact`, `best_fitting` or `contains` —
+        // so the pair could only ever print "0 hits, 0 misses", and the
+        // specification's own rule is that a permanently-zero figure is
+        // worse than its absence.
         report.push_str(&format!(
-            "- {} hits, {} misses, {} rejected as larger than the budget\n",
-            stats.hits, stats.misses, stats.rejected,
+            "- {} rejected as larger than the budget\n",
+            stats.rejected,
         ));
         if stats.pinned_overcommit_bytes > 0 {
             report.push_str(&format!(
@@ -3156,15 +3177,19 @@ impl App {
                 // thread's time its pixels cost to take delivery of. Recorded
                 // before the early returns below: a frame that arrives too
                 // late to be wanted was still rendered and still copied.
+                // Whether this was warming work has to be read before
+                // `take_pending`, which forgets it.
+                let was_thumbnail = self.thumbnail_requests.contains(&job.id);
+                // How long the render itself took, and how much of this
+                // thread's time its pixels cost to take delivery of. Recorded
+                // before the early returns below: a frame that arrives too
+                // late to be wanted was still rendered and still copied.
                 if let Some(submitted) = self.submitted_at.remove(&job.id) {
-                    self.latency.note_render(submitted.elapsed());
+                    self.latency.note_render(submitted.elapsed(), was_thumbnail);
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());
                 }
-                // Whether this was warming work has to be read before
-                // `take_pending`, which forgets it.
-                let was_thumbnail = self.thumbnail_requests.contains(&job.id);
                 let Some(key) = self.take_pending(job.id) else {
                     return;
                 };

@@ -151,7 +151,8 @@ pub struct Latency {
     abandoned: u64,
     stages: Stages,
     copies: Copies,
-    /// Render latency: submitted to frame in hand.
+    /// Render latency for a frame a window is waiting for: submitted to
+    /// frame in hand, so it includes the wait in the queue.
     ///
     /// There is deliberately no upload stage beside it. Which pictures a
     /// window has on the GPU is that window's own widget state, reachable
@@ -159,6 +160,16 @@ pub struct Latency {
     /// slow upload to the log where it happens rather than posting a number
     /// here that would have to be smuggled across the view boundary.
     render: Stage,
+    /// Render latency for deck warming, kept apart from the above.
+    ///
+    /// A deck of seven hundred pages warms seven hundred thumbnails, each
+    /// queued behind all the others, so most of them wait seconds by design
+    /// and nobody is waiting on any of them. Averaged together with the live
+    /// frames — which is how this was first reported — the handful of numbers
+    /// that describe a page turn vanished into hundreds that describe idle
+    /// background work, and the report said renders take half a second when
+    /// no page turn had waited anything like that.
+    warming: Stage,
 }
 
 impl Latency {
@@ -245,8 +256,14 @@ impl Latency {
     }
 
     /// Note how long a render took, from submission to the frame in hand.
-    pub fn note_render(&mut self, elapsed: Duration) {
-        self.render.record(elapsed);
+    ///
+    /// `warming` separates work nobody is waiting for from work a window is.
+    pub fn note_render(&mut self, elapsed: Duration, warming: bool) {
+        if warming {
+            self.warming.record(elapsed);
+        } else {
+            self.render.record(elapsed);
+        }
     }
 
     pub fn turns(&self) -> &VecDeque<Turn> {
@@ -267,6 +284,10 @@ impl Latency {
 
     pub fn render(&self) -> &Stage {
         &self.render
+    }
+
+    pub fn warming(&self) -> &Stage {
+        &self.warming
     }
 
     /// The typical and worst settled turn, over what has been remembered.

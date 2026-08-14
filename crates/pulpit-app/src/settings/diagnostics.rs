@@ -134,11 +134,18 @@ impl DiagnosticsBundle {
 
     /// Render the bundle as plain text for a bug report.
     pub fn to_report(&self) -> String {
+        self.to_report_with_backend(&self.pdf_backend)
+    }
+
+    /// The bundle, with the PDF backend supplied by a caller that can ask the
+    /// renderer rather than from this struct's own field, which nothing in
+    /// the application ever sets.
+    pub fn to_report_with_backend(&self, pdf_backend: &str) -> String {
         let mut out = String::new();
         out.push_str("# pulpit diagnostics\n\n");
         out.push_str(&format!("platform: {}\n", self.platform));
         out.push_str(&format!("display backend: {}\n", self.display_backend));
-        out.push_str(&format!("pdf backend: {}\n", self.pdf_backend));
+        out.push_str(&format!("pdf backend: {pdf_backend}\n"));
         out.push_str(&format!("capabilities: {}\n", self.capabilities));
         out.push_str(&format!("version: {}\n\n", env!("CARGO_PKG_VERSION")));
 
