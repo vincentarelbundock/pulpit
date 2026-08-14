@@ -4838,6 +4838,30 @@ impl App {
         self.audience_size.width.max(320.0) as u32
     }
 
+    /// The pages the presenter's slide panels actually draw, most urgent
+    /// first.
+    ///
+    /// The panels are Previous, Current and Next, and every one of them is
+    /// relative to the *committed* page — `slides.current` in the widget
+    /// model — so three pages is the whole of what the window can show. The
+    /// preview position is only a slide panel's business while the presenter
+    /// is browsing ahead of the room, and its notes pane asks separately.
+    ///
+    /// This used to be [`priority_slides`](pulpit_core::PresentationState::priority_slides),
+    /// which reaches two pages either side. That list is the renderer's
+    /// warming order and a fine one, but as a source of *panel* renders it
+    /// bought two frames per navigation that no layout draws — at nine
+    /// megabytes each, on a deck where the cache was already full and
+    /// evicting. They were rendered, cached, and thrown away before anything
+    /// could use them.
+    fn panel_pages(&self) -> Vec<usize> {
+        panel_pages(
+            self.state.committed(),
+            self.state.preview(),
+            self.state.slide_count(),
+        )
+    }
+
     /// The one width every live presenter slide panel is rendered at.
     fn presenter_width(&self) -> u32 {
         canonical_presenter_width(self.preview_size.width, self.presenter_scale)
@@ -5343,7 +5367,7 @@ impl App {
         // page is already prefetched and the stand-in is never displayed.
         let mut wanted = live_slide_plan(
             committed,
-            self.state.priority_slides(),
+            self.panel_pages(),
             audience_width,
             presenter_width,
             (coarse_width < audience_width && self.wants_coarse_stand_in()).then_some(coarse_width),
@@ -6160,6 +6184,33 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
     }
 }
 
+/// The pages the presenter's slide panels draw, most urgent first.
+///
+/// Pure so the rule is testable, and because it is a claim about the *view*
+/// that lives in the render plan: if the panels ever draw a fourth page, this
+/// and they must be changed together, and a test is the cheapest way to be
+/// told about it.
+fn panel_pages(committed: usize, preview: usize, count: usize) -> Vec<usize> {
+    let mut pages: Vec<usize> = Vec::with_capacity(5);
+    let mut push = |slide: usize, pages: &mut Vec<usize>| {
+        if slide < count && !pages.contains(&slide) {
+            pages.push(slide);
+        }
+    };
+    push(committed, &mut pages);
+    push(committed + 1, &mut pages);
+    if let Some(previous) = committed.checked_sub(1) {
+        push(previous, &mut pages);
+    }
+    // Browsing ahead moves the preview without moving the room. Asked for
+    // only then, so the ordinary case stays at three pages.
+    if preview != committed {
+        push(preview, &mut pages);
+        push(preview + 1, &mut pages);
+    }
+    pages
+}
+
 /// Whether a window holding `holding` should take a coarse stand-in for
 /// `wanted_slide` if one exists.
 ///
@@ -6215,6 +6266,32 @@ mod canonical_frame_tests {
             width,
             height: width / 2,
         }
+    }
+
+    /// Three panels, three pages. The renderer's warming order reaches two
+    /// either side, which is right for warming and wrong here: those frames
+    /// are nine megabytes each and no layout draws them.
+    #[test]
+    fn only_the_pages_a_panel_can_draw_are_rendered_at_panel_size() {
+        assert_eq!(super::panel_pages(10, 10, 100), vec![10, 11, 9]);
+        // The deck's edges, where a neighbour does not exist.
+        assert_eq!(super::panel_pages(0, 0, 100), vec![0, 1]);
+        assert_eq!(super::panel_pages(99, 99, 100), vec![99, 98]);
+    }
+
+    /// Browsing ahead is the one case that needs more, and only while it
+    /// lasts: the room stays where it is and the presenter looks on.
+    #[test]
+    fn browsing_ahead_asks_for_the_pages_being_browsed() {
+        let pages = super::panel_pages(10, 20, 100);
+        assert!(pages.starts_with(&[10, 11, 9]), "the room comes first");
+        assert!(pages.contains(&20) && pages.contains(&21));
+        // And nothing twice, however the two positions overlap.
+        let mut sorted = pages.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), pages.len());
+        assert_eq!(super::panel_pages(10, 11, 100), vec![10, 11, 9, 12]);
     }
 
     #[test]
