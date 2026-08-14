@@ -1205,37 +1205,36 @@ impl App {
         // Submitted to frame in hand, so the queue wait is in it: that wait
         // is part of what a turn spends, and hiding it would flatter the
         // number that matters.
-        let render = self.latency.render();
-        report.push_str(&format!(
-            "- renders a window waited for: {} finished, {} typical, {} worst\n",
-            render.calls,
-            millis(render.mean()),
-            millis(render.worst),
-        ));
-        let warming = self.latency.warming();
-        if warming.calls > 0 {
-            report.push_str(&format!(
-                "- deck warming, which nobody waits for: {} finished, {} typical, {} worst\n",
-                warming.calls,
-                millis(warming.mean()),
-                millis(warming.worst),
-            ));
-        }
-        // The half of that wait a worker was actually working. Everything
-        // above it and below the figures above is time a job spent queued —
-        // and a deep queue and a slow rasteriser call for opposite fixes.
-        if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
-            if render.worked_count > 0 {
-                let mean = render
-                    .worked_total
-                    .checked_div(render.worked_count as u32)
-                    .unwrap_or_default();
-                report.push_str(&format!(
-                    "- of which a worker was working: {} typical, {} worst (the rest was queued)\n",
-                    millis(mean),
-                    millis(render.worked_worst),
-                ));
+        for (name, total, worked) in [
+            (
+                "renders a window waited for",
+                self.latency.render(),
+                self.latency.render_worked(),
+            ),
+            (
+                "deck warming, which nobody waits for",
+                self.latency.warming(),
+                self.latency.warming_worked(),
+            ),
+        ] {
+            if total.calls == 0 {
+                continue;
             }
+            report.push_str(&format!(
+                "- {name}: {} finished, {} typical, {} worst\n",
+                total.calls,
+                millis(total.mean()),
+                millis(total.worst),
+            ));
+            // The worker's share, and by subtraction ours. A deep queue and a
+            // slow rasteriser are one number without this split, and they
+            // call for opposite fixes.
+            report.push_str(&format!(
+                "    held by a worker {} typical, {} worst; queued here {} typical\n",
+                millis(worked.mean()),
+                millis(worked.worst),
+                millis(total.mean().saturating_sub(worked.mean())),
+            ));
         }
         // Everything below happens on the event loop, where the interface is
         // not drawing. That is the whole reason to count it separately from
@@ -3207,20 +3206,16 @@ impl App {
                 tracing::debug!(name, reason, "attachment unavailable");
                 self.media.attachment_failed(&name, &reason);
             }
-            RenderEvent::Frame { job, frame } => {
-                // How long the render itself took, and how much of this
-                // thread's time its pixels cost to take delivery of. Recorded
-                // before the early returns below: a frame that arrives too
-                // late to be wanted was still rendered and still copied.
+            RenderEvent::Frame { job, frame, worked } => {
                 // Whether this was warming work has to be read before
                 // `take_pending`, which forgets it.
                 let was_thumbnail = self.thumbnail_requests.contains(&job.id);
-                // How long the render itself took, and how much of this
-                // thread's time its pixels cost to take delivery of. Recorded
+                // The whole wait and the worker's share of it. Recorded
                 // before the early returns below: a frame that arrives too
                 // late to be wanted was still rendered and still copied.
                 if let Some(submitted) = self.submitted_at.remove(&job.id) {
-                    self.latency.note_render(submitted.elapsed(), was_thumbnail);
+                    self.latency
+                        .note_render(submitted.elapsed(), worked, was_thumbnail);
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());

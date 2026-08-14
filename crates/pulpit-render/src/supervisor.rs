@@ -117,6 +117,9 @@ pub enum RenderEvent {
     Frame {
         job: RenderJob,
         frame: Frame,
+        /// How long the worker held this job, from the moment it was
+        /// handed over. Everything before that was queueing here.
+        worked: Duration,
     },
     Failed {
         job: RenderJob,
@@ -1047,11 +1050,13 @@ impl RendererSupervisor {
                         worker.region.as_slice()[..bytes as usize].to_vec()
                     }
                 };
-                self.counters.record_worked(in_flight.dispatched.elapsed());
+                let worked = in_flight.dispatched.elapsed();
+                self.counters.record_worked(worked);
                 self.counters.record_frame(width, height, quality);
                 events.push(RenderEvent::Frame {
                     job: in_flight.job,
                     frame: Frame::new(width, height, pixels),
+                    worked,
                 });
             }
             WorkerPayload::Response(Response::RenderFailed { id, reason, .. }) => {

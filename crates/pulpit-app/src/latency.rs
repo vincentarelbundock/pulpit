@@ -192,6 +192,11 @@ pub struct Latency {
     /// slow upload to the log where it happens rather than posting a number
     /// here that would have to be smuggled across the view boundary.
     render: Stage,
+    /// The part of `render` a worker was holding the job. What is left is the
+    /// wait in this process's queue.
+    render_worked: Stage,
+    /// The same split for warming.
+    warming_worked: Stage,
     /// Render latency for deck warming, kept apart from the above.
     ///
     /// A deck of seven hundred pages warms seven hundred thumbnails, each
@@ -287,14 +292,20 @@ impl Latency {
         self.copies.bytes += bytes;
     }
 
-    /// Note how long a render took, from submission to the frame in hand.
+    /// Note how long a render took, from submission to the frame in hand,
+    /// and how much of that a worker was holding it.
     ///
     /// `warming` separates work nobody is waiting for from work a window is.
-    pub fn note_render(&mut self, elapsed: Duration, warming: bool) {
+    /// The difference between the two figures is the wait in this process's
+    /// own queue, which is the only part anything here can do something
+    /// about.
+    pub fn note_render(&mut self, elapsed: Duration, worked: Duration, warming: bool) {
         if warming {
             self.warming.record(elapsed);
+            self.warming_worked.record(worked);
         } else {
             self.render.record(elapsed);
+            self.render_worked.record(worked);
         }
     }
 
@@ -320,6 +331,14 @@ impl Latency {
 
     pub fn warming(&self) -> &Stage {
         &self.warming
+    }
+
+    pub fn render_worked(&self) -> &Stage {
+        &self.render_worked
+    }
+
+    pub fn warming_worked(&self) -> &Stage {
+        &self.warming_worked
     }
 
     /// The typical and worst settled turn, over what has been remembered.

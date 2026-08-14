@@ -124,7 +124,7 @@ fn renders_pages_through_worker_processes() {
     let rendered = frames(&events);
     assert_eq!(rendered.len(), 3, "all three pages came back: {events:?}");
     for event in &events {
-        if let RenderEvent::Frame { job, frame } = event {
+        if let RenderEvent::Frame { job, frame, .. } = event {
             assert_eq!(frame.width, job.width);
             assert_eq!(frame.pixels.len(), 320 * 180 * 4);
             assert!(
