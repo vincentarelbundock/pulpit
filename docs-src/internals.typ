@@ -163,6 +163,14 @@ any later change. The key words *MUST*, *MUST NOT*, *SHOULD*, *SHOULD NOT* and
   view therefore holds allocations from its own renderer, for exactly the
   pictures it draws plus the page a turn away, taken one per pass so the
   blocking upload lands while that window is idle rather than during a turn.
+  One per pass makes those uploads paced by how often the application draws,
+  so a newly cached frame holds the fast tick briefly: settling the instant
+  the last render landed left precisely the pre-uploads that make the next
+  turn instant to trickle at the idle cadence, and a turn arriving first paid
+  for one synchronously on the event loop. The application does not track
+  which pictures a window has actually uploaded — that is the window's own
+  widget state — so the hold is timed from a frame arriving and errs toward
+  staying awake a tick too long rather than a tick too short.
 + *The PDF page remains the fallback.* Without a media runtime, every overlay
   shows its poster or the PDF page and the deck still presents.
 + *Failure is presenter-side.* No known platform-specific failure may blank,

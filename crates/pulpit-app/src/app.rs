@@ -34,6 +34,24 @@ const TICK: Duration = Duration::from_millis(50);
 /// and resume detection, slow enough that an idle talk barely wakes the CPU.
 const SETTLED_TICK: Duration = Duration::from_millis(250);
 
+/// How long a newly cached frame keeps the fast tick, so the windows can get
+/// it onto the GPU before the next page turn asks them to draw it.
+///
+/// `residency` uploads at most one picture per pass on purpose — several tens
+/// of mebibytes at once would trade a flash for a stall — so the pre-uploads
+/// that make the *next* turn instant are paced by how often the application
+/// draws. Settling the moment the last render landed left exactly those
+/// uploads to trickle at the settled tick, and a turn arriving before they
+/// finished paid for one synchronously, on the event loop, at the worst
+/// possible moment.
+///
+/// Anchored to a frame arriving rather than to residency itself: which
+/// pictures a window has uploaded is that window's widget state, published
+/// nowhere, and a stale copy of it in the application would be a fast tick
+/// that never ends the day a window stops drawing. This costs a handful of
+/// extra wakeups after the last render of a turn and cannot outlive them.
+const UPLOAD_SETTLE: Duration = Duration::from_millis(300);
+
 /// How long the overview must go without a scroll event before it counts as
 /// stopped. Long enough not to fire between two frames of a trackpad glide,
 /// short enough that the selection catches up while the hand is still on the
@@ -369,6 +387,9 @@ pub struct App {
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
+    /// When the windows have had long enough to upload the frames that have
+    /// arrived. Keeps the fast tick until then; see [`UPLOAD_SETTLE`].
+    uploads_settle_by: Option<Instant>,
     pub documents: DocumentManager,
     pub coordinator: DisplayCoordinator,
     pub diagnostics: DiagnosticsBundle,
@@ -748,6 +769,7 @@ impl App {
             store,
             supervisor,
             render_wakeup,
+            uploads_settle_by: None,
             coordinator,
             diagnostics,
             inhibitor: Inhibitor::new(),
@@ -957,6 +979,10 @@ impl App {
     /// clock, file watching, the throttled saves) tolerates its cadence.
     fn is_live(&self) -> bool {
         !self.pending.is_empty()
+            // Frames that have arrived but may not be on the GPU yet. The
+            // renders being finished is precisely when this matters: the
+            // uploads that make the next turn instant happen after it.
+            || self.uploads_settle_by.is_some_and(|at| self.now < at)
             || !self.thumbnail_queue.is_empty()
             || self.scrubbing
             || !self.placement_retries.is_empty()
@@ -4391,6 +4417,16 @@ impl App {
     /// unpinned entry in the cache is the first thing the next insert evicts.
     fn frame_ready(&mut self, key: FrameKey, handle: iced::widget::image::Handle) {
         self.handles.insert(key, handle);
+        // A picture some window will want on the GPU. Re-armed by each
+        // arrival, so a burst holds the fast tick once rather than per frame.
+        //
+        // The wall clock rather than `self.now`, which only advances on the
+        // tick: a frame delivered by the doorbell between two ticks would
+        // otherwise date its own deadline to the last one and settle early.
+        // `is_live` compares this against `self.now`, which can only be
+        // older — so the error is always toward staying live a tick too long,
+        // never toward settling a tick too soon.
+        self.uploads_settle_by = Some(Instant::now() + UPLOAD_SETTLE);
         for evicted in self.cache.take_evicted() {
             self.handles.remove(&evicted);
         }
