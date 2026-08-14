@@ -433,7 +433,9 @@ fn render_one(
             height: job.height,
         };
         let mut pixels = vec![0u8; bytes as usize];
+        let started = std::time::Instant::now();
         let result = backend.render_into(&request, &mut pixels, cancel.as_ref());
+        let render_micros = started.elapsed().as_micros() as u64;
         *shared.in_flight.lock().unwrap() = None;
         return match result {
             Ok(()) => Response::Rendered {
@@ -444,6 +446,7 @@ fn render_one(
                 quality: job.quality,
                 bytes,
                 pixels: Some(pixels),
+                render_micros,
             },
             Err(crate::pdf::PdfError::Cancelled) => Response::Cancelled { id: job.id },
             Err(e) => Response::RenderFailed {
@@ -490,7 +493,9 @@ fn render_one(
         width: job.width,
         height: job.height,
     };
+    let started = std::time::Instant::now();
     let result = backend.render_into(&request, mapped.as_mut_slice(), cancel.as_ref());
+    let render_micros = started.elapsed().as_micros() as u64;
     *shared.in_flight.lock().unwrap() = None;
 
     match result {
@@ -502,6 +507,7 @@ fn render_one(
             quality: job.quality,
             bytes,
             pixels: None,
+            render_micros,
         },
         Err(crate::pdf::PdfError::Cancelled) => Response::Cancelled { id: job.id },
         Err(e) => Response::RenderFailed {

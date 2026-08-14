@@ -1205,16 +1205,18 @@ impl App {
         // Submitted to frame in hand, so the queue wait is in it: that wait
         // is part of what a turn spends, and hiding it would flatter the
         // number that matters.
-        for (name, total, worked) in [
+        for (name, total, worked, rasterised) in [
             (
                 "renders a window waited for",
                 self.latency.render(),
                 self.latency.render_worked(),
+                self.latency.render_rendered(),
             ),
             (
                 "deck warming, which nobody waits for",
                 self.latency.warming(),
                 self.latency.warming_worked(),
+                self.latency.warming_rendered(),
             ),
         ] {
             if total.calls == 0 {
@@ -1229,10 +1231,16 @@ impl App {
             // The worker's share, and by subtraction ours. A deep queue and a
             // slow rasteriser are one number without this split, and they
             // call for opposite fixes.
+            // Three places a job's time can go, and only one of them is work:
+            // this process's queue, the worker's own inbox, and the
+            // rasteriser. They call for entirely different fixes, and until
+            // all three were separated the answer moved every time a bucket
+            // was split.
             report.push_str(&format!(
-                "    held by a worker {} typical, {} worst; queued here {} typical\n",
-                millis(worked.mean()),
-                millis(worked.worst),
+                "    rasterising {} typical, {} worst; worker inbox {} typical; our queue {} typical\n",
+                millis(rasterised.mean()),
+                millis(rasterised.worst),
+                millis(worked.mean().saturating_sub(rasterised.mean())),
                 millis(total.mean().saturating_sub(worked.mean())),
             ));
         }
@@ -3226,7 +3234,12 @@ impl App {
                 tracing::debug!(name, reason, "attachment unavailable");
                 self.media.attachment_failed(&name, &reason);
             }
-            RenderEvent::Frame { job, frame, worked } => {
+            RenderEvent::Frame {
+                job,
+                frame,
+                worked,
+                rendered,
+            } => {
                 // Whether this was warming work has to be read before
                 // `take_pending`, which forgets it.
                 let was_thumbnail = self.thumbnail_requests.contains(&job.id);
@@ -3238,8 +3251,13 @@ impl App {
                     // everything below is for a page one step away.
                     let on_screen =
                         matches!(job.priority, Priority::Audience | Priority::Presenter);
-                    self.latency
-                        .note_render(submitted.elapsed(), worked, was_thumbnail, on_screen);
+                    self.latency.note_render(
+                        submitted.elapsed(),
+                        worked,
+                        rendered,
+                        was_thumbnail,
+                        on_screen,
+                    );
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());

@@ -120,6 +120,9 @@ pub enum RenderEvent {
         /// How long the worker held this job, from the moment it was
         /// handed over. Everything before that was queueing here.
         worked: Duration,
+        /// How long the rasteriser itself took. `worked` minus this is the
+        /// wait in the worker's own inbox, which nothing else can see.
+        rendered: Duration,
     },
     Failed {
         job: RenderJob,
@@ -417,6 +420,8 @@ struct Counters {
     worked_total: Duration,
     worked_worst: Duration,
     worked_count: u64,
+    rendered_total: Duration,
+    rendered_worst: Duration,
 }
 
 impl Counters {
@@ -425,6 +430,12 @@ impl Counters {
         self.worked_total += elapsed;
         self.worked_worst = self.worked_worst.max(elapsed);
         self.worked_count += 1;
+    }
+
+    /// Note how long the rasteriser itself took.
+    fn record_rendered(&mut self, elapsed: Duration) {
+        self.rendered_total += elapsed;
+        self.rendered_worst = self.rendered_worst.max(elapsed);
     }
 }
 
@@ -996,6 +1007,7 @@ impl RendererSupervisor {
                 bytes,
                 quality,
                 pixels,
+                render_micros,
                 ..
             }) => {
                 let floor = self.generation_floor;
@@ -1051,12 +1063,15 @@ impl RendererSupervisor {
                     }
                 };
                 let worked = in_flight.dispatched.elapsed();
+                let rendered = Duration::from_micros(render_micros);
                 self.counters.record_worked(worked);
+                self.counters.record_rendered(rendered);
                 self.counters.record_frame(width, height, quality);
                 events.push(RenderEvent::Frame {
                     job: in_flight.job,
                     frame: Frame::new(width, height, pixels),
                     worked,
+                    rendered,
                 });
             }
             WorkerPayload::Response(Response::RenderFailed { id, reason, .. }) => {

@@ -209,6 +209,11 @@ pub struct Latency {
     render_worked: Stage,
     /// The same split for warming.
     warming_worked: Stage,
+    /// The rasteriser's own time, as the worker measured it. `worked` minus
+    /// this is the wait in the worker's inbox — a queue the supervisor
+    /// cannot see, and the last place a page turn's time could be hiding.
+    render_rendered: Stage,
+    warming_rendered: Stage,
     /// Render latency for deck warming, kept apart from the above.
     ///
     /// A deck of seven hundred pages warms seven hundred thumbnails, each
@@ -315,16 +320,19 @@ impl Latency {
         &mut self,
         elapsed: Duration,
         worked: Duration,
+        rendered: Duration,
         warming: bool,
         on_screen: bool,
     ) {
         if warming {
             self.warming.record(elapsed);
             self.warming_worked.record(worked);
+            self.warming_rendered.record(rendered);
             return;
         }
         self.render.record(elapsed);
         self.render_worked.record(worked);
+        self.render_rendered.record(rendered);
         if on_screen {
             self.on_screen.record(elapsed);
         } else {
@@ -358,6 +366,14 @@ impl Latency {
 
     pub fn render_worked(&self) -> &Stage {
         &self.render_worked
+    }
+
+    pub fn render_rendered(&self) -> &Stage {
+        &self.render_rendered
+    }
+
+    pub fn warming_rendered(&self) -> &Stage {
+        &self.warming_rendered
     }
 
     pub fn on_screen(&self) -> &Stage {

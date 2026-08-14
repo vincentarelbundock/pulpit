@@ -267,6 +267,16 @@ pub enum Response {
         /// Inline frames never occupy the region, which is what lets a worker
         /// hold several small jobs and render them back to back.
         pixels: Option<Vec<u8>>,
+        /// How long the rasteriser itself took, in microseconds.
+        ///
+        /// The supervisor can time from handing a job over to getting a frame
+        /// back, but a worker holds several jobs at once and renders them one
+        /// at a time, so that measurement is the rasteriser *and* the wait in
+        /// the worker's own inbox. Only the worker can tell them apart, and
+        /// the difference decides whether the answer is a faster render or
+        /// less work in flight.
+        #[serde(default)]
+        render_micros: u64,
     },
     RenderFailed {
         id: RequestId,
