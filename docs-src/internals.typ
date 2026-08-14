@@ -427,11 +427,20 @@ frames, which includes copying a large one out of shared memory on this
 thread. Work inside a worker process is not a stage; it is already visible as
 render latency.
 
-There is deliberately no upload stage. Which pictures a window has on the GPU
-is that window's own widget state, and the application holds no reference to
-it, so `residency` logs an upload that blocked long enough to cost a frame
-rather than posting a number the application would have to smuggle across the
-view boundary.
+Uploading a picture to the GPU is on the event loop too, but outside
+`update`: it happens while a window lays itself out. It is therefore reported
+through a meter the `residency` widget writes to and the application reads,
+rather than as a stage. The meter is shared by handle because its two ends sit
+on opposite sides of the view boundary — a window's residency is widget state
+reached through `&App`, the recorder is `&mut` only inside `update`, and one
+`Cell` between them needs no locking on a single thread.
+
+It was left out at first, on the grounds that the application cannot see what
+a window has uploaded. That is true and beside the point: it does not need to
+know *which* pictures are resident, only how long it was stopped putting them
+there. Leaving it out meant the one part of a page turn that blocks the event
+loop outside `update` was the one part never counted, while the report — on
+the strength of the parts that were — said the event loop was innocent.
 
 == Capabilities over OS checks
 

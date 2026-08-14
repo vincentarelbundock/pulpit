@@ -394,6 +394,9 @@ pub struct App {
     /// of clock reads per event, and the alternative is arguing from the
     /// source about which of five plausible delays is the real one.
     pub latency: crate::latency::Latency,
+    /// Where the windows report the uploads they blocked on. Shared with the
+    /// `residency` widget in each window's view.
+    upload_meter: crate::latency::UploadMeter,
     /// When each outstanding render was submitted, so a frame can report how
     /// long it took. Separate from `pending` because it is diagnostic only.
     submitted_at: std::collections::HashMap<RequestId, Instant>,
@@ -778,6 +781,7 @@ impl App {
             render_wakeup,
             uploads_settle_by: None,
             latency: crate::latency::Latency::default(),
+            upload_meter: crate::latency::UploadMeter::default(),
             submitted_at: std::collections::HashMap::new(),
             coordinator,
             diagnostics,
@@ -1234,6 +1238,21 @@ impl App {
                 stage.calls,
                 millis(stage.mean()),
                 millis(stage.worst),
+            ));
+        }
+        // Uploads are on the event loop too, but outside `update`: they
+        // happen while a window lays itself out, which is why they are
+        // reported from a meter the widget writes to rather than from a
+        // stage. Counting only the stages, as this once did, said the event
+        // loop was innocent while the one thing that blocks it for tens of
+        // milliseconds went unmeasured.
+        let upload = self.upload_meter.get();
+        if upload.calls > 0 {
+            report.push_str(&format!(
+                "- on the event loop, uploading pictures to the GPU: {} uploads, {} typical, {} worst\n",
+                upload.calls,
+                millis(upload.mean()),
+                millis(upload.worst),
             ));
         }
         let copies = self.latency.copies();
@@ -4828,6 +4847,11 @@ impl App {
             keys.push(self.ready_frame_key(self.state.preview(), FrameKind::Notes, notes));
         }
         self.resident_handles(keys)
+    }
+
+    /// Where a window's view reports the uploads it blocked on.
+    pub fn upload_meter(&self) -> crate::latency::UploadMeter {
+        self.upload_meter.clone()
     }
 
     /// The textures for a window's wanted frames, in order, without repeats.

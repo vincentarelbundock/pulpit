@@ -142,6 +142,38 @@ pub struct Copies {
     pub bytes: u64,
 }
 
+/// Where `residency` reports the uploads it blocks on.
+///
+/// Shared by handle because the two ends are on opposite sides of the view
+/// boundary: a window's residency is widget state reached through `&App`,
+/// and the recorder is `&mut` only inside `update`. A `Cell` between them is
+/// the whole mechanism — one thread, no locking, and the widget never sees
+/// the recorder.
+///
+/// This was left out at first on the grounds that the application cannot see
+/// what a window has uploaded. That was true and beside the point: it does
+/// not need to know *which* pictures are resident, only how long it was
+/// stopped putting them there. Leaving it out meant the one part of a page
+/// turn that blocks the event loop outside `update` was the one part never
+/// counted — while the report said, on the strength of the parts that were,
+/// that the event loop was innocent.
+#[derive(Debug, Clone, Default)]
+pub struct UploadMeter(std::rc::Rc<std::cell::Cell<Stage>>);
+
+impl UploadMeter {
+    /// Note a blocking upload. Takes `&self`: the caller is a widget holding
+    /// nothing mutable.
+    pub fn record(&self, elapsed: Duration) {
+        let mut stage = self.0.get();
+        stage.record(elapsed);
+        self.0.set(stage);
+    }
+
+    pub fn get(&self) -> Stage {
+        self.0.get()
+    }
+}
+
 /// The recorder. One per application.
 #[derive(Debug, Default)]
 pub struct Latency {
@@ -397,6 +429,24 @@ mod tests {
         }
         assert_eq!(latency.turns().len(), REMEMBERED_TURNS);
         assert_eq!(latency.turns().back().unwrap().slide, REMEMBERED_TURNS + 4);
+    }
+
+    /// Both windows write to one meter through their own clones, and the
+    /// application reads the total. If a clone kept its own counter, the
+    /// audience window's uploads — the large ones — would be reported by
+    /// nobody.
+    #[test]
+    fn every_window_reports_to_the_same_meter() {
+        let meter = UploadMeter::default();
+        let presenter = meter.clone();
+        let audience = meter.clone();
+        presenter.record(Duration::from_millis(3));
+        audience.record(Duration::from_millis(21));
+
+        let stage = meter.get();
+        assert_eq!(stage.calls, 2);
+        assert_eq!(stage.worst, Duration::from_millis(21));
+        assert_eq!(stage.mean(), Duration::from_millis(12));
     }
 
     #[test]

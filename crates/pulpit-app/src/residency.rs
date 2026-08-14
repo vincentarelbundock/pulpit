@@ -52,16 +52,22 @@ const SLOW_UPLOAD: Duration = Duration::from_millis(8);
 pub fn resident<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     wanted: Vec<Handle>,
+    meter: crate::latency::UploadMeter,
 ) -> Element<'a, Message> {
     Element::new(Resident {
         content: content.into(),
         wanted,
+        meter,
     })
 }
 
 struct Resident<'a, Message> {
     content: Element<'a, Message>,
     wanted: Vec<Handle>,
+    /// Where the blocking uploads below are reported, so the time this widget
+    /// takes off the event loop appears in the same report as the time
+    /// everything else does.
+    meter: crate::latency::UploadMeter,
 }
 
 /// The allocations this window holds, in the order they were asked for.
@@ -91,7 +97,12 @@ impl Held {
     /// several tens of mebibytes at once would trade a flash for a stall. The
     /// application redraws on its tick, so the rest follow within a few frames
     /// — long before a page turn needs them.
-    fn sync(&self, wanted: &[Handle], renderer: &iced::Renderer) {
+    fn sync(
+        &self,
+        wanted: &[Handle],
+        renderer: &iced::Renderer,
+        meter: &crate::latency::UploadMeter,
+    ) {
         let mut held = self.allocations.borrow_mut();
         let mut refused = self.refused.borrow_mut();
         held.retain(|(id, _)| wanted.iter().any(|handle| handle.id() == *id));
@@ -112,6 +123,7 @@ impl Held {
         let start = std::time::Instant::now();
         let outcome = renderer.load_image(&missing);
         let elapsed = start.elapsed();
+        meter.record(elapsed);
         if elapsed >= SLOW_UPLOAD {
             tracing::debug!(
                 millis = elapsed.as_millis(),
@@ -177,7 +189,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
         // included, working from a picture that is really there.
         tree.state
             .downcast_ref::<Held>()
-            .sync(&self.wanted, renderer);
+            .sync(&self.wanted, renderer, &self.meter);
         self.content
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits)
@@ -237,7 +249,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
         // steady state is an identifier scan and no upload at all.
         tree.state
             .downcast_ref::<Held>()
-            .sync(&self.wanted, renderer);
+            .sync(&self.wanted, renderer, &self.meter);
         self.content.as_widget().draw(
             &tree.children[0],
             renderer,

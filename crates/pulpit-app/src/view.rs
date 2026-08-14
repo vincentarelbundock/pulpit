@@ -95,7 +95,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
     // this a panel draws nothing on the pass a new frame first reaches it.
-    crate::residency::resident(page, app.presenter_resident_handles())
+    crate::residency::resident(page, app.presenter_resident_handles(), app.upload_meter())
 }
 
 // --------------------------------------------------------------- audience
@@ -198,6 +198,7 @@ fn audience(app: &App) -> Element<'_, Message> {
                 ..container::Style::default()
             }),
         app.audience_resident_handles(),
+        app.upload_meter(),
     )
 }
 
