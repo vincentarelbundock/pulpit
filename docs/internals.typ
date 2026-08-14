@@ -53,18 +53,30 @@ an error path.
 - The audience window is created only when Start is pressed, initially hidden,
   assigned, and shown only with a valid frame (`Warning::AwaitingFirstFrame`).
   Stop destroys it.
-- New pages are rendered coarse-first and refined afterwards, and the cache
+- Every live page is rendered at exactly one size per window, and the cache
   falls back across generations so a reload cannot blank the output. "Never
-  worse" covers quality, not only absence: each output remembers what it is
-  showing and swaps textures only for a meaningful improvement — the audience
-  window holds its last frame rather than dip through a coarse one while the
-  refined render is in flight, and a presenter panel walks at most one step up
-  from its stand-in instead of blinking through the whole coarse-to-refined
-  ladder. The presenter's current-slide panel is a mirror of the projector —
-  the same frame, chosen by the same rules, changing in the same beat the
-  room sees — though blanking is not mirrored: the room's screen goes dark,
-  the presenter's place in the deck does not. Every panel swap is logged at
-  debug level.
+  worse" covers quality, not only absence: each output holds the last picture
+  it settled on until an exact replacement for the page it wants is ready, so
+  no window climbs a ladder of textures for one page turn. A panel with
+  nothing yet shows the deck thumbnail, and gives it up once, to the first
+  real frame.
+- The one deliberate exception is the coarse stand-in, and it is asked for
+  only on the jumps where it would be shown: a window holding some *other*
+  page, with nothing at its own size for the page it wants. A correct page
+  coarsely beats a sharp picture of somewhere else. One rule serves both
+  windows and one render answers both, because a window that took a stand-in
+  the plan had not asked for would wait for a frame nobody was rendering.
+  Ordinary turns land on a prefetched frame, so they neither render it nor
+  show it; a stand-in never appears over the page it is already showing, which
+  would be the ladder rather than the cure; and the very first frame of a
+  session is always the real one — no window is revealed with a soft picture
+  that sharpens in front of the room.
+- The presenter's current-slide panel changes in the same beat the room sees,
+  stand-in included: it is the surface the operator is watching, and holding
+  the previous page there until a full canonical render landed made it the
+  last thing in the application to answer the key they pressed. Blanking is
+  still not mirrored: the room's screen goes dark, the presenter's place in
+  the deck does not. Every display change is logged at debug level.
 - The render queue serves the committed audience page first, then the
   presenter panels' preview-size frames, and only then the audience-size
   prefetch of the neighbouring pages: prefetch is a background luxury, and one
@@ -82,20 +94,42 @@ an error path.
 Everything — key presses, timer ticks, file-watch hints, topology hints,
 renderer replies — becomes an application message handled by one `update`
 function. Subscriptions are stable across view rebuilds, so no watcher or
-timer is ever duplicated. The renderer is pumped from the tick handler, which
-keeps IPC results inside the same single-threaded state transition as user
-input.
+timer is ever duplicated.
+
+The renderer is pumped from the tick handler and from a doorbell, both of
+which run the same drain, so IPC results stay inside the same
+single-threaded state transition as user input. The doorbell is a one-deep
+channel a worker's reader thread rings after its message is on the queue: it
+carries no payload, a burst of finished frames collapses into one pass of the
+event loop, and a missed ring costs nothing because the next drain takes
+everything waiting. It exists because a finished frame used to become visible
+only when the tick next got round to looking, so every rendering step of a
+page turn paid up to a tick for the poll alone. The tick is unchanged and
+still drains on its own schedule: a silent worker — the deadline and restart
+cases — is exactly what no doorbell reports.
 
 == Cache accounting
 
 Eviction is bounded by decoded bytes, never page count: a 3840×2160 RGBA frame
-is 33,177,600 bytes. CPU bitmaps and GPU textures are counted separately, the
+is 33,177,600 bytes. What is counted is the decoded bitmap, which is what the
+cache holds — the textures made from it belong to a window's renderer, one copy
+per window that draws it, and are neither sized nor timed from here. The
 frames currently on screen — and the prefetched neighbours whose whole purpose
 is to survive until the next page turn — are pinned and never evicted, a frame
 larger than the whole budget is refused rather than allowed to evict
-everything, and the statistics are visible in diagnostics. A render request is
-satisfied only by a cached frame near its own width, so an audience-resolution
-frame never suppresses the panel-size render the presenter windows depend on.
+everything, and the statistics are visible in diagnostics. Pinning the
+neighbours means the audience-size ones by name, not merely the panel-size
+frames for the same pages: an audience frame is tens of megabytes against a
+panel's few, which makes it both the most valuable thing in the cache and the
+first thing an unpinned budget takes. Leaving them out is not a slow leak but
+a treadmill — the frame bought to make the next turn seamless is evicted
+before that turn, re-requested, and paid for again — and it presents as a
+sluggish page turn rather than as anything about memory. A slide request is
+satisfied only by a frame of exactly its own size — width *and* height, since a
+`/FitR` zoom re-crops a page — so an audience-resolution frame never suppresses
+the panel-size render the presenter windows depend on, and one page under one
+crop is one picture rather than whichever of two the hash order offers. Notes,
+which are nobody's atomic transition, still take a nearby fitting frame.
 Deck thumbnails live on a separate budget and are rendered in one pass at one
 width — chosen per document so the whole deck fits — and are then immutable
 for the document's life, so no texture downstream ever swaps because of them.
@@ -118,6 +152,17 @@ any later change. The key words *MUST*, *MUST NOT*, *SHOULD*, *SHOULD NOT* and
   frame, its last complete frame is retained until a complete replacement
   arrives; partial buffers and worker errors never reach the audience. The
   `last_audience` cache key is pinned for this reason.
++ *A frame MUST be resident in the renderer that draws it before it is laid
+  out.* Residency is per window, not per application: Iced gives each window
+  its own image cache and atlas, and its explicit allocation task reaches only
+  the lowest-numbered window. Any image of two mebibytes or more — every slide
+  panel, every audience frame — is uploaded on a worker thread, is skipped by
+  the frame it belongs to while that upload runs, and measures as nothing
+  before it lands, so a widget drawn on another window's guarantee is laid out
+  at zero size and paints a black rectangle for a page turn. Each window's
+  view therefore holds allocations from its own renderer, for exactly the
+  pictures it draws plus the page a turn away, taken one per pass so the
+  blocking upload lands while that window is idle rather than during a turn.
 + *The PDF page remains the fallback.* Without a media runtime, every overlay
   shows its poster or the PDF page and the deck still presents.
 + *Failure is presenter-side.* No known platform-specific failure may blank,
@@ -243,18 +288,43 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   (`Bytes::from_owner`) instead of deep-copying it; the annotation model is
   snapshotted behind an `Arc` with a revision counter and drawn through
   `canvas::Cache`, so unchanged strokes are neither cloned nor re-tessellated.
++ *A picture is compared by identity, never by its pixels.* Iced's image
+  handle derives equality, and its pixel buffer compares by content, so a
+  single `==` between two audience frames memcmps thirty megabytes. Anything
+  that asks "is this the same picture?" on a draw pass — residency
+  bookkeeping above all — MUST compare `Handle::id`. Getting this wrong does
+  not look like a slow projector; it looks like a slow application.
++ *A window keeps resident only what it draws.* A texture atlas grows to fit
+  whatever is held in it and *copies every existing layer* each time it grows,
+  so holding the frame cache resident — a quarter of a gigabyte of pictures,
+  for four panels and one projector — paid a full-atlas texture copy every
+  time the budget refilled. Rendering is not the expensive part of a page
+  turn: a 4K page is single-digit milliseconds through PDFium, where an
+  unbounded atlas is tens.
 + *Budgets must be honest.* A byte budget names what it actually counts
   ("source bytes"). Pinned overcommit is reported rather than hidden, and no
-  permanently-zero figure is displayed. Full GPU/texture accounting remains
-  unavailable through Iced and is stated as such rather than estimated
-  silently.
+  permanently-zero figure is displayed — which is why texture bytes are not a
+  cache statistic at all: they remain unavailable through Iced, and a field
+  that could only ever be an estimate or a zero is worse than its absence.
 + *Measure before restructuring.* Two recorded negative results: replacing the
   CDP pipe's 1 ms retry sleep with `poll(2)` cost 2-3x the worker CPU for one
   to two milliseconds of latency (the sleep stays, with a comment saying why);
   and the 50 ms application tick MUST NOT be replaced until a wrapped GUI
   build has actually been profiled. Static-analysis findings are hypotheses
   until measurement attaches numbers to them, and debug builds never set
-  targets.
+  targets. The renderer doorbell is not that replacement and MUST NOT be read
+  as licence for it: the tick still runs, still drains, and still owns the
+  deadline and restart checks — the doorbell only removes the poll's latency
+  from the path a page turn takes.
++ *The render queue order is settled.* The committed audience page first, then
+  the presenter panels, then the audience-size prefetch of the neighbours,
+  which is a background luxury costing roughly ten panel frames apiece.
+  Promoting the prefetch above the panels was tried and reverted — it delayed
+  every panel update by hundreds of milliseconds and read as a late pop on
+  each navigation. Do not reorder these tiers without numbers from a release
+  build; a page turn that feels slow is far likelier to be a starved cache or
+  a polled event than a mis-sorted queue, and both of those have been the
+  answer before.
 
 == Definition of supported
 

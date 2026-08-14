@@ -9,7 +9,10 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError,
+};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pulpit_core::RenderGeneration;
@@ -480,12 +483,77 @@ enum WorkerPayload {
     Died(String),
 }
 
+/// A worker has said something, so there is a reason to call
+/// [`RendererSupervisor::pump`].
+///
+/// Deliberately carries nothing: it is a doorbell, not a delivery. The
+/// messages themselves stay on the supervisor's own channel, which only the
+/// event-loop thread may drain, so nothing here can race a dispatch or
+/// duplicate an event. A caller that misses one loses nothing — the next
+/// `pump` drains everything waiting — which is what lets the sink drop
+/// signals rather than block a reader thread.
+pub struct RenderWakeup {
+    inbox: Mutex<Receiver<()>>,
+}
+
+/// What a [`RenderWakeup::wait`] came back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wakeup {
+    /// A worker has spoken: drain the supervisor.
+    Ring,
+    /// Nothing was said within the timeout.
+    Idle,
+    /// The supervisor is gone. A listener must stop waiting; every later
+    /// call returns this immediately, so a loop that treats it as a ring
+    /// spins.
+    Closed,
+}
+
+impl RenderWakeup {
+    /// Wait up to `timeout` for a worker to say something.
+    ///
+    /// Blocking: this is meant for a thread of the caller's own, not for the
+    /// event loop, which must stay free to draw between renders. One waiter
+    /// at a time — the handle is taken once — and a second caller finding the
+    /// inbox held is told the same thing as a caller finding it closed.
+    pub fn wait(&self, timeout: Duration) -> Wakeup {
+        let Ok(inbox) = self.inbox.try_lock() else {
+            return Wakeup::Closed;
+        };
+        match inbox.recv_timeout(timeout) {
+            Ok(()) => Wakeup::Ring,
+            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
+            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
+        }
+    }
+}
+
+/// The reader threads' end of the doorbell.
+#[derive(Clone)]
+struct WakeupSink(SyncSender<()>);
+
+impl WakeupSink {
+    /// Ring the doorbell, unless it is already ringing.
+    ///
+    /// `try_send` on a one-deep channel is the whole coalescing rule: a burst
+    /// of finished renders wakes the event loop once, and a reader thread
+    /// never blocks on a listener that has not got round to looking yet.
+    fn ring(&self) {
+        let _ = self.0.try_send(());
+    }
+}
+
 pub struct RendererSupervisor {
     config: SupervisorConfig,
     workers: Vec<Worker>,
     queue: VecDeque<RenderJob>,
     events: Receiver<WorkerMessage>,
     sender: Sender<WorkerMessage>,
+    /// Handed to every reader thread, including those of workers spawned or
+    /// restarted later, so the doorbell survives a crash.
+    wakeup: WakeupSink,
+    /// The listener's end, taken once by whoever drives the event loop.
+    wakeup_inbox: Option<Arc<RenderWakeup>>,
     namer: RegionNamer,
     next_request: u64,
     generation_floor: RenderGeneration,
@@ -508,11 +576,18 @@ const DEFAULT_REGION_BYTES: u64 = 1920 * 1080 * 4;
 impl RendererSupervisor {
     pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
         let (sender, events) = channel();
+        // One deep: the doorbell says "look again", and two rings before a
+        // look would mean the same thing as one.
+        let (signal, inbox) = sync_channel(1);
         let mut supervisor = Self {
             workers: Vec::new(),
             queue: VecDeque::new(),
             events,
             sender,
+            wakeup: WakeupSink(signal),
+            wakeup_inbox: Some(Arc::new(RenderWakeup {
+                inbox: Mutex::new(inbox),
+            })),
             namer: RegionNamer::new(),
             next_request: 0,
             generation_floor: RenderGeneration::ZERO,
@@ -565,9 +640,10 @@ impl RendererSupervisor {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let sender = self.sender.clone();
+        let wakeup = self.wakeup.clone();
         std::thread::Builder::new()
             .name(format!("render-reader-{index}"))
-            .spawn(move || read_responses(index, epoch, stdout, sender))?;
+            .spawn(move || read_responses(index, epoch, stdout, sender, wakeup))?;
 
         let mut worker = Worker {
             index,
@@ -785,6 +861,21 @@ impl RendererSupervisor {
                 let _ = write_message(&mut worker.stdin, &Request::Cancel { id });
             }
         }
+    }
+
+    /// The doorbell, for whoever drives the event loop. `None` after the
+    /// first call: one listener, so a signal cannot be delivered to a thread
+    /// that is not the one that will call [`pump`](Self::pump).
+    pub fn take_wakeup(&mut self) -> Option<Arc<RenderWakeup>> {
+        self.wakeup_inbox.take()
+    }
+
+    /// Ring the doorbell without a worker having said anything.
+    ///
+    /// The listener is woken so it can notice a state change of the caller's
+    /// own — a shutdown, most usefully, which no worker will announce.
+    pub fn wake(&self) {
+        self.wakeup.ring();
     }
 
     /// Drain worker events, enforce deadlines and dispatch queued work.
@@ -1270,6 +1361,7 @@ fn read_responses(
     epoch: u64,
     stdout: std::process::ChildStdout,
     sender: Sender<WorkerMessage>,
+    wakeup: WakeupSink,
 ) {
     let mut reader = std::io::BufReader::new(stdout);
     loop {
@@ -1285,6 +1377,10 @@ fn read_responses(
                 {
                     return;
                 }
+                // After the message is on the channel, never before: a
+                // listener woken first would drain an empty channel and go
+                // back to sleep with the frame still in flight.
+                wakeup.ring();
             }
             Err(e) => {
                 let _ = sender.send(WorkerMessage {
@@ -1292,6 +1388,9 @@ fn read_responses(
                     epoch,
                     payload: WorkerPayload::Died(e.to_string()),
                 });
+                // A death is the most urgent thing a worker ever says: the
+                // restart is what gets the queue moving again.
+                wakeup.ring();
                 return;
             }
         }

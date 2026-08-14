@@ -66,6 +66,14 @@ const PRESENTER_REFOCUS_DELAYS: [Duration; 3] = [
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick(Instant),
+    /// A worker has said something. The frames themselves are not carried
+    /// here — this is the doorbell from `pulpit_render::supervisor`, and the
+    /// handler drains the supervisor exactly as the tick does.
+    ///
+    /// Its whole purpose is latency: a finished frame used to become visible
+    /// only when the next tick got round to looking, so every page turn paid
+    /// up to a tick per rendering step for nothing but the poll.
+    RenderReady,
     Key {
         key: Option<String>,
         scancode: Option<u32>,
@@ -359,6 +367,8 @@ pub struct App {
     /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
     pub supervisor: Option<RendererSupervisor>,
+    /// The renderer's doorbell, listened to by [`App::subscription`].
+    render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
     pub documents: DocumentManager,
     pub coordinator: DisplayCoordinator,
     pub diagnostics: DiagnosticsBundle,
@@ -649,7 +659,7 @@ impl App {
         diagnostics.display_backend = coordinator.backend.name().to_string();
         diagnostics.capabilities = format!("{:?}", coordinator.capabilities);
 
-        let supervisor = RendererSupervisor::start(SupervisorConfig {
+        let mut supervisor = RendererSupervisor::start(SupervisorConfig {
             workers: settings.rendering.workers.clamp(1, 8),
             command: WorkerCommand::CurrentExe {
                 arg: "--render-worker".into(),
@@ -662,6 +672,13 @@ impl App {
             e
         })
         .ok();
+        // Taken once, here, and held for the life of the application: the
+        // subscription is rebuilt after every message and must hand back the
+        // same listener each time or iced would see a new subscription and
+        // restart it.
+        let render_wakeup = supervisor
+            .as_mut()
+            .and_then(|supervisor| supervisor.take_wakeup());
 
         let now = Instant::now();
 
@@ -730,6 +747,7 @@ impl App {
             settings,
             store,
             supervisor,
+            render_wakeup,
             coordinator,
             diagnostics,
             inhibitor: Inhibitor::new(),
@@ -1017,7 +1035,11 @@ impl App {
         });
         let closes = window::close_events().map(Message::WindowClosed);
         let resizes = window::resize_events().map(|(id, size)| Message::Resized { id, size });
-        Subscription::batch([ticks, keys, closes, resizes])
+        let mut subscriptions = vec![ticks, keys, closes, resizes];
+        if let Some(wakeup) = self.render_wakeup.clone() {
+            subscriptions.push(render_wakeups(wakeup));
+        }
+        Subscription::batch(subscriptions)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1145,6 +1167,10 @@ impl App {
     fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick(now) => self.on_tick(now),
+            Message::RenderReady => {
+                self.pump_renderer();
+                Task::none()
+            }
             Message::Key {
                 key,
                 scancode,
@@ -2538,6 +2564,28 @@ impl App {
         self.last_session = Some(snapshot);
     }
 
+    /// Drain everything the renderer workers have said, and the bookkeeping
+    /// that must follow a batch of them.
+    ///
+    /// Shared by the tick and by the doorbell so a frame reaches the windows
+    /// by whichever arrives first, with identical effects either way.
+    fn pump_renderer(&mut self) {
+        let events = self
+            .supervisor
+            .as_mut()
+            .map(|s| s.pump())
+            .unwrap_or_default();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            self.on_render_event(event);
+        }
+        // One overlay-index rebuild for the whole batch of Overlays events
+        // drained above, however many pages announced themselves.
+        self.flush_overlay_rebuild();
+    }
+
     fn on_tick(&mut self, now: Instant) -> Task<Message> {
         let previous = self.now;
         self.now = now;
@@ -2621,18 +2669,12 @@ impl App {
             }
         }
 
-        // 2. Renderer events.
-        let events = self
-            .supervisor
-            .as_mut()
-            .map(|s| s.pump())
-            .unwrap_or_default();
-        for event in events {
-            self.on_render_event(event);
-        }
-        // One overlay-index rebuild for the whole batch of Overlays events
-        // drained above, however many pages announced themselves.
-        self.flush_overlay_rebuild();
+        // 2. Renderer events. Also driven by `Message::RenderReady` the
+        //    moment a worker speaks; the tick keeps calling it because the
+        //    deadline and restart checks inside `pump` are the supervisor's
+        //    clock, and a silent worker is exactly the case no doorbell
+        //    reports.
+        self.pump_renderer();
 
         // 2b. Media events. Frames arrive already validated and copied, so
         //     the only thing that reaches presentation state is a complete
@@ -4377,6 +4419,28 @@ impl App {
                 candidates.push(self.ready_frame_key(slide, FrameKind::Slide, width));
             }
         }
+        // The projector's own frames for the pages one step away, which is
+        // what makes a page turn a swap rather than a render. Unpinned, these
+        // are by a wide margin the largest unprotected entries in the cache —
+        // tens of megabytes each against a panel frame's few — so the budget
+        // took them first and the very frames the prefetch exists to have
+        // ready were gone by the turn that wanted them. The committed page's
+        // own audience frame is included: `last_audience` covers what is on
+        // the projector, which during a transition is still the page before.
+        let audience = self.audience_width();
+        for slide in [
+            Some(committed),
+            committed.checked_sub(1),
+            Some(committed + 1),
+        ] {
+            if let Some(slide) = slide.filter(|slide| *slide < count) {
+                candidates.push(self.ready_frame_key(slide, FrameKind::Slide, audience));
+            }
+        }
+        // The coarse stand-in, which either window may have on screen right
+        // now. It is a megabyte against an audience frame's tens, and losing
+        // it is losing the picture that is up.
+        candidates.push(self.ready_frame_key(committed, FrameKind::Slide, self.coarse_width()));
         let mut pinned = Vec::new();
         for key in candidates.into_iter().flatten() {
             if self.handles.contains_key(&key) && !pinned.contains(&key) {
@@ -4444,13 +4508,24 @@ impl App {
         previous
     }
 
-    /// Whether a coarse stand-in would be shown if one existed: the projector
-    /// is holding some *other* page, which is the only thing the stand-in
+    /// Whether a coarse stand-in would be shown if one existed: a window is
+    /// holding some *other* page, which is the only thing the stand-in
     /// improves on.
+    ///
+    /// Either window is enough to ask for it, and one render answers both.
+    /// The presenter panel alone is the ordinary case for a windowed session
+    /// with no projector attached, where nothing would otherwise be asked for
+    /// and the panel would sit on the previous page for a whole canonical
+    /// render.
     fn wants_coarse_stand_in(&self) -> bool {
-        self.last_audience
-            .filter(|key| self.handles.contains_key(key))
-            .is_some_and(|key| key.slide != self.state.committed())
+        [self.last_audience, self.last_presenter]
+            .into_iter()
+            .any(|slot| wants_stand_in(self.held(slot), self.state.committed()))
+    }
+
+    /// A display slot's frame, if it is one a window can still draw.
+    fn held(&self, slot: Option<FrameKey>) -> Option<FrameKey> {
+        slot.filter(|key| self.handles.contains_key(key))
     }
 
     /// The projector's output width in pixels.
@@ -4515,7 +4590,10 @@ impl App {
         let width = self.presenter_width();
         let committed = self.state.committed();
         let count = self.state.slide_count();
-        let mut keys = vec![self.last_presenter];
+        // The stand-in ahead of the slot it is standing in for: it is on
+        // screen this pass, and the slot's own frame is by definition of the
+        // page the operator has already left.
+        let mut keys = vec![self.presenter_stand_in(), self.last_presenter];
         for slide in [Some(committed + 1), committed.checked_sub(1)] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
                 keys.push(self.ready_frame_key(slide, FrameKind::Slide, width));
@@ -4567,8 +4645,9 @@ impl App {
     /// `max_width` is the panel's own width, and only notes are chosen by it:
     /// slide panels all share [`canonical_presenter_width`], because a picture
     /// that changes size changes texture, and a texture change is a blink.
-    /// Current Slide reads its display slot so a cold jump holds its last
-    /// valid frame; the other panels draw their page as soon as it is ready.
+    /// Current Slide reads its display slot, plus the same coarse stand-in the
+    /// projector uses while a cold page renders; the other panels draw their
+    /// page as soon as it is ready.
     pub fn frame_for_width(
         &self,
         slide: usize,
@@ -4576,8 +4655,10 @@ impl App {
         max_width: u32,
     ) -> Option<Picture> {
         let key = if kind == FrameKind::Slide && slide == self.state.committed() {
-            self.last_presenter
-                .filter(|key| self.handles.contains_key(key))
+            self.presenter_stand_in().or_else(|| {
+                self.last_presenter
+                    .filter(|key| self.handles.contains_key(key))
+            })
         } else {
             let width = if kind == FrameKind::Slide {
                 self.presenter_width()
@@ -4595,6 +4676,36 @@ impl App {
             None if kind == FrameKind::Slide => self.thumbnail(slide),
             None => None,
         }
+    }
+
+    /// The coarse frame Current Slide shows while the canonical one renders,
+    /// and only then.
+    ///
+    /// The presenter panel was the one surface with no stand-in at all: the
+    /// projector got a correct-but-soft picture within a coarse render of the
+    /// keypress while the panel the operator is actually watching held the
+    /// *previous* page until the full canonical render landed — the last
+    /// surface in the application to answer the key they pressed.
+    ///
+    /// The rules are the projector's, for the same reasons and with the same
+    /// bound of one extra step:
+    ///
+    /// - Only while the slot holds a *different* page. A stand-in over the
+    ///   right page is a downgrade, and this must never become a rung on a
+    ///   ladder — climbing one per turn is what the panels used to do, and
+    ///   what reads as flicker.
+    /// - Never before the slot has anything, where the thumbnail already
+    ///   stands in and a soft frame would be a second stand-in for the same
+    ///   emptiness.
+    /// - The frame is the projector's own coarse stand-in, not a render of
+    ///   its own: one picture, two windows, no extra work asked of a worker
+    ///   that is busy with the page being turned to.
+    fn presenter_stand_in(&self) -> Option<FrameKey> {
+        let committed = self.state.committed();
+        if !wants_stand_in(self.held(self.last_presenter), committed) {
+            return None;
+        }
+        self.ready_frame_key(committed, FrameKind::Slide, self.coarse_width())
     }
 
     /// The deck thumbnail for a page, if it belongs to the document on screen.
@@ -5538,6 +5649,69 @@ fn visible_centre(scroll: f32, grid: OverviewGrid, count: usize) -> Option<usize
     Some((row * columns + columns / 2).min(count - 1))
 }
 
+/// How long the listener thread waits before looking again of its own accord.
+///
+/// Nothing depends on it: a ring wakes the thread immediately and a closed
+/// doorbell returns at once. It exists only so the thread is never parked
+/// unboundedly on a channel whose senders leaked.
+const WAKEUP_POLL: Duration = Duration::from_secs(1);
+
+/// The renderer's doorbell as a subscription identity.
+///
+/// The hash is a constant because there is exactly one doorbell for the life
+/// of the application. Hashing the pointer instead would be the same value in
+/// practice and a restarted subscription — a second listener thread on a
+/// one-listener handle — the day it were not.
+#[derive(Clone)]
+struct RenderListener(std::sync::Arc<pulpit_render::supervisor::RenderWakeup>);
+
+impl std::hash::Hash for RenderListener {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "pulpit::render-wakeup".hash(state);
+    }
+}
+
+/// Turn the renderer's doorbell into [`Message::RenderReady`].
+///
+/// A thread, not a future, because the doorbell is a blocking channel: the
+/// wait must not sit on the runtime that also draws. The channel it feeds is
+/// one deep and the send is a `try_send`, so a burst of finished frames
+/// collapses into a single pass of the event loop instead of a queue of
+/// messages each asking for the same drain.
+fn render_wakeups(
+    wakeup: std::sync::Arc<pulpit_render::supervisor::RenderWakeup>,
+) -> Subscription<Message> {
+    use pulpit_render::supervisor::Wakeup;
+
+    Subscription::run_with(RenderListener(wakeup), |listener| {
+        let wakeup = listener.0.clone();
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("render-wakeup".into())
+            .spawn(move || loop {
+                match wakeup.wait(WAKEUP_POLL) {
+                    Wakeup::Ring => {
+                        if sender
+                            .try_send(Message::RenderReady)
+                            .is_err_and(|error| error.is_disconnected())
+                        {
+                            return;
+                        }
+                    }
+                    Wakeup::Idle => {}
+                    // The supervisor is gone, which happens on the way out.
+                    Wakeup::Closed => return,
+                }
+            });
+        if let Err(error) = spawned {
+            // The tick still drains the supervisor, so this costs latency
+            // rather than frames.
+            tracing::warn!(%error, "no renderer wakeup listener; falling back to the tick");
+        }
+        receiver
+    })
+}
+
 type RenderWant = (usize, FrameKind, Priority, Quality, u32);
 
 /// The complete live slide plan before audience-neighbour and notes prefetch.
@@ -5621,6 +5795,23 @@ fn canonical_presenter_width(preview_width: f32, scale: f32) -> u32 {
     wanted.div_ceil(BUCKET) * BUCKET
 }
 
+/// Whether a window holding `holding` should take a coarse stand-in for
+/// `wanted_slide` if one exists.
+///
+/// The rule both windows obey, in one place because they must agree: the
+/// stand-in is asked for by `request_renders` and consumed by the views, and a
+/// window that would show one the plan did not ask for waits for a frame that
+/// is never coming.
+///
+/// A stand-in corrects a *wrong page*, and nothing else. It is never shown
+/// over the right page — that would be a downgrade, and a ladder of textures
+/// for one turn is the flicker this design exists to prevent — and never over
+/// an empty slot, where there is no wrong page to correct and a soft picture
+/// would sharpen in front of the room for no reason.
+fn wants_stand_in(holding: Option<FrameKey>, wanted_slide: usize) -> bool {
+    holding.is_some_and(|key| key.slide != wanted_slide)
+}
+
 /// Move a display slot only when the complete candidate is for its wanted
 /// slide. A missing or stale candidate leaves the last valid frame untouched.
 fn ready_transition(
@@ -5645,7 +5836,7 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
 
 #[cfg(test)]
 mod canonical_frame_tests {
-    use super::{canonical_presenter_width, ready_transition};
+    use super::{canonical_presenter_width, ready_transition, wants_stand_in};
     use pulpit_core::RenderGeneration;
     use pulpit_render::cache::{FrameKey, FrameKind};
     use pulpit_render::protocol::Quality;
@@ -5659,6 +5850,21 @@ mod canonical_frame_tests {
             width,
             height: width / 2,
         }
+    }
+
+    #[test]
+    fn a_stand_in_corrects_a_wrong_page_and_nothing_else() {
+        // The presenter panel is holding the page just left: this is the one
+        // case a soft picture is an improvement, and the case the panel used
+        // to answer by showing the previous slide until the full canonical
+        // render landed.
+        assert!(wants_stand_in(Some(key(3, 1280)), 4));
+        // Already on the right page. A stand-in here is the second rung of a
+        // ladder, which is the flicker, not the fix.
+        assert!(!wants_stand_in(Some(key(4, 1280)), 4));
+        // Nothing held: the thumbnail stands in, and the first real frame the
+        // window ever shows is a sharp one.
+        assert!(!wants_stand_in(None, 4));
     }
 
     #[test]
@@ -5699,12 +5905,16 @@ mod canonical_frame_tests {
     }
 
     #[test]
-    fn the_coarse_stand_in_is_asked_for_first_and_only_for_the_projector() {
+    fn one_coarse_stand_in_is_asked_for_first_and_serves_both_windows() {
         let plan = super::live_slide_plan(4, vec![4, 5, 3], 3840, 1280, Some(640));
         let coarse = plan.first().expect("a plan");
         assert_eq!(coarse.3, Quality::Coarse);
         assert_eq!(coarse.4, 640);
         assert_eq!(coarse.0, 4, "the committed page, never a neighbour");
+        // Exactly one, however many windows will draw it: the projector and
+        // the Current Slide panel show the same picture while the page they
+        // have been sent to renders, and asking twice would buy a second
+        // texture and a second render for one image.
         assert_eq!(
             plan.iter()
                 .filter(|request| request.3 == Quality::Coarse)

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use pulpit_core::notes::Region;
 use pulpit_core::RenderGeneration;
 use pulpit_render::protocol::{Priority, Quality, RenderJob, RequestId};
-use pulpit_render::supervisor::{RenderEvent, RendererSupervisor, SupervisorConfig, WorkerCommand};
+use pulpit_render::supervisor::{
+    RenderEvent, RendererSupervisor, SupervisorConfig, Wakeup, WorkerCommand,
+};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_pulpit-render-worker");
 
@@ -389,4 +391,92 @@ fn inline_bytes_in_flight_are_capped() {
         "the rest followed. A short count here means work was dropped, not \
          merely slow — check for a killed worker in: {events:?}"
     );
+}
+
+/// The doorbell rings when a frame is ready, so the application need not poll
+/// to find out. This is the whole latency claim: without it a finished frame
+/// waits for the next application tick before any window can draw it.
+#[test]
+fn a_finished_frame_rings_the_doorbell() {
+    let mut supervisor = start(1);
+    let wakeup = supervisor.take_wakeup().expect("the doorbell, once");
+    supervisor.open(1, "fixture:pages=4");
+
+    // Opening is itself something a worker answers, and that answer rings:
+    // every worker message is one, not only a frame. Settle those first, so
+    // what the frame does is what this test is measuring.
+    while wakeup.wait(Duration::from_millis(200)) == Wakeup::Ring {
+        supervisor.pump();
+    }
+    assert_eq!(
+        wakeup.wait(Duration::from_millis(100)),
+        Wakeup::Idle,
+        "an idle renderer does not wake the event loop"
+    );
+
+    supervisor.submit(job(1, 1, 0, Priority::Audience));
+    assert_eq!(
+        wakeup.wait(Duration::from_secs(10)),
+        Wakeup::Ring,
+        "the frame announced itself"
+    );
+    // The ring is only a hint to look; the frame comes off the ordinary queue.
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        !frames(events).is_empty()
+    });
+    assert_eq!(frames(&events).len(), 1, "and it was really there");
+}
+
+/// The handle is taken once. A second listener would divide the rings between
+/// two waiters, and the one that did not get it would sleep through a frame.
+#[test]
+fn the_doorbell_has_exactly_one_listener() {
+    let mut supervisor = start(1);
+    assert!(supervisor.take_wakeup().is_some());
+    assert!(supervisor.take_wakeup().is_none());
+}
+
+/// A burst collapses: the doorbell says "look again", so several frames
+/// finishing together are one pass of the event loop rather than one each.
+#[test]
+fn a_burst_of_frames_is_one_wakeup() {
+    let mut supervisor = start(2);
+    let wakeup = supervisor.take_wakeup().expect("the doorbell");
+    supervisor.open(1, "fixture:pages=8");
+
+    for page in 0..6usize {
+        supervisor.submit(job(page as u64 + 1, 1, page, Priority::Ancillary));
+    }
+    let events = collect_until(&mut supervisor, Duration::from_secs(20), |events| {
+        frames(events).len() == 6
+    });
+    assert_eq!(frames(&events).len(), 6, "all six rendered: {events:?}");
+
+    // Six frames have been drained. However many rings they produced, the
+    // channel holds at most the one that says "there may be more".
+    let mut rings = 0;
+    while wakeup.wait(Duration::from_millis(10)) == Wakeup::Ring {
+        rings += 1;
+        assert!(rings <= 1, "the doorbell coalesces rather than queues");
+    }
+}
+
+/// A shutdown closes the doorbell rather than leaving a listener parked on it
+/// for ever: the listener thread must be able to notice and stop.
+#[test]
+fn dropping_the_supervisor_closes_the_doorbell() {
+    let mut supervisor = start(1);
+    let wakeup = supervisor.take_wakeup().expect("the doorbell");
+    drop(supervisor);
+    // A dying worker says so, and that rings on the way past. What matters is
+    // that the rings run out and the doorbell then reports itself closed,
+    // rather than leaving the listener parked until its timeout for ever.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut outcome = wakeup.wait(Duration::from_millis(200));
+    while outcome == Wakeup::Ring && Instant::now() < deadline {
+        outcome = wakeup.wait(Duration::from_millis(200));
+    }
+    assert_eq!(outcome, Wakeup::Closed);
+    // And stays closed, so a loop that stops on this stops for good.
+    assert_eq!(wakeup.wait(Duration::from_millis(50)), Wakeup::Closed);
 }
