@@ -22,8 +22,8 @@ kind of obligation:
 | Part of the package | Licence | Full text |
 | --- | --- | --- |
 | Pulpit's own source, in `crates/`, `scripts/`, `packaging/`, `docs-src/` | MIT OR Apache-2.0 | `LICENSE-MIT`, `LICENSE-APACHE` |
-| The two vendored `iced_aw` widgets, in `crates/pulpit-app/src/vendor/iced_aw/` | MIT, © 2020 Kaiden42 | `ICED_AW-LICENSE` |
-| The Lucide icons, in `crates/pulpit-app/assets/icons/` | ISC, © 2026 Lucide Icons and Contributors | `LUCIDE-LICENSE` |
+| The two vendored `iced_aw` widgets, in `crates/pulpit/src/vendor/iced_aw/` | MIT, © 2020 Kaiden42 | `ICED_AW-LICENSE` |
+| The Lucide icons, in `crates/pulpit/assets/icons/` | ISC, © 2026 Lucide Icons and Contributors | `LUCIDE-LICENSE` |
 | Fonts embedded by the `typst-assets` Cargo dependency | OFL-1.1 / GUST / Bitstream Vera terms | the crate's `LICENSE` and `NOTICE`, included in generated dependency notices |
 | PDFium, fetched into `lib/` and shipped as `lib/pulpit/libpdfium.so` | BSD-3-Clause, plus MIT for the packaging | `lib/PDFIUM-LICENSE`, after `make pdfium` |
 | Everything resolved from `Cargo.lock` | MIT / Apache-2.0 / BSD / ISC | generated, see below |
@@ -39,7 +39,7 @@ kind of obligation:
 * Licence: **MIT**, © 2020 Kaiden42 and the iced_aw contributors
 * Full text: `ICED_AW-LICENSE`
 * Provenance and the list of changes made:
-  `crates/pulpit-app/src/vendor/iced_aw/README.md`
+  `crates/pulpit/src/vendor/iced_aw/README.md`
 
 Two widgets were copied rather than the crate depended on; the reasoning is in
 that README. The code is modified — module paths, the icon-font call, one
@@ -71,7 +71,7 @@ PDFium and needs no PDFium notice.
 * Licence: **ISC**, © 2026 Lucide Icons and Contributors
 * Full text: `LUCIDE-LICENSE`
 
-The `.svg` files under `crates/pulpit-app/assets/icons/` are compiled into the
+The `.svg` files under `crates/pulpit/assets/icons/` are compiled into the
 binary with `include_bytes!`, so this notice travels with every build.
 
 ---

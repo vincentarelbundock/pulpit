@@ -30,6 +30,8 @@
 ]
 
 #m.slide[
+  == GIF
+
   #overlay(
     "run:media-assets/bouncing.gif?autostart&loop",
     "media-assets/bouncing-still.png",
@@ -38,6 +40,8 @@
 ]
 
 #m.slide[
+  == Video
+
   #overlay(
     "run:media-assets/clip.mp4?autostart&mute",
     "media-assets/poster.png",
@@ -46,6 +50,8 @@
 ]
 
 #m.slide[
+  == HTML + JS
+
   #overlay(
     "run:media-assets/bouncing-balls.html",
     "media-assets/balls-poster.png",

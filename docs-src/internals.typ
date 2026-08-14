@@ -9,12 +9,12 @@
 Application (iced daemon, one update loop)
 ├── PresentationState        authoritative domain state         pulpit-core
 ├── DisplayCoordinator       snapshots, roles, reconcile()      pulpit-display
-├── DocumentManager          watch, debounce, atomic reload     pulpit_app::doc
+├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
-├── InputRouter              keymap incl. raw scancodes         pulpit_app::settings
-├── SessionInhibitor         acquire/release, crash-safe        pulpit-app
-└── Settings & Diagnostics   atomic, versioned, reportable      pulpit_app::settings
+├── InputRouter              keymap incl. raw scancodes         pulpit::settings
+├── SessionInhibitor         acquire/release, crash-safe        pulpit
+└── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
 ```
 
 Four packages, not nine: `core`, `display` and `render` are separate because
@@ -25,7 +25,7 @@ no Iced, no clocks, no services below the application layer.
 
 == Why the domain crates are pure
 
-`pulpit-core`, the decision half of `pulpit-display`, and `pulpit_app::doc`'s
+`pulpit-core`, the decision half of `pulpit-display`, and `pulpit::doc`'s
 state machine contain no UI types, no window handles, no PDF library types and
 no clock reads (time is passed in). That is what makes the hard cases —
 reconnect at a new index, an unequal mirror, a partial write, a stale delayed
@@ -389,7 +389,7 @@ presentation state machines; it MUST NOT fork the application workflow.
 
 = The platform boundary
 
-`pulpit_app::platform` is the only module that knows about D-Bus, portals,
+`pulpit::platform` is the only module that knows about D-Bus, portals,
 `xdg-open`, `%APPDATA%` or `~/Library`. Everything else talks to four traits
 plus a snapshot:
 
@@ -427,7 +427,7 @@ a projector.
 
 == What a page turn spends its time on
 
-`pulpit_app::latency` records every page turn and reports it in the
+`pulpit::latency` records every page turn and reports it in the
 diagnostics bundle, because every performance question asked of this
 application so far has been answered by reading the source and arguing, and
 the arguments have been wrong about as often as right.
@@ -481,7 +481,7 @@ The UI adapts on the resulting capability claim alone — never on
 
 = The design system
 
-`crates/pulpit-app/src/theme/tokens.rs` defines the seven colour roles shared
+`crates/pulpit/src/theme/tokens.rs` defines the seven colour roles shared
 by Settings and code. Borders, interaction states, and readable text over
 fills are derived from them. The same layer defines the 4/8/12/16/24/32
 spacing scale, radii, a type scale, and hit-target sizes. Dark and light
@@ -652,8 +652,8 @@ untouched.
 
 = Presenter layouts and widgets
 
-The tree model lives in `crates/pulpit-app/src/layout` and each widget family
-in `crates/pulpit-app/src/widgets/<family>/`. Both are pure — no UI types, no
+The tree model lives in `crates/pulpit/src/layout` and each widget family
+in `crates/pulpit/src/widgets/<family>/`. Both are pure — no UI types, no
 clock, no rendering — so every structural rule is unit-tested without a
 display. The designer and the presenter view are two projections of the same
 values, which is what makes "what you designed is what you present" true

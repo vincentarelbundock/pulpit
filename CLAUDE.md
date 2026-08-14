@@ -20,7 +20,7 @@ The workspace is five crates under `crates/`:
   supervised worker processes, and the byte-bounded frame cache.
 - `pulpit-media` — media and interactive overlays, driven by an installed
   Chromium-family browser over CDP in a separate worker process.
-- `pulpit-app` — the Iced application and everything only it uses: the
+- `pulpit` — the Iced application and everything only it uses: the
   presenter layout tree and widgets, the document watcher, the platform
   boundary, settings and diagnostics.
 
@@ -71,10 +71,10 @@ The three rules, in short:
   cases — reconnect at a new index, an unequal mirror, a partial write, a
   stale delayed notification — ordinary unit tests that run in CI.
 - Ask what the session can do, never what OS it is. Everything above
-  `pulpit_app::platform` reads `Capabilities`; `cfg!(target_os = ...)` in a
+  `pulpit::platform` reads `Capabilities`; `cfg!(target_os = ...)` in a
   view or a state transition is a bug.
 - Views name meanings, not colours or numbers: the seven colour roles and the
-  spacing/type scales in `crates/pulpit-app/src/theme/tokens.rs`.
+  spacing/type scales in `crates/pulpit/src/theme/tokens.rs`.
 - Every operation that leaves the process returns an explicit `Outcome`
   (`Done` / `Refused` / `Unsupported` / `Failed`). Never a bare `bool`.
 - Scripted topology files in `crates/pulpit-display/tests/topology/` are the

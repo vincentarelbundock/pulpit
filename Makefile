@@ -49,7 +49,7 @@ build:  ## Build the release binary
 # Every worker — the renderer and the browser that plays media — is a role of
 # this one binary, re-executed with a flag, so there is nothing else to build.
 launch:  ## Launch the app in the dev shell (optionally: make launch DECK=deck.pdf)
-	nix develop . --command $(CARGO) run -p pulpit-app -- $(DECK)
+	nix develop . --command $(CARGO) run -p pulpit -- $(DECK)
 
 # The same launcher, optimised. Any statement about how fast pulpit is has to
 # come from this one: `launch` builds a debug binary, where PDFium is still
@@ -57,7 +57,7 @@ launch:  ## Launch the app in the dev shell (optionally: make launch DECK=deck.p
 # response around it is not. A debug session reads as a sluggish application
 # and measures as one, which has already cost a long investigation.
 launch-release: ## Launch the optimised build — the only one worth timing
-	nix develop . --command $(CARGO) run --release -p pulpit-app -- $(DECK)
+	nix develop . --command $(CARGO) run --release -p pulpit -- $(DECK)
 
 # A file target, so the download happens once and again only when the pin
 # moves: the script carries the release tag and per-platform hashes.
@@ -92,8 +92,8 @@ app: build $(PDFIUM_LIB)  ## Build and ad-hoc sign dist/Pulpit.app (macOS only)
 app-universal: $(PDFIUM_LIB)  ## Build the universal dist/Pulpit.app (macOS only)
 	rustup target add aarch64-apple-darwin x86_64-apple-darwin
 	./scripts/fetch-pdfium.sh --platform mac-x64 --dest lib/mac-x64
-	$(CARGO) build --release -p pulpit-app --target aarch64-apple-darwin
-	$(CARGO) build --release -p pulpit-app --target x86_64-apple-darwin
+	$(CARGO) build --release -p pulpit --target aarch64-apple-darwin
+	$(CARGO) build --release -p pulpit --target x86_64-apple-darwin
 	./scripts/make-app-bundle.sh --universal
 
 # The Windows artifacts: the portable zip Scoop installs from, and the
