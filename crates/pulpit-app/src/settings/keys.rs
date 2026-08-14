@@ -63,14 +63,12 @@ pub enum Action {
     /// Move the preview a tenth of the deck at a time. Iced only gives the
     /// slider its arrow keys while the pointer rests on it, which is no use
     /// to someone scrubbing a long deck from a lectern.
-    PreviewJumpForward,
-    PreviewJumpBack,
     Quit,
 }
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 29] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -99,8 +97,6 @@ impl Action {
         Action::ToggleAnnotationAudience,
         Action::FocusNextLink,
         Action::FocusPreviousLink,
-        Action::PreviewJumpForward,
-        Action::PreviewJumpBack,
         Action::Quit,
     ];
 
@@ -134,8 +130,6 @@ impl Action {
             Action::ToggleAnnotationAudience => "Show annotations to the audience",
             Action::FocusNextLink => "Focus the next link",
             Action::FocusPreviousLink => "Focus the previous link",
-            Action::PreviewJumpForward => "Preview ten per cent forward",
-            Action::PreviewJumpBack => "Preview ten per cent back",
             Action::Quit => "Quit",
         }
     }
@@ -225,8 +219,6 @@ impl Default for Keymap {
                 // rather than overloading the one presenters use most.
                 named("l", Action::FocusNextLink),
                 named("k", Action::FocusPreviousLink),
-                named("ShiftRight", Action::PreviewJumpForward),
-                named("ShiftLeft", Action::PreviewJumpBack),
                 named("q", Action::Quit),
                 // Common presenter remotes: most emit these logical keys.
                 named("F1", Action::Blank),
@@ -476,14 +468,6 @@ mod tests {
         assert_eq!(
             keymap.resolve_with_shift(Some("Tab"), true, None),
             Some(Action::PreviewPrevious)
-        );
-        assert_eq!(
-            keymap.resolve_with_shift(Some("Right"), true, None),
-            Some(Action::PreviewJumpForward)
-        );
-        assert_eq!(
-            keymap.resolve_with_shift(Some("Left"), true, None),
-            Some(Action::PreviewJumpBack)
         );
     }
 

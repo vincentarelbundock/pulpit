@@ -195,10 +195,7 @@ fn scrubber_from<Message: Clone + 'static>(
     // minimum pointer target and far too thin to hit with a finger while
     // standing at a lectern.
     .height(target::MINIMUM)
-    .step(1u32)
-    // Shift drags and Shift+Arrow move by a tenth of the deck, so a long
-    // deck can be crossed without dragging pixel by pixel.
-    .shift_step(crate::widgets::navigation::model::coarse_step(count) as u32);
+    .step(1u32);
 
     if mode.interactive() {
         control.on_release(on(WidgetEvent::CommitScrub)).into()

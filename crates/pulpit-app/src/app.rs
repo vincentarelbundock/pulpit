@@ -2750,8 +2750,6 @@ impl App {
             )),
             Action::FocusNextLink => self.step_link_focus(true),
             Action::FocusPreviousLink => self.step_link_focus(false),
-            Action::PreviewJumpForward => self.jump_preview(true),
-            Action::PreviewJumpBack => self.jump_preview(false),
             Action::Quit => self.quit(),
         }
     }
@@ -4504,24 +4502,6 @@ impl App {
     ///
     /// The audience does not move: this is scrubbing, and it commits only
     /// when the presenter says so, exactly like dragging the slider.
-    fn jump_preview(&mut self, forward: bool) -> Task<Message> {
-        let count = self.state.slide_count();
-        if count == 0 {
-            return Task::none();
-        }
-        let step = crate::widgets::navigation::model::coarse_step(count);
-        let preview = self.state.preview();
-        let target = if forward {
-            preview.saturating_add(step).min(count - 1)
-        } else {
-            preview.saturating_sub(step)
-        };
-        if target == preview {
-            return Task::none();
-        }
-        self.update(Message::Nav(Nav::PreviewGoTo(target)))
-    }
-
     /// Move about the overview grid with the arrow keys.
     ///
     /// `None` means the key was not one the grid owns, and should go on to
