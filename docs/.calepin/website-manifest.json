@@ -1,0 +1,9 @@
+{
+  "outputs": [
+    "assets/favicon.svg",
+    "assets/logo.svg",
+    "index.html",
+    "robots.txt",
+    "sitemap.xml"
+  ]
+}

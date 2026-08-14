@@ -2525,8 +2525,6 @@ html:not([data-theme]) {
 
 
 
-
-<script id="calepin-website-source-data" type="application/json">"#set document(title: [Pulpit])\n#metadata((tags: (\"overview\",))) <website-metadata>\n\n#html.elem(\"div\", attrs: (style: \"text-align: center; margin-block: 0 1.5rem;\"))[\n  #html.elem(\n    \"img\",\n    attrs: (\n      src: \"assets/logo.svg\",\n      alt: \"Pulpit\",\n      style: \"width: 100%; max-width: 15rem; display: block;\"\n        + \" margin: 0 auto -0.75rem;\",\n    ),\n  )\n  #html.elem(\n    \"div\",\n    attrs: (\n      style: \"font-family: Helvetica, Arial, sans-serif; font-size: 3rem;\"\n        + \" font-weight: 700; letter-spacing: 0.12em; line-height: 1;\",\n    ),\n  )[PULPIT]\n  #html.elem(\n    \"p\",\n    attrs: (\n      style: \"font-size: 1.5rem; font-weight: 600; line-height: 1.3;\"\n        + \" margin: 0.75rem auto 0;\",\n    ),\n  )[A Snappy and Snazzy PDF Projector]\n  #html.elem(\n    \"p\",\n    attrs: (\n      style: \"font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;\",\n    ),\n  )[\n    Interactive media · Speaker notes · Annotations · Custom layouts ·\n    Jump to page · Timers · And more!\n  ]\n]\n\n= Installation\n\n#include \"parts/install.typ\"\n\n#include \"parts/usage.typ\"\n\n= Licence\n\nMIT or Apache-2.0. PDFium is BSD-3-Clause and is _not_ vendored here.\n"</script>
 </head><body>
 
     <header class="calepin-website-topbar calepin-site-topbar">
@@ -2553,14 +2551,6 @@ html:not([data-theme]) {
                 </li>
                 
                 
-                
-                <li class="calepin-website-view-mode-item">
-                    <select id="calepin-website-view-mode" class="calepin-website-view-mode" aria-label="Choose page view" data-calepin-view-mode>
-                        <option value="rendered">HTML</option>
-                        <option value="source">Source</option>
-                        
-                    </select>
-                </li>
                 
             </ul>
         </nav>
