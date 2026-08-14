@@ -2,8 +2,13 @@
 //!
 //! Eviction is bounded by *decoded memory cost*, never by page count: a
 //! 3840×2160 RGBA bitmap is 33,177,600 bytes, so "keep 20 pages" is not a
-//! memory policy. CPU bitmaps and GPU textures are accounted separately
-//! because they are separate allocations with separate lifetimes.
+//! memory policy.
+//!
+//! What is counted is the decoded bitmap, which is what this cache holds. The
+//! textures made from those bitmaps belong to a window's renderer, one copy
+//! per window that draws them, and neither their size nor their lifetime is
+//! visible from here — so they are not guessed at. Keeping a window's set of
+//! them small is `pulpit_app::residency`'s job.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,18 +72,12 @@ impl Frame {
     pub fn cpu_bytes(&self) -> u64 {
         self.pixels.len() as u64
     }
-
-    /// What the same frame costs once uploaded as an RGBA texture.
-    pub fn gpu_bytes(&self) -> u64 {
-        self.width as u64 * self.height as u64 * 4
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CacheStats {
     pub frames: usize,
     pub cpu_bytes: u64,
-    pub gpu_bytes: u64,
     pub hits: u64,
     pub misses: u64,
     pub evictions: u64,
@@ -92,15 +91,13 @@ pub struct CacheStats {
 
 impl CacheStats {
     pub fn total_bytes(&self) -> u64 {
-        self.cpu_bytes + self.gpu_bytes
+        self.cpu_bytes
     }
 }
 
 #[derive(Debug)]
 struct Entry {
     frame: Frame,
-    /// Whether this frame is also resident on the GPU.
-    uploaded: bool,
     /// A `Cell` because the hot lookups — `best`, `best_fitting` — take
     /// `&self` from view construction. Without touching recency there, the
     /// "least recently used" eviction was really insertion order: the
@@ -109,7 +106,7 @@ struct Entry {
     last_used: std::cell::Cell<u64>,
 }
 
-/// A cache with a combined CPU+GPU byte budget.
+/// A cache bounded by the bytes of the bitmaps it holds.
 #[derive(Debug)]
 pub struct FrameCache {
     entries: HashMap<FrameKey, Entry>,
@@ -224,6 +221,38 @@ impl FrameCache {
             })
     }
 
+    /// Best frame at exactly one size. Canonical display slots use this so an
+    /// audience-size texture can never become an intermediate display step.
+    ///
+    /// Height is part of the identity, not decoration: a `/FitR` zoom re-crops
+    /// the committed page, so the cache can hold two frames of the same page
+    /// at the same width and different heights. Matching on width alone left
+    /// the choice between them to hash order, and the projector could flip
+    /// between cropped and uncropped from pass to pass.
+    pub fn best_exact(
+        &self,
+        generation: RenderGeneration,
+        slide: usize,
+        kind: FrameKind,
+        width: u32,
+        height: u32,
+    ) -> Option<(FrameKey, Frame)> {
+        self.entries
+            .iter()
+            .filter(|(key, _)| {
+                key.generation == generation
+                    && key.slide == slide
+                    && key.kind == kind
+                    && key.width == width
+                    && key.height == height
+            })
+            .max_by_key(|(key, _)| key.quality)
+            .map(|(key, entry)| {
+                entry.last_used.set(self.tick());
+                (*key, entry.frame.clone())
+            })
+    }
+
     /// The best frame no wider than `max_width`, for a small panel.
     ///
     /// Returns `None` when every cached frame is larger, so the caller can
@@ -319,8 +348,8 @@ impl FrameCache {
         }
     }
 
-    pub fn insert(&mut self, key: FrameKey, frame: Frame, uploaded: bool) -> bool {
-        let cost = frame.cpu_bytes() + if uploaded { frame.gpu_bytes() } else { 0 };
+    pub fn insert(&mut self, key: FrameKey, frame: Frame) -> bool {
+        let cost = frame.cpu_bytes();
         if cost > self.budget_bytes {
             // A single frame larger than the entire budget is refused rather
             // than allowed to evict everything and still not fit.
@@ -335,7 +364,6 @@ impl FrameCache {
         self.enforce_budget(cost);
         let entry = Entry {
             frame,
-            uploaded,
             last_used: std::cell::Cell::new(clock),
         };
         self.account(&entry, 1);
@@ -371,32 +399,6 @@ impl FrameCache {
         }
     }
 
-    /// Note that a frame now also lives on the GPU.
-    pub fn mark_uploaded(&mut self, key: &FrameKey) {
-        let extra = match self.entries.get(key) {
-            Some(entry) if !entry.uploaded => entry.frame.gpu_bytes(),
-            _ => return,
-        };
-        self.stats.gpu_bytes += extra;
-        if let Some(entry) = self.entries.get_mut(key) {
-            entry.uploaded = true;
-        }
-        self.enforce_budget(0);
-    }
-
-    /// Drop the CPU copy of an uploaded frame. The specification explicitly
-    /// asks not to retain both unnecessarily.
-    pub fn release_cpu_copy(&mut self, key: &FrameKey) {
-        let Some(entry) = self.entries.get_mut(key) else {
-            return;
-        };
-        if !entry.uploaded || entry.frame.pixels.is_empty() {
-            return;
-        }
-        self.stats.cpu_bytes -= entry.frame.cpu_bytes();
-        entry.frame.pixels = Arc::new(Vec::new());
-    }
-
     /// Discard everything older than `generation`. Called on every accepted
     /// reload, DPI change and mapping change.
     pub fn evict_older_than(&mut self, generation: RenderGeneration) -> usize {
@@ -426,25 +428,17 @@ impl FrameCache {
         // reuse these keys from eviction.
         self.pinned.clear();
         self.stats.cpu_bytes = 0;
-        self.stats.gpu_bytes = 0;
         self.stats.frames = 0;
         self.stats.pinned_overcommit_bytes = 0;
     }
 
     fn account(&mut self, entry: &Entry, sign: i64) {
         let cpu = entry.frame.cpu_bytes();
-        let gpu = if entry.uploaded {
-            entry.frame.gpu_bytes()
-        } else {
-            0
-        };
         if sign > 0 {
             self.stats.cpu_bytes += cpu;
-            self.stats.gpu_bytes += gpu;
             self.stats.frames += 1;
         } else {
             self.stats.cpu_bytes = self.stats.cpu_bytes.saturating_sub(cpu);
-            self.stats.gpu_bytes = self.stats.gpu_bytes.saturating_sub(gpu);
             self.stats.frames = self.stats.frames.saturating_sub(1);
         }
     }
@@ -527,7 +521,7 @@ mod tests {
         // frame must not suppress the preview-size render the panels rely
         // on, because the giant is the first thing eviction takes.
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Refined, 3840), sized_frame(3840), false);
+        cache.insert(sized_key(Quality::Refined, 3840), sized_frame(3840));
         let generation = RenderGeneration(1);
         assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
         // But the same giant satisfies a request for its own size…
@@ -537,9 +531,54 @@ mod tests {
     }
 
     #[test]
+    fn exact_lookup_never_promotes_an_audience_frame_into_a_presenter_slot() {
+        let mut cache = FrameCache::new(100_000_000);
+        cache.insert(sized_key(Quality::Refined, 1280), sized_frame(1280));
+        cache.insert(sized_key(Quality::Refined, 3840), sized_frame(3840));
+
+        let (key, _) = cache
+            .best_exact(RenderGeneration(1), 0, FrameKind::Slide, 1280, 720)
+            .expect("canonical presenter frame");
+        assert_eq!(key.width, 1280);
+        assert!(cache
+            .best_exact(RenderGeneration(1), 0, FrameKind::Slide, 640, 360)
+            .is_none());
+    }
+
+    #[test]
+    fn a_zoom_crop_and_a_whole_page_are_two_pictures_at_one_width() {
+        // The `/FitR` case: same page, same width, different height. Choosing
+        // by width alone left the projector's picture to hash order.
+        let mut cache = FrameCache::new(100_000_000);
+        let whole = sized_key(Quality::Refined, 1280);
+        let cropped = FrameKey {
+            height: 900,
+            ..whole
+        };
+        cache.insert(whole, sized_frame(1280));
+        cache.insert(
+            cropped,
+            Frame {
+                width: 1280,
+                height: 900,
+                pixels: Arc::new(vec![0u8; 64]),
+            },
+        );
+
+        let (key, _) = cache
+            .best_exact(RenderGeneration(1), 0, FrameKind::Slide, 1280, 900)
+            .expect("the cropped frame");
+        assert_eq!(key, cropped);
+        let (key, _) = cache
+            .best_exact(RenderGeneration(1), 0, FrameKind::Slide, 1280, 720)
+            .expect("the whole page");
+        assert_eq!(key, whole);
+    }
+
+    #[test]
     fn a_frame_near_the_requested_width_satisfies_it() {
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Refined, 2000), sized_frame(2000), false);
+        cache.insert(sized_key(Quality::Refined, 2000), sized_frame(2000));
         let generation = RenderGeneration(1);
         // Within [width, 2 × width]: good enough, no re-render.
         assert!(cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
@@ -550,7 +589,7 @@ mod tests {
     #[test]
     fn a_coarse_frame_does_not_satisfy_a_refined_request() {
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Coarse, 1152), sized_frame(1152), false);
+        cache.insert(sized_key(Quality::Coarse, 1152), sized_frame(1152));
         let generation = RenderGeneration(1);
         assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
         // A smaller coarse frame does not satisfy a wider coarse request.
@@ -561,33 +600,16 @@ mod tests {
     #[test]
     fn accounting_is_in_bytes_not_pages() {
         let mut cache = FrameCache::new(10_000_000);
-        cache.insert(key(1, 0, Quality::Refined), frame(4_000_000), false);
+        cache.insert(key(1, 0, Quality::Refined), frame(4_000_000));
         assert_eq!(cache.stats().cpu_bytes, 4_000_000);
-        assert_eq!(cache.stats().gpu_bytes, 0);
         assert_eq!(cache.stats().frames, 1);
-    }
-
-    #[test]
-    fn cpu_and_gpu_costs_are_tracked_separately() {
-        let mut cache = FrameCache::new(1_000_000_000);
-        let k = key(1, 0, Quality::Refined);
-        cache.insert(k, frame(8_294_400), false);
-        assert_eq!(cache.stats().gpu_bytes, 0);
-
-        cache.mark_uploaded(&k);
-        assert_eq!(cache.stats().gpu_bytes, 1920 * 1080 * 4);
-        assert_eq!(cache.stats().cpu_bytes, 8_294_400);
-
-        cache.release_cpu_copy(&k);
-        assert_eq!(cache.stats().cpu_bytes, 0, "no duplicate residency");
-        assert_eq!(cache.stats().gpu_bytes, 1920 * 1080 * 4);
     }
 
     #[test]
     fn the_budget_is_never_exceeded() {
         let mut cache = FrameCache::new(10_000_000);
         for slide in 0..20 {
-            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000), false);
+            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000));
             assert!(
                 cache.stats().total_bytes() <= cache.budget_bytes(),
                 "budget exceeded at slide {slide}: {} bytes",
@@ -601,11 +623,11 @@ mod tests {
     fn pinned_frames_survive_pressure() {
         let mut cache = FrameCache::new(6_000_000);
         let on_screen = key(1, 0, Quality::Refined);
-        cache.insert(on_screen, frame(2_000_000), false);
+        cache.insert(on_screen, frame(2_000_000));
         cache.pin(vec![on_screen]);
 
         for slide in 1..10 {
-            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000), false);
+            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000));
         }
         assert!(
             cache.get(&on_screen).is_some(),
@@ -616,8 +638,8 @@ mod tests {
     #[test]
     fn a_frame_bigger_than_the_budget_is_refused_not_ruinous() {
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(key(1, 0, Quality::Coarse), frame(500_000), false);
-        assert!(!cache.insert(key(1, 1, Quality::Refined), frame(4_000_000), false));
+        cache.insert(key(1, 0, Quality::Coarse), frame(500_000));
+        assert!(!cache.insert(key(1, 1, Quality::Refined), frame(4_000_000)));
         assert_eq!(cache.stats().rejected, 1);
         assert!(
             cache.get(&key(1, 0, Quality::Coarse)).is_some(),
@@ -633,11 +655,11 @@ mod tests {
         let mut cache = FrameCache::new(5_000_000);
         let shown = key(1, 0, Quality::Refined);
         let idle = key(1, 1, Quality::Refined);
-        cache.insert(shown, frame(2_000_000), false);
-        cache.insert(idle, frame(2_000_000), false);
+        cache.insert(shown, frame(2_000_000));
+        cache.insert(idle, frame(2_000_000));
         // The older entry is the one the view keeps drawing.
         cache.best(RenderGeneration(1), 0, FrameKind::Slide);
-        cache.insert(key(1, 2, Quality::Refined), frame(2_000_000), false);
+        cache.insert(key(1, 2, Quality::Refined), frame(2_000_000));
         assert!(cache.contains(&shown), "the fetched frame survives");
         assert!(!cache.contains(&idle), "the untouched frame is the victim");
     }
@@ -645,8 +667,8 @@ mod tests {
     #[test]
     fn resident_generations_track_what_is_actually_cached() {
         let mut cache = FrameCache::new(100_000_000);
-        cache.insert(key(3, 0, Quality::Refined), frame(1_000_000), false);
-        cache.insert(key(900, 0, Quality::Refined), frame(1_000_000), false);
+        cache.insert(key(3, 0, Quality::Refined), frame(1_000_000));
+        cache.insert(key(900, 0, Quality::Refined), frame(1_000_000));
         // Newest first, only generations with entries, capped at the asked
         // generation — a thousand reloads must not mean a thousand probes.
         assert_eq!(
@@ -671,8 +693,8 @@ mod tests {
             width,
             ..key(1, 0, Quality::Refined)
         };
-        cache.insert(sized(1920), frame(1_000_000), false);
-        cache.insert(sized(400), frame(1_000_000), false);
+        cache.insert(sized(1920), frame(1_000_000));
+        cache.insert(sized(400), frame(1_000_000));
         let (found, _) = cache
             .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 800)
             .unwrap();
@@ -688,14 +710,14 @@ mod tests {
         let mut cache = FrameCache::new(3_000_000);
         let first = key(1, 0, Quality::Refined);
         let second = key(1, 1, Quality::Refined);
-        cache.insert(first, frame(2_000_000), false);
+        cache.insert(first, frame(2_000_000));
         cache.pin(vec![first, second]);
-        cache.insert(second, frame(2_000_000), false);
+        cache.insert(second, frame(2_000_000));
         assert!(cache.stats().total_bytes() > cache.budget_bytes());
         assert_eq!(cache.stats().pinned_overcommit_bytes, 1_000_000);
         // Pressure that can be relieved clears the overcommit report.
         cache.pin(vec![second]);
-        cache.insert(key(1, 2, Quality::Refined), frame(500_000), false);
+        cache.insert(key(1, 2, Quality::Refined), frame(500_000));
         assert_eq!(cache.stats().pinned_overcommit_bytes, 0);
     }
 
@@ -703,14 +725,14 @@ mod tests {
     fn clearing_forgets_pins_and_reports_the_evicted_keys() {
         let mut cache = FrameCache::new(10_000_000);
         let pinned = key(1, 0, Quality::Refined);
-        cache.insert(pinned, frame(1_000_000), false);
+        cache.insert(pinned, frame(1_000_000));
         cache.pin(vec![pinned]);
         cache.clear();
         assert_eq!(cache.take_evicted(), vec![pinned]);
         // A stale pin would exempt the next frame reusing this key from
         // eviction for ever.
-        cache.insert(pinned, frame(8_000_000), false);
-        cache.insert(key(1, 1, Quality::Refined), frame(8_000_000), false);
+        cache.insert(pinned, frame(8_000_000));
+        cache.insert(key(1, 1, Quality::Refined), frame(8_000_000));
         assert!(cache.stats().total_bytes() <= cache.budget_bytes());
     }
 
@@ -718,8 +740,8 @@ mod tests {
     fn eviction_reports_the_keys_so_derived_handles_can_follow() {
         let mut cache = FrameCache::new(4_000_000);
         let old = key(1, 0, Quality::Refined);
-        cache.insert(old, frame(3_000_000), false);
-        cache.insert(key(1, 1, Quality::Refined), frame(3_000_000), false);
+        cache.insert(old, frame(3_000_000));
+        cache.insert(key(1, 1, Quality::Refined), frame(3_000_000));
         assert_eq!(cache.take_evicted(), vec![old]);
         assert!(cache.take_evicted().is_empty(), "drained on read");
     }
@@ -728,8 +750,8 @@ mod tests {
     fn stale_generations_are_dropped_wholesale() {
         let mut cache = FrameCache::new(100_000_000);
         for slide in 0..5 {
-            cache.insert(key(1, slide, Quality::Refined), frame(1_000_000), false);
-            cache.insert(key(2, slide, Quality::Refined), frame(1_000_000), false);
+            cache.insert(key(1, slide, Quality::Refined), frame(1_000_000));
+            cache.insert(key(2, slide, Quality::Refined), frame(1_000_000));
         }
         assert_eq!(cache.evict_older_than(RenderGeneration(2)), 5);
         assert!(cache.get(&key(1, 0, Quality::Refined)).is_none());
@@ -745,7 +767,7 @@ mod tests {
             height: 270,
             ..key(3, 7, Quality::Coarse)
         };
-        cache.insert(coarse, Frame::new(480, 270, vec![0; 480 * 270 * 4]), false);
+        cache.insert(coarse, Frame::new(480, 270, vec![0; 480 * 270 * 4]));
         let (found, _) = cache
             .best(RenderGeneration(3), 7, FrameKind::Slide)
             .unwrap();
@@ -755,7 +777,7 @@ mod tests {
         );
 
         let refined = key(3, 7, Quality::Refined);
-        cache.insert(refined, frame(1920 * 1080 * 4), false);
+        cache.insert(refined, frame(1920 * 1080 * 4));
         let (found, _) = cache
             .best(RenderGeneration(3), 7, FrameKind::Slide)
             .unwrap();
@@ -779,17 +801,13 @@ mod tests {
                 height: 360,
                 ..key(1, slide, Quality::Coarse)
             };
-            cache.insert(coarse, Frame::new(640, 360, vec![0; 640 * 360 * 4]), false);
+            cache.insert(coarse, Frame::new(640, 360, vec![0; 640 * 360 * 4]));
             let refined = FrameKey {
                 width: 3840,
                 height: 2160,
                 ..key(1, slide, Quality::Refined)
             };
-            cache.insert(
-                refined,
-                Frame::new(3840, 2160, vec![0; 3840 * 2160 * 4]),
-                true,
-            );
+            cache.insert(refined, Frame::new(3840, 2160, vec![0; 3840 * 2160 * 4]));
             assert!(cache.stats().total_bytes() <= DEFAULT_BUDGET_BYTES);
         }
         assert!(

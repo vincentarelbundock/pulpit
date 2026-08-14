@@ -53,17 +53,23 @@ an error path.
 - The audience window is created only when Start is pressed, initially hidden,
   assigned, and shown only with a valid frame (`Warning::AwaitingFirstFrame`).
   Stop destroys it.
-- New pages are rendered coarse-first and refined afterwards, and the cache
+- Every live page is rendered at exactly one size per window, and the cache
   falls back across generations so a reload cannot blank the output. "Never
-  worse" covers quality, not only absence: each output remembers what it is
-  showing and swaps textures only for a meaningful improvement — the audience
-  window holds its last frame rather than dip through a coarse one while the
-  refined render is in flight, and a presenter panel walks at most one step up
-  from its stand-in instead of blinking through the whole coarse-to-refined
-  ladder. The presenter's current-slide panel is a mirror of the projector —
-  the same frame, chosen by the same rules, changing in the same beat the
-  room sees — though blanking is not mirrored: the room's screen goes dark,
-  the presenter's place in the deck does not. Every panel swap is logged at
+  worse" covers quality, not only absence: each output holds the last picture
+  it settled on until an exact replacement for the page it wants is ready, so
+  no window climbs a ladder of textures for one page turn. A panel with
+  nothing yet shows the deck thumbnail, and gives it up once, to the first
+  real frame.
+- The one deliberate exception is the coarse stand-in, and it is asked for
+  only on the jumps where it would be shown: the projector holding some
+  *other* page, with nothing output-sized for the page it wants. A correct
+  page coarsely beats a sharp picture of somewhere else. Ordinary turns land
+  on a prefetched frame, so they neither render it nor show it, and the very
+  first frame of a session is always the real one — a projector is not
+  revealed with a soft picture that sharpens in front of the room.
+- The presenter's current-slide panel changes in the same beat the room sees,
+  though blanking is not mirrored: the room's screen goes dark, the
+  presenter's place in the deck does not. Every display change is logged at
   debug level.
 - The render queue serves the committed audience page first, then the
   presenter panels' preview-size frames, and only then the audience-size
@@ -89,13 +95,18 @@ input.
 == Cache accounting
 
 Eviction is bounded by decoded bytes, never page count: a 3840×2160 RGBA frame
-is 33,177,600 bytes. CPU bitmaps and GPU textures are counted separately, the
+is 33,177,600 bytes. What is counted is the decoded bitmap, which is what the
+cache holds — the textures made from it belong to a window's renderer, one copy
+per window that draws it, and are neither sized nor timed from here. The
 frames currently on screen — and the prefetched neighbours whose whole purpose
 is to survive until the next page turn — are pinned and never evicted, a frame
 larger than the whole budget is refused rather than allowed to evict
-everything, and the statistics are visible in diagnostics. A render request is
-satisfied only by a cached frame near its own width, so an audience-resolution
-frame never suppresses the panel-size render the presenter windows depend on.
+everything, and the statistics are visible in diagnostics. A slide request is
+satisfied only by a frame of exactly its own size — width *and* height, since a
+`/FitR` zoom re-crops a page — so an audience-resolution frame never suppresses
+the panel-size render the presenter windows depend on, and one page under one
+crop is one picture rather than whichever of two the hash order offers. Notes,
+which are nobody's atomic transition, still take a nearby fitting frame.
 Deck thumbnails live on a separate budget and are rendered in one pass at one
 width — chosen per document so the whole deck fits — and are then immutable
 for the document's life, so no texture downstream ever swaps because of them.
@@ -118,6 +129,17 @@ any later change. The key words *MUST*, *MUST NOT*, *SHOULD*, *SHOULD NOT* and
   frame, its last complete frame is retained until a complete replacement
   arrives; partial buffers and worker errors never reach the audience. The
   `last_audience` cache key is pinned for this reason.
++ *A frame MUST be resident in the renderer that draws it before it is laid
+  out.* Residency is per window, not per application: Iced gives each window
+  its own image cache and atlas, and its explicit allocation task reaches only
+  the lowest-numbered window. Any image of two mebibytes or more — every slide
+  panel, every audience frame — is uploaded on a worker thread, is skipped by
+  the frame it belongs to while that upload runs, and measures as nothing
+  before it lands, so a widget drawn on another window's guarantee is laid out
+  at zero size and paints a black rectangle for a page turn. Each window's
+  view therefore holds allocations from its own renderer, for exactly the
+  pictures it draws plus the page a turn away, taken one per pass so the
+  blocking upload lands while that window is idle rather than during a turn.
 + *The PDF page remains the fallback.* Without a media runtime, every overlay
   shows its poster or the PDF page and the deck still presents.
 + *Failure is presenter-side.* No known platform-specific failure may blank,
@@ -243,11 +265,24 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   (`Bytes::from_owner`) instead of deep-copying it; the annotation model is
   snapshotted behind an `Arc` with a revision counter and drawn through
   `canvas::Cache`, so unchanged strokes are neither cloned nor re-tessellated.
++ *A picture is compared by identity, never by its pixels.* Iced's image
+  handle derives equality, and its pixel buffer compares by content, so a
+  single `==` between two audience frames memcmps thirty megabytes. Anything
+  that asks "is this the same picture?" on a draw pass — residency
+  bookkeeping above all — MUST compare `Handle::id`. Getting this wrong does
+  not look like a slow projector; it looks like a slow application.
++ *A window keeps resident only what it draws.* A texture atlas grows to fit
+  whatever is held in it and *copies every existing layer* each time it grows,
+  so holding the frame cache resident — a quarter of a gigabyte of pictures,
+  for four panels and one projector — paid a full-atlas texture copy every
+  time the budget refilled. Rendering is not the expensive part of a page
+  turn: a 4K page is single-digit milliseconds through PDFium, where an
+  unbounded atlas is tens.
 + *Budgets must be honest.* A byte budget names what it actually counts
   ("source bytes"). Pinned overcommit is reported rather than hidden, and no
-  permanently-zero figure is displayed. Full GPU/texture accounting remains
-  unavailable through Iced and is stated as such rather than estimated
-  silently.
+  permanently-zero figure is displayed — which is why texture bytes are not a
+  cache statistic at all: they remain unavailable through Iced, and a field
+  that could only ever be an estimate or a zero is worse than its absence.
 + *Measure before restructuring.* Two recorded negative results: replacing the
   CDP pipe's 1 ms retry sleep with `poll(2)` cost 2-3x the worker CPU for one
   to two milliseconds of latency (the sleep stays, with a comment saying why);

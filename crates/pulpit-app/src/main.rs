@@ -14,6 +14,7 @@ mod layout_renderer;
 mod media;
 mod panel;
 mod platform;
+mod residency;
 mod session;
 mod settings;
 mod theme;

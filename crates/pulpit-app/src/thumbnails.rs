@@ -95,14 +95,6 @@ impl ThumbnailCache {
         self.entries.get(&slide).map(|entry| entry.handle.clone())
     }
 
-    /// The picture and the width it was rendered at, for callers that must
-    /// judge whether a sharper frame is a *meaningful* improvement over it.
-    pub fn get_sized(&self, slide: usize) -> Option<(Handle, u32)> {
-        self.entries
-            .get(&slide)
-            .map(|entry| (entry.handle.clone(), entry.width))
-    }
-
     pub fn len(&self) -> usize {
         self.entries.len()
     }

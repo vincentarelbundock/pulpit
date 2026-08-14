@@ -17,7 +17,7 @@ use pulpit_display::{
     apply_outcome, Action as DisplayAction, Reconciliation, Role, RoleTarget, WindowMode,
     WindowState,
 };
-use pulpit_render::cache::{Frame, FrameCache, FrameKey, FrameKind};
+use pulpit_render::cache::{FrameCache, FrameKey, FrameKind};
 use pulpit_render::protocol::{Priority, Quality, RenderJob, RequestId};
 use pulpit_render::supervisor::{RenderEvent, RendererSupervisor, SupervisorConfig, WorkerCommand};
 
@@ -91,6 +91,10 @@ pub enum Message {
         id: window::Id,
         size: Size,
     },
+    /// The presenter window's physical-pixel ratio, which decides how wide a
+    /// panel's frame must be. Re-read on every resize: moving a window to
+    /// another display changes it.
+    PresenterScale(f32),
     SetMapping(NotesMapping),
     /// Bind the most recent unrecognised key press to an action.
     BindUnboundKey(Action),
@@ -346,11 +350,13 @@ pub struct App {
     /// The frame the audience window last had: held on to across a page
     /// change so the output never blanks between renders.
     last_audience: Option<FrameKey>,
-    /// Which frame each panel settled on, so a panel does not swap texture
-    /// for an equal-or-worse one. Interior mutability because the views that
-    /// resolve frames take `&self`; see `panel_choice`.
-    sticky: std::cell::RefCell<std::collections::HashMap<(usize, FrameKind, u32), PanelChoice>>,
-    /// One texture per cached frame, reused across view passes.
+    /// The last allocated canonical frame shown in the Current Slide panel.
+    /// A cold jump holds this frame until the target allocation is ready.
+    last_presenter: Option<FrameKey>,
+    /// One texture handle per cached frame, dropped with the frame it names.
+    ///
+    /// A handle is a name, not a residency: which *window* can draw it at once
+    /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
     pub supervisor: Option<RendererSupervisor>,
     pub documents: DocumentManager,
@@ -400,6 +406,10 @@ pub struct App {
     pub audience_window: Option<window::Id>,
     pub audience_size: Size,
     pub preview_size: Size,
+    /// Physical pixels per logical pixel on the presenter's display. Asked
+    /// for, never assumed: it decides how wide a panel's frame has to be to
+    /// look sharp, and guessing high is four times the pixels for nothing.
+    presenter_scale: f32,
     pub show_diagnostics: bool,
     pub last_poll: Instant,
     pub now: Instant,
@@ -580,25 +590,6 @@ pub struct Picture {
     pub handle: iced::widget::image::Handle,
 }
 
-/// What a presenter panel has settled on showing: a rendered frame, or the
-/// deck thumbnail standing in until one is worth swapping to.
-///
-/// A panel remembers its choice because every choice change is a new GPU
-/// texture, and a new texture is a visible blink. The panels used to walk the
-/// whole upgrade ladder as renders arrived — thumbnail, coarse, preview,
-/// audience-size — up to four textures for one navigation, perceived as
-/// flicker. The choice rules in [`panel_swap`] and [`frame_beats_thumb`]
-/// collapse that to at most one deliberate step.
-#[derive(Debug, Clone)]
-enum PanelChoice {
-    Frame(FrameKey),
-    Thumb {
-        generation: pulpit_core::RenderGeneration,
-        width: u32,
-        handle: iced::widget::image::Handle,
-    },
-}
-
 /// A placement that has not taken effect yet.
 #[derive(Debug, Clone)]
 struct PlacementRetry {
@@ -728,7 +719,7 @@ impl App {
             cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
             handles: std::collections::HashMap::new(),
             last_audience: None,
-            sticky: std::cell::RefCell::new(std::collections::HashMap::new()),
+            last_presenter: None,
             documents: DocumentManager::new(
                 initial.clone().unwrap_or_default(),
                 ReloadPolicy {
@@ -770,6 +761,7 @@ impl App {
             audience_window: None,
             audience_size: Size::new(1280.0, 720.0),
             preview_size: Size::new(640.0, 360.0),
+            presenter_scale: 1.0,
             show_diagnostics: false,
             last_poll: now,
             now,
@@ -1338,7 +1330,17 @@ impl App {
                 if role == Role::Audience {
                     self.schedule_presenter_refocus();
                 }
-                display::native_window_id(id, move |native| Message::NativeId { role, native })
+                let native =
+                    display::native_window_id(id, move |native| Message::NativeId { role, native });
+                match role {
+                    // The first panel renders are asked for before any resize
+                    // arrives, so the pixel ratio has to be known by then.
+                    Role::Presenter => Task::batch([
+                        window::scale_factor(id).map(Message::PresenterScale),
+                        native,
+                    ]),
+                    Role::Audience => native,
+                }
             }
             Message::NativeId { role, native } => {
                 // Compositor IPC tokens take precedence over raw toolkit
@@ -1371,6 +1373,10 @@ impl App {
                     self.audience_size = size;
                 } else {
                     self.preview_size = Size::new(size.width * 0.45, size.height * 0.45);
+                    // A resize is also how a window arrives on a display with
+                    // a different pixel ratio, so the ratio is re-read here
+                    // rather than only at startup.
+                    let scale = self.presenter_scale_task();
                     // The editor canvas is the middle column of the page;
                     // divider drags are expressed as fractions of it.
                     if self.designer.is_some() {
@@ -1378,12 +1384,25 @@ impl App {
                             (size.width - 560.0).max(200.0),
                             (size.height - 120.0).max(200.0),
                         );
-                        return self.update(Message::Designer(
+                        let designer = self.update(Message::Designer(
                             crate::designer::Msg::CanvasResized(canvas),
                         ));
+                        return Task::batch([scale, designer]);
                     }
+                    self.request_renders();
+                    return scale;
                 }
                 self.request_renders();
+                Task::none()
+            }
+            Message::PresenterScale(scale) => {
+                if (self.presenter_scale - scale).abs() > f32::EPSILON {
+                    tracing::debug!(scale, "presenter pixel ratio");
+                    self.presenter_scale = scale;
+                    // Every panel frame is now the wrong size by definition:
+                    // ask for the right ones rather than upscale for ever.
+                    self.request_renders();
+                }
                 Task::none()
             }
             Message::SetMapping(mapping) => {
@@ -2956,8 +2975,18 @@ impl App {
                     return;
                 }
                 tracing::debug!(slide = key.slide, quality = ?key.quality, width = key.width, "frame cached");
-                if self.cache.insert(key, frame.clone(), false) {
-                    self.remember_handle(key, &frame);
+                if self.cache.insert(key, frame.clone()) {
+                    // The handle shares the cached frame's own allocation, so
+                    // naming a frame costs nothing. Uploading it is a separate
+                    // question, asked once per window by the view that draws
+                    // it — never here, where the answer would be "upload it
+                    // everywhere, and keep it there for ever".
+                    let handle = iced::widget::image::Handle::from_rgba(
+                        frame.width,
+                        frame.height,
+                        shared_pixels(&frame.pixels),
+                    );
+                    self.frame_ready(key, handle);
                 }
                 self.pin_visible();
 
@@ -3080,7 +3109,7 @@ impl App {
                                 self.handles.remove(&evicted);
                             }
                             self.last_audience = None;
-                            self.sticky.borrow_mut().clear();
+                            self.last_presenter = None;
                         }
                     }
                     self.settings.remember_recent(info.path.clone());
@@ -4310,68 +4339,47 @@ impl App {
         Some(self.pending.remove(position).1)
     }
 
+    /// A frame the windows may now draw: record its texture, forget whatever
+    /// the budget took to make room for it, and let the display slots and the
+    /// pins move.
+    ///
+    /// Both slots move *before* anything is pinned: `pin_visible` protects
+    /// what the slots point at, so pinning first left the frame this event put
+    /// on the projector unprotected until some later pass — and the largest
+    /// unpinned entry in the cache is the first thing the next insert evicts.
+    fn frame_ready(&mut self, key: FrameKey, handle: iced::widget::image::Handle) {
+        self.handles.insert(key, handle);
+        for evicted in self.cache.take_evicted() {
+            self.handles.remove(&evicted);
+        }
+        self.remember_presenter_frame();
+        self.mark_audience_frame();
+        self.remember_audience_frame();
+        self.pin_visible();
+    }
+
     fn pin_visible(&mut self) {
-        // A sticky entry that can no longer be drawn will never hold again;
-        // dropping it here bounds the map by what is resident rather than by
-        // every slide the deck has ever shown.
-        let generation = self.state.generation();
-        {
-            let handles = &self.handles;
-            self.sticky.borrow_mut().retain(|_, choice| match choice {
-                PanelChoice::Frame(key) => handles.contains_key(key),
-                PanelChoice::Thumb { generation: g, .. } => *g == generation,
-            });
-        }
-
-        // Exactly what is on screen, at the size it is on screen. The
-        // audience frame is whatever the projector resolved to; the presenter
-        // panels get their preview-sized frames, which are small enough that
-        // protecting all of them costs a fraction of one audience frame.
-        let committed = self.state.committed();
-        let preview_width = self.preview_size.width.max(160.0) as u32;
+        // Ready presenter neighbours are the next turn's ammunition. The two
+        // display slots are strong logical references and must survive cache
+        // pressure until a complete replacement is allocated.
         let count = self.state.slide_count();
-        let mut candidates = vec![self.audience_frame_key()];
-        for (slide, width) in [
-            (Some(committed), preview_width * 2),
-            (Some(self.state.preview()), preview_width * 2),
-            (committed.checked_sub(1), preview_width),
-            (Some(committed + 1), preview_width),
-        ] {
-            if let Some(slide) = slide.filter(|slide| *slide < count) {
-                candidates.push(match self.panel_choice(slide, FrameKind::Slide, width) {
-                    Some(PanelChoice::Frame(key)) => Some(key),
-                    // A thumbnail lives on the thumbnail cache's own
-                    // budget; there is nothing here to pin for it.
-                    _ => None,
-                });
-            }
-        }
-        // The next turn's ammunition: the best frames for the committed page
-        // and its neighbours, which is where the audience-size prefetches
-        // land. Unpinned, a prefetched neighbour was the largest unprotected
-        // entry in the cache — the first thing eviction took — so the very
-        // frame bought to make the turn seamless was gone by the turn.
+        let committed = self.state.committed();
+        let width = self.presenter_width();
+        let mut candidates = vec![self.last_audience, self.last_presenter];
         for slide in [
-            Some(committed),
+            committed.checked_sub(2),
             committed.checked_sub(1),
+            Some(committed),
             Some(committed + 1),
+            Some(committed + 2),
         ] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
-                candidates.push(
-                    self.cache
-                        .best(generation, slide, FrameKind::Slide)
-                        .map(|(key, _)| key),
-                );
+                candidates.push(self.ready_frame_key(slide, FrameKind::Slide, width));
             }
         }
-        // The reload fallback is on the projector right now; evicting it
-        // would let `audience_frame()`'s "never flash black" promise fail
-        // exactly when the cache is busiest.
-        candidates.push(self.last_audience);
-
-        let mut pinned: Vec<FrameKey> = Vec::new();
+        let mut pinned = Vec::new();
         for key in candidates.into_iter().flatten() {
-            if !pinned.contains(&key) {
+            if self.handles.contains_key(&key) && !pinned.contains(&key) {
                 pinned.push(key);
             }
         }
@@ -4382,11 +4390,9 @@ impl App {
         if !self.audience_started {
             return;
         }
-        let generation = self.state.generation();
         let has_frame = self
-            .cache
-            .best(generation, self.state.committed(), FrameKind::Slide)
-            .is_some();
+            .audience_frame_key()
+            .is_some_and(|key| key.slide == self.state.committed());
         let window = self.coordinator.window_state_mut(Role::Audience);
         if has_frame && !window.has_frame {
             window.has_frame = true;
@@ -4406,71 +4412,134 @@ impl App {
         self.audience_frame_key().and_then(|key| self.picture(&key))
     }
 
-    /// Which cached frame the audience output resolves to, ignoring
-    /// blanking — blanking hides the projector's picture, it does not
-    /// unchoose it, and the presenter's mirror of it stays visible.
-    ///
-    /// Split out so `remember_audience_frame` anchors on the frame that is
-    /// actually on the projector. Anchoring on `cache.best` instead let the
-    /// fallback itself decay to a coarse frame, which then became the
-    /// stand-in for the *next* navigation.
+    /// The exact output-sized audience frame for the committed page, the
+    /// coarse stand-in while a cold page is still rendering, or the frame
+    /// already on the projector.
     fn audience_frame_key(&self) -> Option<FrameKey> {
-        let generation = self.state.generation();
         let slide = self.state.committed();
-        let previous = self.last_audience.filter(|key| self.cache.contains(key));
-        // Only generations actually resident in the cache: a long session
-        // of reloads must not make every view pass walk hundreds of empty
-        // generation numbers.
-        for candidate in self.cache.generations_at_or_below(generation) {
-            if let Some((key, _)) = self.cache.best(candidate, slide, FrameKind::Slide) {
-                if let Some(previous) = previous {
-                    if self.would_downgrade(previous, key) {
-                        return Some(previous);
-                    }
-                }
+        let width = self.audience_width();
+        let previous = self
+            .last_audience
+            .filter(|key| self.handles.contains_key(key));
+
+        // A projector never consumes the presenter's canonical frame. It
+        // changes exactly once, when its own output-sized frame is ready.
+        if let Some(key) = self.ready_frame_key(slide, FrameKind::Slide, width) {
+            return Some(key);
+        }
+        // Nothing output-sized yet. A stale page is the right answer while the
+        // *same* page sharpens, and the wrong one once the presenter has
+        // jumped somewhere cold: a correct page coarsely beats a sharp picture
+        // of somewhere else. That is the whole job of the coarse stand-in, and
+        // the only moment either window is allowed a two-step ladder.
+        //
+        // Never for the first frame of a session, where there is no wrong
+        // slide to correct: the projector is revealed with the real picture
+        // rather than with a soft one that sharpens in front of the room.
+        if self.wants_coarse_stand_in() {
+            if let Some(key) = self.ready_frame_key(slide, FrameKind::Slide, self.coarse_width()) {
                 return Some(key);
             }
         }
-        // Nothing for the new page yet. Keep showing the page that is already
-        // on the projector rather than flashing black for the two frames it
-        // takes to render: the audience output must never get worse than it
-        // was, and a stale slide for 50ms is invisible where a black flash is
-        // not.
         previous
     }
 
-    /// Whether putting `next` on the projector in place of `previous` would
-    /// make the output visibly worse.
-    ///
-    /// The rule is not just "never blank": a coarse or preview-sized frame
-    /// upscaled to a 4K projector is a worse picture than the slide that is
-    /// already up, and swapping to it and back is exactly the flash the
-    /// coarse-first request was meant to avoid.
-    ///
-    /// The hold is deliberately conditional on a wider render being in
-    /// flight. If the refined render fails or is cancelled, nothing better is
-    /// coming, and showing the correct page coarsely beats showing the wrong
-    /// page sharply — so the guard releases rather than freezing on a stale
-    /// slide forever.
-    fn would_downgrade(&self, previous: FrameKey, next: FrameKey) -> bool {
-        let target = (self.audience_size.width.max(320.0)) as u32;
-        would_downgrade(
-            target,
-            previous.width,
-            next.width,
-            previous == next,
-            self.better_frame_in_flight(next),
-        )
+    /// Whether a coarse stand-in would be shown if one existed: the projector
+    /// is holding some *other* page, which is the only thing the stand-in
+    /// improves on.
+    fn wants_coarse_stand_in(&self) -> bool {
+        self.last_audience
+            .filter(|key| self.handles.contains_key(key))
+            .is_some_and(|key| key.slide != self.state.committed())
     }
 
-    /// Whether a render wider than `next` is outstanding for the same page.
-    fn better_frame_in_flight(&self, next: FrameKey) -> bool {
-        self.pending.iter().any(|(_, key)| {
-            key.generation == next.generation
-                && key.slide == next.slide
-                && key.kind == next.kind
-                && key.width > next.width
-        })
+    /// The projector's output width in pixels.
+    fn audience_width(&self) -> u32 {
+        self.audience_size.width.max(320.0) as u32
+    }
+
+    /// The one width every live presenter slide panel is rendered at.
+    fn presenter_width(&self) -> u32 {
+        canonical_presenter_width(self.preview_size.width, self.presenter_scale)
+    }
+
+    /// Ask the runtime what the presenter window's pixel ratio is.
+    fn presenter_scale_task(&self) -> Task<Message> {
+        match self.presenter_window {
+            Some(id) => window::scale_factor(id).map(Message::PresenterScale),
+            None => Task::none(),
+        }
+    }
+
+    /// The width of the stand-in rendered before the output-sized frame.
+    ///
+    /// Never wider than the output itself: on a small audience window the
+    /// coarse frame *is* the frame, and asking for two sizes of the same
+    /// picture would be a render and a texture for nothing.
+    fn coarse_width(&self) -> u32 {
+        self.settings
+            .rendering
+            .coarse_width
+            .min(self.audience_width())
+    }
+
+    /// Every picture the audience window must be able to draw without
+    /// waiting: what is on the projector now — blanked or not, because
+    /// unblanking must not wait for an upload — and the two pages one step
+    /// away, whose audience-size frames the prefetch has already asked for.
+    ///
+    /// On screen first: `residency` uploads one picture per pass, so the order
+    /// decides what is ready this pass and what is ready for the next turn.
+    pub fn audience_resident_handles(&self) -> Vec<iced::widget::image::Handle> {
+        let width = self.audience_size.width.max(320.0) as u32;
+        let committed = self.state.committed();
+        let count = self.state.slide_count();
+        let mut keys = vec![self.audience_frame_key()];
+        for slide in [Some(committed + 1), committed.checked_sub(1)] {
+            if let Some(slide) = slide.filter(|slide| *slide < count) {
+                keys.push(self.ready_frame_key(slide, FrameKind::Slide, width));
+            }
+        }
+        self.resident_handles(keys)
+    }
+
+    /// Every picture the presenter window draws: the slide panels' three
+    /// pages and the notes for the page being previewed.
+    ///
+    /// Deliberately *only* those. A window's atlas grows to hold whatever it
+    /// is told to keep, and growing it copies everything already in it, so
+    /// holding the whole frame cache resident here — a quarter of a gigabyte
+    /// of pictures for four panels — cost a texture copy of the entire atlas
+    /// every time the budget refilled it.
+    pub fn presenter_resident_handles(&self) -> Vec<iced::widget::image::Handle> {
+        let width = self.presenter_width();
+        let committed = self.state.committed();
+        let count = self.state.slide_count();
+        let mut keys = vec![self.last_presenter];
+        for slide in [Some(committed + 1), committed.checked_sub(1)] {
+            if let Some(slide) = slide.filter(|slide| *slide < count) {
+                keys.push(self.ready_frame_key(slide, FrameKind::Slide, width));
+            }
+        }
+        if self.state.mapping().has_notes() {
+            let notes = (self.preview_size.width.max(240.0)) as u32;
+            keys.push(self.ready_frame_key(self.state.preview(), FrameKind::Notes, notes));
+        }
+        self.resident_handles(keys)
+    }
+
+    /// The textures for a window's wanted frames, in order, without repeats.
+    fn resident_handles(&self, keys: Vec<Option<FrameKey>>) -> Vec<iced::widget::image::Handle> {
+        let mut wanted: Vec<FrameKey> = Vec::new();
+        for key in keys.into_iter().flatten() {
+            if !wanted.contains(&key) {
+                wanted.push(key);
+            }
+        }
+        wanted
+            .iter()
+            .filter_map(|key| self.handles.get(key).cloned())
+            .collect()
     }
 
     /// Remember what the audience window is actually showing, so the next
@@ -4493,148 +4562,123 @@ impl App {
         }
     }
 
-    /// The best frame for a panel about `max_width` pixels wide.
+    /// What a presenter panel draws for one page.
     ///
-    /// Preferring the smallest frame that is still sharp enough keeps an
-    /// audience-resolution frame out of a thumbnail: a 4K image in a 200px
-    /// preview costs upload bandwidth and texture-atlas space for detail
-    /// nobody can see. Falls back to the deck thumbnail, and to whatever
-    /// exists, rather than showing an empty panel.
+    /// `max_width` is the panel's own width, and only notes are chosen by it:
+    /// slide panels all share [`canonical_presenter_width`], because a picture
+    /// that changes size changes texture, and a texture change is a blink.
+    /// Current Slide reads its display slot so a cold jump holds its last
+    /// valid frame; the other panels draw their page as soon as it is ready.
     pub fn frame_for_width(
         &self,
         slide: usize,
         kind: FrameKind,
         max_width: u32,
     ) -> Option<Picture> {
-        match self.panel_choice(slide, kind, max_width)? {
-            PanelChoice::Frame(key) => self.picture(&key),
-            PanelChoice::Thumb { handle, .. } => Some(Picture { handle }),
+        let key = if kind == FrameKind::Slide && slide == self.state.committed() {
+            self.last_presenter
+                .filter(|key| self.handles.contains_key(key))
+        } else {
+            let width = if kind == FrameKind::Slide {
+                self.presenter_width()
+            } else {
+                max_width.max(64)
+            };
+            self.ready_frame_key(slide, kind, width)
+        };
+        match key {
+            Some(key) => self.picture(&key),
+            // Nothing rendered for this page yet — the warmed deck thumbnail
+            // rather than an empty panel. It is a stand-in, never a rung on a
+            // ladder: it is replaced once, by the first real frame, and a
+            // panel that has one never comes back to it.
+            None if kind == FrameKind::Slide => self.thumbnail(slide),
+            None => None,
         }
     }
 
-    /// What a `max_width`-wide panel shows for `slide`, remembered per panel
-    /// so the picture only ever changes for one of the reasons in
-    /// [`panel_swap`] / [`frame_beats_thumb`].
-    ///
-    /// Shared with `pin_visible` so pinning protects exactly the frames the
-    /// panels are showing. The candidate search asks for the best frame no
-    /// wider than the panel's own request — the request width already carries
-    /// the sharpness headroom — so an audience-resolution giant is only ever
-    /// chosen when nothing panel-sized exists, and its later re-render can
-    /// never displace a panel-sized frame that is already up.
-    fn panel_choice(&self, slide: usize, kind: FrameKind, max_width: u32) -> Option<PanelChoice> {
-        let generation = self.state.generation();
-        // The committed slide's panel is a mirror of the projector: the very
-        // same frame, chosen by the very same "never worse" rules, changing
-        // in the same beat the room sees the change. Running the ordinary
-        // panel ladder here left it hostage to whatever happened to be
-        // cached at the keypress — a preview frame one step, an audience
-        // frame the next — and that sharp/soft alternation across steps read
-        // as flicker. During a transition the mirror briefly shows the
-        // *previous* slide, exactly as long as the projector does, which is
-        // the truthful thing for a presenter display to do. Blanking is
-        // deliberately not mirrored: the room's screen goes dark, the
-        // presenter's place in the deck does not.
-        if kind == FrameKind::Slide && slide == self.state.committed() {
-            if let Some(key) = self.audience_frame_key() {
-                return Some(
-                    self.remember_panel_choice((slide, kind, max_width), PanelChoice::Frame(key)),
-                );
-            }
-            // Nothing resolved for the projector yet — cold start — so fall
-            // through to the ordinary ladder and its thumbnail stand-in.
+    /// The deck thumbnail for a page, if it belongs to the document on screen.
+    fn thumbnail(&self, slide: usize) -> Option<Picture> {
+        if self.thumbnails.generation() != self.state.generation() {
+            return None;
         }
-        let candidate = self
-            .cache
-            .generations_at_or_below(generation)
+        self.thumbnails.get(slide).map(|handle| Picture { handle })
+    }
+
+    /// Find one immutable, ready frame for this page and render epoch.
+    fn ready_frame_key(&self, slide: usize, kind: FrameKind, max_width: u32) -> Option<FrameKey> {
+        let height = self.frame_shape(slide, kind, max_width).1;
+        self.cache
+            .generations_at_or_below(self.state.generation())
             .into_iter()
-            .find_map(|resident| {
-                self.cache
-                    .best_fitting(resident, slide, kind, max_width.max(64))
+            .find_map(|generation| {
+                let frame = if kind == FrameKind::Slide {
+                    self.cache
+                        .best_exact(generation, slide, kind, max_width, height)
+                } else {
+                    self.cache.best_fitting(generation, slide, kind, max_width)
+                };
+                frame
                     .map(|(key, _)| key)
                     .filter(|key| self.handles.contains_key(key))
-            });
-
-        let held = self.sticky.borrow();
-        let slot = (slide, kind, max_width);
-        // A hold is only a hold while it can still be drawn: a frame must be
-        // resident, a thumbnail must be of the current document.
-        let previous = held.get(&slot).cloned().filter(|choice| match choice {
-            PanelChoice::Frame(key) => self.handles.contains_key(key),
-            PanelChoice::Thumb { generation: g, .. } => *g == generation,
-        });
-
-        let choice = match (previous, candidate) {
-            (Some(PanelChoice::Frame(prev)), Some(next)) => {
-                if panel_swap(prev, next, max_width) {
-                    PanelChoice::Frame(next)
-                } else {
-                    PanelChoice::Frame(prev)
-                }
-            }
-            // Still resident, nothing else on offer: a beat with no candidate
-            // must not blank the panel.
-            (Some(choice @ PanelChoice::Frame(_)), None) => choice,
-            (
-                Some(PanelChoice::Thumb {
-                    generation: g,
-                    width,
-                    handle,
-                }),
-                next,
-            ) => match next {
-                Some(next) if frame_beats_thumb(next, width, max_width) => PanelChoice::Frame(next),
-                // Hold the thumbnail — the very handle first shown, so the
-                // warming pass sharpening the grid underneath never swaps a
-                // panel's texture.
-                _ => PanelChoice::Thumb {
-                    generation: g,
-                    width,
-                    handle,
-                },
-            },
-            (None, Some(next)) => PanelChoice::Frame(next),
-            (None, None) => {
-                // Nothing rendered for this page yet — the warmed deck
-                // thumbnail rather than the "Slide N" placeholder. Only
-                // slides have thumbnails, and only of the current document.
-                if kind != FrameKind::Slide || self.thumbnails.generation() != generation {
-                    return None;
-                }
-                let (handle, width) = self.thumbnails.get_sized(slide)?;
-                PanelChoice::Thumb {
-                    generation,
-                    width,
-                    handle,
-                }
-            }
-        };
-        drop(held);
-        Some(self.remember_panel_choice(slot, choice))
+            })
     }
 
-    /// Record what a panel settled on, logging the change if it is one —
-    /// the log is what turns the next flicker report into a grep.
-    fn remember_panel_choice(
+    /// The crop and the pixel height a `width`-wide frame of this page has.
+    ///
+    /// One function for the plan and for every lookup, because these two
+    /// numbers *are* the frame's identity: a `/FitR` zoom re-crops the
+    /// committed page, and a request that computes the cropped height while a
+    /// lookup assumes the whole page asks for a picture that is never found —
+    /// and finds one that was never asked for.
+    fn frame_shape(
         &self,
-        slot: (usize, FrameKind, u32),
-        choice: PanelChoice,
-    ) -> PanelChoice {
-        let mut held = self.sticky.borrow_mut();
-        if !held
-            .get(&slot)
-            .is_some_and(|prev| same_panel_choice(prev, &choice))
-        {
-            tracing::debug!(
-                slide = slot.0,
-                kind = ?slot.1,
-                max_width = slot.2,
-                to = %describe_panel_choice(&choice),
-                "panel picture change"
-            );
+        slide: usize,
+        kind: FrameKind,
+        width: u32,
+    ) -> (Option<pulpit_core::notes::Region>, u32) {
+        let mut aspect = self
+            .state
+            .first_page_size()
+            .map(|size| size.aspect_ratio())
+            .unwrap_or(16.0 / 9.0);
+        let mut crop = None;
+        if kind == FrameKind::Slide && slide == self.state.committed() {
+            let source = self
+                .state
+                .mapping()
+                .audience_source(slide, self.state.pdf_pages());
+            if let Some(region) = source.and_then(|source| {
+                self.state
+                    .zoom()
+                    .and_then(|zoom| source.region.intersect(&zoom))
+            }) {
+                let cropped = aspect * region.width / region.height;
+                if cropped > 0.0 {
+                    aspect = cropped;
+                    crop = Some(region);
+                }
+            }
         }
-        held.insert(slot, choice.clone());
-        choice
+        (crop, (width as f32 / aspect).max(1.0) as u32)
+    }
+
+    /// Atomically advance Current Slide when its canonical texture is ready.
+    fn remember_presenter_frame(&mut self) {
+        let slide = self.state.committed();
+        let width = self.presenter_width();
+        let candidate = self.ready_frame_key(slide, FrameKind::Slide, width);
+        let next = ready_transition(self.last_presenter, slide, candidate);
+        if next != self.last_presenter {
+            if let Some(key) = next {
+                tracing::debug!(
+                    slide = key.slide,
+                    width = key.width,
+                    "presenter frame change"
+                );
+            }
+            self.last_presenter = next;
+        }
     }
 
     /// The texture for a cached frame.
@@ -4647,27 +4691,6 @@ impl App {
         Some(Picture {
             handle: self.handles.get(key)?.clone(),
         })
-    }
-
-    /// Remember the texture for a newly cached frame, and forget the ones
-    /// whose frames the cache has evicted.
-    ///
-    /// Pruning follows the cache's own eviction list rather than a size
-    /// heuristic: a handle is dropped exactly when its frame went, so the
-    /// uncounted handle map cannot quietly outlive the budget that was
-    /// supposed to bound the pixels.
-    fn remember_handle(&mut self, key: FrameKey, frame: &Frame) {
-        self.handles.insert(
-            key,
-            iced::widget::image::Handle::from_rgba(
-                frame.width,
-                frame.height,
-                shared_pixels(&frame.pixels),
-            ),
-        );
-        for evicted in self.cache.take_evicted() {
-            self.handles.remove(&evicted);
-        }
     }
 
     // ------------------------------------------------------------ thumbnails
@@ -4857,60 +4880,29 @@ impl App {
             return;
         };
         let generation = self.state.generation();
-        let aspect = self
-            .state
-            .first_page_size()
-            .map(|size| size.aspect_ratio())
-            .unwrap_or(16.0 / 9.0);
-
-        let audience_width = (self.audience_size.width.max(320.0)) as u32;
-        let audience_height = (audience_width as f32 / aspect) as u32;
-        let coarse_width = self.settings.rendering.coarse_width.min(audience_width);
-        let coarse_height = (coarse_width as f32 / aspect).max(1.0) as u32;
-        let preview_width = (self.preview_size.width.max(240.0)) as u32;
-        let preview_height = (preview_width as f32 / aspect).max(1.0) as u32;
-
         let committed = self.state.committed();
         let preview = self.state.preview();
-        let mut wanted: Vec<(usize, FrameKind, Priority, Quality, u32, u32)> = Vec::new();
 
-        // 1. The committed audience page: coarse first so something correct
-        //    appears immediately, then the real thing.
-        wanted.push((
+        // Widths only: every height comes from `frame_shape` below, so a zoom
+        // crop's height is the same number in the plan and in every lookup.
+        let audience_width = self.audience_width();
+        let presenter_width = self.presenter_width();
+        let coarse_width = self.coarse_width();
+        let preview_width = (self.preview_size.width.max(240.0)) as u32;
+
+        // One exact audience frame plus one immutable presenter representation
+        // for every page in the bounded navigation neighbourhood — and, ahead
+        // of both, the coarse stand-in, but only on the jumps where it would
+        // actually be shown. Asked for on every turn it would be a render and
+        // a texture bought on the overwhelming majority of turns, where the
+        // page is already prefetched and the stand-in is never displayed.
+        let mut wanted = live_slide_plan(
             committed,
-            FrameKind::Slide,
-            Priority::Audience,
-            Quality::Coarse,
-            coarse_width,
-            coarse_height,
-        ));
-        wanted.push((
-            committed,
-            FrameKind::Slide,
-            Priority::Audience,
-            Quality::Refined,
+            self.state.priority_slides(),
             audience_width,
-            audience_height,
-        ));
-        // 2/3/4. Presenter page, next page, neighbours — at preview size,
-        // because the presenter panels are small and an audience-resolution
-        // frame in a thumbnail is waste.
-        for (index, slide) in self.state.priority_slides().into_iter().enumerate() {
-            let priority = match index {
-                0 => Priority::Presenter,
-                1 => Priority::Presenter,
-                2 => Priority::Next,
-                _ => Priority::Adjacent,
-            };
-            wanted.push((
-                slide,
-                FrameKind::Slide,
-                priority,
-                Quality::Refined,
-                preview_width,
-                preview_height,
-            ));
-        }
+            presenter_width,
+            (coarse_width < audience_width && self.wants_coarse_stand_in()).then_some(coarse_width),
+        );
         // The pages on either side of the committed one, at audience size, so
         // stepping swaps one finished frame for another instead of waiting
         // for a render. Both directions: backwards navigation used to find
@@ -4938,7 +4930,6 @@ impl App {
                 Priority::Adjacent,
                 Quality::Refined,
                 audience_width,
-                audience_height,
             ));
         }
         // 5. Notes.
@@ -4949,7 +4940,6 @@ impl App {
                 Priority::Ancillary,
                 Quality::Refined,
                 preview_width,
-                preview_height,
             ));
         }
 
@@ -4964,7 +4954,7 @@ impl App {
         // the panels starved and the projector waited a full render latency
         // after every settle.
         let mut still_wanted: Vec<FrameKey> = Vec::new();
-        for (slide, kind, priority, quality, width, mut height) in wanted {
+        for (slide, kind, priority, quality, width) in wanted {
             let source = match kind {
                 FrameKind::Slide => self
                     .state
@@ -4978,19 +4968,11 @@ impl App {
             let Some(mut source) = source else { continue };
             // A `/FitR` zoom re-crops the committed slide everywhere it is
             // shown at slide size. The frame keeps the crop's own aspect, or
-            // the picture would arrive stretched.
-            if kind == FrameKind::Slide && slide == committed {
-                if let Some(region) = self
-                    .state
-                    .zoom()
-                    .and_then(|zoom| source.region.intersect(&zoom))
-                {
-                    source.region = region;
-                    let region_aspect = aspect * region.width / region.height;
-                    if region_aspect > 0.0 {
-                        height = (width as f32 / region_aspect).max(1.0) as u32;
-                    }
-                }
+            // the picture would arrive stretched — and the crop is part of its
+            // identity, which is why the same function answers for lookups.
+            let (crop, height) = self.frame_shape(slide, kind, width);
+            if let Some(region) = crop {
+                source.region = region;
             }
             let key = FrameKey {
                 generation,
@@ -5001,10 +4983,7 @@ impl App {
                 height,
             };
             still_wanted.push(key);
-            if self
-                .cache
-                .satisfies(generation, slide, kind, quality, width)
-            {
+            if request_is_satisfied(&self.cache, key) {
                 continue;
             }
             if self.pending.iter().any(|(_, pending)| *pending == key) {
@@ -5096,6 +5075,7 @@ impl App {
         // and until one arrived the pins protected the previous position
         // while the frames actually on screen were fair game for eviction.
         self.remember_audience_frame();
+        self.remember_presenter_frame();
         self.pin_visible();
     }
 
@@ -5558,227 +5538,214 @@ fn visible_centre(scroll: f32, grid: OverviewGrid, count: usize) -> Option<usize
     Some((row * columns + columns / 2).min(count - 1))
 }
 
-/// Whether a panel should replace the frame it is showing with `candidate`.
+type RenderWant = (usize, FrameKind, Priority, Quality, u32);
+
+/// The complete live slide plan before audience-neighbour and notes prefetch.
 ///
-/// Every yes here is a new GPU texture — a visible blink — so the answer is
-/// yes only for a *meaningful* improvement: new content (a newer generation),
-/// a quality repair, or a sharpening jump while the panel is still below its
-/// target width. Once at or above target, extra pixels change nothing the
-/// panel can display, so nothing justifies another texture.
+/// One exact audience render and one canonical presenter representation per
+/// logical page: no page is ever asked for at two live sizes, so no panel and
+/// no projector can be handed a quality ladder to climb.
 ///
-/// Pure for the same reason as [`would_downgrade`]: `App` cannot be built in
-/// a test.
-fn panel_swap(previous: FrameKey, candidate: FrameKey, max_width: u32) -> bool {
-    if candidate == previous {
-        return false;
+/// `coarse` is the one exception, and `Some` only on the jumps where the
+/// stand-in would be shown — the committed page, ahead of its own refined
+/// frame, so a worker that is busy with panels still answers the projector
+/// first.
+fn live_slide_plan(
+    committed: usize,
+    priority_slides: Vec<usize>,
+    audience: u32,
+    presenter: u32,
+    coarse: Option<u32>,
+) -> Vec<RenderWant> {
+    let mut wanted: Vec<RenderWant> = coarse
+        .map(|width| {
+            (
+                committed,
+                FrameKind::Slide,
+                Priority::Audience,
+                Quality::Coarse,
+                width,
+            )
+        })
+        .into_iter()
+        .collect();
+    wanted.push((
+        committed,
+        FrameKind::Slide,
+        Priority::Audience,
+        Quality::Refined,
+        audience,
+    ));
+    for (index, slide) in priority_slides.into_iter().enumerate() {
+        let priority = match index {
+            0 | 1 => Priority::Presenter,
+            2 => Priority::Next,
+            _ => Priority::Adjacent,
+        };
+        wanted.push((
+            slide,
+            FrameKind::Slide,
+            priority,
+            Quality::Refined,
+            presenter,
+        ));
     }
-    // A different generation is different content: a reload must always win,
-    // and a panel must never trade current content for an old document's.
-    if candidate.generation != previous.generation {
-        return candidate.generation > previous.generation;
-    }
-    if (candidate.quality, candidate.width) <= (previous.quality, previous.width) {
-        return false;
-    }
-    let sharpening = previous.width < max_width
-        && (candidate.width >= max_width || candidate.width >= previous.width.saturating_mul(2));
-    let quality_repair = candidate.quality > previous.quality && candidate.width >= previous.width;
-    sharpening || quality_repair
+    wanted
 }
 
-/// Whether a rendered frame should replace the deck thumbnail a panel is
-/// showing: only when it reaches the panel's target or at least doubles the
-/// detail. A frame barely wider than the thumbnail is a blink for nothing —
-/// the frame that reaches the target is at most one hop behind it.
-fn frame_beats_thumb(candidate: FrameKey, thumb_width: u32, max_width: u32) -> bool {
-    candidate.width >= max_width || candidate.width >= thumb_width.saturating_mul(2)
-}
-
-/// Whether two panel choices would draw the same texture.
-fn same_panel_choice(a: &PanelChoice, b: &PanelChoice) -> bool {
-    match (a, b) {
-        (PanelChoice::Frame(x), PanelChoice::Frame(y)) => x == y,
-        (
-            PanelChoice::Thumb {
-                generation: ga,
-                width: wa,
-                ..
-            },
-            PanelChoice::Thumb {
-                generation: gb,
-                width: wb,
-                ..
-            },
-        ) => ga == gb && wa == wb,
-        _ => false,
-    }
-}
-
-/// A one-line description of a panel choice, for the swap log.
-fn describe_panel_choice(choice: &PanelChoice) -> String {
-    match choice {
-        PanelChoice::Frame(key) => format!("{:?} {}px", key.quality, key.width),
-        PanelChoice::Thumb { width, .. } => format!("thumbnail {width}px"),
-    }
-}
-
-/// Whether swapping the frame on the projector for a `next_width`-wide one
-/// would make the picture visibly worse.
+/// One render width shared by every live presenter slide panel.
 ///
-/// Pure so the rule is testable: building an `App` starts a renderer
-/// supervisor and probes the display server, and this decision runs on every
-/// view pass.
-fn would_downgrade(
-    target_width: u32,
-    previous_width: u32,
-    next_width: u32,
-    same_frame: bool,
-    better_in_flight: bool,
-) -> bool {
-    if same_frame {
-        return false;
+/// The application records `preview_size` as 45% of the presenter window, and
+/// the largest slide panel in a shipped layout is about that wide — so the
+/// panel's own *physical* width is `preview_width × scale_factor`, plus a
+/// quarter for layouts that give Current Slide a little more room. Coarse
+/// buckets keep ordinary resize noise from minting a new texture identity.
+///
+/// The scale factor is asked for rather than assumed. This width used to be a
+/// flat double, which is right for a HiDPI laptop and twice too much on a 4K
+/// display at scale 1 — and being twice too wide is four times the pixels, in
+/// every one of the five frames the panels keep resident. On a 4K presenter
+/// that was 128 MiB of a 256 MiB cache budget for the panels alone, which put
+/// the projector's own prefetched frames on the eviction list and re-requested
+/// them on the next pass: a render treadmill on exactly the frames the
+/// prefetch exists to have ready.
+fn canonical_presenter_width(preview_width: f32, scale: f32) -> u32 {
+    const BUCKET: u32 = 128;
+    const PANEL_HEADROOM: f32 = 1.25;
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let wanted = ((preview_width.max(1.0) * PANEL_HEADROOM * scale).ceil() as u32).max(512);
+    wanted.div_ceil(BUCKET) * BUCKET
+}
+
+/// Move a display slot only when the complete candidate is for its wanted
+/// slide. A missing or stale candidate leaves the last valid frame untouched.
+fn ready_transition(
+    previous: Option<FrameKey>,
+    wanted_slide: usize,
+    candidate: Option<FrameKey>,
+) -> Option<FrameKey> {
+    candidate
+        .filter(|key| key.slide == wanted_slide)
+        .or(previous)
+}
+
+/// Slide outputs are immutable exact-size products. Notes may reuse a nearby
+/// fitting render because they are not part of the atomic slide transition.
+fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
+    if key.kind == FrameKind::Slide {
+        cache.contains(&key)
+    } else {
+        cache.satisfies(key.generation, key.slide, key.kind, key.quality, key.width)
     }
-    // A frame within a third of the target is close enough that the upscale
-    // is invisible; below that the softness reads as a flash.
-    let acceptable = target_width.saturating_mul(2) / 3;
-    !(next_width >= acceptable || next_width >= previous_width || !better_in_flight)
 }
 
 #[cfg(test)]
-mod audience_frame_tests {
-    use super::would_downgrade;
+mod canonical_frame_tests {
+    use super::{canonical_presenter_width, ready_transition};
+    use pulpit_core::RenderGeneration;
+    use pulpit_render::cache::{FrameKey, FrameKind};
+    use pulpit_render::protocol::Quality;
 
-    const TARGET: u32 = 3840;
-    const REFINED: u32 = 3840;
-    const COARSE: u32 = 640;
-    const PREVIEW: u32 = 320;
-
-    #[test]
-    fn a_coarse_frame_never_displaces_a_refined_one() {
-        // The flicker: the coarse-first render for the new page lands before
-        // the refined one and briefly replaces a full-resolution slide.
-        assert!(would_downgrade(TARGET, REFINED, COARSE, false, true));
-    }
-
-    #[test]
-    fn stepping_back_onto_a_preview_frame_holds_instead() {
-        assert!(would_downgrade(TARGET, REFINED, PREVIEW, false, true));
-    }
-
-    #[test]
-    fn a_refined_frame_always_takes_over() {
-        assert!(!would_downgrade(TARGET, REFINED, REFINED, false, true));
-        assert!(!would_downgrade(TARGET, COARSE, REFINED, false, false));
-    }
-
-    #[test]
-    fn the_hold_releases_when_nothing_better_is_coming() {
-        // A cancelled or failed refined render must not freeze the projector
-        // on the wrong page: the correct page coarsely beats a stale slide.
-        assert!(!would_downgrade(TARGET, REFINED, COARSE, false, false));
-    }
-
-    #[test]
-    fn a_frame_close_to_the_target_is_not_a_downgrade() {
-        // Slightly-narrow frames are common after a resize; holding for them
-        // would stall every turn on a mid-DPI projector.
-        assert!(!would_downgrade(TARGET, REFINED, 3000, false, true));
-    }
-
-    #[test]
-    fn the_same_frame_is_never_a_downgrade() {
-        assert!(!would_downgrade(TARGET, PREVIEW, PREVIEW, true, true));
-    }
-
-    mod panels {
-        use super::super::{frame_beats_thumb, panel_swap};
-        use pulpit_core::RenderGeneration;
-        use pulpit_render::cache::{FrameKey, FrameKind};
-        use pulpit_render::protocol::Quality;
-
-        const PANEL: u32 = 1152;
-
-        fn key(generation: u64, quality: Quality, width: u32) -> FrameKey {
-            FrameKey {
-                generation: RenderGeneration(generation),
-                slide: 4,
-                kind: FrameKind::Slide,
-                quality,
-                width,
-                height: width / 2,
-            }
-        }
-
-        #[test]
-        fn a_panel_never_swaps_a_wide_frame_for_a_narrow_one() {
-            // The audience-size prefetch lands first, then the preview-size
-            // render arrives; swapping down would mint a texture for nothing.
-            let wide = key(1, Quality::Refined, 3840);
-            let narrow = key(1, Quality::Refined, 640);
-            assert!(!panel_swap(wide, narrow, PANEL));
-        }
-
-        #[test]
-        fn at_target_no_amount_of_extra_pixels_earns_a_texture() {
-            // The chain that read as flicker: preview frame up, then the
-            // audience giant lands and used to replace it — invisibly
-            // sharper, visibly blinking.
-            let at_target = key(1, Quality::Refined, PANEL);
-            let giant = key(1, Quality::Refined, 3840);
-            assert!(!panel_swap(at_target, giant, PANEL));
-        }
-
-        #[test]
-        fn below_target_a_frame_reaching_the_target_swaps_in() {
-            let soft = key(1, Quality::Refined, 640);
-            let sharp = key(1, Quality::Refined, 2304);
-            assert!(panel_swap(soft, sharp, 2304));
-            // …but a barely-wider frame is a blink for nothing.
-            let barely = key(1, Quality::Refined, 700);
-            assert!(!panel_swap(soft, barely, 2304));
-        }
-
-        #[test]
-        fn a_quality_repair_always_earns_the_swap() {
-            let coarse = key(1, Quality::Coarse, 640);
-            let refined = key(1, Quality::Refined, 640);
-            assert!(panel_swap(coarse, refined, PANEL));
-        }
-
-        #[test]
-        fn a_newer_generation_always_wins_and_an_older_never_does() {
-            // A reload is new content; an old document's frame must not
-            // displace it, however sharp.
-            let old = key(1, Quality::Refined, 3840);
-            let new = key(2, Quality::Refined, 640);
-            assert!(panel_swap(old, new, PANEL));
-            assert!(!panel_swap(new, old, PANEL));
-        }
-
-        #[test]
-        fn the_same_frame_never_swaps() {
-            let frame = key(1, Quality::Refined, 640);
-            assert!(!panel_swap(frame, frame, PANEL));
-        }
-
-        #[test]
-        fn a_thumbnail_yields_only_to_a_real_step_up() {
-            // Coarse frames land barely wider than the thumbnail — swapping
-            // through them was two blinks where the panel-size frame, one
-            // hop behind, deserves the only one.
-            let coarse = key(1, Quality::Coarse, 640);
-            assert!(!frame_beats_thumb(coarse, 480, PANEL));
-            let panel_size = key(1, Quality::Refined, PANEL);
-            assert!(frame_beats_thumb(panel_size, 480, PANEL));
-            let doubled = key(1, Quality::Refined, 960);
-            assert!(frame_beats_thumb(doubled, 480, PANEL));
+    fn key(slide: usize, width: u32) -> FrameKey {
+        FrameKey {
+            generation: RenderGeneration(1),
+            slide,
+            kind: FrameKind::Slide,
+            quality: Quality::Refined,
+            width,
+            height: width / 2,
         }
     }
 
     #[test]
-    fn a_small_audience_window_does_not_hold_forever() {
-        // Target below the coarse width: everything qualifies, nothing holds.
-        assert!(!would_downgrade(320, REFINED, COARSE, false, true));
+    fn every_presenter_panel_uses_one_quantized_width() {
+        assert_eq!(canonical_presenter_width(640.0, 1.0), 896);
+        assert_eq!(canonical_presenter_width(700.0, 1.0), 896);
+        assert_eq!(canonical_presenter_width(100.0, 1.0), 512);
+    }
+
+    #[test]
+    fn a_panel_is_rendered_for_the_pixels_the_display_actually_has() {
+        // The same window on a HiDPI display needs twice the pixels, and on a
+        // large display at scale 1 it does not: a flat doubling was right for
+        // one of those and four times too many pixels for the other.
+        assert_eq!(canonical_presenter_width(864.0, 2.0), 2176);
+        assert_eq!(canonical_presenter_width(1728.0, 1.0), 2176);
+        // Nonsense from the runtime never becomes a nonsense render.
+        assert_eq!(
+            canonical_presenter_width(864.0, 0.0),
+            canonical_presenter_width(864.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn the_live_plan_has_no_progressive_presenter_ladder() {
+        let plan = super::live_slide_plan(4, vec![4, 5, 3], 3840, 1280, None);
+        assert!(plan.iter().all(|request| request.3 == Quality::Refined));
+        assert_eq!(
+            plan.iter()
+                .filter(|request| request.2 == pulpit_render::protocol::Priority::Audience)
+                .count(),
+            1
+        );
+        assert!(plan
+            .iter()
+            .filter(|request| request.2 != pulpit_render::protocol::Priority::Audience)
+            .all(|request| request.4 == 1280));
+    }
+
+    #[test]
+    fn the_coarse_stand_in_is_asked_for_first_and_only_for_the_projector() {
+        let plan = super::live_slide_plan(4, vec![4, 5, 3], 3840, 1280, Some(640));
+        let coarse = plan.first().expect("a plan");
+        assert_eq!(coarse.3, Quality::Coarse);
+        assert_eq!(coarse.4, 640);
+        assert_eq!(coarse.0, 4, "the committed page, never a neighbour");
+        assert_eq!(
+            plan.iter()
+                .filter(|request| request.3 == Quality::Coarse)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_nearby_width_never_suppresses_an_exact_slide_request() {
+        let mut cache = pulpit_render::cache::FrameCache::new(32 * 1024 * 1024);
+        let cached = key(0, 1408);
+        cache.insert(
+            cached,
+            pulpit_render::cache::Frame {
+                width: 1408,
+                height: 704,
+                pixels: std::sync::Arc::new(vec![0; 1408 * 704 * 4]),
+            },
+        );
+        assert!(!super::request_is_satisfied(&cache, key(0, 1280)));
+        assert!(super::request_is_satisfied(&cache, cached));
+    }
+
+    #[test]
+    fn navigation_holds_the_previous_frame_until_the_target_is_ready() {
+        let previous = key(3, 1280);
+        assert_eq!(ready_transition(Some(previous), 4, None), Some(previous));
+        assert_eq!(
+            ready_transition(Some(previous), 4, Some(key(4, 1280))),
+            Some(key(4, 1280))
+        );
+    }
+
+    #[test]
+    fn a_late_frame_for_another_slide_never_changes_the_display() {
+        let previous = key(3, 1280);
+        assert_eq!(
+            ready_transition(Some(previous), 4, Some(key(5, 1280))),
+            Some(previous)
+        );
     }
 }
 

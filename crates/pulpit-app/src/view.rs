@@ -91,7 +91,11 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if let Some(plan) = app.pending_restore.as_ref() {
         page = stack![page, restore_session_dialog(plan)].into();
     }
-    page
+    // Its own renderer, its own atlas, its own residency — exactly as the
+    // projector has, and for the same reason. A slide panel's picture is well
+    // over the two mebibytes at which Iced stops uploading inline, so without
+    // this a panel draws nothing on the pass a new frame first reaches it.
+    crate::residency::resident(page, app.presenter_resident_handles())
 }
 
 // --------------------------------------------------------------- audience
@@ -179,16 +183,22 @@ fn audience(app: &App) -> Element<'_, Message> {
             .into(),
     };
 
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(background.into()),
-            ..container::Style::default()
-        })
-        .into()
+    // The projector's own renderer, with its own image cache: an audience
+    // frame is tens of megabytes, and without this the first draw of every new
+    // one was a black flash while the upload ran on a worker thread. See
+    // `residency`.
+    crate::residency::resident(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(background.into()),
+                ..container::Style::default()
+            }),
+        app.audience_resident_handles(),
+    )
 }
 
 // -------------------------------------------------------------- presenter

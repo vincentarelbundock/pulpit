@@ -1403,7 +1403,7 @@ mod tests {
             cache: Some(CacheStats {
                 frames: 4,
                 cpu_bytes: 100,
-                gpu_bytes: 0,
+
                 hits: 2,
                 misses: 40,
                 evictions: 30,
