@@ -248,8 +248,9 @@ Windows: what matters is the path the artifact travels, not what is inside it.
 - Without notarization, a first launch costs one trip through System Settings →
   Privacy & Security → *Open Anyway*. macOS 15 removed the Control-click
   shortcut that used to make this quicker.
-- Homebrew re-applies quarantine to cask installs deliberately, so
-  `--no-quarantine` is the documented way to skip it, not a default we assume.
+- Homebrew re-applies quarantine to cask installs deliberately, and removed
+  `--no-quarantine` in 4.5, so a cask install costs the same one-time approval
+  as the disk image. No documented flag skips it.
 - A plain formula would install with no prompt — and no Launchpad entry, no
   icon, no double-click launch. pulpit takes the `.app` and the prompt, because
   application identity is part of the definition of supported and a one-time

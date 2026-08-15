@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "fingerprint": 9195530082827030775,
-  "generation": "7f9d15e3ec52d0f7-1349cde127705c16",
+  "fingerprint": 5506572645400211570,
+  "generation": "4c6b46a55af67072-1349cde127705c16",
   "completed_store": {},
   "stabilized_chunks": [
     {
       "label": "chunk-1",
       "engine": "sh",
-      "code": "brew install --cask --no-quarantine vincentarelbundock/tap/pulpit",
+      "code": "brew install --cask vincentarelbundock/tap/pulpit",
       "script": true,
       "exec_options": {
         "eval": true,

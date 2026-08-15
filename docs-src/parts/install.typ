@@ -4,8 +4,11 @@
 With Homebrew:
 
 ```sh
-brew install --cask --no-quarantine vincentarelbundock/tap/pulpit
+brew install --cask vincentarelbundock/tap/pulpit
 ```
+
+Either way the first launch needs the one-time approval described below;
+Homebrew no longer offers a flag that skips it.
 
 Or install it by hand:
 

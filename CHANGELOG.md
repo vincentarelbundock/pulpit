@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow now actually publishes the Homebrew Cask. It rendered
+  `Casks/pulpit.rb` into a clone of the tap and then tested for changes with
+  `git diff` *before* staging, which does not see an untracked file, so every
+  release through 0.0.3 reported "the cask is already at …" and pushed
+  nothing. `brew install --cask vincentarelbundock/tap/pulpit` answered "No
+  casks found". The step stages first, and afterwards reads the cask back out
+  of the tap through the GitHub API and fails the release if the tagged
+  version is not being served.
+
+### Changed
+
+- macOS install instructions no longer pass `--no-quarantine`, which Homebrew
+  removed in 4.5. A cask install costs the same one-time trip through System
+  Settings → Privacy & Security as the disk image does; no flag skips it.
+
 ## [0.0.2] — 2026-08-14
 
 ### Changed

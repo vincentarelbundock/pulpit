@@ -2,13 +2,13 @@
   "schema": 2,
   "calepin_version": "0.0.46",
   "input": "index.typ",
-  "generation": "7f9d15e3ec52d0f7-1349cde127705c16",
+  "generation": "4c6b46a55af67072-1349cde127705c16",
   "store": {},
   "chunks": {
     "chunk-1": {
       "label": "chunk-1",
       "engine": "sh",
-      "source": "brew install --cask --no-quarantine vincentarelbundock/tap/pulpit",
+      "source": "brew install --cask vincentarelbundock/tap/pulpit",
       "status": "skipped",
       "options": {
         "echo": true,

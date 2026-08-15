@@ -1,7 +1,7 @@
 # Homebrew Cask template for Pulpit.
 #
-# `__VERSION__` and `__SHA256__` are filled in by the release workflow, which
-# then pushes the rendered file to vincentarelbundock/homebrew-tap as
+# The version and sha256 placeholders below are filled in by the release
+# workflow, which then pushes the rendered file to vincentarelbundock/homebrew-tap as
 # `Casks/pulpit.rb`. Edit this file, never the copy in the tap: the tap's copy
 # is generated output and any hand edit is overwritten by the next release.
 cask "pulpit" do
@@ -32,12 +32,11 @@ cask "pulpit" do
     Apple Silicon execute the binary at all; it buys no Gatekeeper relief,
     and notarization needs a paid Developer ID that no release is gated on.
 
-    Installed this way the quarantine attribute still applies, so the first
-    launch costs one trip through System Settings -> Privacy & Security,
-    where a message about Pulpit offers "Open Anyway". To skip that entirely,
-    reinstall with:
-
-      brew install --cask --no-quarantine vincentarelbundock/tap/pulpit
+    The quarantine attribute applies, so the first launch costs one trip
+    through System Settings -> Privacy & Security, where a message about
+    Pulpit offers "Open Anyway". Homebrew removed --no-quarantine in 4.5, so
+    there is no flag that skips it; the approval is needed once, not per
+    upgrade.
 
     Interactive and web media overlays need a Chromium-family browser —
     Google Chrome, Chromium, Microsoft Edge or Brave in /Applications.

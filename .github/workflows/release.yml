@@ -210,10 +210,9 @@ jobs:
 
             The app is **ad-hoc signed, not notarized**. Notarization needs a
             paid Developer ID and no release is gated on one
-            (SPEC-package.md §7). A first launch from a browser download
-            therefore goes through System Settings → Privacy & Security →
-            Open Anyway, once. Installing through the Homebrew Cask with
-            `--no-quarantine` avoids the step entirely.
+            (SPEC-package.md §7). A first launch therefore goes through
+            System Settings → Privacy & Security → Open Anyway, once, whether
+            the app came from the disk image or from the Homebrew Cask.
 
             macOS 11 Big Sur or newer, on either architecture.
 
@@ -266,15 +265,40 @@ jobs:
             packaging/macos/pulpit.rb.in > "$RUNNER_TEMP/tap/Casks/pulpit.rb"
 
           cd "$RUNNER_TEMP/tap"
-          if git diff --quiet; then
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage first, then compare against the index: on the release that
+          # creates Casks/pulpit.rb the file is untracked, and a plain
+          # `git diff` does not see untracked files. That reported "already
+          # at ${version}" and pushed nothing, so the tap had no cask at all.
+          git add Casks/pulpit.rb
+          if git diff --cached --quiet; then
             echo "::notice::the cask is already at ${version}"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/pulpit.rb
           git commit -m "pulpit ${version}"
           git push
+
+          # Verify the tap from the outside, the way `brew` will read it, so
+          # that a push which succeeds locally but leaves the tap without a
+          # usable cask fails the release rather than passing quietly. The
+          # placeholder check catches a renamed token in the template; the
+          # fetch catches a push to the wrong branch or repository.
+          if grep -q '__VERSION__\|__SHA256__' Casks/pulpit.rb; then
+            echo "::error::the cask still holds unsubstituted placeholders"
+            exit 1
+          fi
+          # The API, not raw.githubusercontent.com: raw is served through a
+          # CDN that can hold a stale copy for minutes after a push, which
+          # would make this check flaky rather than meaningful.
+          api="https://api.github.com/repos/vincentarelbundock/homebrew-tap/contents/Casks/pulpit.rb?ref=main"
+          published="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" "$api" || true)"
+          if ! printf '%s' "$published" | grep -q "version \"${version}\""; then
+            echo "::error::the tap does not serve Casks/pulpit.rb at ${version}"
+            exit 1
+          fi
+          echo "::notice::the tap serves pulpit ${version}"
 
   windows:
     name: Windows x64 package
