@@ -372,9 +372,7 @@ impl DisplayBackend for MacosBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // AppKit honours a frame on any display, and fullscreen follows
-            // the window's display.
-            targeted_fullscreen: true,
+            // AppKit honours a frame on any display.
             arbitrary_position: true,
             // Leaving fullscreen restores AppKit's own saved frame, which it
             // clamps to the visible desktop.

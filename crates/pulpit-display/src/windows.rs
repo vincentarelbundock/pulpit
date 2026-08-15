@@ -548,7 +548,6 @@ impl DisplayBackend for WindowsBackend {
         // the window is shown, and restoring a saved rectangle cannot strand
         // it: `SetWindowPos` is checked against the live desktop.
         Capabilities {
-            targeted_fullscreen: true,
             arbitrary_position: true,
             unfullscreen_safe: true,
             place_before_map: true,

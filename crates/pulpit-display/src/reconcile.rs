@@ -14,8 +14,6 @@ use crate::snapshot::{DisplaySnapshot, Rect, Resolution};
 /// extension, not assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// The compositor honours "fullscreen this window on that output".
-    pub targeted_fullscreen: bool,
     /// Arbitrary top-level window positioning (X11 yes, Wayland no).
     pub arbitrary_position: bool,
     /// Whether leaving fullscreen is safe: on Wayland unfullscreening can
@@ -28,15 +26,14 @@ pub struct Capabilities {
 impl Capabilities {
     /// X11 with a conventional window manager.
     pub const X11: Capabilities = Capabilities {
-        targeted_fullscreen: true,
         arbitrary_position: true,
         unfullscreen_safe: true,
         place_before_map: false,
     };
 
-    /// Wayland: targeted fullscreen only, subject to compositor policy.
+    /// Wayland: the compositor owns placement, so the audience window goes
+    /// fullscreen wherever it already is.
     pub const WAYLAND: Capabilities = Capabilities {
-        targeted_fullscreen: true,
         arbitrary_position: false,
         unfullscreen_safe: false,
         place_before_map: false,
@@ -44,14 +41,13 @@ impl Capabilities {
 
     /// A tiling compositor that ignores client placement entirely.
     pub const TILING: Capabilities = Capabilities {
-        targeted_fullscreen: false,
         arbitrary_position: false,
         unfullscreen_safe: true,
         place_before_map: false,
     };
 
     pub fn can_place(&self) -> bool {
-        self.targeted_fullscreen || self.arbitrary_position
+        self.arbitrary_position
     }
 }
 

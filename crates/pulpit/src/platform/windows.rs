@@ -162,7 +162,6 @@ impl PlatformServices for WindowsServices {
             // `QueryDisplayConfig` carries the monitor device path, which is
             // stable across a reboot and a re-plug.
             identity: IdentityQuality::Stable,
-            targeted_fullscreen: true,
             arbitrary_placement: true,
             safe_unfullscreen: true,
             place_before_map: true,

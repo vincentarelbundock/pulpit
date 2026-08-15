@@ -215,7 +215,7 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
 == Platform boundary
 
 + *Ask what the session can do, never what OS it is.* Views and domain logic
-  ask for capabilities — targeted fullscreen, arbitrary placement, system
+  ask for capabilities — arbitrary placement, safe un-fullscreening, system
   appearance, sleep inhibition, native menus, accessibility bridge, media
   keys. An unavailable capability produces one of three deliberate outcomes: a
   documented safe fallback, a specific manual action for the user, or a
@@ -466,17 +466,15 @@ the strength of the parts that were — said the event loop was innocent.
 == Capabilities over OS checks
 
 `Capabilities` reports the backend, the quality of display identity
-(`Stable` → `Connector` → `Geometric` → `None`), whether targeted fullscreen,
-arbitrary placement and safe un-fullscreening are possible, whether appearance
+(`Stable` → `Connector` → `Geometric` → `None`), whether arbitrary placement
+and safe un-fullscreening are possible, whether appearance
 and high contrast can be read, whether sleep can be inhibited, and whether
 native dialogs, menus, an accessibility bridge, media keys and notifications
 exist. `report()` renders it for the diagnostics bundle and the settings page;
 `limitations()` yields the ones worth telling the presenter about.
 
-The X11 adapter claims placement; the portable Wayland adapter does not. On a
-Niri session, a runtime wrapper claims targeted placement through Niri's IPC
-and moves each role-specific window to the selected output's active workspace.
-The UI adapts on the resulting capability claim alone — never on
+The X11 adapter claims placement; the Wayland adapter does not, on any
+compositor. The UI adapts on the resulting capability claim alone — never on
 `cfg!(target_os = ...)`.
 
 = The design system
@@ -514,14 +512,15 @@ is a courtesy; the bundle is the record.
   columns: (0.8fr, 1fr, 1.2fr, 1.2fr),
   stroke: none,
   inset: 0.55em,
-  [*Platform*], [*Enumeration and identity*], [*Targeted fullscreen*], [*Notes*],
+  [*Platform*], [*Enumeration and identity*], [*Window placement*], [*Notes*],
   [X11], [XRandR + EDID], [yes, via EWMH], [reference platform],
   [Wayland], [`wl_output` + `xdg_output`], [*no* — compositor placement, explained in the UI], [Iced fullscreens on the monitor it picks; accepted permanently],
   [Windows / macOS], [none], [falls back], [not in this build],
 )
 
-Iced 0.14 exposes no monitor enumeration and no targeted fullscreen;
-`crates/pulpit-display` implements both behind a trait, so an upstream
+Iced 0.14 exposes no monitor enumeration and no way to name the output for a
+fullscreen window; `crates/pulpit-display` implements what it can behind a
+trait, so an upstream
 contribution or a pinned patch can replace an adapter without touching the
 application.
 
@@ -594,11 +593,22 @@ gap is an API one, not a protocol one.
 
 *This is accepted as a permanent limitation.* Closing it means forking or
 vendoring `iced_winit`, and carrying a toolkit fork is a worse standing cost
-than the fallback. The adapter therefore reports `targeted_fullscreen: false`,
-and the application falls back to compositor fullscreen while saying so in the
-UI. On a Wayland session the presenter may have to move the audience window
-once, by hand, exactly as in a tiling compositor — a supported configuration,
-not a broken one. Nothing else in the design depends on this capability.
+than the fallback. Choosing the output for the audience window is therefore
+not a capability the design has at all: it was removed from `Capabilities`
+rather than left as a flag no adapter could honestly set, and the application
+falls back to compositor fullscreen while saying so in the UI. On a Wayland
+session the presenter may have to move the audience window once, by hand,
+exactly as in a tiling compositor — a supported configuration, not a broken
+one. Nothing else in the design depends on this capability.
+
+The same reasoning removed a compositor-specific escape hatch. An earlier
+build wrapped the Wayland adapter on Niri and drove `niri msg action
+move-window-to-monitor` over that compositor's IPC, which did place the
+audience window. It was deleted: one compositor out of many behaving
+differently is a second code path through reconciliation, exercised only on
+the maintainer's machine, in exchange for saving the user a single manual
+window move. Shelling out to a compositor's CLI is also exactly the kind of
+per-desktop special case the platform boundary exists to prevent.
 
 A second, subtler limitation: this
 adapter opens its own Wayland connection, so its outputs are correlated with
@@ -621,18 +631,15 @@ compositor.
 
 == Capability envelope
 
-Encoded as `Capabilities { targeted_fullscreen, arbitrary_position,
-unfullscreen_safe, place_before_map }` and consumed by the single
+Encoded as `Capabilities { arbitrary_position, unfullscreen_safe,
+place_before_map }` and consumed by the single
 reconciliation function:
 
 - *X11/EWMH*: everything true except `place_before_map`.
 - *Wayland*: nothing placeable from here; unfullscreening is _not_ safe, so
   the reconciler leaves a fullscreen audience window alone and says why
   (`CannotLeaveFullscreen`).
-- *Niri/Wayland*: output enumeration still comes from Wayland, while Niri IPC
-  identifies the role-specific window and sends it to the selected output's
-  active workspace. Placement is retried after a hidden window is mapped.
-- *Tiling WMs (i3/Sway)*: nothing is placeable; the reconciler emits
+- *Tiling WMs (i3/Sway/Niri)*: nothing is placeable; the reconciler emits
   `PlacementUnsupported`, keeps both windows visible and tells the user what
   to do. This is a supported configuration, not an unsupported one.
 

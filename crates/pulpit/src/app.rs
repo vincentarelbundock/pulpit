@@ -1697,10 +1697,6 @@ impl App {
                 }
             }
             Message::NativeId { role, native } => {
-                // Compositor IPC tokens take precedence over raw toolkit
-                // handles: an app forced through Xwayland still needs Niri's
-                // compositor window id, not its unrelated X11 id.
-                let native = self.coordinator.backend.window_token(role).or(native);
                 self.coordinator.set_native(role, native);
                 self.reconcile()
             }
@@ -3772,11 +3768,10 @@ impl App {
                             .unwrap_or(WindowMode::Windowed);
                         tasks.push(window::set_mode::<Message>(id, display::iced_mode(mode)));
                     }
-                    // A hidden Wayland toplevel does not exist in the
-                    // compositor's window list yet. Re-assert its placement
-                    // just after mapping; this is what lets compositor IPC
-                    // adapters (notably Niri) send the audience window to the
-                    // selected output without ever flashing an empty frame.
+                    // A window that has not been mapped yet may not be
+                    // placeable. Re-assert its placement just after mapping,
+                    // so the audience window reaches the selected display
+                    // without ever flashing an empty frame.
                     if self.coordinator.capabilities.can_place()
                         && !self.coordinator.capabilities.place_before_map
                     {

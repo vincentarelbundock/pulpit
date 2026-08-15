@@ -7,8 +7,6 @@
 
 pub mod backend;
 pub mod identity;
-#[cfg(all(feature = "wayland", unix, not(target_os = "macos")))]
-pub mod niri;
 pub mod reconcile;
 pub mod roles;
 pub mod scenario;

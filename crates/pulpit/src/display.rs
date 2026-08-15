@@ -1,10 +1,8 @@
 //! Glue between Iced windows and the display extension.
 //!
-//! Iced 0.14 exposes no monitor enumeration and no targeted fullscreen, which
-//! is exactly the parity gap the specification identifies. Until that lands
-//! upstream, this module resolves a native window handle and hands it to a
-//! platform adapter for the duration of one call — no native handle is ever
-//! stored in application state.
+//! Iced 0.14 exposes no monitor enumeration, so this module resolves a native
+//! window handle and hands it to a platform adapter for the duration of one
+//! call — no native handle is ever stored in application state.
 
 use std::sync::Arc;
 
@@ -141,30 +139,14 @@ fn detect_backend() -> (Arc<dyn DisplayBackend>, Capabilities) {
         if session == "wayland" || std::env::var_os("WAYLAND_DISPLAY").is_some() {
             match pulpit_display::wayland::WaylandBackend::connect() {
                 Ok(backend) => {
-                    // The portable backend only enumerates outputs. A
-                    // compositor-specific wrapper may add placement below;
-                    // otherwise the UI explains the limitation explicitly.
+                    // The Wayland backend only enumerates outputs; placement
+                    // belongs to the compositor, and the UI says so.
                     let capabilities = backend.capabilities();
                     for check in backend.scale_checks().unwrap_or_default() {
                         if check.consistent {
                             tracing::info!(check = %check.describe(), "wayland scale check");
                         } else {
                             tracing::warn!(check = %check.describe(), "wayland scale check");
-                        }
-                    }
-                    #[cfg(all(unix, not(target_os = "macos")))]
-                    if std::env::var_os("NIRI_SOCKET").is_some() {
-                        match pulpit_display::niri::NiriBackend::available() {
-                            Ok(()) => {
-                                let backend = pulpit_display::niri::NiriBackend::new(backend);
-                                let capabilities = backend.capabilities();
-                                tracing::info!("using Niri IPC for targeted window placement");
-                                return (Arc::new(backend), capabilities);
-                            }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                "Niri IPC is unavailable; window placement remains manual"
-                            ),
                         }
                     }
                     return (Arc::new(backend), capabilities);
@@ -177,7 +159,6 @@ fn detect_backend() -> (Arc<dyn DisplayBackend>, Capabilities) {
     (
         Arc::new(NullBackend::default()),
         Capabilities {
-            targeted_fullscreen: false,
             arbitrary_position: false,
             unfullscreen_safe: true,
             place_before_map: false,
@@ -185,15 +166,15 @@ fn detect_backend() -> (Arc<dyn DisplayBackend>, Capabilities) {
     )
 }
 
-/// Give compositor IPC adapters an unambiguous way to distinguish the two
-/// top-level windows.
+/// Give the compositor, and the user reading its window list, an unambiguous
+/// way to distinguish the two top-level windows.
 pub fn identify_window(settings: window::Settings, role: Role) -> window::Settings {
     #[cfg(target_os = "linux")]
     let settings = {
         let mut settings = settings;
         settings.platform_specific.application_id = match role {
-            Role::Presenter => pulpit_display::niri::PRESENTER_APP_ID,
-            Role::Audience => pulpit_display::niri::AUDIENCE_APP_ID,
+            Role::Presenter => pulpit_display::wayland::PRESENTER_APP_ID,
+            Role::Audience => pulpit_display::wayland::AUDIENCE_APP_ID,
         }
         .into();
         settings
@@ -270,11 +251,11 @@ mod tests {
         let audience = identify_window(window::Settings::default(), Role::Audience);
         assert_eq!(
             presenter.platform_specific.application_id,
-            pulpit_display::niri::PRESENTER_APP_ID
+            pulpit_display::wayland::PRESENTER_APP_ID
         );
         assert_eq!(
             audience.platform_specific.application_id,
-            pulpit_display::niri::AUDIENCE_APP_ID
+            pulpit_display::wayland::AUDIENCE_APP_ID
         );
     }
 }

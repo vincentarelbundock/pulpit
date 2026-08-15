@@ -185,7 +185,6 @@ impl PlatformServices for MacosServices {
             // CoreGraphics reports a vendor/model/serial triple derived from
             // the panel, which survives a reboot and a different port.
             identity: IdentityQuality::Stable,
-            targeted_fullscreen: true,
             arbitrary_placement: true,
             safe_unfullscreen: true,
             place_before_map: true,
@@ -381,7 +380,7 @@ mod tests {
     fn the_adapter_reports_a_stable_identity_and_no_accessibility_bridge() {
         let capabilities = MacosServices::new().capabilities();
         assert_eq!(capabilities.identity, IdentityQuality::Stable);
-        assert!(capabilities.targeted_fullscreen);
+        assert!(capabilities.arbitrary_placement);
         assert!(!capabilities.accessibility_bridge);
         assert!(capabilities.limitations().is_empty());
     }

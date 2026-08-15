@@ -7,7 +7,6 @@
 
 use crate::identity::MonitorIdentity;
 use crate::reconcile::{Capabilities, WindowMode};
-use crate::roles::Role;
 use crate::snapshot::DisplaySnapshot;
 
 #[derive(Debug, thiserror::Error)]
@@ -42,17 +41,6 @@ pub trait DisplayBackend: Send + Sync {
     fn snapshot(&self) -> Result<DisplaySnapshot, BackendError>;
 
     fn capabilities(&self) -> Capabilities;
-
-    /// Return a backend-specific window token when the toolkit cannot expose
-    /// a useful native handle.
-    ///
-    /// Wayland deliberately does not give clients a global window id. A
-    /// compositor IPC adapter can still address one of this application's
-    /// windows by a role-specific app id and uses this token to carry that
-    /// role through the otherwise platform-neutral placement path.
-    fn window_token(&self, _role: Role) -> Option<NativeWindow> {
-        None
-    }
 
     /// Give a window the keyboard focus.
     ///
@@ -98,7 +86,6 @@ impl DisplayBackend for NullBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            targeted_fullscreen: false,
             arbitrary_position: false,
             unfullscreen_safe: true,
             place_before_map: false,

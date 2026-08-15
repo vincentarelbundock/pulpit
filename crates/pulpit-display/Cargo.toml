@@ -14,11 +14,10 @@ path = "src/bin/topology.rs"
 [features]
 default = ["x11", "wayland"]
 x11 = ["dep:x11rb"]
-wayland = ["dep:serde_json", "dep:smithay-client-toolkit", "dep:wayland-client"]
+wayland = ["dep:smithay-client-toolkit", "dep:wayland-client"]
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Choosing which display the audience window uses is no longer claimed as a
+  capability on any platform, and the compositor-specific adapter that
+  implemented it on Niri has been removed. On a Wayland session the audience
+  window goes fullscreen on whichever output it is already on and the user is
+  told so, exactly as in any other tiling compositor. Under Niri it used to
+  move itself, through that compositor's `niri msg` IPC — a second path
+  through reconciliation that only one desktop exercised, in exchange for
+  saving a single manual window move. Window placement on X11, Windows and
+  macOS is unchanged.
+
 ## [0.0.4] — 2026-08-15
 
 ### Fixed

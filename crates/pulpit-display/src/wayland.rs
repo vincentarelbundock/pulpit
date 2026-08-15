@@ -7,13 +7,10 @@
 //! # What this can and cannot do
 //!
 //! It **enumerates and identifies** outputs, and reports topology changes. It
-//! **cannot place windows**. Targeted fullscreen on Wayland is
-//! `xdg_toplevel.set_fullscreen(output)`, which must be issued on the
-//! toolkit's own toplevel object; a raw window handle only exposes the
-//! `wl_surface`, and Iced 0.14 does not expose the toplevel. So
-//! [`Capabilities::targeted_fullscreen`] is reported as `false` here and the
-//! application falls back to the compositor's own fullscreen, tells the user,
-//! and stays recoverable — which is exactly the capability-aware contract.
+//! **cannot place windows**. Choosing the output for the audience window is
+//! not something the application attempts on any platform: the window goes
+//! fullscreen on whichever output it is already on, the user is told, and the
+//! result stays recoverable — which is exactly the capability-aware contract.
 //!
 //! Because this adapter opens its own Wayland connection, its outputs cannot
 //! be correlated with winit's windows by object identity. They are correlated
@@ -34,6 +31,12 @@ use crate::backend::{BackendError, DisplayBackend, NativeWindow, PlacementOutcom
 use crate::identity::MonitorIdentity;
 use crate::reconcile::{Capabilities, WindowMode};
 use crate::snapshot::{is_builtin_connector, DisplaySnapshot, Monitor, Rect};
+
+/// Stable app ids assigned to the two top-level windows on Linux. They are not
+/// used for placement — the compositor owns that — but they let the user, and
+/// any compositor rule the user writes themselves, tell the two windows apart.
+pub const PRESENTER_APP_ID: &str = "pulpit";
+pub const AUDIENCE_APP_ID: &str = "pulpit-audience";
 
 /// Dispatch state for the private Wayland connection.
 struct Outputs {
@@ -243,8 +246,7 @@ impl DisplayBackend for WaylandBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // See the module docs: honest until Iced exposes the toplevel.
-            targeted_fullscreen: false,
+            // See the module docs: the compositor owns placement.
             arbitrary_position: false,
             unfullscreen_safe: false,
             place_before_map: false,
@@ -379,7 +381,7 @@ mod tests {
             eprintln!("{}", check.describe());
         }
         assert!(
-            !backend.capabilities().targeted_fullscreen,
+            !backend.capabilities().can_place(),
             "honest capability reporting"
         );
     }

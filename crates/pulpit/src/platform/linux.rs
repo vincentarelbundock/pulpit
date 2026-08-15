@@ -73,7 +73,6 @@ impl PlatformServices for LinuxServices {
                 IdentityQuality::None
             },
             // X11 places windows; Wayland leaves it to the compositor.
-            targeted_fullscreen: self.x11,
             arbitrary_placement: self.x11,
             safe_unfullscreen: self.x11,
             place_before_map: false,
@@ -356,7 +355,7 @@ mod tests {
         // Wayland cannot place windows; X11 can. Either way the claim matches
         // the session rather than the operating system.
         if capabilities.backend == "wayland" {
-            assert!(!capabilities.targeted_fullscreen);
+            assert!(!capabilities.arbitrary_placement);
         }
         assert!(
             capabilities.native_dialogs,

@@ -36,8 +36,6 @@ pub struct Capabilities {
     /// Session/window backend, for diagnostics: `x11`, `wayland`, `win32`, …
     pub backend: String,
     pub identity: IdentityQuality,
-    /// Fullscreen a window on a *chosen* display.
-    pub targeted_fullscreen: bool,
     /// Position a window at chosen coordinates.
     pub arbitrary_placement: bool,
     /// Leaving fullscreen cannot strand the window off-screen.
@@ -68,7 +66,6 @@ impl Default for Capabilities {
         Capabilities {
             backend: "unknown".into(),
             identity: IdentityQuality::None,
-            targeted_fullscreen: false,
             arbitrary_placement: false,
             safe_unfullscreen: true,
             place_before_map: false,
@@ -97,11 +94,6 @@ impl Capabilities {
         vec![
             format!("backend: {}", self.backend),
             format!("display identity: {}", self.identity.label()),
-            flag(
-                self.targeted_fullscreen,
-                "targeted fullscreen: yes",
-                "targeted fullscreen: NO — the compositor places the audience window",
-            ),
             flag(
                 self.arbitrary_placement,
                 "window placement: yes",
@@ -138,7 +130,7 @@ impl Capabilities {
     /// Everything that is *not* available, for a one-line summary.
     pub fn limitations(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if !self.targeted_fullscreen {
+        if !self.arbitrary_placement {
             out.push("choosing which display the audience window uses");
         }
         if !self.sleep_inhibition {
@@ -161,7 +153,7 @@ mod tests {
     #[test]
     fn the_default_claims_nothing() {
         let capabilities = Capabilities::default();
-        assert!(!capabilities.targeted_fullscreen);
+        assert!(!capabilities.arbitrary_placement);
         assert!(!capabilities.native_dialogs);
         assert_eq!(capabilities.identity, IdentityQuality::None);
     }
@@ -170,12 +162,11 @@ mod tests {
     fn the_report_names_every_fallback_in_effect() {
         let capabilities = Capabilities::default();
         let report = capabilities.report().join("\n");
-        assert!(report.contains("targeted fullscreen: NO"));
+        assert!(report.contains("window placement: NO"));
         assert!(report.contains("sleep inhibition: NOT available"));
         assert!(!capabilities.limitations().is_empty());
 
         let full = Capabilities {
-            targeted_fullscreen: true,
             arbitrary_placement: true,
             system_appearance: true,
             sleep_inhibition: true,
