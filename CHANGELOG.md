@@ -6,7 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4] — 2026-08-15
+
 ### Fixed
+
+- Browser overlays are no longer stretched and cropped on a high-density
+  display. The viewport asked of the browser was bounded per axis, so a large
+  overlay on a 2× display had only its long edge shrunk to the 4096-pixel
+  limit and reached the browser with a different aspect ratio than the
+  rectangle it is drawn into — the picture arrived distorted, with its edges
+  outside the frame. The bound now applies to both axes at once, and a frame
+  whose shape still does not match its viewport is fitted with bars rather
+  than stretched to fill it.
 
 - The release workflow now actually publishes the Homebrew Cask. It rendered
   `Casks/pulpit.rb` into a clone of the tap and then tested for changes with
