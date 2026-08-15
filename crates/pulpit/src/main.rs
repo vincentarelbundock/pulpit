@@ -1,4 +1,4 @@
-//! pulpit: a PDF presenter that does not screw up your projector.
+//! pulpit: A Snappy and Snazzy PDF Projector.
 //!
 //! One executable, two roles. Run normally it is the presenter application;
 //! run with `--render-worker` it is a renderer worker process, which is how

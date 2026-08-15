@@ -1,0 +1,7 @@
+# Pulpit
+
+> A Snappy and Snazzy PDF Projector
+
+## Pages
+
+- [Pulpit](https://vincentarelbundock.github.io/pulpit/): "img", attrs: ( src: "assets/logo.svg", alt: "Pulpit", style: "width: 100%; max-width: 15rem; display: block;"

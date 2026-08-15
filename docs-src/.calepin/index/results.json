@@ -1,8 +1,8 @@
 {
   "schema": 2,
-  "calepin_version": "0.0.46",
+  "calepin_version": "0.0.51",
   "input": "index.typ",
-  "generation": "4c6b46a55af67072-1349cde127705c16",
+  "generation": "701ff4321e83c32f-1349cde127705c16",
   "store": {},
   "chunks": {
     "chunk-1": {
@@ -28,6 +28,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -55,6 +57,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -82,6 +86,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -109,6 +115,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -136,6 +144,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -163,6 +173,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -171,7 +183,7 @@
       "label": "chunk-7",
       "engine": "json",
       "source": "{\n  \"format_version\": 1,\n  \"name\": \"Conference Layout\",\n  \"design_ratio\": \"sixteen-nine\",\n  \"root\": {\n    \"type\": \"leaf\",\n    \"id\": 0,\n    \"widget\": {\n      \"kind\": \"timer\",\n      \"style\": { \"variant\": \"standard\", \"scale\": 1.0, \"alignment\": \"center\" },\n      \"config\": { \"timer\": { \"warning_minutes\": 5 } }\n    },\n    \"padding\": 8.0,\n    \"background\": \"none\",\n    \"border\": \"none\",\n    \"empty_behavior\": \"show-blank-panel\"\n  }\n}",
-      "status": "skipped",
+      "status": "unavailable",
       "options": {
         "echo": true,
         "output": true,
@@ -190,6 +202,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []
@@ -198,7 +212,7 @@
       "label": "chunk-8",
       "engine": "tex",
       "source": "\\setbeameroption{show notes on second screen=right}",
-      "status": "skipped",
+      "status": "unavailable",
       "options": {
         "echo": true,
         "output": true,
@@ -217,6 +231,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "items": []

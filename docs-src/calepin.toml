@@ -1,5 +1,5 @@
 title = "Pulpit"
-description = "A focused PDF presenter in Rust that does not screw up your projector."
+description = "A Snappy and Snazzy PDF Projector"
 base-url = "https://vincentarelbundock.github.io/pulpit"
 theme = "themes/pulpit"
 logo = "assets/logo.svg"

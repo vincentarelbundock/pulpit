@@ -1,5 +1,5 @@
 {
-  description = "pulpit — the PDF presenter that does not screw up your projector";
+  description = "pulpit — A Snappy and Snazzy PDF Projector";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

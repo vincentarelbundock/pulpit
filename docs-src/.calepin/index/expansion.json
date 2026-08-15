@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "fingerprint": 5506572645400211570,
-  "generation": "4c6b46a55af67072-1349cde127705c16",
+  "fingerprint": 8079444752623452975,
+  "generation": "701ff4321e83c32f-1349cde127705c16",
   "completed_store": {},
   "stabilized_chunks": [
     {
@@ -38,6 +38,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 1,
@@ -77,6 +79,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 3,
@@ -116,6 +120,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 5,
@@ -155,6 +161,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 7,
@@ -194,6 +202,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 9,
@@ -233,6 +243,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 11,
@@ -272,6 +284,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 13,
@@ -311,6 +325,8 @@
         "fig-subcaptions": null,
         "fig-layout-columns": null,
         "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
         "kind": null
       },
       "ordinal": 15,

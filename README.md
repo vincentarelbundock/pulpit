@@ -7,7 +7,7 @@ an audience window on the projector, and it treats connection, disconnection,
 mirroring, swapping, suspend/resume and mixed DPI as the *main* engineering
 problem — not as polish.
 
-> **pulpit is the PDF presenter that does not screw up your projector.**
+> **pulpit: A Snappy and Snazzy PDF Projector**
 
 Installation, keys, layouts, and internals are documented on the website:
 <https://vincentarelbundock.github.io/pulpit>

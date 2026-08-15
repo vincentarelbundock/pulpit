@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "A PDF presenter that does not screw up your projector."
+description = "A Snappy and Snazzy PDF Projector"
 
 [features]
 default = ["pdfium"]

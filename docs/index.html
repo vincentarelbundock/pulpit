@@ -3,8 +3,8 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Pulpit</title>
     
     
-    <meta name="description" content="A focused PDF presenter in Rust that does not screw up your projector.">
-    <meta property="og:description" content="A focused PDF presenter in Rust that does not screw up your projector.">
+    <meta name="description" content="A Snappy and Snazzy PDF Projector">
+    <meta property="og:description" content="A Snappy and Snazzy PDF Projector">
     
     
     <meta property="og:site_name" content="Pulpit">
@@ -504,19 +504,26 @@ figure > img {
   --calepin-syntax-foreground: #003b4f;
   --calepin-syntax-background: #f7f7f5;
   --calepin-syntax-border: color-mix(in srgb, var(--calepin-syntax-foreground) 18%, var(--calepin-syntax-background));
-  --scope-1-foreground: #4759ab;
-  --scope-2-foreground: #ad0000;
-  --scope-3-foreground: #5e5e5e;
-  --scope-4-foreground: #5e5e5e;
-  --scope-5-foreground: #667321;
+  --scope-1-foreground: #003b4f;
+  --scope-2-foreground: #003b4f;
+  --scope-3-foreground: #8f5902;
+  --scope-4-foreground: #003b4f;
+  --scope-5-foreground: #003b4f;
   --scope-6-foreground: #003b4f;
-  --scope-6-font-weight: 700;
-  --fallback-7-foreground: #003b4f;
-  --fallback-8-foreground: #003b4f;
-  --fallback-9-foreground: #ad0000;
-  --fallback-10-foreground: #003b4f;
-  --fallback-11-foreground: #5e5e5e;
-  --fallback-12-foreground: #667321;
+  --scope-7-foreground: #8b41b1;
+  --scope-8-foreground: #003b4f;
+  --scope-9-foreground: #ad0000;
+  --scope-10-foreground: #8b41b1;
+  --scope-11-foreground: #003b4f;
+  --scope-12-foreground: #003b4f;
+  --scope-13-foreground: #003b4f;
+  --scope-13-font-weight: 700;
+  --fallback-14-foreground: #5e5e5e;
+  --fallback-15-foreground: #20794d;
+  --fallback-16-foreground: #ad0000;
+  --fallback-17-foreground: #0b6e79;
+  --fallback-18-foreground: #8b41b1;
+  --fallback-19-foreground: #667321;
 
 }
 
@@ -571,37 +578,72 @@ pre code .calepin-syntax-scope-5 {
 .sourceCode .calepin-syntax-scope-6,
 pre code .calepin-syntax-scope-6 {
   color: var(--scope-6-foreground);
-  font-weight: var(--scope-6-font-weight);
 }
 
-.sourceCode .calepin-syntax-fallback-7,
-pre code .calepin-syntax-fallback-7 {
-  color: var(--fallback-7-foreground);
+.sourceCode .calepin-syntax-scope-7,
+pre code .calepin-syntax-scope-7 {
+  color: var(--scope-7-foreground);
 }
 
-.sourceCode .calepin-syntax-fallback-8,
-pre code .calepin-syntax-fallback-8 {
-  color: var(--fallback-8-foreground);
+.sourceCode .calepin-syntax-scope-8,
+pre code .calepin-syntax-scope-8 {
+  color: var(--scope-8-foreground);
 }
 
-.sourceCode .calepin-syntax-fallback-9,
-pre code .calepin-syntax-fallback-9 {
-  color: var(--fallback-9-foreground);
+.sourceCode .calepin-syntax-scope-9,
+pre code .calepin-syntax-scope-9 {
+  color: var(--scope-9-foreground);
 }
 
-.sourceCode .calepin-syntax-fallback-10,
-pre code .calepin-syntax-fallback-10 {
-  color: var(--fallback-10-foreground);
+.sourceCode .calepin-syntax-scope-10,
+pre code .calepin-syntax-scope-10 {
+  color: var(--scope-10-foreground);
 }
 
-.sourceCode .calepin-syntax-fallback-11,
-pre code .calepin-syntax-fallback-11 {
-  color: var(--fallback-11-foreground);
+.sourceCode .calepin-syntax-scope-11,
+pre code .calepin-syntax-scope-11 {
+  color: var(--scope-11-foreground);
 }
 
-.sourceCode .calepin-syntax-fallback-12,
-pre code .calepin-syntax-fallback-12 {
-  color: var(--fallback-12-foreground);
+.sourceCode .calepin-syntax-scope-12,
+pre code .calepin-syntax-scope-12 {
+  color: var(--scope-12-foreground);
+}
+
+.sourceCode .calepin-syntax-scope-13,
+pre code .calepin-syntax-scope-13 {
+  color: var(--scope-13-foreground);
+  font-weight: var(--scope-13-font-weight);
+}
+
+.sourceCode .calepin-syntax-fallback-14,
+pre code .calepin-syntax-fallback-14 {
+  color: var(--fallback-14-foreground);
+}
+
+.sourceCode .calepin-syntax-fallback-15,
+pre code .calepin-syntax-fallback-15 {
+  color: var(--fallback-15-foreground);
+}
+
+.sourceCode .calepin-syntax-fallback-16,
+pre code .calepin-syntax-fallback-16 {
+  color: var(--fallback-16-foreground);
+}
+
+.sourceCode .calepin-syntax-fallback-17,
+pre code .calepin-syntax-fallback-17 {
+  color: var(--fallback-17-foreground);
+}
+
+.sourceCode .calepin-syntax-fallback-18,
+pre code .calepin-syntax-fallback-18 {
+  color: var(--fallback-18-foreground);
+}
+
+.sourceCode .calepin-syntax-fallback-19,
+pre code .calepin-syntax-fallback-19 {
+  color: var(--fallback-19-foreground);
 }
 
 
@@ -662,19 +704,26 @@ html[data-theme="dark"] {
   --calepin-syntax-foreground: #d8e7ef;
   --calepin-syntax-background: #161b22;
   --calepin-syntax-border: color-mix(in srgb, var(--calepin-syntax-foreground) 18%, var(--calepin-syntax-background));
-  --scope-1-foreground: #9db8ff;
-  --scope-2-foreground: #ffb3a7;
-  --scope-3-foreground: #b5bdc9;
-  --scope-4-foreground: #b5bdc9;
-  --scope-5-foreground: #c3d86c;
+  --scope-1-foreground: #d8e7ef;
+  --scope-2-foreground: #d8e7ef;
+  --scope-3-foreground: #ffcc9c;
+  --scope-4-foreground: #d8e7ef;
+  --scope-5-foreground: #d8e7ef;
   --scope-6-foreground: #d8e7ef;
-  --scope-6-font-weight: 700;
-  --fallback-7-foreground: #d8e7ef;
-  --fallback-8-foreground: #d8e7ef;
-  --fallback-9-foreground: #ffb3a7;
-  --fallback-10-foreground: #d8e7ef;
-  --fallback-11-foreground: #b5bdc9;
-  --fallback-12-foreground: #c3d86c;
+  --scope-7-foreground: #c8a2f0;
+  --scope-8-foreground: #d8e7ef;
+  --scope-9-foreground: #ffb3a7;
+  --scope-10-foreground: #c8a2f0;
+  --scope-11-foreground: #d8e7ef;
+  --scope-12-foreground: #d8e7ef;
+  --scope-13-foreground: #d8e7ef;
+  --scope-13-font-weight: 700;
+  --fallback-14-foreground: #8b949e;
+  --fallback-15-foreground: #8fd694;
+  --fallback-16-foreground: #ffb3a7;
+  --fallback-17-foreground: #7fd1de;
+  --fallback-18-foreground: #c8a2f0;
+  --fallback-19-foreground: #c3d86c;
 
 }
 
@@ -697,19 +746,26 @@ html[data-theme="dark"] .calepin-copy-code:focus-visible {
   --calepin-syntax-foreground: #d8e7ef;
   --calepin-syntax-background: #161b22;
   --calepin-syntax-border: color-mix(in srgb, var(--calepin-syntax-foreground) 18%, var(--calepin-syntax-background));
-  --scope-1-foreground: #9db8ff;
-  --scope-2-foreground: #ffb3a7;
-  --scope-3-foreground: #b5bdc9;
-  --scope-4-foreground: #b5bdc9;
-  --scope-5-foreground: #c3d86c;
+  --scope-1-foreground: #d8e7ef;
+  --scope-2-foreground: #d8e7ef;
+  --scope-3-foreground: #ffcc9c;
+  --scope-4-foreground: #d8e7ef;
+  --scope-5-foreground: #d8e7ef;
   --scope-6-foreground: #d8e7ef;
-  --scope-6-font-weight: 700;
-  --fallback-7-foreground: #d8e7ef;
-  --fallback-8-foreground: #d8e7ef;
-  --fallback-9-foreground: #ffb3a7;
-  --fallback-10-foreground: #d8e7ef;
-  --fallback-11-foreground: #b5bdc9;
-  --fallback-12-foreground: #c3d86c;
+  --scope-7-foreground: #c8a2f0;
+  --scope-8-foreground: #d8e7ef;
+  --scope-9-foreground: #ffb3a7;
+  --scope-10-foreground: #c8a2f0;
+  --scope-11-foreground: #d8e7ef;
+  --scope-12-foreground: #d8e7ef;
+  --scope-13-foreground: #d8e7ef;
+  --scope-13-font-weight: 700;
+  --fallback-14-foreground: #8b949e;
+  --fallback-15-foreground: #8fd694;
+  --fallback-16-foreground: #ffb3a7;
+  --fallback-17-foreground: #7fd1de;
+  --fallback-18-foreground: #c8a2f0;
+  --fallback-19-foreground: #c3d86c;
 
   }
 
@@ -2557,28 +2613,28 @@ html:not([data-theme]) {
     </header>
     <div class="calepin-website-shell grid">
         <main class="calepin-website-main calepin-content" data-pagefind-body>
-            <div style="text-align: center; margin-block: 0 1.5rem;"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNDAgMTgwIiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjE4MCIgZmlsbD0ibm9uZSI+CiAgPCEtLSBMYXJnZSBkaXNwbGF5IC0tPgogIDxwYXRoIGQ9Ik05MiAzNCBIMTg4IFExOTMgMzQgMTkzIDM5IFYxMDUgUTE5MyAxMTAgMTg4IDExMCBIMTMyIgogICAgICAgIHN0cm9rZT0iIzIyMjIyMiIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNOTIgMzQgUTg3IDM0IDg3IDM5IFY3NCIKICAgICAgICBzdHJva2U9IiMyMjIyMjIiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CgogIDwhLS0gTGFwdG9wIHNjcmVlbiAtLT4KICA8cmVjdCB4PSI2MSIgeT0iODQiIHdpZHRoPSI1NyIgaGVpZ2h0PSI0MyIgcng9IjIiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiLz4KCiAgPCEtLSBMYXB0b3AgYmFzZSAtLT4KICA8cGF0aCBkPSJNNTMgMTI5IEgxMjYiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K" alt="Pulpit" style="width: 100%; max-width: 15rem; display: block; margin: 0 auto -0.75rem;"><div style="font-family: Helvetica, Arial, sans-serif; font-size: 3rem; font-weight: 700; letter-spacing: 0.12em; line-height: 1;">PULPIT</div><p style="font-size: 1.5rem; font-weight: 600; line-height: 1.3; margin: 0.75rem auto 0;">A Snappy and Snazzy PDF Projector</p><p style="font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;">Interactive media · Speaker notes · Annotations · Custom layouts · Jump to page · Timers · And more!</p></div><div style="text-align: center; margin-block: 0 2rem;"><video src="assets/tour.mp4" controls playsinline preload="metadata" style="width: 50%; min-width: 18rem; height: auto; display: block; margin: 0 auto; border-radius: 0.5rem;"></video></div><h2 id="installation">Installation</h2><h3 id="macos">macOS</h3><p>With Homebrew:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">brew</span> install<span class="calepin-syntax-scope-3"> --</span><span class="calepin-syntax-scope-5">cask</span> vincentarelbundock/tap/pulpit</code></pre></div><p>Either way the first launch needs the one-time approval described below; Homebrew no longer offers a flag that skips it.</p><p>Or install it by hand:</p><ol><li>Download the disk image from the releases page.</li><li>Open it and drag <code>Pulpit.app</code> onto Applications.</li><li>Launch Pulpit. macOS refuses this first launch.</li><li>Open System Settings, then Privacy &amp; Security (called Security Settings in some versions), and click <strong>Open Anyway</strong> next to the message about Pulpit.</li><li>Launch Pulpit again. It opens, and the refusal does not come back, this version or any later one.</li></ol><p>That refusal happens because the app is not registered with Apple, which costs money, even for free open source projects.</p><p>One download covers both Apple Silicon and Intel Macs, running natively on each. macOS 11 Big Sur or newer.</p><h3 id="windows">Windows</h3><p>With a package manager:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">winget</span> install VincentArelBundock.Pulpit
-<span class="calepin-syntax-scope-1">scoop</span> install pulpit</code></pre></div><p>Or install it by hand:</p><ol><li>Download the installer from the releases page. A portable <code>.zip</code> is published beside it if you would rather not install anything.</li><li>Run the installer. It installs for your account only, so it never asks for an administrator password.</li><li>Windows may warn you that it does not recognise the publisher. Click <strong>More info</strong>, then <strong>Run anyway</strong>.</li></ol><p>That warning happens because the builds are not signed, which costs money, even for free open source projects.</p><p>Builds are 64-bit Intel only at present. Windows on ARM runs them anyway.</p><h3 id="linux">Linux</h3><p>Install the package for your distribution:</p><ol><li>Download the appropriate package from the releases page.</li><li>Install it with your package manager.</li></ol><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">sudo</span> apt install ./pulpit_<span class="calepin-syntax-scope-3">*</span>_amd64.deb
-<span class="calepin-syntax-scope-1">sudo</span> dnf install ./pulpit-<span class="calepin-syntax-scope-3">*</span>.x86_64.rpm
-<span class="calepin-syntax-scope-1">sudo</span> pacman<span class="calepin-syntax-scope-3"> -</span><span class="calepin-syntax-scope-5">U</span> ./pulpit-<span class="calepin-syntax-scope-3">*</span>-x86_64.pkg.tar.zst</code></pre></div><p>The package installs what Pulpit depends on alongside it, and suggests a Chromium-based browser so that slides with video or interactive content work on a fresh install.</p><p>Building from source works too, and the repository’s <code>README</code> covers it.</p><h3 id="nix">Nix</h3><p>Nix is a cross-platform package manager that runs on Linux and macOS; its <a href="https://nixos.org/download/">download page</a> covers installing it. If you already have it, this runs Pulpit once, without installing anything:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">nix</span> run github:vincentarelbundock/pulpit<span class="calepin-syntax-scope-3"> --</span> path/to/deck.pdf</code></pre></div><p>And this installs it for your user, so it stays:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">nix</span> profile add github:vincentarelbundock/pulpit</code></pre></div><p>On Nix older than 2.30 the subcommand is <code>nix profile install</code>, which newer versions still accept with a deprecation warning.</p><p>The packaged build starts with no setup at all: it already knows where to find the libraries it loads while running. That matters most on NixOS, where those libraries do not sit in the usual system-wide location. It also carries the two media players below, so video and interactive slides work immediately.</p><h3 id="slides-with-video-or-interactive-content">Slides with video or interactive content</h3><p>Pulpit plays no media itself. It borrows two programs that are already good at it, and it finds them on its own — there is nothing to configure.</p><ol><li><strong>A Chromium-based browser</strong> plays everything: video, animated images, and interactive HTML such as a live chart or a small web app. Google Chrome, Chromium, Microsoft Edge and Brave all qualify. Firefox and Safari do not, because Pulpit drives the browser through a control protocol only this family speaks.</li><li><strong>mpv</strong> plays video and animated images, and Pulpit prefers it for those when it is installed. It cannot play interactive content, so a browser is still the one to have if you install only one.</li></ol><p>On macOS, install either or both:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-1">brew</span> install<span class="calepin-syntax-scope-3"> --</span><span class="calepin-syntax-scope-5">cask</span> google-chrome
-<span class="calepin-syntax-scope-1">brew</span> install mpv</code></pre></div><p>The Homebrew Cask installs <code>mpv</code> for you. On Linux, the <code>.deb</code> and <code>.rpm</code> suggest both, so your package manager offers them at install time; otherwise install <code>chromium</code> and <code>mpv</code> the usual way. On Windows there is nothing to do: Edge is already there. And the Nix package carries both itself.</p><p>Pulpit never uses your own browser session. It starts the browser hidden, in a private profile it creates for the deck, so your extensions, cookies, logins and history are untouched — a slide is untrusted code and does not belong inside your browsing session.</p><p>Without either program a deck still presents. Media slides show their poster image, which is what a printed handout of the same deck would show, and everything else behaves normally.</p><h2 id="keys">Keys</h2><table><tr><td><strong>Key</strong></td><td><strong>Action</strong></td></tr><tr><td><code>→</code> <code>↓</code> <code>Space</code> <code>PageDown</code></td><td>next slide (audience follows)</td></tr><tr><td><code>←</code> <code>↑</code> <code>PageUp</code> <code>Backspace</code></td><td>previous slide</td></tr><tr><td><code>Home</code> / <code>End</code></td><td>first / last</td></tr><tr><td><code>Tab</code> / <code>Shift+Tab</code></td><td>look ahead / back on your screen only, leaving the audience where it is</td></tr><tr><td><code>Enter</code></td><td>show the slide you were looking at to the audience</td></tr><tr><td><code>Esc</code></td><td>go back to the slide the audience is on</td></tr><tr><td><code>b</code> / <code>w</code></td><td>blank black / blank white</td></tr><tr><td><code>p</code> / <code>r</code></td><td>start-pause / reset the timer</td></tr><tr><td><code>s</code></td><td>swap presenter and audience displays</td></tr><tr><td><code>f</code></td><td>toggle audience fullscreen</td></tr><tr><td><code>o</code> / <code>F5</code></td><td>open / reload</td></tr><tr><td><code>q</code></td><td>quit</td></tr></table><p>Presenter remotes usually emit <code>PageUp</code>/<code>PageDown</code>, media keys or browser back/forward, all of which are bound by default. A remote whose keys the toolkit cannot name is still usable: press the key and the presenter window offers to bind it, storing the raw scancode in <code>settings.toml</code>.</p><h2 id="navigation">Navigation</h2><p>Four ways to move through the deck:</p><ul><li><strong>Keys</strong>, listed above. Arrows, <code>Space</code> and <code>PageUp</code>/<code>PageDown</code> move the audience with you. <code>Tab</code> and <code>Shift+Tab</code> instead look ahead or back on your own screen while the audience stays put, which is how you check what is coming without showing it. <code>Enter</code> then shows the slide you landed on, and <code>Esc</code> returns you to the one the audience is seeing.</li><li><strong>Back and forward buttons</strong>, a widget you can place in any layout cell, with or without words beside the arrows.</li><li><strong>Slider</strong>, a draggable track across the whole deck.</li><li><strong>Jump menu</strong> (<code>j</code>), the whole deck as thumbnails, so you land on a slide by eye rather than by number. Picking one closes the menu.</li></ul><h2 id="annotations">Annotations</h2><p>The palette offers five controls:</p><ul><li><strong>Pointer</strong>: a dot that follows the pointer. Its options also arm <strong>Spotlight</strong>, which lights a circle and dims the rest of the page.</li><li><strong>Ink</strong>: freehand strokes that stay until the slide changes, black by default.</li><li><strong>Highlighter</strong>: a broad translucent stroke that leaves slide content readable.</li><li><strong>Eraser</strong>: removes the stroke or label it touches.</li><li><strong>Text</strong> (<code>T</code>): places a typewritten label, black by default.</li></ul><p>Select the text tool, click the slide, and type into the translucent expanding field; <code>Enter</code> commits the label and <code>Ctrl+Enter</code> inserts a line, and <code>Ctrl/Cmd+V</code> pastes text.</p><p>Text labels are complete Typst 0.15.1 documents. Markup, math, set rules, functions, tables, and other built-in Typst features render live after a short typing pause. Labels follow Typst’s math syntax exactly: for example, multiplication is <code>$e=m c^2$</code>, with whitespace between variables.</p><h2 id="windows-2">Windows</h2><p>Pulpit runs two windows.</p><p>The <strong>Presenter Window</strong> is the one you look at: slides, notes, timers and controls, arranged by the active layout. It opens on its own when Pulpit starts.</p><p>The <strong>Audience Window</strong> is the one the room looks at: the current slide and nothing else. You start it when you are ready, with <strong>Start ▾</strong> beside the hamburger, a split button whose <strong>Start</strong> half uses the saved audience display, while the arrow lists the connected displays so one click both picks the projector and starts the window. <strong>Stop</strong> removes it again.</p><p>Two starting modes:</p><ul><li><strong>Fullscreen</strong>: the window takes the chosen display immediately. A five-second delayed start is offered too, which leaves you time to switch to the projector workspace during the count.</li><li><strong>Windowed</strong>: the window opens as an ordinary window so you can drag it onto the right display or desktop position yourself, then press <code>f</code> to make it fullscreen where it sits. This is the reliable route on compositors that place windows themselves.</li></ul><h2 id="layouts">Layouts</h2><p>The presenter screen is not hard-coded. It is a <strong>layout</strong>: a tree of splits and cells with a widget in each cell, rendered proportionally into whatever window it lands in. Four built-in layouts ship with the application, and any of them can be duplicated into an editable copy.</p><p>The <strong>Layout: …</strong> button in the presenter window opens the layout library, and a layout opens from there into the designer.</p><p>Layouts <strong>import and export as JSON</strong>. A custom layout is a file in <code>&lt;config>/layouts/&lt;id>.json</code>, written atomically: exporting one is copying it out, importing one is copying it in, and the file itself is the interchange format. The shape, with a <code>format_version</code>:</p><div class="sourceCode" data-lang="json"><pre><code data-lang="json">{
-  <span class="calepin-syntax-scope-3">"</span>format_version<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">1</span><span class="calepin-syntax-scope-3">,</span>
-  <span class="calepin-syntax-scope-3">"</span>name<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>Conference Layout<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-  <span class="calepin-syntax-scope-3">"</span>design_ratio<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>sixteen-nine<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-  <span class="calepin-syntax-scope-3">"</span>root<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> {
-    <span class="calepin-syntax-scope-3">"</span>type<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>leaf<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>id<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>widget<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> {
-      <span class="calepin-syntax-scope-3">"</span>kind<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>timer<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-      <span class="calepin-syntax-scope-3">"</span>style<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>variant<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>standard<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span> <span class="calepin-syntax-scope-3">"</span>scale<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">1</span><span class="calepin-syntax-scope-3">.</span><span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span> <span class="calepin-syntax-scope-3">"</span>alignment<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>center<span class="calepin-syntax-scope-3">"</span> }<span class="calepin-syntax-scope-3">,</span>
-      <span class="calepin-syntax-scope-3">"</span>config<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>timer<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> { <span class="calepin-syntax-scope-3">"</span>warning_minutes<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">5</span> } }
-    }<span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>padding<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-2">8</span><span class="calepin-syntax-scope-3">.</span><span class="calepin-syntax-scope-2">0</span><span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>background<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>none<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>border<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>none<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">,</span>
-    <span class="calepin-syntax-scope-3">"</span>empty_behavior<span class="calepin-syntax-scope-3">"</span><span class="calepin-syntax-scope-3">:</span> <span class="calepin-syntax-scope-3">"</span>show-blank-panel<span class="calepin-syntax-scope-3">"</span>
+            <div style="text-align: center; margin-block: 0 1.5rem;"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNDAgMTgwIiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjE4MCIgZmlsbD0ibm9uZSI+CiAgPCEtLSBMYXJnZSBkaXNwbGF5IC0tPgogIDxwYXRoIGQ9Ik05MiAzNCBIMTg4IFExOTMgMzQgMTkzIDM5IFYxMDUgUTE5MyAxMTAgMTg4IDExMCBIMTMyIgogICAgICAgIHN0cm9rZT0iIzIyMjIyMiIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNOTIgMzQgUTg3IDM0IDg3IDM5IFY3NCIKICAgICAgICBzdHJva2U9IiMyMjIyMjIiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CgogIDwhLS0gTGFwdG9wIHNjcmVlbiAtLT4KICA8cmVjdCB4PSI2MSIgeT0iODQiIHdpZHRoPSI1NyIgaGVpZ2h0PSI0MyIgcng9IjIiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiLz4KCiAgPCEtLSBMYXB0b3AgYmFzZSAtLT4KICA8cGF0aCBkPSJNNTMgMTI5IEgxMjYiCiAgICAgICAgc3Ryb2tlPSIjMjIyMjIyIiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K" alt="Pulpit" style="width: 100%; max-width: 15rem; display: block; margin: 0 auto -0.75rem;"><div style="font-family: Helvetica, Arial, sans-serif; font-size: 3rem; font-weight: 700; letter-spacing: 0.12em; line-height: 1;">PULPIT</div><p style="font-size: 1.5rem; font-weight: 600; line-height: 1.3; margin: 0.75rem auto 0;">A Snappy and Snazzy PDF Projector</p><p style="font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;">Interactive media · Speaker notes · Annotations · Custom layouts · Jump to page · Timers · And more!</p></div><div style="text-align: center; margin-block: 0 2rem;"><video src="assets/tour.mp4" controls playsinline preload="metadata" style="width: 50%; min-width: 18rem; height: auto; display: block; margin: 0 auto; border-radius: 0.5rem;"></video></div><h2 id="installation">Installation</h2><h3 id="macos">macOS</h3><p>With Homebrew:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">brew</span> install<span class="calepin-syntax-scope-10"> --</span><span class="calepin-syntax-scope-12">cask</span> vincentarelbundock/tap/pulpit</code></pre></div><p>Either way the first launch needs the one-time approval described below; Homebrew no longer offers a flag that skips it.</p><p>Or install it by hand:</p><ol><li>Download the disk image from the releases page.</li><li>Open it and drag <code>Pulpit.app</code> onto Applications.</li><li>Launch Pulpit. macOS refuses this first launch.</li><li>Open System Settings, then Privacy &amp; Security (called Security Settings in some versions), and click <strong>Open Anyway</strong> next to the message about Pulpit.</li><li>Launch Pulpit again. It opens, and the refusal does not come back, this version or any later one.</li></ol><p>That refusal happens because the app is not registered with Apple, which costs money, even for free open source projects.</p><p>One download covers both Apple Silicon and Intel Macs, running natively on each. macOS 11 Big Sur or newer.</p><h3 id="windows">Windows</h3><p>With a package manager:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">winget</span> install VincentArelBundock.Pulpit
+<span class="calepin-syntax-scope-8">scoop</span> install pulpit</code></pre></div><p>Or install it by hand:</p><ol><li>Download the installer from the releases page. A portable <code>.zip</code> is published beside it if you would rather not install anything.</li><li>Run the installer. It installs for your account only, so it never asks for an administrator password.</li><li>Windows may warn you that it does not recognise the publisher. Click <strong>More info</strong>, then <strong>Run anyway</strong>.</li></ol><p>That warning happens because the builds are not signed, which costs money, even for free open source projects.</p><p>Builds are 64-bit Intel only at present. Windows on ARM runs them anyway.</p><h3 id="linux">Linux</h3><p>Install the package for your distribution:</p><ol><li>Download the appropriate package from the releases page.</li><li>Install it with your package manager.</li></ol><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">sudo</span> apt install ./pulpit_<span class="calepin-syntax-scope-10">*</span>_amd64.deb
+<span class="calepin-syntax-scope-8">sudo</span> dnf install ./pulpit-<span class="calepin-syntax-scope-10">*</span>.x86_64.rpm
+<span class="calepin-syntax-scope-8">sudo</span> pacman<span class="calepin-syntax-scope-10"> -</span><span class="calepin-syntax-scope-12">U</span> ./pulpit-<span class="calepin-syntax-scope-10">*</span>-x86_64.pkg.tar.zst</code></pre></div><p>The package installs what Pulpit depends on alongside it, and suggests a Chromium-based browser so that slides with video or interactive content work on a fresh install.</p><p>Building from source works too, and the repository’s <code>README</code> covers it.</p><h3 id="nix">Nix</h3><p>Nix is a cross-platform package manager that runs on Linux and macOS; its <a href="https://nixos.org/download/">download page</a> covers installing it. If you already have it, this runs Pulpit once, without installing anything:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">nix</span> run github:vincentarelbundock/pulpit<span class="calepin-syntax-scope-10"> --</span> path/to/deck.pdf</code></pre></div><p>And this installs it for your user, so it stays:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">nix</span> profile add github:vincentarelbundock/pulpit</code></pre></div><p>On Nix older than 2.30 the subcommand is <code>nix profile install</code>, which newer versions still accept with a deprecation warning.</p><p>The packaged build starts with no setup at all: it already knows where to find the libraries it loads while running. That matters most on NixOS, where those libraries do not sit in the usual system-wide location. It also carries the two media players below, so video and interactive slides work immediately.</p><h3 id="slides-with-video-or-interactive-content">Slides with video or interactive content</h3><p>Pulpit plays no media itself. It borrows two programs that are already good at it, and it finds them on its own — there is nothing to configure.</p><ol><li><strong>A Chromium-based browser</strong> plays everything: video, animated images, and interactive HTML such as a live chart or a small web app. Google Chrome, Chromium, Microsoft Edge and Brave all qualify. Firefox and Safari do not, because Pulpit drives the browser through a control protocol only this family speaks.</li><li><strong>mpv</strong> plays video and animated images, and Pulpit prefers it for those when it is installed. It cannot play interactive content, so a browser is still the one to have if you install only one.</li></ol><p>On macOS, install either or both:</p><div class="sourceCode" data-lang="sh"><pre><code data-lang="sh"><span class="calepin-syntax-scope-8">brew</span> install<span class="calepin-syntax-scope-10"> --</span><span class="calepin-syntax-scope-12">cask</span> google-chrome
+<span class="calepin-syntax-scope-8">brew</span> install mpv</code></pre></div><p>The Homebrew Cask installs <code>mpv</code> for you. On Linux, the <code>.deb</code> and <code>.rpm</code> suggest both, so your package manager offers them at install time; otherwise install <code>chromium</code> and <code>mpv</code> the usual way. On Windows there is nothing to do: Edge is already there. And the Nix package carries both itself.</p><p>Pulpit never uses your own browser session. It starts the browser hidden, in a private profile it creates for the deck, so your extensions, cookies, logins and history are untouched — a slide is untrusted code and does not belong inside your browsing session.</p><p>Without either program a deck still presents. Media slides show their poster image, which is what a printed handout of the same deck would show, and everything else behaves normally.</p><h2 id="keys">Keys</h2><table><tr><td><strong>Key</strong></td><td><strong>Action</strong></td></tr><tr><td><code>→</code> <code>↓</code> <code>Space</code> <code>PageDown</code></td><td>next slide (audience follows)</td></tr><tr><td><code>←</code> <code>↑</code> <code>PageUp</code> <code>Backspace</code></td><td>previous slide</td></tr><tr><td><code>Home</code> / <code>End</code></td><td>first / last</td></tr><tr><td><code>Tab</code> / <code>Shift+Tab</code></td><td>look ahead / back on your screen only, leaving the audience where it is</td></tr><tr><td><code>Enter</code></td><td>show the slide you were looking at to the audience</td></tr><tr><td><code>Esc</code></td><td>go back to the slide the audience is on</td></tr><tr><td><code>b</code> / <code>w</code></td><td>blank black / blank white</td></tr><tr><td><code>p</code> / <code>r</code></td><td>start-pause / reset the timer</td></tr><tr><td><code>s</code></td><td>swap presenter and audience displays</td></tr><tr><td><code>f</code></td><td>toggle audience fullscreen</td></tr><tr><td><code>o</code> / <code>F5</code></td><td>open / reload</td></tr><tr><td><code>q</code></td><td>quit</td></tr></table><p>Presenter remotes usually emit <code>PageUp</code>/<code>PageDown</code>, media keys or browser back/forward, all of which are bound by default. A remote whose keys the toolkit cannot name is still usable: press the key and the presenter window offers to bind it, storing the raw scancode in <code>settings.toml</code>.</p><h2 id="navigation">Navigation</h2><p>Four ways to move through the deck:</p><ul><li><strong>Keys</strong>, listed above. Arrows, <code>Space</code> and <code>PageUp</code>/<code>PageDown</code> move the audience with you. <code>Tab</code> and <code>Shift+Tab</code> instead look ahead or back on your own screen while the audience stays put, which is how you check what is coming without showing it. <code>Enter</code> then shows the slide you landed on, and <code>Esc</code> returns you to the one the audience is seeing.</li><li><strong>Back and forward buttons</strong>, a widget you can place in any layout cell, with or without words beside the arrows.</li><li><strong>Slider</strong>, a draggable track across the whole deck.</li><li><strong>Jump menu</strong> (<code>j</code>), the whole deck as thumbnails, so you land on a slide by eye rather than by number. Picking one closes the menu.</li></ul><h2 id="annotations">Annotations</h2><p>The palette offers five controls:</p><ul><li><strong>Pointer</strong>: a dot that follows the pointer. Its options also arm <strong>Spotlight</strong>, which lights a circle and dims the rest of the page.</li><li><strong>Ink</strong>: freehand strokes that stay until the slide changes, black by default.</li><li><strong>Highlighter</strong>: a broad translucent stroke that leaves slide content readable.</li><li><strong>Eraser</strong>: removes the stroke or label it touches.</li><li><strong>Text</strong> (<code>T</code>): places a typewritten label, black by default.</li></ul><p>Select the text tool, click the slide, and type into the translucent expanding field; <code>Enter</code> commits the label and <code>Ctrl+Enter</code> inserts a line, and <code>Ctrl/Cmd+V</code> pastes text.</p><p>Text labels are complete Typst 0.15.1 documents. Markup, math, set rules, functions, tables, and other built-in Typst features render live after a short typing pause. Labels follow Typst’s math syntax exactly: for example, multiplication is <code>$e=m c^2$</code>, with whitespace between variables.</p><h2 id="windows-2">Windows</h2><p>Pulpit runs two windows.</p><p>The <strong>Presenter Window</strong> is the one you look at: slides, notes, timers and controls, arranged by the active layout. It opens on its own when Pulpit starts.</p><p>The <strong>Audience Window</strong> is the one the room looks at: the current slide and nothing else. You start it when you are ready, with <strong>Start ▾</strong> beside the hamburger, a split button whose <strong>Start</strong> half uses the saved audience display, while the arrow lists the connected displays so one click both picks the projector and starts the window. <strong>Stop</strong> removes it again.</p><p>Two starting modes:</p><ul><li><strong>Fullscreen</strong>: the window takes the chosen display immediately. A five-second delayed start is offered too, which leaves you time to switch to the projector workspace during the count.</li><li><strong>Windowed</strong>: the window opens as an ordinary window so you can drag it onto the right display or desktop position yourself, then press <code>f</code> to make it fullscreen where it sits. This is the reliable route on compositors that place windows themselves.</li></ul><h2 id="layouts">Layouts</h2><p>The presenter screen is not hard-coded. It is a <strong>layout</strong>: a tree of splits and cells with a widget in each cell, rendered proportionally into whatever window it lands in. Four built-in layouts ship with the application, and any of them can be duplicated into an editable copy.</p><p>The <strong>Layout: …</strong> button in the presenter window opens the layout library, and a layout opens from there into the designer.</p><p>Layouts <strong>import and export as JSON</strong>. A custom layout is a file in <code>&lt;config>/layouts/&lt;id>.json</code>, written atomically: exporting one is copying it out, importing one is copying it in, and the file itself is the interchange format. The shape, with a <code>format_version</code>:</p><div class="sourceCode" data-lang="json"><pre><code data-lang="json">{
+  <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">format_version</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-9">1</span><span class="calepin-syntax-scope-10">,</span>
+  <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">name</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">Conference Layout</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+  <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">design_ratio</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">sixteen-nine</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+  <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">root</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> {
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">type</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">leaf</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">id</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-9">0</span><span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">widget</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> {
+      <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">kind</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">timer</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+      <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">style</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> { <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">variant</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">standard</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">scale</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-9">1</span><span class="calepin-syntax-scope-10">.</span><span class="calepin-syntax-scope-9">0</span><span class="calepin-syntax-scope-10">,</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">alignment</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">center</span><span class="calepin-syntax-scope-2">"</span> }<span class="calepin-syntax-scope-10">,</span>
+      <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">config</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> { <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">timer</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> { <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">warning_minutes</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-9">5</span> } }
+    }<span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">padding</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-9">8</span><span class="calepin-syntax-scope-10">.</span><span class="calepin-syntax-scope-9">0</span><span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">background</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">none</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">border</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">none</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">,</span>
+    <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">empty_behavior</span><span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-10">:</span> <span class="calepin-syntax-scope-2">"</span><span class="calepin-syntax-scope-2">show-blank-panel</span><span class="calepin-syntax-scope-2">"</span>
   }
-}</code></pre></div><p><code>border</code> remains in format 1 files for compatibility, but is no longer rendered. New built-in layouts write <code>"none"</code>; the split gutter owns visual separation so adjacent cells cannot produce doubled edges or an outer frame.</p><p>A widget carries its kind, the style every widget has, and the configuration only its family can have. The two must agree: a file claiming a title holds notes options is refused rather than repaired.</p><p>On import Pulpit runs the full validation, renumbers node ids so they cannot collide, and appends a numeric suffix if the name is taken. An imported layout is always a custom layout, even if it was exported from a built-in.</p><h2 id="speaker-notes">Speaker notes</h2><p>Notes come in two formats.</p><p>The first is a <strong>split page</strong>: each PDF page is twice as wide as the slide, with the slide on one half and the notes on the other. Pulpit shows the audience the slide half and keeps the notes half for you. This is what beamer produces with</p><div class="sourceCode" data-lang="tex"><pre><code data-lang="tex"><span class="calepin-syntax-scope-3">\</span><span class="calepin-syntax-scope-1">setbeameroption</span><span class="calepin-syntax-scope-3">{</span>show notes on second screen=right<span class="calepin-syntax-scope-3">}</span></code></pre></div><p>A doubled page is recognised on open, with the slide taken to be the left half, which is what beamer writes. If your notes are on the left instead, <strong>Swap halves</strong> in the presenter window flips it.</p><p>Notes can also live on pages of their own, either alternating with the slides or gathered after them, and you choose that in the presenter window.</p><p>The second is <strong>pdfpc</strong>, where the notes are text stored inside the PDF rather than drawn on a page. Anything that writes that format works, including beamer with the <code>pdfpc</code> package, and <a href="https://vincentarelbundock.github.io/mosaic">Mosaic</a>, which embeds the notes in the PDF it produces.</p><p>Whichever format a deck uses, the one in force is shown in the presenter window.</p><h2 id="licence">Licence</h2><p>MIT or Apache-2.0. PDFium is BSD-3-Clause and is <em>not</em> vendored here.</p>
+}</code></pre></div><p><code>border</code> remains in format 1 files for compatibility, but is no longer rendered. New built-in layouts write <code>"none"</code>; the split gutter owns visual separation so adjacent cells cannot produce doubled edges or an outer frame.</p><p>A widget carries its kind, the style every widget has, and the configuration only its family can have. The two must agree: a file claiming a title holds notes options is refused rather than repaired.</p><p>On import Pulpit runs the full validation, renumbers node ids so they cannot collide, and appends a numeric suffix if the name is taken. An imported layout is always a custom layout, even if it was exported from a built-in.</p><h2 id="speaker-notes">Speaker notes</h2><p>Notes come in two formats.</p><p>The first is a <strong>split page</strong>: each PDF page is twice as wide as the slide, with the slide on one half and the notes on the other. Pulpit shows the audience the slide half and keeps the notes half for you. This is what beamer produces with</p><div class="sourceCode" data-lang="tex"><pre><code data-lang="tex"><span class="calepin-syntax-scope-10">\</span><span class="calepin-syntax-scope-8">setbeameroption</span><span class="calepin-syntax-scope-10">{</span>show notes on second screen=right<span class="calepin-syntax-scope-10">}</span></code></pre></div><p>A doubled page is recognised on open, with the slide taken to be the left half, which is what beamer writes. If your notes are on the left instead, <strong>Swap halves</strong> in the presenter window flips it.</p><p>Notes can also live on pages of their own, either alternating with the slides or gathered after them, and you choose that in the presenter window.</p><p>The second is <strong>pdfpc</strong>, where the notes are text stored inside the PDF rather than drawn on a page. Anything that writes that format works, including beamer with the <code>pdfpc</code> package, and <a href="https://vincentarelbundock.github.io/mosaic">Mosaic</a>, which embeds the notes in the PDF it produces.</p><p>Whichever format a deck uses, the one in force is shown in the presenter window.</p><h2 id="licence">Licence</h2><p>MIT or Apache-2.0. PDFium is BSD-3-Clause and is <em>not</em> vendored here.</p>
         </main>
                 
         <aside class="calepin-website-toc is-floating">
