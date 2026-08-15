@@ -113,5 +113,7 @@ contents:
     dst: /usr/share/doc/pulpit/licenses/ICED_AW-LICENSE
   - src: ./LICENSES/LUCIDE-LICENSE
     dst: /usr/share/doc/pulpit/licenses/LUCIDE-LICENSE
+  - src: ./LICENSES/TYPST_ASSETS-NOTICE
+    dst: /usr/share/doc/pulpit/licenses/TYPST_ASSETS-NOTICE
   - src: ./lib/PDFIUM-LICENSE
     dst: /usr/share/doc/pulpit/licenses/PDFIUM-LICENSE

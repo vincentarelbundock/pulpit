@@ -52,6 +52,8 @@ install -m644 "$root/LICENSES/ICED_AW-LICENSE" \
   "$out/share/licenses/ICED_AW-LICENSE"
 install -m644 "$root/LICENSES/LUCIDE-LICENSE" \
   "$out/share/licenses/LUCIDE-LICENSE"
+install -m644 "$root/LICENSES/TYPST_ASSETS-NOTICE" \
+  "$out/share/licenses/TYPST_ASSETS-NOTICE"
 install -m644 "$root/packaging/pulpit.desktop" "$out/share/"
 # The desktop entry says `Icon=pulpit`, so the icon has to travel with it —
 # otherwise anything installing from this tarball (the AUR package among them)

@@ -183,6 +183,8 @@ install:  ## Install the built binary and its data files under $(PREFIX)
 		$(DESTDIR)$(PREFIX)/share/doc/pulpit/licenses/ICED_AW-LICENSE
 	install -Dm644 LICENSES/LUCIDE-LICENSE \
 		$(DESTDIR)$(PREFIX)/share/doc/pulpit/licenses/LUCIDE-LICENSE
+	install -Dm644 LICENSES/TYPST_ASSETS-NOTICE \
+		$(DESTDIR)$(PREFIX)/share/doc/pulpit/licenses/TYPST_ASSETS-NOTICE
 	@if [ -f lib/libpdfium.so ]; then \
 		install -Dm644 lib/libpdfium.so \
 			$(DESTDIR)$(PREFIX)/lib/pulpit/libpdfium.so; \

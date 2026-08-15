@@ -97,7 +97,7 @@ iconutil --convert icns --output "$out/Contents/Resources/pulpit.icns" \
 # Notices for the work that is not ours travel inside the thing being handed
 # to somebody else, exactly as in `make-bundle.sh`.
 mkdir -p "$out/Contents/Resources/licenses"
-for notice in README.md LICENSE-MIT LICENSE-APACHE ICED_AW-LICENSE LUCIDE-LICENSE; do
+for notice in README.md LICENSE-MIT LICENSE-APACHE ICED_AW-LICENSE LUCIDE-LICENSE TYPST_ASSETS-NOTICE; do
   install -m644 "$root/LICENSES/$notice" "$out/Contents/Resources/licenses/$notice"
 done
 install -m644 "$root/lib/PDFIUM-LICENSE" \

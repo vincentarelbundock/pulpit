@@ -43,7 +43,7 @@ mkdir -p "$out/licenses"
 cp "$target" "$out/pulpit.exe"
 cp "$root/lib/pdfium.dll" "$out/pdfium.dll"
 cp "$root/README.md" "$out/README.md"
-for notice in README.md LICENSE-MIT LICENSE-APACHE ICED_AW-LICENSE LUCIDE-LICENSE; do
+for notice in README.md LICENSE-MIT LICENSE-APACHE ICED_AW-LICENSE LUCIDE-LICENSE TYPST_ASSETS-NOTICE; do
   cp "$root/LICENSES/$notice" "$out/licenses/$notice"
 done
 cp "$root/lib/PDFIUM-LICENSE" "$out/licenses/PDFIUM-LICENSE" 2>/dev/null || true

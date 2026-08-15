@@ -24,7 +24,7 @@ kind of obligation:
 | Pulpit's own source, in `crates/`, `scripts/`, `packaging/`, `docs-src/` | MIT OR Apache-2.0 | `LICENSE-MIT`, `LICENSE-APACHE` |
 | The two vendored `iced_aw` widgets, in `crates/pulpit/src/vendor/iced_aw/` | MIT, © 2020 Kaiden42 | `ICED_AW-LICENSE` |
 | The Lucide icons, in `crates/pulpit/assets/icons/` | ISC, © 2026 Lucide Icons and Contributors | `LUCIDE-LICENSE` |
-| Fonts embedded by the `typst-assets` Cargo dependency | OFL-1.1 / GUST / Bitstream Vera terms | the crate's `LICENSE` and `NOTICE`, included in generated dependency notices |
+| Fonts embedded by the `typst-assets` Cargo dependency | OFL-1.1 / GUST / Bitstream Vera terms | `TYPST_ASSETS-NOTICE`, a copy of the crate's `NOTICE` |
 | PDFium, fetched into `lib/` and shipped as `lib/pulpit/libpdfium.so` | BSD-3-Clause, plus MIT for the packaging | `lib/PDFIUM-LICENSE`, after `make pdfium` |
 | Everything resolved from `Cargo.lock` | MIT / Apache-2.0 / BSD / ISC | generated, see below |
 | `examples/stress-test-730.pdf` | © Gerth Stølting Brodal, Aarhus University; no reuse grant | none — see below |
@@ -73,6 +73,20 @@ PDFium and needs no PDFium notice.
 
 The `.svg` files under `crates/pulpit/assets/icons/` are compiled into the
 binary with `include_bytes!`, so this notice travels with every build.
+
+### Fonts from typst-assets
+
+* Upstream: <https://crates.io/crates/typst-assets>, the pinned version in
+  `Cargo.lock`
+* Licence: **OFL-1.1** (Libertinus, New Computer Modern's regular face and
+  others), **GUST Font License** (New Computer Modern), **Bitstream Vera
+  terms** (DejaVu), among others — the notice itself is the authoritative map
+* Full text: `TYPST_ASSETS-NOTICE`, a verbatim copy of the crate's `NOTICE`
+
+The `fonts` feature embeds these fonts into the binary, and the OFL requires
+its text to accompany any distribution of the fonts, so this notice ships in
+every package alongside the other licence texts. When the pinned
+`typst-assets` version changes, refresh the copy from the crate's `NOTICE`.
 
 ---
 
