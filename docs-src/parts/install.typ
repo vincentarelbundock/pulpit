@@ -15,8 +15,8 @@ Or install it by hand:
 + Download the disk image from the releases page.
 + Open it and drag `Pulpit.app` onto Applications.
 + Launch Pulpit. macOS refuses this first launch.
-+ Open System Settings, then Privacy & Security, and click *Open Anyway* next
-  to the message about Pulpit.
++ Open System Settings, then Privacy & Security (called Security Settings in
+  some versions), and click *Open Anyway* next to the message about Pulpit.
 + Launch Pulpit again. It opens, and the refusal does not come back, this
   version or any later one.
 
