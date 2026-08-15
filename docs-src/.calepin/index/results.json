@@ -2,7 +2,7 @@
   "schema": 2,
   "calepin_version": "0.0.51",
   "input": "index.typ",
-  "generation": "701ff4321e83c32f-1349cde127705c16",
+  "generation": "486ce2cc358d3d1f-1349cde127705c16",
   "store": {},
   "chunks": {
     "chunk-1": {
@@ -37,7 +37,7 @@
     "chunk-2": {
       "label": "chunk-2",
       "engine": "sh",
-      "source": "winget install VincentArelBundock.Pulpit\nscoop install pulpit",
+      "source": "brew install --cask google-chrome\nbrew install mpv",
       "status": "skipped",
       "options": {
         "echo": true,
@@ -66,7 +66,7 @@
     "chunk-3": {
       "label": "chunk-3",
       "engine": "sh",
-      "source": "sudo apt install ./pulpit_*_amd64.deb\nsudo dnf install ./pulpit-*.x86_64.rpm\nsudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst",
+      "source": "winget install VincentArelBundock.Pulpit\nscoop install pulpit",
       "status": "skipped",
       "options": {
         "echo": true,
@@ -95,7 +95,7 @@
     "chunk-4": {
       "label": "chunk-4",
       "engine": "sh",
-      "source": "nix run github:vincentarelbundock/pulpit -- path/to/deck.pdf",
+      "source": "sudo apt install ./pulpit_*_amd64.deb\nsudo dnf install ./pulpit-*.x86_64.rpm\nsudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst",
       "status": "skipped",
       "options": {
         "echo": true,
@@ -124,7 +124,7 @@
     "chunk-5": {
       "label": "chunk-5",
       "engine": "sh",
-      "source": "nix profile add github:vincentarelbundock/pulpit",
+      "source": "sudo apt install chromium mpv",
       "status": "skipped",
       "options": {
         "echo": true,
@@ -153,7 +153,7 @@
     "chunk-6": {
       "label": "chunk-6",
       "engine": "sh",
-      "source": "brew install --cask google-chrome\nbrew install mpv",
+      "source": "nix run github:vincentarelbundock/pulpit -- path/to/deck.pdf",
       "status": "skipped",
       "options": {
         "echo": true,
@@ -181,6 +181,35 @@
     },
     "chunk-7": {
       "label": "chunk-7",
+      "engine": "sh",
+      "source": "nix profile add github:vincentarelbundock/pulpit",
+      "status": "skipped",
+      "options": {
+        "echo": true,
+        "output": true,
+        "results": "render",
+        "warning": true,
+        "message": true,
+        "placeholder": true,
+        "fig-width": "70%",
+        "fig-height": null,
+        "fig-align": "center",
+        "fig-responsive": true,
+        "fig-link": null,
+        "fig-caption": null,
+        "fig-cap-location": null,
+        "fig-alt-text": null,
+        "fig-subcaptions": null,
+        "fig-layout-columns": null,
+        "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
+        "kind": null
+      },
+      "items": []
+    },
+    "chunk-8": {
+      "label": "chunk-8",
       "engine": "json",
       "source": "{\n  \"format_version\": 1,\n  \"name\": \"Conference Layout\",\n  \"design_ratio\": \"sixteen-nine\",\n  \"root\": {\n    \"type\": \"leaf\",\n    \"id\": 0,\n    \"widget\": {\n      \"kind\": \"timer\",\n      \"style\": { \"variant\": \"standard\", \"scale\": 1.0, \"alignment\": \"center\" },\n      \"config\": { \"timer\": { \"warning_minutes\": 5 } }\n    },\n    \"padding\": 8.0,\n    \"background\": \"none\",\n    \"border\": \"none\",\n    \"empty_behavior\": \"show-blank-panel\"\n  }\n}",
       "status": "unavailable",
@@ -208,8 +237,8 @@
       },
       "items": []
     },
-    "chunk-8": {
-      "label": "chunk-8",
+    "chunk-9": {
+      "label": "chunk-9",
       "engine": "tex",
       "source": "\\setbeameroption{show notes on second screen=right}",
       "status": "unavailable",

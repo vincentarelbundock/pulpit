@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "fingerprint": 8079444752623452975,
-  "generation": "701ff4321e83c32f-1349cde127705c16",
+  "fingerprint": 5218795434915216671,
+  "generation": "486ce2cc358d3d1f-1349cde127705c16",
   "completed_store": {},
   "stabilized_chunks": [
     {
@@ -48,7 +48,7 @@
     {
       "label": "chunk-2",
       "engine": "sh",
-      "code": "winget install VincentArelBundock.Pulpit\nscoop install pulpit",
+      "code": "brew install --cask google-chrome\nbrew install mpv",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -89,7 +89,7 @@
     {
       "label": "chunk-3",
       "engine": "sh",
-      "code": "sudo apt install ./pulpit_*_amd64.deb\nsudo dnf install ./pulpit-*.x86_64.rpm\nsudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst",
+      "code": "winget install VincentArelBundock.Pulpit\nscoop install pulpit",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -130,7 +130,7 @@
     {
       "label": "chunk-4",
       "engine": "sh",
-      "code": "nix run github:vincentarelbundock/pulpit -- path/to/deck.pdf",
+      "code": "sudo apt install ./pulpit_*_amd64.deb\nsudo dnf install ./pulpit-*.x86_64.rpm\nsudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -171,7 +171,7 @@
     {
       "label": "chunk-5",
       "engine": "sh",
-      "code": "nix profile add github:vincentarelbundock/pulpit",
+      "code": "sudo apt install chromium mpv",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -212,7 +212,7 @@
     {
       "label": "chunk-6",
       "engine": "sh",
-      "code": "brew install --cask google-chrome\nbrew install mpv",
+      "code": "nix run github:vincentarelbundock/pulpit -- path/to/deck.pdf",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -252,8 +252,8 @@
     },
     {
       "label": "chunk-7",
-      "engine": "json",
-      "code": "{\n  \"format_version\": 1,\n  \"name\": \"Conference Layout\",\n  \"design_ratio\": \"sixteen-nine\",\n  \"root\": {\n    \"type\": \"leaf\",\n    \"id\": 0,\n    \"widget\": {\n      \"kind\": \"timer\",\n      \"style\": { \"variant\": \"standard\", \"scale\": 1.0, \"alignment\": \"center\" },\n      \"config\": { \"timer\": { \"warning_minutes\": 5 } }\n    },\n    \"padding\": 8.0,\n    \"background\": \"none\",\n    \"border\": \"none\",\n    \"empty_behavior\": \"show-blank-panel\"\n  }\n}",
+      "engine": "sh",
+      "code": "nix profile add github:vincentarelbundock/pulpit",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -293,6 +293,47 @@
     },
     {
       "label": "chunk-8",
+      "engine": "json",
+      "code": "{\n  \"format_version\": 1,\n  \"name\": \"Conference Layout\",\n  \"design_ratio\": \"sixteen-nine\",\n  \"root\": {\n    \"type\": \"leaf\",\n    \"id\": 0,\n    \"widget\": {\n      \"kind\": \"timer\",\n      \"style\": { \"variant\": \"standard\", \"scale\": 1.0, \"alignment\": \"center\" },\n      \"config\": { \"timer\": { \"warning_minutes\": 5 } }\n    },\n    \"padding\": 8.0,\n    \"background\": \"none\",\n    \"border\": \"none\",\n    \"empty_behavior\": \"show-blank-panel\"\n  }\n}",
+      "script": true,
+      "exec_options": {
+        "eval": true,
+        "error": false,
+        "store-get": [],
+        "store-set": [],
+        "fig_device_format": "svg",
+        "fig_device_dpi": 150,
+        "fig_device_width": 6.0,
+        "fig_device_height": null,
+        "fig_device_aspect": 0.618
+      },
+      "display_options": {
+        "echo": true,
+        "output": true,
+        "results": "render",
+        "warning": true,
+        "message": true,
+        "placeholder": true,
+        "fig-width": "70%",
+        "fig-height": null,
+        "fig-align": "center",
+        "fig-responsive": true,
+        "fig-link": null,
+        "fig-caption": null,
+        "fig-cap-location": null,
+        "fig-alt-text": null,
+        "fig-subcaptions": null,
+        "fig-layout-columns": null,
+        "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
+        "kind": null
+      },
+      "ordinal": 15,
+      "crossref_labels": []
+    },
+    {
+      "label": "chunk-9",
       "engine": "tex",
       "code": "\\setbeameroption{show notes on second screen=right}",
       "script": true,
@@ -329,7 +370,7 @@
         "lst-caption": null,
         "kind": null
       },
-      "ordinal": 15,
+      "ordinal": 17,
       "crossref_labels": []
     }
   ],

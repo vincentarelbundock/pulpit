@@ -26,6 +26,14 @@ money, even for free open source projects.
 One download covers both Apple Silicon and Intel Macs, running natively on
 each. macOS 11 Big Sur or newer.
 
+Install both media players too — strongly recommended, since without them
+video and interactive slides fall back to their poster image:
+
+```sh
+brew install --cask google-chrome
+brew install mpv
+```
+
 == Windows
 
 With a package manager:
@@ -49,6 +57,10 @@ even for free open source projects.
 
 Builds are 64-bit Intel only at present. Windows on ARM runs them anyway.
 
+Edge is already installed, so video and interactive slides work as they are.
+Adding mpv is still strongly recommended: it plays video better, and any mpv
+build that ships `mpv-2.dll` on your `PATH` will do.
+
 == Linux
 
 Install the package for your distribution:
@@ -62,9 +74,12 @@ sudo dnf install ./pulpit-*.x86_64.rpm
 sudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst
 ```
 
-The package installs what Pulpit depends on alongside it, and suggests a
-Chromium-based browser so that slides with video or interactive content work
-on a fresh install.
+The package installs what Pulpit depends on alongside it, and suggests both
+media players. Accept them — strongly recommended — or install them yourself:
+
+```sh
+sudo apt install chromium mpv
+```
 
 Building from source works too, and the repository's `README` covers it.
 
@@ -90,39 +105,20 @@ versions still accept with a deprecation warning.
 The packaged build starts with no setup at all: it already knows where to find
 the libraries it loads while running. That matters most on NixOS, where those
 libraries do not sit in the usual system-wide location. It also carries the
-two media players below, so video and interactive slides work immediately.
+two media players itself, so video and interactive slides work immediately.
 
 == Slides with video or interactive content
 
-Pulpit plays no media itself. It borrows two programs that are already good at
-it, and it finds them on its own — there is nothing to configure.
+Pulpit plays no media itself. It borrows two programs, and finds them on its
+own — there is nothing to configure.
 
-+ *A Chromium-based browser* plays everything: video, animated images, and
-  interactive HTML such as a live chart or a small web app. Google Chrome,
-  Chromium, Microsoft Edge and Brave all qualify. Firefox and Safari do not,
-  because Pulpit drives the browser through a control protocol only this
-  family speaks.
-+ *mpv* plays video and animated images, and Pulpit prefers it for those when
-  it is installed. It cannot play interactive content, so a browser is still
-  the one to have if you install only one.
++ *A Chromium-based browser* plays everything, including interactive HTML.
+  Chrome, Chromium, Edge and Brave qualify; Firefox and Safari do not, because
+  Pulpit drives the browser through a protocol only this family speaks. If you
+  install one program, make it this one.
++ *mpv* plays video and animated images, and Pulpit prefers it for those.
 
-On macOS, install either or both:
-
-```sh
-brew install --cask google-chrome
-brew install mpv
-```
-
-The Homebrew Cask installs `mpv` for you. On Linux, the `.deb` and `.rpm`
-suggest both, so your package manager offers them at install time; otherwise
-install `chromium` and `mpv` the usual way. On Windows there is nothing to do:
-Edge is already there. And the Nix package carries both itself.
-
-Pulpit never uses your own browser session. It starts the browser hidden, in a
-private profile it creates for the deck, so your extensions, cookies, logins
-and history are untouched — a slide is untrusted code and does not belong
-inside your browsing session.
-
-Without either program a deck still presents. Media slides show their poster
-image, which is what a printed handout of the same deck would show, and
-everything else behaves normally.
+Pulpit never uses your own browser session: it starts the browser hidden, in a
+private profile per deck, so your extensions, cookies, logins and history are
+untouched. Without either program a deck still presents — media slides show
+their poster image.

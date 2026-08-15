@@ -58,4 +58,4 @@
 
 = Licence
 
-MIT or Apache-2.0. PDFium is BSD-3-Clause and is _not_ vendored here.
+MIT or Apache-2.0.
