@@ -62,9 +62,104 @@ pub fn scale_rgba(
     out
 }
 
+/// Fit a decoded frame into the viewport without changing its shape.
+///
+/// [`scale_rgba`] maps the source onto the target corner to corner, so a
+/// source of a different aspect ratio arrives stretched. Chrome preserves the
+/// page's aspect ratio inside the box `Page.startScreencast` was given, so a
+/// mismatch is a thing that happens rather than a thing to assert against; it
+/// should degrade to bars, which are merely unused, and never to a distorted
+/// picture. The bars are opaque black, matching the wrapper page's own
+/// background.
+pub fn fit_rgba(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<u8> {
+    if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
+        return scale_rgba(
+            source,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+        );
+    }
+
+    // The largest box of the source's shape that still fits the target.
+    let by_width = source_height as u64 * target_width as u64 / source_width as u64;
+    let (inner_width, inner_height) = if by_width <= target_height as u64 {
+        (target_width, (by_width as u32).max(1))
+    } else {
+        let by_height = source_width as u64 * target_height as u64 / source_height as u64;
+        ((by_height as u32).max(1).min(target_width), target_height)
+    };
+    if (inner_width, inner_height) == (target_width, target_height) {
+        return scale_rgba(
+            source,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+        );
+    }
+
+    let inner = scale_rgba(
+        source,
+        source_width,
+        source_height,
+        inner_width,
+        inner_height,
+    );
+    let mut out = vec![0u8; target_width as usize * target_height as usize * 4];
+    for pixel in out.chunks_exact_mut(4) {
+        pixel[3] = 0xFF;
+    }
+    let left = (target_width - inner_width) as usize / 2;
+    let top = (target_height - inner_height) as usize / 2;
+    let inner_stride = inner_width as usize * 4;
+    for row in 0..inner_height as usize {
+        let from = row * inner_stride;
+        let to = ((top + row) * target_width as usize + left) * 4;
+        out[to..to + inner_stride].copy_from_slice(&inner[from..from + inner_stride]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fitting_a_narrower_frame_adds_bars_rather_than_stretching() {
+        // One white pixel, square, into a 4×2 viewport: a 2×2 white block in
+        // the middle with a black column on either side.
+        let frame = vec![255u8; 4];
+        let fitted = fit_rgba(&frame, 1, 1, 4, 2);
+        let column = |x: usize, y: usize| {
+            let index = (y * 4 + x) * 4;
+            fitted[index..index + 4].to_vec()
+        };
+        assert_eq!(column(0, 0), vec![0, 0, 0, 255], "left bar");
+        assert_eq!(column(3, 1), vec![0, 0, 0, 255], "right bar");
+        assert_eq!(column(1, 0), vec![255, 255, 255, 255], "picture");
+        assert_eq!(column(2, 1), vec![255, 255, 255, 255], "picture");
+    }
+
+    #[test]
+    fn fitting_a_frame_of_the_same_shape_fills_the_viewport() {
+        let frame = vec![255u8; 4 * 4];
+        let fitted = fit_rgba(&frame, 2, 2, 4, 4);
+        assert!(fitted.iter().all(|byte| *byte == 255), "no bars");
+    }
+
+    #[test]
+    fn fitting_a_degenerate_size_yields_a_blank_frame_rather_than_panicking() {
+        assert!(fit_rgba(&[], 0, 0, 2, 2).iter().all(|byte| *byte == 0));
+        assert!(fit_rgba(&[1, 2, 3, 4], 1, 1, 0, 0).is_empty());
+    }
 
     #[test]
     fn a_frame_already_at_the_target_size_is_passed_through() {

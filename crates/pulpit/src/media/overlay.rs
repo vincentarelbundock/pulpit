@@ -118,7 +118,12 @@ pub fn to_css_pixels(position: (f32, f32), css_width: u32, css_height: u32) -> (
 /// The physical-pixel viewport an overlay needs, given its size on screen.
 ///
 /// Bounded so a maximised window on a high-density display cannot ask a
-/// browser for a surface larger than the transport allows.
+/// browser for a surface larger than the transport allows. The bound is
+/// applied to both axes at once: clamping them independently would hand the
+/// browser a viewport of a different shape than the rectangle it is drawn
+/// into, and the picture would arrive stretched. A 2× display is what makes
+/// that reachable in practice, so the shrink preserves the aspect ratio and
+/// only the resolution is lost.
 pub fn viewport_for(rectangle: Rectangle, scale: f32) -> (u32, u32) {
     const MAX_EDGE: f32 = 4096.0;
     let scale = if scale.is_finite() && scale > 0.0 {
@@ -126,8 +131,16 @@ pub fn viewport_for(rectangle: Rectangle, scale: f32) -> (u32, u32) {
     } else {
         1.0
     };
-    let width = (rectangle.width * scale).round().clamp(1.0, MAX_EDGE);
-    let height = (rectangle.height * scale).round().clamp(1.0, MAX_EDGE);
+    let mut width = (rectangle.width * scale).max(1.0);
+    let mut height = (rectangle.height * scale).max(1.0);
+    let longest = width.max(height);
+    if longest > MAX_EDGE {
+        let shrink = MAX_EDGE / longest;
+        width *= shrink;
+        height *= shrink;
+    }
+    let width = width.round().clamp(1.0, MAX_EDGE);
+    let height = height.round().clamp(1.0, MAX_EDGE);
     (width as u32, height as u32)
 }
 
@@ -396,6 +409,23 @@ mod tests {
             ..rectangle
         };
         assert_eq!(viewport_for(degenerate, 1.0), (1, 1));
+
+        // A full-bleed 16:9 overlay on a 2× display asks for more than the
+        // bound on its long edge. Shrinking only that edge would hand the
+        // browser a 1.2:1 viewport for a 16:9 rectangle.
+        let retina = Rectangle {
+            width: 3024.0,
+            height: 1701.0,
+            ..rectangle
+        };
+        let (width, height) = viewport_for(retina, 2.0);
+        assert_eq!(width, 4096, "the long edge lands on the bound");
+        let aspect = width as f32 / height as f32;
+        assert!(
+            (aspect - WIDE).abs() < 1e-2,
+            "the bound preserves the shape: {width}×{height}"
+        );
+
         assert_eq!(viewport_for(rectangle, f32::NAN), (640, 360));
     }
 }

@@ -19,7 +19,7 @@ use crate::protocol::{
     SurfaceFrame, Viewport, WebCommand, WorkerCounters, WorkerDescription, MEDIA_PROTOCOL_VERSION,
 };
 use crate::runtime::chromium::{wrapper_page, AssetServer, CdpPipe, Json, WrapperPlayback};
-use crate::runtime::scale::scale_rgba;
+use crate::runtime::scale::fit_rgba;
 use crate::runtime::{discover_chromium, probe_external_chromium};
 use crate::surface::AttachedRing;
 
@@ -776,13 +776,15 @@ impl Session {
         // Asked for at the overlay's size, a frame normally arrives at it and
         // is written straight to the ring. The resample stays because Chrome
         // preserves the page's aspect ratio inside the box it was given, so a
-        // viewport whose shape differs from the page's still needs fitting.
+        // viewport whose shape differs from the page's still needs fitting —
+        // fitting, not stretching: a mismatch shows bars, never a distorted
+        // picture.
         let written = if (width, height) == (viewport.width, viewport.height) {
             counters.frames_scale_elided += 1;
             self.ring.write_frame(raw, self.sequence)
         } else {
             counters.frames_scaled += 1;
-            let scaled = scale_rgba(raw, width, height, viewport.width, viewport.height);
+            let scaled = fit_rgba(raw, width, height, viewport.width, viewport.height);
             self.ring.write_frame(&scaled, self.sequence)
         };
         let slot = written
