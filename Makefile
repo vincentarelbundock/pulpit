@@ -216,6 +216,7 @@ bump:  ## Bump the workspace version (usage: make bump VERSION=x.y.z)
 	    exit 1; \
 	fi
 	@sed -i.bak -E '0,/^version = "[^"]*"/s//version = "$(VERSION)"/' Cargo.toml && rm Cargo.toml.bak
+	@sed -i.bak -E '/^pulpit-/s/version = "[^"]*"/version = "$(VERSION)"/' Cargo.toml && rm Cargo.toml.bak
 	@$(CARGO) update -w >/dev/null
 	@echo "Bumped pulpit to $(VERSION)."
 	@git diff --stat Cargo.toml Cargo.lock

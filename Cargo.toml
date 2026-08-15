@@ -20,13 +20,13 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/vincentarelbundock/pulpit"
 
 [workspace.dependencies]
-pulpit-core = { path = "crates/pulpit-core" }
-pulpit-display = { path = "crates/pulpit-display", default-features = false }
+pulpit-core = { path = "crates/pulpit-core", version = "0.0.4" }
+pulpit-display = { path = "crates/pulpit-display", version = "0.0.4", default-features = false }
 # Default features on purpose: the browser worker is the only media runtime,
 # so a dependant that quietly opted out would ship an application whose media
 # silently never plays — which happened once already, from the other end.
-pulpit-media = { path = "crates/pulpit-media" }
-pulpit-render = { path = "crates/pulpit-render", default-features = false }
+pulpit-media = { path = "crates/pulpit-media", version = "0.0.4" }
+pulpit-render = { path = "crates/pulpit-render", version = "0.0.4", default-features = false }
 
 anyhow = "1"
 bincode = { version = "1.3", default-features = false }
