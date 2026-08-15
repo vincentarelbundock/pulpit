@@ -51,3 +51,10 @@ jobs:
           for crate in pulpit-core pulpit-display pulpit-render pulpit-media pulpit; do
             cargo publish -p "$crate" --locked --token "${CARGO_REGISTRY_TOKEN}"
           done
+
+      # rust-cache's post step walks `target/` and trips over the transient
+      # package/verify trees `cargo publish` leaves behind, failing the job
+      # after every crate has already been uploaded.
+      - name: Remove packaging debris before the cache post step
+        if: always()
+        run: rm -rf target/package
