@@ -45,9 +45,9 @@ impl Engines {
     pub fn detect() -> &'static Engines {
         static ENGINES: OnceLock<Engines> = OnceLock::new();
         ENGINES.get_or_init(|| Engines {
-            mutool: find("mutool", "PDFFORM_MUTOOL"),
-            pdftoppm: find("pdftoppm", "PDFFORM_PDFTOPPM"),
-            pdftotext: find("pdftotext", "PDFFORM_PDFTOTEXT"),
+            mutool: find("mutool", "PULPIT_MUTOOL"),
+            pdftoppm: find("pdftoppm", "PULPIT_PDFTOPPM"),
+            pdftotext: find("pdftotext", "PULPIT_PDFTOTEXT"),
         })
     }
 
@@ -83,7 +83,7 @@ impl Engines {
             "PDFFORM_REQUIRE_VERIFIER is set but {name} is not installed, so {what} \
              cannot be checked against an independent implementation"
         );
-        eprintln!("SKIP: {what} — {name} not installed (set PDFFORM_MUTOOL, or install it)");
+        eprintln!("SKIP: {what} — {name} not installed (set PULPIT_MUTOOL, or install it)");
         false
     }
 

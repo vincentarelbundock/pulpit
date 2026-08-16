@@ -287,8 +287,13 @@ impl<'a> PdfiumDocument<'a> {
                         top = unsafe { bindings.FPDF_GetPageHeightF(handle) };
                     }
                 }
-                let rotation =
-                    PageRotation::from_degrees(unsafe { bindings.FPDFPage_GetRotation(handle) });
+                // PDFium reports rotation in *quarter turns* — 0, 1, 2, 3 —
+                // not in degrees. Passing that straight to `from_degrees`
+                // read every rotated page as unrotated, which put every mark
+                // on one in the wrong place; the cross-viewer rotation test
+                // is what found it.
+                let quarters = unsafe { bindings.FPDFPage_GetRotation(handle) };
+                let rotation = PageRotation::from_degrees(quarters.rem_euclid(4) * 90);
                 Ok(PageGeometry::new(
                     left.min(right),
                     bottom.min(top),
