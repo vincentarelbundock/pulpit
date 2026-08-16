@@ -2825,12 +2825,35 @@ impl App {
         }
     }
 
-    /// How this platform spells a binding, for menu labels.
-    pub fn shortcut(&self, key: &str) -> String {
+    /// The key a menu entry should quote for an action, read from the live
+    /// keymap rather than written beside the entry. Menu labels used to spell
+    /// their own keys, so they went stale the moment a binding moved — and
+    /// they never showed a rebinding at all.
+    pub fn action_shortcut(&self, action: crate::settings::keys::Action) -> Option<String> {
+        use crate::platform::input::Modifier;
         use crate::platform::Shortcut;
-        // The presenter bindings are single keys; the platform layer decides
-        // how they are written.
-        self.platform.input.format(&Shortcut::key(key))
+        use crate::settings::keys::KeyBinding;
+
+        let binding = self.settings.keymap.display_binding(action)?;
+        let KeyBinding::Named { key, mods } = binding else {
+            return None;
+        };
+        let mut modifiers = Vec::new();
+        // `ctrl` in a keymap means "the modifier this desktop uses for
+        // application commands", which is Command on macOS.
+        if mods.ctrl {
+            modifiers.push(Modifier::Primary);
+        }
+        if mods.alt {
+            modifiers.push(Modifier::Alt);
+        }
+        if mods.shift {
+            modifiers.push(Modifier::Shift);
+        }
+        Some(self.platform.input.format(&Shortcut {
+            modifiers,
+            key: display_key(key),
+        }))
     }
 
     pub fn document_title(&self) -> String {
@@ -2996,10 +3019,18 @@ impl App {
                     && self.resolved_index(Role::Presenter) == self.resolved_index(Role::Audience);
                 self.coordinator.roles.allow_shared_display = wanted && shared;
                 if wanted && shared && self.audience_started {
+                    // The way back out has to be the key that is actually
+                    // bound: this notice is the only thing on screen when the
+                    // audience window is covering the presenter view.
+                    let key = self
+                        .action_shortcut(Action::ToggleAudienceFullscreen)
+                        .map(|key| format!("Press {key} to bring it back."))
+                        .unwrap_or_else(|| {
+                            "Bind a key to \"Audience fullscreen\" to bring it back.".to_string()
+                        });
                     self.notify(format!(
                         "The audience window is now fullscreen on this screen and covers the \
-                         presenter view. Press {} to bring it back.",
-                        self.shortcut("f")
+                         presenter view. {key}"
                     ));
                 }
 
@@ -8288,6 +8319,18 @@ fn platform_description() -> String {
     let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into());
     format!("{}/{session} ({desktop})", std::env::consts::OS)
+}
+
+/// The other direction: a keymap key name as a menu should print it. Letters
+/// are stored as the toolkit reports them, in lower case, and the function
+/// keys inconsistently so; a key cap is upper case either way.
+fn display_key(key: &str) -> String {
+    match key {
+        "slash" => "/".into(),
+        other if other.len() == 1 => other.to_ascii_uppercase(),
+        other if other.len() <= 3 && other.starts_with(['f', 'F']) => other.to_ascii_uppercase(),
+        other => other.to_string(),
+    }
 }
 
 /// A stable, human-readable name for a logical key, matching the strings the

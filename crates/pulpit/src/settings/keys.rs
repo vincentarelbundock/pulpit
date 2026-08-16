@@ -590,6 +590,21 @@ impl Keymap {
     /// rest.
     pub const UNBOUND_BY_DEFAULT: [Action; 2] = [Action::FocusNextLink, Action::FocusPreviousLink];
 
+    /// The binding to *show* for an action, if any.
+    ///
+    /// Menu labels quote one key, not the whole list, and a scancode is not
+    /// something a person can read off a key cap — so this is the first named
+    /// binding, in keymap order, which is the one the defaults put first on
+    /// purpose.
+    pub fn display_binding(&self, action: Action) -> Option<&KeyBinding> {
+        self.bindings
+            .iter()
+            .find(|(binding, bound)| {
+                *bound == action && matches!(binding, KeyBinding::Named { .. })
+            })
+            .map(|(binding, _)| binding)
+    }
+
     pub fn keys_for(&self, action: Action) -> Vec<String> {
         self.bindings
             .iter()
@@ -602,6 +617,24 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_entry_quotes_the_bound_key_not_a_remembered_one() {
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.display_binding(Action::ShowOverview),
+            Some(&KeyBinding::named("o"))
+        );
+        keymap.unbind(&KeyBinding::named("o"));
+        keymap.bind(
+            KeyBinding::named_with("m", Mods::ctrl()),
+            Action::ShowOverview,
+        );
+        assert_eq!(
+            keymap.display_binding(Action::ShowOverview),
+            Some(&KeyBinding::named_with("m", Mods::ctrl()))
+        );
+    }
 
     #[test]
     fn every_action_has_at_least_one_default_binding() {

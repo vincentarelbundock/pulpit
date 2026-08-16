@@ -872,7 +872,9 @@ fn menu(app: &App) -> Element<'_, Message> {
             .style(theme::ambient::tool_button)
             .on_press(Message::MenuAction(Box::new(message)))
     };
-    let shortcut = |keys: &str| Some(app.shortcut(keys));
+    // Every shortcut here is read from the keymap, so a rebinding shows up in
+    // the menu and a moved default cannot leave a stale key behind.
+    let shortcut = |action: Action| app.action_shortcut(action);
 
     let mut items = Column::new()
         .spacing(gap::XS)
@@ -885,10 +887,14 @@ fn menu(app: &App) -> Element<'_, Message> {
         )
         .height(Length::Fixed(MENU_HEADER)),
     );
-    items = items.push(entry("Open…", shortcut("o"), Message::OpenDialog));
+    items = items.push(entry(
+        "Open…",
+        shortcut(Action::OpenDocument),
+        Message::OpenDialog,
+    ));
     items = items.push(entry(
         "Reload",
-        shortcut("F5"),
+        shortcut(Action::ReloadDocument),
         Message::Do(Action::ReloadDocument),
     ));
     if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
@@ -897,16 +903,20 @@ fn menu(app: &App) -> Element<'_, Message> {
     if app.state.document().is_some() {
         items = items.push(entry(
             "Jump to slide…",
-            shortcut("j"),
+            shortcut(Action::ShowOverview),
             Message::Do(Action::ShowOverview),
         ));
     }
-    items = items.push(entry("Layouts…", shortcut("l"), Message::ShowLibrary));
+    items = items.push(entry(
+        "Layouts…",
+        shortcut(Action::ShowLayouts),
+        Message::ShowLibrary,
+    ));
     items = items.push(entry("Settings…", None, Message::ShowSettings));
 
     items = items.push(entry(
         "Swap displays",
-        shortcut("s"),
+        shortcut(Action::SwapDisplays),
         Message::Do(Action::SwapDisplays),
     ));
     items = items.push(entry(
@@ -915,7 +925,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         } else {
             "Audience: windowed"
         },
-        shortcut("f"),
+        shortcut(Action::ToggleAudienceFullscreen),
         Message::Do(Action::ToggleAudienceFullscreen),
     ));
 
@@ -927,12 +937,12 @@ fn menu(app: &App) -> Element<'_, Message> {
         } else {
             "Start timer"
         },
-        shortcut("p"),
+        shortcut(Action::ToggleTimer),
         Message::Do(Action::ToggleTimer),
     ));
     items = items.push(entry(
         "Reset timer",
-        shortcut("r"),
+        shortcut(Action::ResetTimer),
         Message::Do(Action::ResetTimer),
     ));
 
@@ -941,7 +951,11 @@ fn menu(app: &App) -> Element<'_, Message> {
             .width(Length::Fill)
             .style(theme::ambient::separator),
     );
-    items = items.push(entry("Exit", shortcut("q"), Message::Do(Action::Quit)));
+    items = items.push(entry(
+        "Exit",
+        shortcut(Action::Quit),
+        Message::Do(Action::Quit),
+    ));
 
     let panel = container(
         container(items)
