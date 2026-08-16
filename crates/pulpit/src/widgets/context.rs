@@ -225,6 +225,13 @@ pub struct MediaData {
 #[derive(Debug, Clone)]
 pub struct ReaderPage {
     pub placed: crate::widgets::document::model::PlacedPage,
+    /// The page's canonical size in PDF points, so a pointer position inside
+    /// the drawn sheet can be turned into a canonical page point (A4).
+    ///
+    /// Carried with the page rather than derived from the zoom, because a
+    /// document that mixes portrait body pages with a landscape appendix has
+    /// no single scale and the conversion has to be per page.
+    pub canonical: (f32, f32),
     /// The most recent complete frame for this page at roughly this size, or
     /// `None` while one is being rendered. A page with no frame yet draws its
     /// sheet and nothing on it, rather than nothing at all: the column must

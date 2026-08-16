@@ -11,9 +11,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use pulpit_core::annotate::AnnotationInteraction;
 use pulpit_core::annotation::AnnotationTool;
-use pulpit_core::page::{PageGeometry, PageIndex};
-use pulpit_render::document::{CompatibilityLevel, DocumentRevision, DocumentWarning, FormField};
+use pulpit_core::page::{PageGeometry, PageIndex, PagePoint};
+use pulpit_render::document::{
+    CompatibilityLevel, DocumentRevision, DocumentTransaction, DocumentWarning, FormField,
+};
 
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
 use crate::widgets::document::model::{Column, ReaderControls, Zoom};
@@ -78,6 +81,12 @@ pub struct ReaderSession {
     /// and field edits, in user action order (§8.6).
     undo_stack: Vec<pulpit_render::document::DocumentUndo>,
     redo_stack: Vec<pulpit_render::document::DocumentUndo>,
+    /// What the pointer is doing to the page: the armed tool and any open
+    /// gesture, and nothing that has been committed (§5.3, A2).
+    interaction: AnnotationInteraction,
+    /// Where the pointer last was, on which page. Transient, and never
+    /// snapshotted (§3.2).
+    cursor: Option<(PageIndex, PagePoint)>,
 }
 
 /// One page as it was last drawn.
@@ -91,11 +100,8 @@ struct RenderedPage {
     revision: DocumentRevision,
 }
 
-// The reader session is complete; the parts of it the application has not
-// yet been wired to — the page-gesture path and the document-mode worker
-// requests — are the remaining steps of `SPEC-document.md` §14.3, and the
-// surface they will call is deliberately here and tested rather than added
-// later beside its first caller.
+// A few readers of this state are the recovery path's, which §11 has yet to
+// write; the rest is live.
 #[allow(dead_code)]
 impl ReaderSession {
     pub fn new() -> ReaderSession {
@@ -186,6 +192,54 @@ impl ReaderSession {
         for page in &applied.dirty_pages {
             self.in_flight.remove(page);
         }
+    }
+
+    /// The pointer moved over a page, at a canonical page point (A4).
+    pub fn pointer_moved(&mut self, page: PageIndex, x: f32, y: f32) {
+        let at = PagePoint::new(x, y);
+        self.cursor = Some((page, at));
+        self.interaction.extend(at);
+    }
+
+    /// The pointer went down on the page it was last over.
+    ///
+    /// Returns `false` when nothing took the press — no tool armed, or a tool
+    /// whose mark is placed rather than drawn — so the caller knows the press
+    /// belongs to the document's own links and fields.
+    pub fn pointer_pressed(&mut self) -> bool {
+        let Some((page, at)) = self.cursor else {
+            return false;
+        };
+        self.interaction.begin(page, at)
+    }
+
+    /// The pointer came up. Returns the one atomic action it produced, if any.
+    ///
+    /// Nothing is applied here: the transaction goes to the worker, and the
+    /// mark appears when a frame carrying it arrives (A1, A7). A gesture that
+    /// resolved to nothing — a selection with no text under it, an eraser
+    /// sweep that touched nothing — returns `None` and is not an error.
+    pub fn pointer_released(&mut self) -> Option<DocumentTransaction> {
+        let page = self.interaction.gesture()?.page();
+        let geometry = self.pages.get(page.get()).copied()?;
+        let outcome = self.interaction.finish(&geometry);
+        let commands = outcome.commands();
+        if commands.is_empty() {
+            return None;
+        }
+        Some(DocumentTransaction::from_annotations(commands.to_vec()))
+    }
+
+    /// The gesture was abandoned — the pointer left the page, or Escape was
+    /// pressed. Nothing is committed and nothing is reported (§8.1).
+    pub fn pointer_cancelled(&mut self) {
+        self.interaction.cancel();
+        self.cursor = None;
+    }
+
+    /// Is a gesture open? The page surface draws its own preview while one is.
+    pub fn is_drawing(&self) -> bool {
+        self.interaction.is_drawing()
     }
 
     /// The operation that undoes the last edit, if there is one.
@@ -361,6 +415,11 @@ impl ReaderSession {
             }
             ReadCommand::Arm(tool) => {
                 self.controls.tool = *tool;
+                // The toolbar and the gesture state are one choice, not two:
+                // arming through the interaction is also what abandons any
+                // open gesture, so changing tools mid-stroke drops the stroke
+                // rather than finishing it with the new tool.
+                self.interaction.arm(*tool);
                 false
             }
             // The rest are the application's to route to the worker: a page
@@ -400,6 +459,11 @@ impl ReaderSession {
                 .visible(self.controls.offset, self.cell.1)
                 .into_iter()
                 .map(|placed| ReaderPage {
+                    canonical: self
+                        .pages
+                        .get(placed.page.get())
+                        .map(|page| (page.width, page.height))
+                        .unwrap_or((1.0, 1.0)),
                     // Whatever frame this page has, even one drawn at another
                     // width or before the last edit: it is replaced when a
                     // newer one arrives (A7). Until the first one does, the
@@ -767,6 +831,69 @@ mod tests {
         session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
         assert!(!session.facet(true).can_redo);
         assert!(session.facet(true).can_undo);
+    }
+
+    #[test]
+    fn a_stroke_on_a_page_becomes_one_transaction() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(1), 100.0, 100.0);
+        assert!(session.pointer_pressed());
+        assert!(session.is_drawing());
+        for step in 1..20 {
+            session.pointer_moved(PageIndex(1), 100.0 + step as f32 * 6.0, 100.0 + step as f32);
+        }
+        let transaction = session.pointer_released().expect("a stroke commits");
+        assert_eq!(transaction.len(), 1, "one gesture is one undo entry");
+        assert!(!session.is_drawing());
+        assert_eq!(transaction.label(), "Add Ink");
+    }
+
+    #[test]
+    fn a_press_with_nothing_armed_belongs_to_the_document() {
+        let mut session = open(2);
+        session.pointer_moved(PageIndex(0), 40.0, 40.0);
+        assert!(
+            !session.pointer_pressed(),
+            "an unarmed press must reach the page's own links and fields"
+        );
+        assert!(session.pointer_released().is_none());
+    }
+
+    #[test]
+    fn a_gesture_the_pointer_left_commits_nothing() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 50.0, 50.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 150.0, 90.0);
+        session.pointer_cancelled();
+        assert!(!session.is_drawing());
+        assert!(session.pointer_released().is_none());
+    }
+
+    #[test]
+    fn changing_tool_mid_stroke_drops_the_stroke() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 50.0, 50.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 150.0, 90.0);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
+        assert!(!session.is_drawing());
+        assert!(session.pointer_released().is_none());
+    }
+
+    #[test]
+    fn a_stroke_off_the_page_commits_nothing() {
+        // The gesture validates against the page it was drawn on before it is
+        // sent, so a mark that cannot be written is refused here rather than
+        // by the worker (§8.1).
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 90_000.0, 40.0);
+        session.pointer_pressed();
+        assert!(session.pointer_released().is_none());
     }
 
     #[test]

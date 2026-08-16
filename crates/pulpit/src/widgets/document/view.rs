@@ -6,7 +6,9 @@
 //! elements, so what is on screen is decided by something that can be tested
 //! without a window.
 
-use iced::widget::{button, column, container, image, row, scrollable, space, text, text_input};
+use iced::widget::{
+    button, column, container, image, mouse_area, row, scrollable, space, text, text_input,
+};
 use iced::{Alignment, Element, Length, Padding};
 
 use pulpit_core::annotation::AnnotationTool;
@@ -87,8 +89,9 @@ fn page_surface<Message: Clone + 'static>(
             sheets = sheets.push(space::vertical().height(Length::Fixed(first.placed.top)));
         }
     }
+    let armed = reader.controls.tool.is_some();
     for page in &reader.visible {
-        sheets = sheets.push(sheet(page, mode));
+        sheets = sheets.push(sheet(page, mode, armed, on_event));
     }
 
     let scroller = scrollable(
@@ -113,9 +116,11 @@ fn page_surface<Message: Clone + 'static>(
 /// A page with no frame yet is still drawn, at its full size, as a blank
 /// sheet: the alternative is a column that changes height as frames arrive,
 /// which moves the text under the reader's eye.
-fn sheet<Message: 'static>(
+fn sheet<Message: Clone + 'static>(
     page: &crate::widgets::context::ReaderPage,
-    _mode: Mode,
+    mode: Mode,
+    armed: bool,
+    on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let inner: Element<'static, Message> = match &page.frame {
         Some(handle) => image(handle.clone())
@@ -127,14 +132,62 @@ fn sheet<Message: 'static>(
             .height(Length::Fixed(page.placed.height))
             .into(),
     };
-    container(inner)
+    let sheet = container(inner)
         .width(Length::Fixed(page.placed.width))
         .height(Length::Fixed(page.placed.height))
         .style(|_theme| container::Style {
             background: Some(iced::Background::Color(iced::Color::WHITE)),
             ..container::Style::default()
+        });
+
+    if !mode.interactive() {
+        return sheet.into();
+    }
+
+    // Pointer positions leave this widget in canonical page points and in no
+    // other unit (A4). The conversion is per sheet because each sheet knows
+    // its own page's size and the size it was drawn at, and a document of
+    // mixed page sizes has no single scale to convert by.
+    let index = page.placed.page;
+    let (drawn_width, drawn_height) = (page.placed.width, page.placed.height);
+    let (canonical_width, canonical_height) = page.canonical;
+    let to_page = move |point: iced::Point| -> (f32, f32) {
+        let x = if drawn_width > 0.0 {
+            point.x * canonical_width / drawn_width
+        } else {
+            0.0
+        };
+        let y = if drawn_height > 0.0 {
+            point.y * canonical_height / drawn_height
+        } else {
+            0.0
+        };
+        (x, y)
+    };
+
+    let area = mouse_area(sheet)
+        .on_move(move |point| {
+            let (x, y) = to_page(point);
+            on_event(WidgetEvent::Read(ReadCommand::PageCursor {
+                page: index,
+                x,
+                y,
+            }))
         })
-        .into()
+        .on_press(on_event(WidgetEvent::Read(ReadCommand::PagePressed)))
+        .on_release(on_event(WidgetEvent::Read(ReadCommand::PageReleased)))
+        // The pointer leaving the sheet mid-stroke ends the gesture rather
+        // than leaving it open: a stroke that resumed when the pointer came
+        // back would join two marks the user made separately.
+        .on_exit(on_event(WidgetEvent::Read(ReadCommand::PageCancelled)));
+
+    // An armed tool takes the pointer away from the document's own links and
+    // fields, and the cursor says so before the reader finds out by pressing.
+    if armed {
+        area.interaction(iced::mouse::Interaction::Crosshair).into()
+    } else {
+        area.into()
+    }
 }
 
 /// The navigation band: where you are, and how big the page is.

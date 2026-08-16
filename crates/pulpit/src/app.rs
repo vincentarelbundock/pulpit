@@ -3838,6 +3838,28 @@ impl App {
                 // there is no "Save" that could quietly become one.
                 Task::none()
             }
+            ReadCommand::PageCursor { page, x, y } => {
+                self.reader.pointer_moved(*page, *x, *y);
+                Task::none()
+            }
+            ReadCommand::PagePressed => {
+                // A press an armed tool does not take belongs to the
+                // document's own links and fields, and is not this path's.
+                let _taken = self.reader.pointer_pressed();
+                Task::none()
+            }
+            ReadCommand::PageReleased => {
+                // One gesture, one transaction, one revision, one undo entry
+                // (§9.1) — however many marks an eraser sweep took.
+                if let Some(transaction) = self.reader.pointer_released() {
+                    self.commit_to_document(transaction);
+                }
+                Task::none()
+            }
+            ReadCommand::PageCancelled => {
+                self.reader.pointer_cancelled();
+                Task::none()
+            }
             _ => {
                 let _needs_render = self.reader.apply(&command);
                 Task::none()
@@ -3849,7 +3871,6 @@ impl App {
     ///
     /// One transaction is one revision and one undo entry, whatever it
     /// contains (§9.1) — an eraser sweep that took eleven marks included.
-    #[allow(dead_code)] // the page-gesture path calls this; see §14.3
     fn commit_to_document(
         &mut self,
         transaction: pulpit_render::document::DocumentTransaction,
