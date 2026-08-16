@@ -1111,6 +1111,27 @@ impl DocumentBackend for PdfiumDocument<'_> {
     fn source(&self) -> Option<&Path> {
         self.source.as_deref()
     }
+
+    /// Rasterise through the same backend that renders the presenter's
+    /// slides, from the document this engine holds.
+    ///
+    /// The same handle, deliberately: a frame drawn after a commit contains
+    /// the commit (A7), which a separate read-only copy of the file could not
+    /// promise. Annotations are drawn, because a page rendered without them
+    /// would be a page with the user's marks missing.
+    fn render_page(&self, page: PageIndex, width: u32, height: u32, rgba: &mut [u8]) -> Result<()> {
+        let request = crate::pdf::RenderRequest {
+            document: self.document,
+            page: page.get(),
+            region: pulpit_core::notes::Region::FULL,
+            width,
+            height,
+            with_annotations: true,
+        };
+        request.validate().map_err(to_document_error)?;
+        PdfBackend::render_into(self.backend, &request, rgba, &crate::pdf::NeverCancel)
+            .map_err(to_document_error)
+    }
 }
 
 /// Rebuild the modelled part of an annotation from its summary.

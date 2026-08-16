@@ -113,6 +113,28 @@ pub enum FormKey {
 #[serde(rename_all = "kebab-case")]
 pub enum DocumentRequest {
     Open(OpenDocument),
+    /// What the worker knows about the document it holds: page count,
+    /// compatibility level and the warnings a user is told before they start
+    /// editing (§3.4, A9).
+    Info,
+    /// Canonical geometry for a run of pages.
+    ///
+    /// A run rather than one page, because a reader laying out a scrolled
+    /// column needs every page's size to place any of them (§8.7), and a
+    /// round trip per page would be one per page at open. A run rather than
+    /// the whole document, because the answer is bounded like everything else
+    /// that crosses this wire.
+    PageGeometries {
+        from: PageIndex,
+        count: usize,
+    },
+    /// Render one page at a size the caller chose, from the document the
+    /// worker holds.
+    ///
+    /// Rendered *here* rather than by the render worker pool: the frame has to
+    /// contain the annotation that was just committed, and only the process
+    /// holding the mutated document can promise that (A7).
+    Render(DocumentRenderRequest),
     ListAnnotations {
         page: PageIndex,
     },
@@ -139,6 +161,75 @@ pub enum DocumentRequest {
     },
     SaveAs(SaveRequest),
     Close,
+}
+
+/// The most pages one [`DocumentRequest::PageGeometries`] answer may cover.
+///
+/// A page's geometry is six floats; a thousand of them is a message of a few
+/// tens of kilobytes, which is nothing beside a frame and plenty for the
+/// longest document a person scrolls by hand. A longer one asks again.
+pub const MAX_PAGE_GEOMETRIES: usize = 1_024;
+
+/// Render one page of the open document.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DocumentRenderRequest {
+    pub page: PageIndex,
+    /// Target size in physical pixels.
+    pub width: u32,
+    pub height: u32,
+    /// The revision the caller believes the document is at.
+    ///
+    /// Not a precondition — a render is not a mutation and never fails over a
+    /// revision — but the answer carries the revision it actually contains,
+    /// which is how a preview knows when it may be dropped (A7, §9.2).
+    pub expected_revision: DocumentRevision,
+}
+
+impl DocumentRenderRequest {
+    /// The largest page pulpit will rasterise, in each direction.
+    ///
+    /// The same bound the render path uses: 16k × 16k RGBA is already a
+    /// gigabyte, and anything beyond it is a bug or an attack.
+    pub const MAX_DIMENSION: u32 = 16_384;
+
+    pub fn rgba_bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * 4
+    }
+
+    pub fn validate(&self) -> Result<(), LimitExceeded> {
+        if self.width == 0 || self.height == 0 {
+            return Err(LimitExceeded {
+                what: "a zero-sized render",
+                limit: 1,
+            });
+        }
+        if self.width > Self::MAX_DIMENSION || self.height > Self::MAX_DIMENSION {
+            return Err(LimitExceeded {
+                what: "render dimensions",
+                limit: Self::MAX_DIMENSION as usize,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One rendered page, and the revision it contains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentFrame {
+    pub page: PageIndex,
+    pub width: u32,
+    pub height: u32,
+    /// The revision this frame was rendered from. A preview is removed only
+    /// when a frame at or beyond the mutation's revision arrives (A7).
+    pub revision: DocumentRevision,
+    /// Tightly packed RGBA8.
+    pub pixels: Vec<u8>,
+}
+
+impl DocumentFrame {
+    pub fn is_consistent(&self) -> bool {
+        self.pixels.len() == self.width as usize * self.height as usize * 4
+    }
 }
 
 /// Write the open document somewhere else. Never over its source (A6), which
@@ -174,6 +265,10 @@ pub struct CommittedField {
 #[serde(rename_all = "kebab-case")]
 pub enum DocumentResponse {
     Opened(Box<OpenDocumentInfo>),
+    /// Canonical geometry for the run that was asked for, in page order,
+    /// starting at the requested page.
+    PageGeometries(Vec<pulpit_core::page::PageGeometry>),
+    Frame(Box<DocumentFrame>),
     Annotations(Vec<AnnotationSummary>),
     Annotation(Box<AnnotationSummary>),
     Selection(TextSelectionResult),
@@ -271,6 +366,9 @@ impl DocumentRequest {
             // already had it.
             DocumentRequest::FormEvent { .. } => true,
             DocumentRequest::Open(_)
+            | DocumentRequest::Info
+            | DocumentRequest::PageGeometries { .. }
+            | DocumentRequest::Render(_)
             | DocumentRequest::ListAnnotations { .. }
             | DocumentRequest::GetAnnotation { .. }
             | DocumentRequest::SelectText { .. }
@@ -290,6 +388,10 @@ impl DocumentRequest {
                 operation.operations.len(),
                 limits::MAX_OPERATIONS_PER_TRANSACTION,
             ),
+            DocumentRequest::Render(render) => render.validate(),
+            DocumentRequest::PageGeometries { count, .. } => {
+                limits::within("page geometries", *count, MAX_PAGE_GEOMETRIES)
+            }
             DocumentRequest::Open(open) => limits::within(
                 "password length",
                 open.password.as_ref().map(String::len).unwrap_or(0),
@@ -318,6 +420,19 @@ impl DocumentResponse {
                 selection.quads.len(),
                 limits::MAX_QUADS_PER_SELECTION,
             ),
+            DocumentResponse::PageGeometries(pages) => {
+                limits::within("page geometries", pages.len(), MAX_PAGE_GEOMETRIES)
+            }
+            DocumentResponse::Frame(frame) => {
+                if frame.is_consistent() {
+                    Ok(())
+                } else {
+                    Err(LimitExceeded {
+                        what: "a frame whose pixels do not match its dimensions",
+                        limit: 0,
+                    })
+                }
+            }
             DocumentResponse::Form(result) => limits::within(
                 "invalidated rectangles",
                 result.invalidated.len(),

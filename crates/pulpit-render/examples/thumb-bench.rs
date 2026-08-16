@@ -49,6 +49,7 @@ fn main() {
                     region: Region::FULL,
                     width,
                     height,
+                    with_annotations: false,
                 },
                 &NeverCancel,
             );
@@ -63,6 +64,7 @@ fn main() {
                         region: Region::FULL,
                         width,
                         height,
+                        with_annotations: false,
                     },
                     &NeverCancel,
                 )

@@ -85,6 +85,17 @@ pub struct RenderRequest {
     pub width: u32,
     /// Target height in physical pixels.
     pub height: u32,
+    /// Draw the page's own annotations into the frame.
+    ///
+    /// Off for a presentation, and that is not an oversight: the presenter's
+    /// marks are transient overlays drawn by the application over a clean
+    /// page, and a slide that also carried the document's own commented-up
+    /// `/Annots` would put somebody's review notes on the projector.
+    ///
+    /// On for document mode, where the annotations *are* the point: a page
+    /// rendered without them is a page with the reader's own marks missing.
+    #[serde(default)]
+    pub with_annotations: bool,
 }
 
 impl RenderRequest {
@@ -390,6 +401,7 @@ mod tests {
             region: Region::FULL,
             width: 1920,
             height: 1080,
+            with_annotations: false,
         };
         assert!(base.validate().is_ok());
         assert_eq!(base.rgba_bytes(), 1920 * 1080 * 4);
@@ -459,6 +471,7 @@ mod tests {
             region: Region::FULL,
             width: 3840,
             height: 2160,
+            with_annotations: false,
         };
         assert_eq!(request.rgba_bytes(), 33_177_600);
     }

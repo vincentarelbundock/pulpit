@@ -457,6 +457,7 @@ fn render_one(
             region: job.region,
             width: job.width,
             height: job.height,
+            with_annotations: false,
         };
         let mut pixels = vec![0u8; bytes as usize];
         let started = std::time::Instant::now();
@@ -518,6 +519,9 @@ fn render_one(
         region: job.region,
         width: job.width,
         height: job.height,
+        // A presentation draws the document's own annotations nowhere near
+        // the projector; the presenter's marks are a transient overlay.
+        with_annotations: false,
     };
     let started = std::time::Instant::now();
     let result = backend.render_into(&request, mapped.as_mut_slice(), cancel.as_ref());

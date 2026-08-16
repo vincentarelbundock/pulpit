@@ -138,6 +138,25 @@ pub trait DocumentBackend: Send {
 
     /// The path this document was opened from, so a save can refuse it.
     fn source(&self) -> Option<&Path>;
+
+    /// Rasterise one page into `rgba`, which the caller has sized.
+    ///
+    /// Here rather than in the render worker pool because a frame has to
+    /// contain the annotation that was just committed, and only the engine
+    /// holding the mutated document can promise that (A7). A backend with no
+    /// rasteriser says so rather than drawing a placeholder that the reader
+    /// might mistake for their page.
+    fn render_page(
+        &self,
+        _page: PageIndex,
+        _width: u32,
+        _height: u32,
+        _rgba: &mut [u8],
+    ) -> Result<()> {
+        Err(DocumentError::Backend(
+            "this engine cannot rasterise a page".into(),
+        ))
+    }
 }
 
 /// A worker-confined open document (§6).
@@ -397,6 +416,26 @@ impl<'a> PdfDocument<'a> {
             bytes,
             verified_ids: Vec::new(),
         })
+    }
+
+    /// Rasterise one page at `width` × `height` physical pixels.
+    ///
+    /// Allocates the buffer here rather than taking one, because the caller is
+    /// a protocol handler answering a request rather than a frame cache with
+    /// storage of its own; the size is bounded before the allocation (A8).
+    pub fn render_page(&self, page: PageIndex, width: u32, height: u32) -> Result<Vec<u8>> {
+        self.check_page(page)?;
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        // The same ceiling the render path keeps. Checked before the
+        // allocation, not after it.
+        if width == 0 || height == 0 || bytes > 16_384 * 16_384 * 4 {
+            return Err(DocumentError::Backend(format!(
+                "a {width}×{height} render is not a page"
+            )));
+        }
+        let mut rgba = vec![0u8; bytes as usize];
+        self.backend.render_page(page, width, height, &mut rgba)?;
+        Ok(rgba)
     }
 
     /// The identities this session has handed out, for diagnostics.

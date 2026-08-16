@@ -1147,6 +1147,7 @@ impl PdfBackend for PdfiumBackend {
                 request.width,
                 request.height,
                 request.region,
+                request.with_annotations,
                 cancel,
             )
         })
@@ -1563,6 +1564,7 @@ fn render_page_progressively(
     width: u32,
     height: u32,
     region: Region,
+    with_annotations: bool,
     cancel: &dyn CancelSignal,
 ) -> Result<()> {
     let stride = width as i32 * 4;
@@ -1609,7 +1611,15 @@ fn render_page_progressively(
             full_width,
             full_height,
             0,
-            FPDF_REVERSE_BYTE_ORDER,
+            // `FPDF_ANNOT` is bit 0. Document mode asks for it because the
+            // marks are the point; a presentation does not, because the
+            // document's own annotations are not the presenter's (see
+            // `RenderRequest::with_annotations`).
+            if with_annotations {
+                FPDF_REVERSE_BYTE_ORDER | 0x01
+            } else {
+                FPDF_REVERSE_BYTE_ORDER
+            },
             pause_ptr,
         )
     } as u32;
@@ -1732,6 +1742,7 @@ mod tests {
                     region: Region::FULL,
                     width: 400,
                     height: 300,
+                    with_annotations: false,
                 },
                 &crate::pdf::NeverCancel,
             )

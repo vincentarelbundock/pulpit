@@ -328,6 +328,42 @@ fn a_stale_revision_cannot_overwrite_a_later_change() {
     assert_eq!(document.annotations(PageIndex(0)).unwrap().len(), 1);
 }
 
+/// A7, and the reason document mode renders through the engine that holds the
+/// document rather than through the render worker pool: the frame drawn after
+/// a commit contains the commit.
+#[test]
+fn a_frame_rendered_after_a_commit_contains_the_mark() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("frame");
+    let path = source(&directory);
+    let mut document = open(backend, &path);
+
+    let (width, height) = (306u32, 396u32);
+    let before = document
+        .render_page(PageIndex(0), width, height)
+        .expect("the page renders");
+    assert_eq!(before.len(), width as usize * height as usize * 4);
+
+    document
+        .apply(DocumentRevision::INITIAL, DocumentTransaction::one(ink(0)))
+        .expect("the stroke commits");
+
+    let after = document
+        .render_page(PageIndex(0), width, height)
+        .expect("the page renders again");
+    assert_ne!(
+        before, after,
+        "the frame drawn after the commit does not contain it — either the \
+         annotation was not written or the renderer is not drawing /Annots"
+    );
+
+    // …and it is the *annotation* that changed the picture, not the render
+    // being non-deterministic.
+    let again = document.render_page(PageIndex(0), width, height).unwrap();
+    assert_eq!(after, again, "two renders of one revision differ");
+}
+
 #[test]
 fn a_pages_geometry_is_read_from_its_crop_box_and_rotation() {
     let Some(mut guard) = binding() else { return };

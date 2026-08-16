@@ -17,9 +17,10 @@
 use std::io::{BufWriter, Read, Write};
 
 use crate::protocol::{read_message, write_message, ProtocolError};
+use pulpit_core::page::PageIndex;
 
 use super::protocol::{
-    DocumentFailure, DocumentRequest, DocumentResponse, DOCUMENT_PROTOCOL_VERSION,
+    DocumentFailure, DocumentFrame, DocumentRequest, DocumentResponse, DOCUMENT_PROTOCOL_VERSION,
 };
 use super::{DocumentError, DocumentTransaction, PdfDocument};
 
@@ -84,6 +85,31 @@ impl<'a> DocumentWorker<'a> {
 
 fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentResponse {
     let result = match request {
+        DocumentRequest::Info => Ok(DocumentResponse::Opened(Box::new(document.info().clone()))),
+        DocumentRequest::PageGeometries { from, count } => {
+            // Clamped to what the document has rather than refused: a reader
+            // asking for a run past the end is asking for the tail of the
+            // document, which is a well-formed question.
+            let last = document.page_count();
+            let count = count.min(last.saturating_sub(from.get()));
+            (0..count)
+                .map(|offset| document.page_geometry(PageIndex(from.get() + offset)))
+                .collect::<Result<Vec<_>, _>>()
+                .map(DocumentResponse::PageGeometries)
+        }
+        DocumentRequest::Render(render) => document
+            .render_page(render.page, render.width, render.height)
+            .map(|pixels| {
+                DocumentResponse::Frame(Box::new(DocumentFrame {
+                    page: render.page,
+                    width: render.width,
+                    height: render.height,
+                    // The revision the frame actually contains, which is the
+                    // document's now — not the one the caller expected (A7).
+                    revision: document.revision(),
+                    pixels,
+                }))
+            }),
         DocumentRequest::ListAnnotations { page } => document
             .annotations(page)
             .map(DocumentResponse::Annotations),

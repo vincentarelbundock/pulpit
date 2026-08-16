@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, InkDraft, InkPoint, MarkStyle};
 use pulpit_core::page::PageIndex;
-use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse, SaveRequest};
+use pulpit_render::document::protocol::{
+    DocumentRenderRequest, DocumentRequest, DocumentResponse, SaveRequest,
+};
 use pulpit_render::document::session::{DocumentSession, DocumentWorkerCommand, SessionError};
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, SaveOptions};
 
@@ -91,6 +93,31 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
     };
     assert_eq!(session.source(), source);
 
+    // What the worker holds, which is what a reader needs before it can lay
+    // anything out: how many pages, and how big each of them is.
+    let DocumentResponse::Opened(info) = session
+        .request(DocumentRequest::Info)
+        .expect("the worker describes its document")
+    else {
+        panic!("expected document info")
+    };
+    assert_eq!(info.page_count, 2);
+    assert!(info.first_page.is_valid());
+
+    let DocumentResponse::PageGeometries(pages) = session
+        .request(DocumentRequest::PageGeometries {
+            from: PageIndex(0),
+            // More than the document has: a run past the end is the tail of
+            // the document, not an error.
+            count: 64,
+        })
+        .expect("the worker measures its pages")
+    else {
+        panic!("expected page geometries")
+    };
+    assert_eq!(pages.len(), 2);
+    assert!(pages.iter().all(|page| page.is_valid()));
+
     // Nothing on the page to begin with.
     let response = session
         .request(DocumentRequest::ListAnnotations { page: PageIndex(0) })
@@ -122,6 +149,26 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
     };
     assert_eq!(annotations.len(), 1);
     let id = annotations[0].id.clone();
+
+    // A frame, from the process that holds the mutated document — which is
+    // the only one that can promise it contains the commit (A7).
+    let DocumentResponse::Frame(frame) = session
+        .request(DocumentRequest::Render(DocumentRenderRequest {
+            page: PageIndex(0),
+            width: 200,
+            height: 260,
+            expected_revision: DocumentRevision(1),
+        }))
+        .expect("the page renders")
+    else {
+        panic!("expected a frame")
+    };
+    assert!(frame.is_consistent());
+    assert_eq!(frame.revision, DocumentRevision(1));
+    assert!(
+        frame.pixels.iter().any(|byte| *byte != 0),
+        "the frame is entirely blank"
+    );
 
     // A stale revision is refused across the wire exactly as it is in
     // process: a delayed message must not overwrite a later change (A7).

@@ -452,6 +452,7 @@ mod tests {
             region: Region::FULL,
             width: 320,
             height: 180,
+            with_annotations: false,
         }
     }
 

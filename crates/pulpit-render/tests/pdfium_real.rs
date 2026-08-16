@@ -66,6 +66,7 @@ fn opens_and_renders_a_real_pdf() {
                 region: Region::FULL,
                 width: 640,
                 height: 360,
+                with_annotations: false,
             },
             &NeverCancel,
         )
@@ -97,6 +98,7 @@ fn a_cropped_region_differs_from_the_full_page() {
                 region: Region::FULL,
                 width: 200,
                 height: 120,
+                with_annotations: false,
             },
             &NeverCancel,
         )
@@ -109,6 +111,7 @@ fn a_cropped_region_differs_from_the_full_page() {
                 region: Region::left_half(),
                 width: 200,
                 height: 120,
+                with_annotations: false,
             },
             &NeverCancel,
         )
@@ -132,6 +135,7 @@ fn an_already_cancelled_render_returns_promptly() {
             region: Region::FULL,
             width: 3840,
             height: 2160,
+            with_annotations: false,
         },
         &cancel,
     );
@@ -263,6 +267,7 @@ fn how_long_a_page_takes_to_rasterise() {
                 region: Region::FULL,
                 width,
                 height,
+                with_annotations: false,
             };
             let start = std::time::Instant::now();
             let rendered = backend.render(&request, &NeverCancel).unwrap();
@@ -292,6 +297,7 @@ fn frame(backend: &PdfiumBackend, document: pulpit_render::pdf::BackendDocumentI
                 region: Region::FULL,
                 width: 400,
                 height: 300,
+                with_annotations: false,
             },
             &NeverCancel,
         )
