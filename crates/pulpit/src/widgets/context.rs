@@ -351,6 +351,8 @@ pub struct ReaderData<'a> {
     pub outline: &'a [OutlineRow],
     /// The calendar open over a date field, if one is (§8.6).
     pub date_picker: Option<&'a crate::reader::DatePicker>,
+    /// The option list open over a choice field, if one is (§8.6).
+    pub choice_list: Option<&'a crate::reader::ChoiceList>,
     /// The language a picked date is written in.
     pub date_language: crate::datefield::Locale,
     /// What pulpit can honour in this document, and what it cannot (§3.4).

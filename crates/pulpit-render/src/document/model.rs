@@ -384,8 +384,46 @@ pub enum FieldFormat {
     Percent,
     /// A time of day, per `AFTime_Format`.
     Time,
-    /// A telephone number, postcode or similar, per `AFSpecial_Format`.
-    Special,
+    /// A telephone number, postcode or similar, per `AFSpecial_Format` or an
+    /// explicit `AFSpecial_KeystrokeEx` mask.
+    Special { kind: SpecialFormat },
+}
+
+/// Which of Acrobat's "special" formats a field asks for.
+///
+/// `AFSpecial_Format` takes a number from a fixed table Acrobat has carried
+/// unchanged for decades; `AFSpecial_KeystrokeEx` carries an arbitrary mask in
+/// Acrobat's mask vocabulary — `9` a digit, `A` a letter, `O` either, `X` any
+/// character, anything else itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpecialFormat {
+    /// `AFSpecial_Format(0)`: a five-digit postcode.
+    Zip,
+    /// `AFSpecial_Format(1)`: a nine-digit postcode.
+    ZipPlusFour,
+    /// `AFSpecial_Format(2)`: a telephone number.
+    Phone,
+    /// `AFSpecial_Format(3)`: a Social Security number.
+    Ssn,
+    /// `AFSpecial_KeystrokeEx("...")`, with the mask the script names.
+    Mask { mask: String },
+    /// An `AFSpecial` call whose argument could not be read.
+    Unknown,
+}
+
+impl SpecialFormat {
+    /// What to tell someone about to type into this field.
+    pub fn hint(&self) -> String {
+        match self {
+            SpecialFormat::Zip => "a ZIP code".into(),
+            SpecialFormat::ZipPlusFour => "a ZIP+4 code".into(),
+            SpecialFormat::Phone => "a phone number".into(),
+            SpecialFormat::Ssn => "a Social Security number".into(),
+            SpecialFormat::Mask { mask } => format!("a value shaped {mask}"),
+            SpecialFormat::Unknown => "a formatted value".into(),
+        }
+    }
 }
 
 impl FieldFormat {
@@ -393,11 +431,14 @@ impl FieldFormat {
     pub fn hint(&self) -> Option<String> {
         match self {
             FieldFormat::Plain => None,
+            // A numbered preset the table below did not know leaves no pattern
+            // to show, and "date, as " is worse than "a date".
+            FieldFormat::Date { pattern } if pattern.is_empty() => Some("a date".into()),
             FieldFormat::Date { pattern } => Some(format!("date, as {pattern}")),
             FieldFormat::Number => Some("a number".into()),
             FieldFormat::Percent => Some("a percentage".into()),
             FieldFormat::Time => Some("a time".into()),
-            FieldFormat::Special => Some("a formatted value".into()),
+            FieldFormat::Special { kind } => Some(kind.hint()),
         }
     }
 
@@ -436,6 +477,25 @@ pub struct FormField {
     pub options: Vec<String>,
     pub allows_custom_value: bool,
     pub multiple_selection: bool,
+    /// `/Ff` Required: the document says this field must hold a value before
+    /// the form is submitted. Surfaced so a save can say what is still empty;
+    /// never enforced, because pulpit is not the form's submit button.
+    #[serde(default)]
+    pub required: bool,
+    /// A text field with the Password flag. PDFium already draws and edits it
+    /// masked; this is for every place *pulpit* would otherwise echo the value.
+    #[serde(default)]
+    pub password: bool,
+    /// A text field with the FileSelect flag: its value is a path a viewer
+    /// fills through a file picker pulpit refuses to open (§8.6). Filling it
+    /// can never succeed, so it is shown and not edited.
+    #[serde(default)]
+    pub file_select: bool,
+    /// A text field with the RichText flag. It fills, but the styled `/RV`
+    /// the document carries is not rewritten alongside `/V`, so another
+    /// viewer may keep showing the old styled text.
+    #[serde(default)]
+    pub rich_text: bool,
     /// Where the field is drawn. Empty when neither the producer nor the
     /// reader of the document could say — the inspector is still a way in.
     pub widgets: Vec<FieldWidget>,
@@ -466,8 +526,12 @@ impl FormField {
     }
 
     /// Can the user change this one?
+    ///
+    /// A file-select field cannot: its value is a path chosen through a file
+    /// picker the worker refuses to open, so offering an editor for it would
+    /// offer an edit that can never take.
     pub fn is_editable(&self) -> bool {
-        !self.read_only && self.kind.is_fillable()
+        !self.read_only && self.kind.is_fillable() && !self.file_select
     }
 }
 
@@ -655,7 +719,16 @@ pub enum UndoOperation {
     /// Remove an annotation that was created.
     DeleteAnnotation { id: AnnotationId },
     /// Put a field's previous value back.
-    SetField { name: String, value: String },
+    SetField {
+        name: String,
+        value: String,
+        /// Which options were chosen, by index, for a choice field that takes
+        /// several. One string cannot name three selections, which is exactly
+        /// the case [`FormField::selected`] exists for; empty for every other
+        /// kind, and absent from journals written before it existed.
+        #[serde(default)]
+        selected: Vec<u32>,
+    },
 }
 
 /// A lossless copy of what an annotation was before it was changed.
@@ -803,6 +876,10 @@ mod tests {
             options: vec!["a".into(), "b".into()],
             allows_custom_value: false,
             multiple_selection: false,
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             selected: Vec::new(),
             widgets: vec![
                 FieldWidget {
@@ -842,6 +919,10 @@ mod tests {
             options: Vec::new(),
             allows_custom_value: false,
             multiple_selection: false,
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             selected: Vec::new(),
             widgets: Vec::new(),
         };

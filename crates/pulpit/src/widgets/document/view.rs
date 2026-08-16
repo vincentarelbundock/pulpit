@@ -156,6 +156,7 @@ fn page_surface<'a, Message: Clone + 'static>(
                 composing,
                 compose,
                 reader.date_picker,
+                reader.choice_list,
                 reader.date_language,
                 on_event,
             ));
@@ -327,6 +328,7 @@ fn sheet<'a, Message: Clone + 'static>(
     composing: Option<&crate::widgets::context::ComposingMark>,
     buffer: Option<&'a iced::widget::text_editor::Content>,
     picker: Option<&crate::reader::DatePicker>,
+    choice: Option<&crate::reader::ChoiceList>,
     language: crate::datefield::Locale,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
@@ -523,12 +525,125 @@ fn sheet<'a, Message: Clone + 'static>(
         .filter(|picker| picker.page == index)
         .map(|picker| date_picker_layer(picker, language, shown, origin, drawn, on_event));
 
-    match (writing, calendar) {
-        (Some(writing), Some(calendar)) => iced::widget::stack![area, writing, calendar].into(),
-        (Some(writing), None) => iced::widget::stack![area, writing].into(),
-        (None, Some(calendar)) => iced::widget::stack![area, calendar].into(),
-        (None, None) => area,
+    // The option list over a choice field, on the page that field is on, and
+    // over everything else on the sheet: it is the thing the reader is
+    // pointing at.
+    let options = choice
+        .filter(|choice| choice.page == index)
+        .map(|choice| choice_list_layer(choice, shown, origin, drawn, on_event));
+
+    let mut layers: Vec<Element<'a, Message>> = vec![area];
+    layers.extend(writing);
+    layers.extend(calendar);
+    layers.extend(options);
+    if layers.len() == 1 {
+        layers.pop().expect("just checked there is one")
+    } else {
+        iced::widget::stack(layers).into()
     }
+}
+
+/// The list pulpit draws over a non-editable choice field (§8.6).
+///
+/// PDFium draws one of its own into the page bitmap when a combo box is
+/// clicked. That list never reaches a saved file — it is viewer chrome — and
+/// compositing it out of the slivers the engine reports as invalidated, one
+/// round trip per hovered row, is the worst client the partial-repaint path
+/// has. So the press is answered with focus alone and the list is drawn here.
+/// What it produces is an *index*, handed to `FORM_SetIndexSelected`: the
+/// engine still performs the selection and still generates the appearance, so
+/// there is one implementation of the committed value and it is PDFium's.
+///
+/// Placed with spacers against the widget's own rectangle, exactly as the
+/// calendar is, so it opens against the field rather than in a dialog over the
+/// form being filled in.
+fn choice_list_layer<Message: Clone + 'static>(
+    choice: &crate::reader::ChoiceList,
+    shown: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
+    /// Wide enough for an ordinary option, and never narrower than the field.
+    const MIN_WIDTH: f32 = 160.0;
+    /// As tall as it needs to be, up to this: a hundred-option list scrolls
+    /// rather than covering the page it belongs to.
+    const MAX_HEIGHT: f32 = 220.0;
+    /// What one row occupies, used only to guess the panel's height for
+    /// placement. The rows lay themselves out.
+    const ROW: f32 = 24.0;
+
+    let scale_x = if shown.0 > 0.0 {
+        drawn.0 / shown.0
+    } else {
+        1.0
+    };
+    let scale_y = if shown.1 > 0.0 {
+        drawn.1 / shown.1
+    } else {
+        1.0
+    };
+
+    let width = ((choice.bounds.right - choice.bounds.left) * scale_x).max(MIN_WIDTH);
+    let height = (choice.options.len() as f32 * ROW + theme::space::XS * 2.0).min(MAX_HEIGHT);
+
+    // Under the field by preference, which is where a dropdown goes; above it
+    // when there is no room below, so a field near the foot of the page still
+    // opens a list the reader can see all of.
+    let left = ((choice.bounds.left - origin.0) * scale_x).clamp(0.0, (drawn.0 - width).max(0.0));
+    let below = (choice.bounds.bottom - origin.1) * scale_y;
+    let above = (choice.bounds.top - origin.1) * scale_y - height;
+    let top = if below + height <= drawn.1 || above < 0.0 {
+        below.clamp(0.0, (drawn.1 - height).max(0.0))
+    } else {
+        above.max(0.0)
+    };
+
+    let mut rows = Column::new().spacing(1.0);
+    for (index, option) in choice.options.iter().enumerate() {
+        let index = index as u32;
+        // Two things are marked and they are not the same thing: what the
+        // field holds, and where the arrow keys are. Nothing is committed by
+        // moving the highlight, so a list whose highlight looked like a
+        // selection would say the value had already changed.
+        let style = if Some(index) == choice.selected || index == choice.highlighted {
+            theme::ambient::selected_button
+        } else {
+            theme::ambient::tool_button
+        };
+        rows = rows.push(
+            button(text(option.clone()).size(theme::type_scale::LABEL))
+                .width(Length::Fill)
+                .padding(theme::space::XS)
+                .style(style)
+                .on_press(send(ReadCommand::PickOption(index))),
+        );
+    }
+
+    let panel = container(
+        column![
+            iced::widget::scrollable(rows).height(Length::Shrink),
+            button(text("Close").size(theme::type_scale::CAPTION))
+                .padding(theme::space::XS)
+                .style(theme::ambient::tool_button)
+                .on_press(send(ReadCommand::CloseChoiceList)),
+        ]
+        .spacing(theme::space::XS),
+    )
+    .padding(theme::space::XS)
+    .max_height(MAX_HEIGHT)
+    .width(Length::Fixed(width))
+    .style(theme::ambient::surface);
+
+    let placed = column![
+        space::vertical().height(Length::Fixed(top)),
+        row![space::horizontal().width(Length::Fixed(left)), panel],
+    ];
+    container(placed)
+        .width(Length::Fixed(drawn.0))
+        .height(Length::Fixed(drawn.1))
+        .into()
 }
 
 /// The calendar pulpit draws over a date field (§8.6).

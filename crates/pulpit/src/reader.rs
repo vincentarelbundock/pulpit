@@ -168,6 +168,34 @@ pub struct DatePicker {
     /// this type is state, and state that reads a clock cannot be tested.
     pub today: crate::datefield::Date,
 }
+
+/// The option list pulpit draws over a non-editable choice field (§8.6).
+///
+/// PDFium draws one of its own into the page bitmap, and that list is the
+/// worst client of the partial-repaint path: it arrives as slivers, it has to
+/// be guessed at to be composited whole, and every hovered row is a round trip
+/// to a serial worker. It is also pure viewer chrome — no saved file contains
+/// an open dropdown — so drawing it here breaks no rule: the option chosen is
+/// still committed by `FORM_SetIndexSelected`, and the value and its
+/// appearance are still PDFium's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceList {
+    /// The field whose list this is, so the caret moving to another field
+    /// closes it rather than leaving it open over the wrong widget.
+    pub field: String,
+    pub page: PageIndex,
+    /// The widget, in canonical page space, so the list opens against the
+    /// field rather than in the middle of the page.
+    pub bounds: pulpit_core::page::PageRect,
+    pub options: Vec<String>,
+    /// What the field holds now, as the worker last reported it.
+    pub selected: Option<u32>,
+    /// The row the arrow keys are on. Not a selection: nothing is committed
+    /// until Enter or a click, so an arrow key cannot change the document by
+    /// passing over an option.
+    pub highlighted: u32,
+}
+
 /// What the reader is looking at.
 #[derive(Debug, Default)]
 #[allow(dead_code)]
@@ -214,6 +242,8 @@ pub struct ReaderSession {
     /// is on and how many there are is what makes that possible without
     /// asking for the field list on every press.
     form_choice: Option<pulpit_render::document::protocol::FocusedChoice>,
+    /// The option list open over a non-editable choice field, when one is.
+    choice_list: Option<ChoiceList>,
     /// What the field holding the caret expects, so it is said once rather
     /// than once per keystroke.
     form_hint: Option<String>,
@@ -502,16 +532,103 @@ impl ReaderSession {
         hint.is_some()
     }
 
-    /// The combo box holding the focus, as the worker last reported it.
-    pub fn focused_choice(&self) -> Option<pulpit_render::document::protocol::FocusedChoice> {
-        self.form_choice
+    /// The choice field holding the focus, as the worker last reported it.
+    pub fn focused_choice(&self) -> Option<&pulpit_render::document::protocol::FocusedChoice> {
+        self.form_choice.as_ref()
     }
 
+    /// Take the worker's word for which choice field has the focus, and keep
+    /// any open list in step with it.
+    ///
+    /// A list open over a field the caret has left is a list over the wrong
+    /// widget, so it closes. A list over the field that is still focused stays
+    /// open and takes the new selection: committing an option answers with the
+    /// field as it now is, and a list that ignored that answer would go on
+    /// ticking the option that was chosen before.
     pub fn set_focused_choice(
         &mut self,
         choice: Option<pulpit_render::document::protocol::FocusedChoice>,
     ) {
+        match (&choice, &mut self.choice_list) {
+            (Some(choice), Some(open)) if open.field == choice.field => {
+                open.page = choice.page;
+                open.bounds = choice.bounds;
+                open.options = choice.labels.clone();
+                open.selected = choice.selected;
+                open.highlighted = open
+                    .highlighted
+                    .min(open.options.len().saturating_sub(1) as u32);
+            }
+            (_, list) => *list = None,
+        }
         self.form_choice = choice;
+    }
+
+    /// The option list open over a choice field, if one is.
+    pub fn choice_list(&self) -> Option<&ChoiceList> {
+        self.choice_list.as_ref()
+    }
+
+    /// Open the list for the field that just took the focus, if its list is
+    /// pulpit's to draw.
+    ///
+    /// Data-driven: an *editable* combo box keeps PDFium's own list, because
+    /// it has a caret PDFium is drawing and two editing surfaces for one field
+    /// is what §8.6 exists to prevent. A field with no options opens nothing —
+    /// an empty panel says less than the field it would cover.
+    pub fn open_choice_list(&mut self) {
+        let Some(choice) = self.form_choice.as_ref() else {
+            return;
+        };
+        if choice.editable || choice.labels.is_empty() {
+            self.choice_list = None;
+            return;
+        }
+        self.choice_list = Some(ChoiceList {
+            field: choice.field.clone(),
+            page: choice.page,
+            bounds: choice.bounds,
+            options: choice.labels.clone(),
+            selected: choice.selected,
+            // Opens on what the field holds, so Enter on a list nobody moved
+            // chooses what was already chosen rather than the first row.
+            highlighted: choice.selected.unwrap_or(0),
+        });
+    }
+
+    pub fn close_choice_list(&mut self) {
+        self.choice_list = None;
+    }
+
+    /// Move the highlighted row of an open list, and say whether anything
+    /// moved.
+    ///
+    /// Stopping at the ends rather than wrapping, for the reason
+    /// [`ReaderSession::choice_step`] gives: a list that jumped from its last
+    /// row back to its first is a way to choose the wrong option.
+    pub fn step_choice_list(&mut self, forward: bool) -> bool {
+        let Some(open) = self.choice_list.as_mut() else {
+            return false;
+        };
+        let last = match open.options.len() {
+            0 => return false,
+            length => length as u32 - 1,
+        };
+        let moved = if forward {
+            open.highlighted.min(last).saturating_add(1).min(last)
+        } else {
+            open.highlighted.min(last).saturating_sub(1)
+        };
+        let changed = moved != open.highlighted;
+        open.highlighted = moved;
+        changed
+    }
+
+    /// The row an open list would commit, and close it. `None` when no list is
+    /// open or it has no rows.
+    pub fn take_highlighted_option(&mut self) -> Option<u32> {
+        let open = self.choice_list.take()?;
+        (open.highlighted < open.options.len() as u32).then_some(open.highlighted)
     }
 
     /// Which option an arrow key should move a focused combo box to.
@@ -521,7 +638,7 @@ impl ReaderSession {
     /// every native combo box does, and a list that silently jumped from the
     /// last entry back to the first would be a way to pick the wrong one.
     pub fn choice_step(&self, forward: bool) -> Option<u32> {
-        let choice = self.form_choice?;
+        let choice = self.form_choice.as_ref()?;
         if choice.options == 0 {
             return None;
         }
@@ -567,6 +684,7 @@ impl ReaderSession {
             operations: vec![UndoOperation::SetField {
                 name: committed.name.clone(),
                 value: committed.previous.clone(),
+                selected: committed.previous_selected.clone(),
             }],
             restores,
             label: format!("Fill {}", committed.name),
@@ -2354,8 +2472,13 @@ impl ReaderSession {
                 false
             }
             // The pick itself is a document edit and belongs to the layer that
-            // can post one; nothing about the viewport changes here.
-            ReadCommand::PickDate(_) => false,
+            // can post one; nothing about the viewport changes here. So is
+            // choosing an option, which crosses to PDFium as a `SelectOption`.
+            ReadCommand::PickDate(_) | ReadCommand::PickOption(_) => false,
+            ReadCommand::CloseChoiceList => {
+                self.close_choice_list();
+                false
+            }
             ReadCommand::Arm(tool) => {
                 self.controls.tool = *tool;
                 // The toolbar and the gesture state are one choice, not two:
@@ -2697,6 +2820,7 @@ impl ReaderSession {
             scale: self.scale,
             outline: &self.outline,
             date_picker: self.date_picker.as_ref(),
+            choice_list: self.choice_list.as_ref(),
             date_language: self.date_language,
             level: self.level,
             warnings: &self.warnings,
@@ -3723,6 +3847,8 @@ mod tests {
             value: value.into(),
             previous: previous.into(),
             revision: DocumentRevision(4),
+            selected: Vec::new(),
+            previous_selected: Vec::new(),
         }
     }
 
@@ -3758,6 +3884,7 @@ mod tests {
                 // Back to what was there before, which for a first fill is
                 // an empty field rather than the value just typed.
                 value: String::new(),
+                selected: Vec::new(),
             }]
         );
         assert_eq!(
@@ -3786,7 +3913,19 @@ mod tests {
         selected: Option<u32>,
         options: u32,
     ) -> pulpit_render::document::protocol::FocusedChoice {
-        pulpit_render::document::protocol::FocusedChoice { selected, options }
+        pulpit_render::document::protocol::FocusedChoice {
+            field: "country".into(),
+            selected,
+            options,
+            labels: (0..options)
+                .map(|index| format!("option {index}"))
+                .collect(),
+            editable: false,
+            multiple_selection: false,
+            list_box: false,
+            page: PageIndex(0),
+            bounds: pulpit_core::page::PageRect::new(10.0, 20.0, 120.0, 36.0),
+        }
     }
 
     #[test]
@@ -3833,6 +3972,89 @@ mod tests {
         session.set_focused_choice(Some(choice(None, 0)));
         assert_eq!(session.choice_step(true), None);
         assert_eq!(session.choice_step(false), None);
+    }
+
+    #[test]
+    fn an_open_option_list_starts_on_what_the_field_already_holds() {
+        // Enter on a list nobody has moved must choose the option that is
+        // already chosen, not the first row — otherwise opening a list and
+        // pressing Enter silently changes the answer.
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(2), 4)));
+        session.open_choice_list();
+        let open = session.choice_list().expect("the list is open");
+        assert_eq!(open.highlighted, 2);
+        assert_eq!(open.selected, Some(2));
+        assert_eq!(session.take_highlighted_option(), Some(2));
+        assert!(session.choice_list().is_none(), "committing closes it");
+    }
+
+    #[test]
+    fn an_editable_combo_box_keeps_the_engines_own_list() {
+        // An editable combo is a text box with a list attached, and PDFium is
+        // drawing its caret. Drawing a second editing surface over that is
+        // what §8.6 forbids, so the fallback path stays.
+        let mut session = open_with_form(1);
+        let mut editable = choice(Some(0), 3);
+        editable.editable = true;
+        session.set_focused_choice(Some(editable));
+        session.open_choice_list();
+        assert!(session.choice_list().is_none());
+        assert_eq!(
+            session.choice_step(true),
+            Some(1),
+            "and the arrow keys still move it, as they did before"
+        );
+    }
+
+    #[test]
+    fn the_highlight_moves_without_committing_and_stops_at_both_ends() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(0), 3)));
+        session.open_choice_list();
+        assert!(session.step_choice_list(true));
+        assert!(session.step_choice_list(true));
+        assert!(!session.step_choice_list(true), "the last row is the last");
+        assert_eq!(
+            session.choice_list().map(|open| open.selected),
+            Some(Some(0)),
+            "nothing is committed by moving the highlight"
+        );
+        assert!(session.step_choice_list(false));
+        assert_eq!(session.choice_list().map(|open| open.highlighted), Some(1));
+    }
+
+    #[test]
+    fn the_caret_leaving_the_field_takes_its_list_with_it() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(0), 3)));
+        session.open_choice_list();
+        assert!(session.choice_list().is_some());
+
+        // The same field, re-reported after a commit: the list stays and takes
+        // the new selection.
+        session.set_focused_choice(Some(choice(Some(2), 3)));
+        assert_eq!(
+            session.choice_list().map(|open| open.selected),
+            Some(Some(2))
+        );
+
+        let mut elsewhere = choice(Some(0), 3);
+        elsewhere.field = "city".into();
+        session.set_focused_choice(Some(elsewhere));
+        assert!(session.choice_list().is_none(), "another field, no list");
+
+        session.set_focused_choice(None);
+        assert!(session.choice_list().is_none());
+    }
+
+    #[test]
+    fn a_choice_field_with_no_options_opens_no_list() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(None, 0)));
+        session.open_choice_list();
+        assert!(session.choice_list().is_none());
+        assert_eq!(session.take_highlighted_option(), None);
     }
 
     #[test]

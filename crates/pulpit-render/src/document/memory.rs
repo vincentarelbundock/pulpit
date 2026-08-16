@@ -85,6 +85,10 @@ impl MemoryDocument {
             allows_custom_value: true,
             multiple_selection: false,
             selected: Vec::new(),
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 100.0, 400.0, 124.0),
@@ -101,6 +105,10 @@ impl MemoryDocument {
             allows_custom_value: false,
             multiple_selection: false,
             selected: Vec::new(),
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 160.0, 116.0, 176.0),
@@ -117,6 +125,10 @@ impl MemoryDocument {
             allows_custom_value: false,
             multiple_selection: false,
             selected: Vec::new(),
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             widgets: vec![
                 FieldWidget {
                     page: PageIndex(0),
@@ -140,6 +152,10 @@ impl MemoryDocument {
             allows_custom_value: false,
             multiple_selection: false,
             selected: Vec::new(),
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
             widgets: Vec::new(),
         });
         document
@@ -403,7 +419,7 @@ impl DocumentBackend for MemoryDocument {
             .collect())
     }
 
-    fn set_field(&mut self, name: &str, value: &str) -> Result<String> {
+    fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String> {
         let field = self
             .fields
             .get_mut(name)
@@ -411,13 +427,29 @@ impl DocumentBackend for MemoryDocument {
         if field.read_only {
             return Err(DocumentError::MutationForbidden);
         }
+        // A selection named by index restores exactly the options it names —
+        // the case one string cannot carry, and the reason `selected` exists.
+        if !selected.is_empty() {
+            if selected
+                .iter()
+                .any(|index| *index as usize >= field.options.len())
+            {
+                return Err(DocumentError::Backend(format!(
+                    "{name} has no such option to select"
+                )));
+            }
+            field.selected = selected.to_vec();
+            field.value = field.options[selected[0] as usize].clone();
+            return Ok(field.value.clone());
+        }
         // A choice field takes one of its options and nothing else: a document
         // that offers "Yes"/"Off" does not gain a third state because a caller
         // sent one.
-        let offered = field.options.iter().any(|option| option == value);
-        if field.options.is_empty() || field.allows_custom_value || offered {
+        let offered = field.options.iter().position(|option| option == value);
+        if field.options.is_empty() || field.allows_custom_value || offered.is_some() {
             let taken = value.to_string();
             field.value = taken.clone();
+            field.selected = offered.into_iter().map(|index| index as u32).collect();
             return Ok(taken);
         }
         Err(DocumentError::Backend(format!(
@@ -571,13 +603,13 @@ mod tests {
     #[test]
     fn a_choice_field_takes_only_what_it_offers() {
         let mut document = MemoryDocument::with_form();
-        assert_eq!(document.set_field("agreed", "Yes").unwrap(), "Yes");
-        assert!(document.set_field("agreed", "maybe").is_err());
+        assert_eq!(document.set_field("agreed", "Yes", &[]).unwrap(), "Yes");
+        assert!(document.set_field("agreed", "maybe", &[]).is_err());
         assert_eq!(document.field_value("agreed").unwrap(), "Yes");
         // A text field takes whatever it is given.
-        assert_eq!(document.set_field("name", "Ada").unwrap(), "Ada");
+        assert_eq!(document.set_field("name", "Ada", &[]).unwrap(), "Ada");
         assert!(matches!(
-            document.set_field("locked", "x"),
+            document.set_field("locked", "x", &[]),
             Err(DocumentError::MutationForbidden)
         ));
     }
