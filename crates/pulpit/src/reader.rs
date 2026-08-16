@@ -510,6 +510,139 @@ impl ReaderSession {
             .map(|widget| widget.page)
     }
 
+    /// The fields Tab travels between, in the order a reader meets them.
+    ///
+    /// Reading order — page, then down the page, then across it — rather than
+    /// the order the file lists its fields in. `/Fields` is an array a
+    /// generator writes in whatever order it built the form, and tabbing
+    /// through *that* is tabbing at random; a form filled by hand is filled
+    /// top to bottom.
+    ///
+    /// A field with no widget is left out because there is nowhere to put the
+    /// caret, and one that cannot be filled is left out because arriving in it
+    /// is arriving nowhere: a signature or file-select field is refused by the
+    /// worker, and a read-only field is a printed value (§6.4).
+    fn fillable_fields(&self) -> Vec<(PageIndex, &str)> {
+        if !self.has_form {
+            return Vec::new();
+        }
+        let mut ordered: Vec<(PageIndex, pulpit_core::page::PageRect, &str)> = self
+            .fields
+            .iter()
+            .filter(|field| field.is_editable())
+            .filter_map(|field| {
+                let widget = field.widgets.first()?;
+                Some((widget.page, widget.bounds, field.name.as_str()))
+            })
+            .collect();
+        ordered.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(left.1.top.total_cmp(&right.1.top))
+                .then(left.1.left.total_cmp(&right.1.left))
+        });
+        ordered
+            .into_iter()
+            .map(|(page, _, name)| (page, name))
+            .collect()
+    }
+
+    /// Where Tab, or Shift-Tab, puts the caret next.
+    ///
+    /// Wrapping, because a form has no end to fall off: the field after the
+    /// last one is the first one, which is what every form in a browser does.
+    ///
+    /// With nothing focused the walk starts at the first field on or after the
+    /// page in view, so the first Tab picks up where the reader is *looking*
+    /// rather than at the top of a form they have already scrolled past.
+    /// `None` when the document has no field worth reaching.
+    pub fn field_to_focus(&self, forward: bool) -> Option<(PageIndex, String)> {
+        let ordered = self.fillable_fields();
+        if ordered.is_empty() {
+            return None;
+        }
+        // Where the caret is now. The focused *widget* rather than the typing
+        // flag, because a checkbox holds the focus without holding a caret and
+        // Tab has to leave it just the same.
+        let held = self.form_widget.as_ref().and_then(|widget| {
+            ordered
+                .iter()
+                .position(|(_, name)| *name == widget.field.as_str())
+        });
+        let index = match held {
+            Some(index) if forward => (index + 1) % ordered.len(),
+            Some(index) => (index + ordered.len() - 1) % ordered.len(),
+            None => {
+                let page = self.current_page().unwrap_or(PageIndex(0));
+                let from = ordered.iter().position(|(at, _)| *at >= page).unwrap_or(0);
+                if forward {
+                    from
+                } else {
+                    (from + ordered.len() - 1) % ordered.len()
+                }
+            }
+        };
+        let (page, name) = ordered[index];
+        Some((page, name.to_string()))
+    }
+
+    /// Put a named field's widget on screen, not merely the page it sits on.
+    ///
+    /// A page jump lands at the top of the page, and for a field near the foot
+    /// of a tall one that is a jump to somewhere the field is not: a Tab whose
+    /// destination is off screen is a Tab that appears to have done nothing.
+    /// The widget is placed a little above centre, so the field and the lines
+    /// under it are both in view.
+    ///
+    /// `false` — and the position untouched — for a field the reader has no
+    /// geometry for, where the page jump on its own is still the best answer.
+    pub fn reveal_field(&mut self, name: &str) -> bool {
+        let Some(widget) = self
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .and_then(|field| field.widgets.first())
+            .map(|widget| (widget.page, widget.bounds))
+        else {
+            return false;
+        };
+        let (page, bounds) = widget;
+        let Some(geometry) = self.pages.get(page.get()) else {
+            return false;
+        };
+        if geometry.height <= 0.0 {
+            return false;
+        }
+        // A third of a window above the field rather than none, so it does not
+        // arrive pinned against the top edge with its own label off screen.
+        let above = self.cell.1 / 3.0 / self.scale.max(f32::EPSILON);
+        let fraction = ((bounds.top - above) / geometry.height).clamp(0.0, 1.0);
+        self.restore_position(page, None, fraction);
+        true
+    }
+
+    /// What kind of field holds the focus, when one does.
+    ///
+    /// Space means "toggle" in a box and "a space character" in a text field,
+    /// and only the field's kind tells the two apart.
+    pub fn focused_field_kind(&self) -> Option<pulpit_render::document::FieldKind> {
+        let widget = self.form_widget.as_ref()?;
+        self.fields
+            .iter()
+            .find(|field| field.name == widget.field && field.is_editable())
+            .map(|field| field.kind)
+    }
+
+    /// Whether a *text* caret sits in a field — the one state in which the
+    /// clipboard shortcuts mean what they mean in a text box.
+    ///
+    /// Narrower than [`Self::form_has_keyboard`], which is also true for a
+    /// closed combo box holding the focus: there is no selection to copy out
+    /// of one of those and nowhere for a paste to land.
+    pub fn form_holds_the_caret(&self) -> bool {
+        self.has_form && self.form_typing
+    }
+
     /// Whether the keyboard belongs to a field rather than to the toolbar.
     ///
     /// Two ways in, because PDFium reports them differently. A text field
@@ -4157,6 +4290,181 @@ mod tests {
         );
         session.set_cell(612.0, 400.0);
         session
+    }
+
+    /// One field, placed where the test wants it.
+    fn field(
+        name: &str,
+        kind: pulpit_render::document::FieldKind,
+        page: usize,
+        top: f32,
+    ) -> pulpit_render::document::FormField {
+        pulpit_render::document::FormField {
+            name: name.into(),
+            kind,
+            value: String::new(),
+            selected: Vec::new(),
+            read_only: false,
+            format: pulpit_render::document::model::FieldFormat::Plain,
+            options: Vec::new(),
+            allows_custom_value: false,
+            multiple_selection: false,
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
+            widgets: vec![pulpit_render::document::model::FieldWidget {
+                page: PageIndex(page),
+                bounds: pulpit_core::page::PageRect::new(20.0, top, 200.0, top + 20.0),
+                option: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn tab_walks_the_fields_in_reading_order_and_wraps() {
+        use pulpit_render::document::FieldKind;
+
+        // Deliberately out of reading order in the list, because `/Fields` is
+        // whatever order the generator wrote and tabbing through that order is
+        // tabbing at random.
+        let mut session = open_with_form(2);
+        session.set_fields(vec![
+            field("second", FieldKind::Text, 0, 300.0),
+            field("third", FieldKind::Checkbox, 1, 100.0),
+            field("first", FieldKind::Text, 0, 100.0),
+        ]);
+
+        // Nothing focused: the walk starts at the page in view.
+        assert_eq!(
+            session.field_to_focus(true),
+            Some((PageIndex(0), "first".to_string()))
+        );
+
+        let focus = |session: &mut ReaderSession, name: &str, page: usize| {
+            session.set_focused_widget(Some(pulpit_render::document::protocol::FocusedWidget {
+                field: name.into(),
+                page: PageIndex(page),
+                bounds: pulpit_core::page::PageRect::new(20.0, 0.0, 200.0, 20.0),
+            }));
+        };
+        focus(&mut session, "first", 0);
+        assert_eq!(
+            session.field_to_focus(true),
+            Some((PageIndex(0), "second".to_string()))
+        );
+        focus(&mut session, "second", 0);
+        assert_eq!(
+            session.field_to_focus(true),
+            Some((PageIndex(1), "third".to_string())),
+            "a walk that stopped at the page edge would strand every later field"
+        );
+        // The end of a form is its beginning: there is no edge to fall off.
+        focus(&mut session, "third", 1);
+        assert_eq!(
+            session.field_to_focus(true),
+            Some((PageIndex(0), "first".to_string()))
+        );
+        // …and Shift-Tab is the same walk the other way, wrap included.
+        focus(&mut session, "first", 0);
+        assert_eq!(
+            session.field_to_focus(false),
+            Some((PageIndex(1), "third".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_walk_skips_what_arriving_in_would_reach_nothing() {
+        use pulpit_render::document::FieldKind;
+
+        // A signature field, a file-select field and a read-only one are all
+        // drawn and none of them can be filled (§6.4), so a Tab that landed in
+        // one would be a Tab that appeared to do nothing.
+        let mut session = open_with_form(1);
+        let mut read_only = field("printed", FieldKind::Text, 0, 100.0);
+        read_only.read_only = true;
+        let mut file = field("attachment", FieldKind::Text, 0, 200.0);
+        file.file_select = true;
+        let mut placeless = field("nowhere", FieldKind::Text, 0, 250.0);
+        placeless.widgets.clear();
+        session.set_fields(vec![
+            read_only,
+            file,
+            field("signed", FieldKind::Signature, 0, 300.0),
+            field("button", FieldKind::PushButton, 0, 350.0),
+            placeless,
+            field("name", FieldKind::Text, 0, 400.0),
+        ]);
+
+        assert_eq!(
+            session.field_to_focus(true),
+            Some((PageIndex(0), "name".to_string()))
+        );
+        // One fillable field, so it is also what comes before itself.
+        session.set_focused_widget(Some(pulpit_render::document::protocol::FocusedWidget {
+            field: "name".into(),
+            page: PageIndex(0),
+            bounds: pulpit_core::page::PageRect::new(20.0, 400.0, 200.0, 420.0),
+        }));
+        assert_eq!(
+            session.field_to_focus(false),
+            Some((PageIndex(0), "name".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_document_with_nothing_to_fill_has_nowhere_for_tab_to_go() {
+        // No form at all, and a form of unreachable fields, are the same
+        // answer: the key is not the document's and goes on to the keymap.
+        let mut plain = open(1);
+        assert_eq!(plain.field_to_focus(true), None);
+        plain.set_fields(vec![field(
+            "name",
+            pulpit_render::document::FieldKind::Text,
+            0,
+            100.0,
+        )]);
+        assert_eq!(
+            plain.field_to_focus(true),
+            None,
+            "a document with no form must not answer with a field"
+        );
+
+        let mut empty = open_with_form(1);
+        assert_eq!(empty.field_to_focus(true), None);
+        empty.set_fields(vec![field(
+            "signed",
+            pulpit_render::document::FieldKind::Signature,
+            0,
+            100.0,
+        )]);
+        assert_eq!(empty.field_to_focus(true), None);
+    }
+
+    #[test]
+    fn space_is_the_boxs_only_where_a_box_holds_the_focus() {
+        use pulpit_render::document::FieldKind;
+
+        let mut session = open_with_form(1);
+        session.set_fields(vec![
+            field("agree", FieldKind::Checkbox, 0, 100.0),
+            field("name", FieldKind::Text, 0, 200.0),
+        ]);
+        assert_eq!(session.focused_field_kind(), None, "nothing is focused yet");
+
+        let focus = |session: &mut ReaderSession, name: &str| {
+            session.set_focused_widget(Some(pulpit_render::document::protocol::FocusedWidget {
+                field: name.into(),
+                page: PageIndex(0),
+                bounds: pulpit_core::page::PageRect::new(20.0, 0.0, 200.0, 20.0),
+            }));
+        };
+        focus(&mut session, "agree");
+        assert_eq!(session.focused_field_kind(), Some(FieldKind::Checkbox));
+        // A text field's space is a space, which is why the kind is asked for
+        // rather than assumed from "something is focused".
+        focus(&mut session, "name");
+        assert_eq!(session.focused_field_kind(), Some(FieldKind::Text));
     }
 
     #[test]

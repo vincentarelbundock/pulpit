@@ -1138,3 +1138,146 @@ fn the_text_field_flag_variants_are_told_apart() {
         );
     });
 }
+
+#[test]
+fn the_clipboard_reads_and_replaces_what_a_field_has_selected() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // Copy and paste are PDFium's too, for the same reason typing is. The
+        // selection exists only inside the engine — this layer forwarded the
+        // clicks that made it and never modelled it — so the text comes out
+        // through `FORM_GetSelectedText` and goes back in through
+        // `FORM_ReplaceSelection`, in one edit rather than as a run of
+        // synthesised keystrokes that would type *over* the selection.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 75);
+        click_into(&mut document, "name");
+        for character in "Ada".chars() {
+            document
+                .form_event(PageIndex(0), FormInputEvent::Char { character })
+                .expect("a character is accepted");
+        }
+
+        // Nothing is selected yet, so a copy comes back with nothing — and
+        // that is an answer rather than a failure.
+        let nothing = document
+            .form_event(PageIndex(0), FormInputEvent::CopySelection)
+            .expect("a copy with no selection is answered");
+        assert!(
+            nothing
+                .selected_text
+                .as_ref()
+                .is_none_or(|text| text.is_empty()),
+            "an empty selection must not report text"
+        );
+
+        document
+            .form_event(PageIndex(0), FormInputEvent::SelectAll)
+            .expect("select-all is accepted");
+        let copied = document
+            .form_event(PageIndex(0), FormInputEvent::CopySelection)
+            .expect("a copy is answered");
+        assert_eq!(copied.selected_text.as_deref(), Some("Ada"));
+
+        // …and the paste replaces exactly what was selected.
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::ReplaceSelection {
+                    text: "Grace".into(),
+                },
+            )
+            .expect("a replacement is accepted");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .expect("focus can be dropped");
+
+        assert_eq!(document.field_value("name").unwrap(), "Grace");
+    });
+}
+
+#[test]
+fn a_cut_takes_the_text_out_of_the_field_it_copied_it_from() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // A cut is a copy that remembers to remove what it took, and the
+        // removal is an empty replacement rather than a run of backspaces: one
+        // edit, one keystroke script, one commit.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 76);
+        click_into(&mut document, "name");
+        for character in "Ada".chars() {
+            document
+                .form_event(PageIndex(0), FormInputEvent::Char { character })
+                .unwrap();
+        }
+        document
+            .form_event(PageIndex(0), FormInputEvent::SelectAll)
+            .unwrap();
+        let cut = document
+            .form_event(PageIndex(0), FormInputEvent::CopySelection)
+            .unwrap();
+        assert_eq!(cut.selected_text.as_deref(), Some("Ada"));
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::ReplaceSelection {
+                    text: String::new(),
+                },
+            )
+            .unwrap();
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+
+        assert_eq!(document.field_value("name").unwrap(), "");
+    });
+}
+
+#[test]
+fn a_space_toggles_the_box_that_holds_the_focus() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // What Tab-then-Space has to do, and the reason the application
+        // forwards a character rather than synthesising a click: PDFium's own
+        // button handler acts on `FORM_OnChar(' ')`, so the toggle, the
+        // appearance and the commit are all still the engine's. A click would
+        // have to be aimed, and a keyboard has no pointer to aim it with.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "checkbox-standard") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 77);
+        assert_eq!(document.field_value("agree").unwrap(), "Off");
+
+        // Focused by name, which is what the traversal does — not clicked,
+        // because a click is itself a toggle and would prove nothing.
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::FocusField {
+                    name: "agree".into(),
+                },
+            )
+            .expect("the box takes the focus");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Char { character: ' ' })
+            .expect("a space is accepted");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+
+        assert_eq!(document.field_value("agree").unwrap(), "Yes");
+    });
+}

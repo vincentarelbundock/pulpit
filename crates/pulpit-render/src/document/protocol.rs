@@ -20,7 +20,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 3;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 4;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,12 +114,38 @@ pub enum FormInputEvent {
     /// PDFium decides is on top. Naming the field is how a person reaches the
     /// other one. PDFium still does the focusing, the caret and the editing.
     ///
-    /// No caller in the application sends this today: the field panel that
-    /// would have was removed. It stays because reaching an occluded widget
-    /// by name is an engine capability nothing else provides.
+    /// It is also what Tab is built on. Field traversal has to turn the page
+    /// as well as move the caret, and a field two pages down has no position
+    /// on the page the reader is standing on for a click to be aimed at.
     FocusField {
         name: String,
     },
+    /// Read what the focused text field has selected, for the clipboard.
+    ///
+    /// The same argument as [`Self::SelectOption`]. A selection inside a field
+    /// is PDFium's — it made it, from clicks and shift-arrows this layer
+    /// forwarded but never interpreted — and there is no way to ask for its
+    /// text through the raw input events. `FORM_GetSelectedText` is the
+    /// engine's own answer, so copy reads what the field really has selected
+    /// rather than what a second implementation of caret arithmetic believes.
+    /// The text comes back in [`FormEventResult::selected_text`].
+    CopySelection,
+    /// Replace what the focused text field has selected with `text`, or insert
+    /// `text` at the caret when nothing is selected.
+    ///
+    /// This is `FORM_ReplaceSelection`, which is what paste and the second
+    /// half of cut are. Sending the pasted text as a run of
+    /// [`Self::Char`] events would work for the letters and lie about
+    /// everything else: it would type *over* the selection instead of
+    /// replacing it, and it would run the field's keystroke script once per
+    /// character rather than once for the insertion, which is not what the
+    /// document asked for. Bounded by [`limits::MAX_FIELD_VALUE_BYTES`], like
+    /// every other field-sized string on this wire.
+    ReplaceSelection {
+        text: String,
+    },
+    /// Select everything in the focused text field (`FORM_SelectAllText`).
+    SelectAll,
 }
 
 /// The keys a form field responds to that are not characters.
@@ -427,6 +453,15 @@ pub struct FormEventResult {
     /// the page the event was sent to — a ring cannot be drawn on a page the
     /// event does not name.
     pub focused_widget: Option<FocusedWidget>,
+    /// What the focused field had selected, for a
+    /// [`FormInputEvent::CopySelection`] and for nothing else.
+    ///
+    /// `None` on every other event — not `Some("")` — so the caller can tell
+    /// "this event did not ask" from "the field had nothing selected", which
+    /// is the difference between leaving the clipboard alone and emptying it.
+    /// (No `serde` attribute, for the reason given on `requests` above: on a
+    /// bincode wire, every field is positional and always present.)
+    pub selected_text: Option<String>,
 }
 
 /// The widget with the focus, wherever it is (§8.6).
@@ -744,6 +779,19 @@ impl DocumentRequest {
                 open.password.as_ref().map(String::len).unwrap_or(0),
                 limits::MAX_TEXT_BYTES,
             ),
+            // Paste is the one form event carrying a string a *user* chose,
+            // and the clipboard is an unbounded source: a megabyte of text
+            // dropped into a field would cross the wire before anything asked
+            // whether a field could hold it. Bounded by what a field value may
+            // hold, since that is what this becomes.
+            DocumentRequest::FormEvent {
+                event: FormInputEvent::ReplaceSelection { text },
+                ..
+            } => limits::within(
+                "replacement text",
+                text.len(),
+                limits::MAX_FIELD_VALUE_BYTES,
+            ),
             _ => Ok(()),
         }
     }
@@ -803,7 +851,13 @@ impl DocumentResponse {
                         )?;
                     }
                 }
-                Ok(())
+                // Likewise the text a copy brings back: it is a field's value,
+                // read out of a document nothing here trusts.
+                limits::within(
+                    "selected text",
+                    result.selected_text.as_ref().map(String::len).unwrap_or(0),
+                    limits::MAX_FIELD_VALUE_BYTES,
+                )
             }
             _ => Ok(()),
         }
@@ -1043,12 +1097,58 @@ mod tests {
                 page: PageIndex(2),
                 bounds: PageRect::new(10.0, 20.0, 120.0, 36.0),
             }),
+            selected_text: Some("Ad".into()),
         }));
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
             answer
         );
+    }
+
+    #[test]
+    fn the_clipboard_events_cross_the_wire_and_are_bounded() {
+        for event in [
+            FormInputEvent::CopySelection,
+            FormInputEvent::SelectAll,
+            FormInputEvent::ReplaceSelection { text: "Ada".into() },
+        ] {
+            let request = DocumentRequest::FormEvent {
+                page: PageIndex(0),
+                event,
+            };
+            let encoded = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<DocumentRequest>(&encoded).unwrap(),
+                request
+            );
+            assert!(request.validate().is_ok());
+        }
+
+        // A clipboard is unbounded and a field value is not, so the paste is
+        // refused before it is sent rather than after it has been allocated.
+        assert!(DocumentRequest::FormEvent {
+            page: PageIndex(0),
+            event: FormInputEvent::ReplaceSelection {
+                text: "x".repeat(limits::MAX_FIELD_VALUE_BYTES + 1),
+            },
+        }
+        .validate()
+        .is_err());
+        // …and the answer is checked the same way, because the worker has just
+        // read that string out of a document nothing here trusts (A8).
+        assert!(DocumentResponse::Form(Box::new(FormEventResult {
+            selected_text: Some("x".repeat(limits::MAX_FIELD_VALUE_BYTES + 1)),
+            ..FormEventResult::default()
+        }))
+        .validate()
+        .is_err());
+        assert!(DocumentResponse::Form(Box::new(FormEventResult {
+            selected_text: Some("Ada".into()),
+            ..FormEventResult::default()
+        }))
+        .validate()
+        .is_ok());
     }
 
     #[test]
