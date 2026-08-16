@@ -7,7 +7,7 @@
 //! worth being able to test without a window.
 
 use pulpit_core::notes::Region;
-use pulpit_core::page::{PageGeometry, PageIndex};
+use pulpit_core::page::{PageGeometry, PageIndex, PageRotation};
 use serde::{Deserialize, Serialize};
 
 /// How the page is fitted into its cell.
@@ -228,6 +228,54 @@ pub fn cropped(page: &PageGeometry, window: Region) -> PageGeometry {
         width: page.width * window.width,
         height: page.height * window.height,
         ..*page
+    }
+}
+
+/// The page as the reader has turned it: the same sheet with its displayed
+/// axes swapped when the view rotation calls for it.
+///
+/// A view transform in the same family as [`cropped`]: it changes what is on
+/// screen and nothing else. The geometry's own `rotation` and crop fields are
+/// left untouched — they describe the document, this describes the reader's
+/// window onto it — so a consumer that converts to user space must not be
+/// handed this; only the layout, which reads width and height, ever sees it.
+pub fn view_rotated(page: &PageGeometry, rotation: PageRotation) -> PageGeometry {
+    if !rotation.swaps_axes() {
+        return *page;
+    }
+    PageGeometry {
+        width: page.height,
+        height: page.width,
+        ..*page
+    }
+}
+
+/// Where a fraction-of-the-page window sits once the page is turned.
+///
+/// What lets the marquee crop and the view rotation coexist: the crop is kept
+/// in the sheet's own upright fractions, and this is the one place it is
+/// turned to match what the reader is looking at.
+pub fn rotated_region(region: Region, rotation: PageRotation) -> Region {
+    match rotation {
+        PageRotation::None => region,
+        PageRotation::Clockwise90 => Region::new(
+            1.0 - region.y - region.height,
+            region.x,
+            region.height,
+            region.width,
+        ),
+        PageRotation::Clockwise180 => Region::new(
+            1.0 - region.x - region.width,
+            1.0 - region.y - region.height,
+            region.width,
+            region.height,
+        ),
+        PageRotation::Clockwise270 => Region::new(
+            region.y,
+            1.0 - region.x - region.width,
+            region.height,
+            region.width,
+        ),
     }
 }
 
@@ -522,6 +570,12 @@ pub struct ReaderControls {
     pub outline: OutlineView,
     /// One page across the column, or two facing pages.
     pub spread: PageSpread,
+    /// The reader's view rotation, applied to every page.
+    ///
+    /// Session-scoped and never persisted: a view transform like the crop,
+    /// not a document edit — nothing here sets the dirty flag or reaches the
+    /// file, and the audience never sees it.
+    pub rotation: PageRotation,
     /// The marquee crop: armed, mid-choice, or in force.
     pub crop: CropState,
     /// Whether the outline rail is collapsed to its header. The rail keeps the
@@ -547,6 +601,7 @@ impl Default for ReaderControls {
             text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),
             spread: PageSpread::default(),
+            rotation: PageRotation::default(),
             crop: CropState::default(),
             outline_collapsed: false,
         }
@@ -771,6 +826,67 @@ mod tests {
         assert_eq!(OutlineView::Thumbnails.label(), "Pages");
         // Each tab names itself, so a view that is in front is still labelled.
         assert!(!ReaderControls::default().outline_collapsed);
+    }
+
+    #[test]
+    fn a_turned_page_swaps_its_displayed_axes_and_nothing_else() {
+        let page = PageGeometry::upright(612.0, 792.0);
+        let turned = view_rotated(&page, PageRotation::Clockwise90);
+        assert_eq!(turned.width, 792.0);
+        assert_eq!(turned.height, 612.0);
+        // The document's own description is untouched: this is the reader's
+        // window, not a rewrite of the page.
+        assert_eq!(turned.rotation, page.rotation);
+        assert_eq!(turned.crop_width, page.crop_width);
+        assert_eq!(view_rotated(&page, PageRotation::Clockwise180), page);
+    }
+
+    #[test]
+    fn a_two_page_spread_of_turned_pages_lays_out_landscape_rows() {
+        let pages: Vec<PageGeometry> = letter(5)
+            .iter()
+            .map(|page| view_rotated(page, PageRotation::Clockwise90))
+            .collect();
+        let column = Column::lay_out(&pages, 1.0, 2_000.0, PageSpread::Double);
+        // Rows are as tall as the turned page's height and the halves stand a
+        // gap apart, exactly as upright pages would.
+        assert_eq!(column.pages[0].height, 612.0);
+        assert_eq!(column.pages[2].top, 612.0 + PAGE_GAP);
+        assert_eq!(
+            column.pages[1].left - column.pages[0].left,
+            792.0 + PAGE_GAP
+        );
+        // Row bottoms stay ordered down the column, which is what the
+        // binary search over visible pages depends on.
+        assert!(column
+            .pages
+            .windows(2)
+            .all(|pair| pair[0].row_bottom <= pair[1].row_bottom));
+    }
+
+    #[test]
+    fn the_fit_follows_the_turned_page() {
+        let page = PageGeometry::upright(600.0, 800.0);
+        let turned = view_rotated(&page, PageRotation::Clockwise90);
+        // Fitting the width of a landscape-turned portrait page is fitting
+        // its former height.
+        assert!((Zoom::FitWidth.scale(&turned, (400.0, 400.0)) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_region_turns_with_the_page_and_turns_back() {
+        let region = Region::new(0.1, 0.2, 0.3, 0.4);
+        for rotation in PageRotation::ALL {
+            let turned = rotated_region(region, rotation);
+            assert!(turned.x >= 0.0 && turned.y >= 0.0);
+            assert!(turned.x + turned.width <= 1.0 + 1e-6);
+            assert!(turned.y + turned.height <= 1.0 + 1e-6);
+            let back = rotated_region(turned, rotation.inverse());
+            assert!((back.x - region.x).abs() < 1e-6, "{rotation:?}");
+            assert!((back.y - region.y).abs() < 1e-6, "{rotation:?}");
+            assert!((back.width - region.width).abs() < 1e-6);
+            assert!((back.height - region.height).abs() < 1e-6);
+        }
     }
 
     #[test]
