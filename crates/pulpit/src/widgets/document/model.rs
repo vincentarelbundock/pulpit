@@ -619,6 +619,12 @@ pub enum OutlineView {
     /// Page thumbnails, which is the only answer for a document with no
     /// bookmarks and the better one for a document of figures.
     Thumbnails,
+    /// The document's form fields, in the order the file lists them (§6.4).
+    ///
+    /// Offered only for a document that has a form: a rail tab that is always
+    /// empty for a deck of slides is a control that teaches the reader to
+    /// ignore the rail.
+    Fields,
 }
 
 impl OutlineView {
@@ -626,6 +632,7 @@ impl OutlineView {
         match self {
             OutlineView::Bookmarks => "Bookmarks",
             OutlineView::Thumbnails => "Pages",
+            OutlineView::Fields => "Fields",
         }
     }
 }

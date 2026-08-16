@@ -56,6 +56,12 @@ pub enum Ask {
     /// What is on a page, for hit-testing. The eraser and the selection tool
     /// need to know what is under the pointer, and only the document does.
     ListAnnotations { page: pulpit_core::page::PageIndex },
+    /// Every AcroForm field, in the order the file lists them (§6.4).
+    ///
+    /// Read-only: it never moves the revision. Asked once when the document is
+    /// described and again after a commit, because PDFium is the sole author
+    /// of a value and a list this process patched would be a second opinion.
+    ListFields,
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -148,6 +154,8 @@ pub enum Told {
         page: pulpit_core::page::PageIndex,
         summaries: Vec<pulpit_render::document::AnnotationSummary>,
     },
+    /// The document's fields as the engine now holds them.
+    Fields(Vec<pulpit_render::document::FormField>),
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
@@ -390,6 +398,10 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
         {
             Ok(DocumentResponse::Annotations(summaries)) => Told::Annotations { page, summaries },
             other => unexpected(other, "an annotation list"),
+        }],
+        Ask::ListFields => vec![match session.request(DocumentRequest::ListFields) {
+            Ok(DocumentResponse::Fields(fields)) => Told::Fields(fields),
+            other => unexpected(other, "a field list"),
         }],
         Ask::SelectText {
             page,

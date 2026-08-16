@@ -75,6 +75,11 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if app.confirm_reset_colors {
         page = stack![page, reset_colors_dialog()].into();
     }
+    // What the open document asked to do to the reader's place in it. Above
+    // the page, because it is a question about the page.
+    if let Some(request) = app.pending_form_goto.as_ref() {
+        page = stack![page, form_navigation_dialog(request)].into();
+    }
     // The alarm popup is a top-level overlay rather than something drawn
     // inside the clock's pane: a clock can be a narrow cell in a strip, and a
     // popup anchored there would be clipped by its own widget.
@@ -1909,6 +1914,37 @@ fn reset_colors_dialog() -> Element<'static, Message> {
     .spacing(gap::M);
 
     panel(body, Some(Message::CancelResetColors))
+}
+
+/// The offer to follow a jump the open document's JavaScript asked for (§8.6).
+///
+/// A question rather than an action, and worded in the past tense about what
+/// the *document* wanted, so it cannot be mistaken for pulpit proposing to move
+/// the reader. The destination is inside the document and reaches nothing
+/// outside it, which is why this is offered at all rather than only logged like
+/// mail, print and submit.
+fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'static, Message> {
+    let body = column![
+        text("Follow this document's request?").size(type_scale::TITLE),
+        text(format!("This form asked to {}.", request.what)).size(type_scale::BODY),
+        text("Nothing moves until you choose.").size(type_scale::LABEL),
+        row![
+            button(text("Stay here").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press(Message::DeclineFormNavigation),
+            button(text("Go").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::alert_button)
+                .on_press(Message::FollowFormNavigation),
+        ]
+        .spacing(gap::S),
+    ]
+    .spacing(gap::M);
+
+    // A press on the ground behind declines it: staying where you are is the
+    // answer that changes nothing, so it is the safe one to make easy.
+    panel(body, Some(Message::DeclineFormNavigation))
 }
 
 /// The offer to recover an interrupted talk.

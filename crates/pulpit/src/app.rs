@@ -205,6 +205,12 @@ pub enum Message {
     AskResetColors,
     CancelResetColors,
     ResetColors,
+    /// Go where the open document's JavaScript asked to go. Sent only by the
+    /// confirming button of the offer below: a document may not move the
+    /// reader on its own.
+    FollowFormNavigation,
+    /// Decline it, and stay where the reader is.
+    DeclineFormNavigation,
     /// Put the interrupted session back. Sent only by the restore dialog's
     /// confirming button: nothing else in the application may reach it.
     RestoreSession,
@@ -539,6 +545,17 @@ fn reader_snapshot_directory() -> PathBuf {
     std::env::temp_dir().join(format!("pulpit-reader-{}", std::process::id()))
 }
 
+/// A jump a document's own JavaScript asked for, and what to call it (§8.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormNavigation {
+    /// Where it wants the reader, resolved when the request arrived: a named
+    /// action means "the next page" from wherever the reader was standing
+    /// then, not from wherever they wander to while the offer is open.
+    pub page: pulpit_core::page::PageIndex,
+    /// What the document asked for, in the words the offer shows.
+    pub what: String,
+}
+
 pub struct App {
     pub state: PresentationState,
     /// Where the presenter has been, for the two navigation buttons. Only
@@ -631,6 +648,17 @@ pub struct App {
     pub color_drafts:
         std::collections::BTreeMap<(crate::settings::ColorScheme, crate::theme::ColorRole), String>,
     pub confirm_reset_colors: bool,
+    /// A jump the open document's own JavaScript asked for, waiting on an
+    /// answer (§8.6).
+    ///
+    /// Offered rather than performed, and offered rather than merely logged.
+    /// The destination is inside the document and reaches nothing outside it,
+    /// so honouring it is safe — but a script that moves the reader while they
+    /// are typing has taken the document away from them, and a form that does
+    /// it on every keystroke would be unusable. One at a time: a newer request
+    /// replaces an unanswered one, because two offers over one another is a
+    /// puzzle about which page is being agreed to.
+    pub pending_form_goto: Option<FormNavigation>,
     /// Which role's colour wheel is open, if any. One at a time: two wheels
     /// over one another would be a puzzle about which one is being dragged.
     pub color_picker_open: Option<crate::theme::ColorRole>,
@@ -1155,6 +1183,7 @@ impl App {
             },
             color_drafts: std::collections::BTreeMap::new(),
             confirm_reset_colors: false,
+            pending_form_goto: None,
             color_picker_open: None,
             session,
             pending_restore,
@@ -1879,6 +1908,13 @@ impl App {
                     self.confirm_reset_colors = false;
                     return Task::none();
                 }
+                // Escape declines what the document asked for. Safe as a
+                // default, unlike the restore offer: declining leaves the
+                // reader exactly where they already are.
+                if key.as_deref() == Some("Escape") && self.pending_form_goto.is_some() {
+                    self.pending_form_goto = None;
+                    return Task::none();
+                }
                 // A cue going off is acknowledged by Escape as well as by the
                 // clock: hands are not always on the mouse. Dismissing comes
                 // before closing the popup, since the marker is the thing
@@ -2592,6 +2628,19 @@ impl App {
             }
             Message::CancelResetColors => {
                 self.confirm_reset_colors = false;
+                Task::none()
+            }
+            Message::FollowFormNavigation => {
+                let Some(request) = self.pending_form_goto.take() else {
+                    return Task::none();
+                };
+                // An ordinary jump once the reader has agreed to it: recorded
+                // in the navigation history like any other, so the back button
+                // undoes it.
+                self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(request.page))
+            }
+            Message::DeclineFormNavigation => {
+                self.pending_form_goto = None;
                 Task::none()
             }
             Message::ResetColors => {
@@ -4435,6 +4484,12 @@ impl App {
                     self.wash_cache.borrow_mut().clear();
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
+                    // What the form contains, for the navigator. Asked only
+                    // where there is a form: a deck of slides would spend a
+                    // round trip on the serial worker to be told "none".
+                    if info.has_form {
+                        self.ask_field_list();
+                    }
                     self.reader.set_outline(
                         outline
                             .flattened()
@@ -4568,6 +4623,9 @@ impl App {
                     // slide's marks are these (A1). Presentation and document
                     // mode read the same answer.
                     self.adopt_document_marks(page);
+                }
+                crate::reader_link::Told::Fields(fields) => {
+                    self.reader.set_fields(fields);
                 }
                 crate::reader_link::Told::Selection { result, finalising } => {
                     // The worker is free again: the newest waiting sample, if
@@ -5335,6 +5393,96 @@ impl App {
         }
     }
 
+    /// Ask the worker what the document's fields now hold (§6.4).
+    ///
+    /// Read-only, so it can be sent whenever the answer would be stale without
+    /// any of the revision bookkeeping a mutation needs.
+    fn ask_field_list(&mut self) {
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::ListFields);
+        }
+    }
+
+    /// The host requests a diagnostics line is not a sufficient answer to.
+    ///
+    /// Everything here was still refused in the worker, and nothing here
+    /// performs anything. Two of them reach the reader anyway: an alert is the
+    /// document *speaking*, which a bundle nobody opens does not convey; and a
+    /// jump inside the document is the one request that is safe to honour, so
+    /// it is put to the person who can say whether they want it. Egress —
+    /// mail, submit, print, the file path — stays in diagnostics and stays
+    /// refused (A8).
+    fn host_request_needs_the_reader(
+        &mut self,
+        request: &pulpit_render::document::protocol::HostRequest,
+    ) {
+        use pulpit_render::document::protocol::HostRequest;
+
+        // Bounded for the same reason `describe_host_request` bounds its own:
+        // these strings come out of a document that may be hostile, and a
+        // toast is a worse place than a log to discover a megabyte of one.
+        const MOST: usize = 160;
+        let clip = |text: &str| -> String {
+            let mut out: String = text.chars().take(MOST).collect();
+            if text.chars().count() > MOST {
+                out.push('…');
+            }
+            out
+        };
+
+        match request {
+            HostRequest::Alert { message, title } => {
+                let title = clip(title);
+                let message = clip(message);
+                self.toasts.warning(
+                    if title.trim().is_empty() {
+                        format!("This form says: {message}")
+                    } else {
+                        format!("{title}: {message}")
+                    },
+                    self.now,
+                );
+            }
+            HostRequest::GotoPage { page } => {
+                self.offer_form_navigation(
+                    pulpit_core::page::PageIndex(*page),
+                    format!("go to page {}", page.saturating_add(1)),
+                );
+            }
+            HostRequest::NamedAction { name } => {
+                // Only the four that name a page. Everything else a named
+                // action can be — Print, SaveAs — is either egress or a
+                // decision with a control of its own, and neither is turned
+                // into a page jump here.
+                let here = self.reader.controls().page.get();
+                let last = self.reader.page_count().saturating_sub(1);
+                let page = match name.as_str() {
+                    "NextPage" => here.saturating_add(1).min(last),
+                    "PrevPage" => here.saturating_sub(1),
+                    "FirstPage" => 0,
+                    "LastPage" => last,
+                    _ => return,
+                };
+                if page == here {
+                    return;
+                }
+                self.offer_form_navigation(
+                    pulpit_core::page::PageIndex(page),
+                    format!("go to page {}", page.saturating_add(1)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Put a document's own jump to the reader, if it goes anywhere real.
+    fn offer_form_navigation(&mut self, page: pulpit_core::page::PageIndex, what: String) {
+        if !self.in_document_mode() || page.get() >= self.reader.page_count() {
+            return;
+        }
+        self.pending_form_goto = Some(FormNavigation { page, what });
+    }
+
     /// A form event came back from the worker (§8.6).
     ///
     /// Three separable things arrive together, because one keystroke produces
@@ -5396,6 +5544,10 @@ impl App {
         for request in &result.requests {
             self.diagnostics.note(describe_host_request(request));
         }
+        // …and the two kinds a diagnostics line is not enough for.
+        for request in &result.requests {
+            self.host_request_needs_the_reader(request);
+        }
 
         let revision = result
             .committed
@@ -5407,6 +5559,12 @@ impl App {
             // has moved, nothing on screen or on disk reflects it yet, and the
             // snapshot the render pool reads from is now stale.
             self.reader.field_committed(committed);
+            // The navigator's fill marks are only as true as the list they
+            // were drawn from, and a commit has just made that list wrong.
+            // Re-asked rather than patched here: PDFium is the sole author of
+            // a value, and the value it committed is not always the one that
+            // was typed — a format script may have rewritten it.
+            self.ask_field_list();
             self.reader_render.edited_at = Some(Instant::now());
             self.reader_render.urgency = self
                 .reader_render
@@ -5838,6 +5996,24 @@ impl App {
                     self.reader.restore_operation(kind, epoch, operation);
                 }
                 Task::none()
+            }
+            ReadCommand::GoToField { page, name } => {
+                // The page first, so the widget is on screen when the caret
+                // reaches it. `FocusField` searches one page's annotations, so
+                // the page it names has to be the one the widget is on — the
+                // rail's, not wherever the reader was standing.
+                let page = *page;
+                let name = name.clone();
+                let task = self.on_read_command(ReadCommand::GoToPage(page));
+                if let Some(link) = self.reader_link.as_mut() {
+                    link.ask(crate::reader_link::Ask::FormEvent {
+                        page,
+                        event: pulpit_render::document::protocol::FormInputEvent::FocusField {
+                            name,
+                        },
+                    });
+                }
+                task
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
             // Writing a mark on the page is the same four steps the dialog

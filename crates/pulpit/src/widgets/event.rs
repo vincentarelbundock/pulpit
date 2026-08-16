@@ -165,6 +165,15 @@ pub enum ReadCommand {
     /// Turn every page a quarter turn clockwise. A view transform, not a
     /// document edit: nothing reaches the file and the audience never sees it.
     RotateView,
+    /// Go to a named form field: its page, and the caret in it (§6.4).
+    ///
+    /// The page travels with the name because the rail already knows it and
+    /// the focus request has to name the page the widget is on — PDFium
+    /// searches one page's annotations for it, not the whole document.
+    GoToField {
+        page: pulpit_core::page::PageIndex,
+        name: String,
+    },
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
     /// Collapse the outline rail to its header, or open it again.
