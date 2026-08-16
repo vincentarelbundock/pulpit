@@ -120,6 +120,7 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
             .select_text(page, selection)
             .map(DocumentResponse::Selection),
         DocumentRequest::ListFields => document.fields().map(DocumentResponse::Fields),
+        DocumentRequest::Outline => document.outline().map(DocumentResponse::Outline),
         DocumentRequest::Apply {
             expected_revision,
             transaction,

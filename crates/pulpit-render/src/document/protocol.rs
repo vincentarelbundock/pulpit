@@ -146,6 +146,8 @@ pub enum DocumentRequest {
         selection: TextSelection,
     },
     ListFields,
+    /// The document's bookmark tree, for the outline rail.
+    Outline,
     /// Raw input forwarded to the form-fill environment (§8.6).
     FormEvent {
         page: PageIndex,
@@ -273,6 +275,7 @@ pub enum DocumentResponse {
     Annotation(Box<AnnotationSummary>),
     Selection(TextSelectionResult),
     Fields(Vec<FormField>),
+    Outline(pulpit_core::navigation::Outline),
     Form(FormEventResult),
     Applied(Box<Applied>),
     Saved(SavedDocument),
@@ -373,6 +376,7 @@ impl DocumentRequest {
             | DocumentRequest::GetAnnotation { .. }
             | DocumentRequest::SelectText { .. }
             | DocumentRequest::ListFields
+            | DocumentRequest::Outline
             | DocumentRequest::SaveAs(_)
             | DocumentRequest::Close => false,
         }

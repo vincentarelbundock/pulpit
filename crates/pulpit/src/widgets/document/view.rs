@@ -387,13 +387,17 @@ fn fields<Message: Clone + 'static>(
         return nothing("No document open.");
     }
     if reader.fields.is_empty() {
-        // Most PDFs have no AcroForm; the inspector says which case this is
-        // rather than looking like it failed to load.
-        return nothing(if reader.level.allows_form_filling() {
-            "This document has no form fields."
-        } else {
-            "This document's form cannot be filled."
-        });
+        // Most PDFs have no AcroForm, and the inspector says which case this
+        // is rather than looking like it failed to load. A document that *has*
+        // a form and listed no fields is a third case, and calling it "no form
+        // fields" would be a plain untruth.
+        return nothing(
+            match (reader.has_form, reader.level.allows_form_filling()) {
+                (false, _) => "This document has no form fields.",
+                (true, true) => "This document's fields are not listed in this build.",
+                (true, false) => "This document's form cannot be filled.",
+            },
+        );
     }
 
     // A navigation and progress list, not a second editor (§8.6). Values are

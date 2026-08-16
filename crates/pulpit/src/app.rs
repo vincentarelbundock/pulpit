@@ -3709,9 +3709,32 @@ impl App {
         };
         for told in told {
             match told {
-                crate::reader_link::Told::Described { info, geometry } => {
+                crate::reader_link::Told::Described {
+                    info,
+                    geometry,
+                    outline,
+                    fields,
+                } => {
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone());
+                    self.reader.set_has_form(info.has_form);
+                    self.reader.set_outline(
+                        outline
+                            .flattened()
+                            .into_iter()
+                            .filter_map(|entry| {
+                                Some(crate::widgets::context::OutlineRow {
+                                    title: entry.title.clone(),
+                                    // A bookmark that points at a URI orders
+                                    // nothing in this document, so it is not a
+                                    // row the rail can take you to.
+                                    page: pulpit_core::page::PageIndex(entry.page()?),
+                                    depth: entry.depth,
+                                })
+                            })
+                            .collect(),
+                    );
+                    self.reader.set_fields(fields);
                     // Every warning is said once, before the first edit, which
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {

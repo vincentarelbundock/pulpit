@@ -87,6 +87,12 @@ pub struct ReaderSession {
     /// Where the pointer last was, on which page. Transient, and never
     /// snapshotted (§3.2).
     cursor: Option<(PageIndex, PagePoint)>,
+    /// Does the document carry an AcroForm at all?
+    ///
+    /// Separate from whether any fields were listed, because the two differ
+    /// while filling is unimplemented: a form document with an empty field
+    /// list must not be described as having no form (§8.6).
+    has_form: bool,
 }
 
 /// One page as it was last drawn.
@@ -155,6 +161,10 @@ impl ReaderSession {
 
     pub fn closed(&mut self) {
         *self = ReaderSession::new();
+    }
+
+    pub fn set_has_form(&mut self, has_form: bool) {
+        self.has_form = has_form;
     }
 
     pub fn set_outline(&mut self, outline: Vec<OutlineRow>) {
@@ -488,6 +498,7 @@ impl ReaderSession {
             scale: self.scale,
             outline: &self.outline,
             fields: &self.fields,
+            has_form: self.has_form,
             level: self.level,
             warnings: &self.warnings,
             dirty: self.dirty,

@@ -118,6 +118,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         scale: 1.0,
         outline: &[],
         fields: &[],
+        has_form: false,
         level: pulpit_render::document::CompatibilityLevel::AnnotateOnly,
         warnings: &[],
         dirty: false,

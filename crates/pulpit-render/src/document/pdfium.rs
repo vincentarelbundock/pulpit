@@ -1057,6 +1057,10 @@ impl DocumentBackend for PdfiumDocument<'_> {
         })
     }
 
+    fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
+        PdfBackend::outline(self.backend, self.document).map_err(to_document_error)
+    }
+
     fn fields(&self) -> Result<Vec<FormField>> {
         // Reading fields needs the form-fill environment, which is initialised
         // per document; until the write path exists (§8.6) an inspector over

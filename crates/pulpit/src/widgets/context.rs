@@ -268,6 +268,10 @@ pub struct ReaderData<'a> {
     pub scale: f32,
     pub outline: &'a [OutlineRow],
     pub fields: &'a [pulpit_render::document::FormField],
+    /// Does the document carry an AcroForm at all? A form document whose
+    /// fields could not be listed is a different thing from one with no form,
+    /// and the inspector says which.
+    pub has_form: bool,
     /// What pulpit can honour in this document, and what it cannot (§3.4).
     pub level: pulpit_render::document::CompatibilityLevel,
     pub warnings: &'a [pulpit_render::document::DocumentWarning],

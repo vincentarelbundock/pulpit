@@ -124,6 +124,13 @@ pub trait DocumentBackend: Send {
 
     fn fields(&self) -> Result<Vec<FormField>>;
 
+    /// The bookmark tree. A document without one, or a backend that cannot
+    /// read one, reports an empty outline: the rail then has nothing to show,
+    /// which is also what a document without bookmarks looks like.
+    fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
+        Ok(pulpit_core::navigation::Outline::default())
+    }
+
     /// Write a field, returning the value the document actually took.
     fn set_field(&mut self, name: &str, value: &str) -> Result<String>;
 
@@ -161,7 +168,7 @@ pub trait DocumentBackend: Send {
 
 /// A worker-confined open document (§6).
 ///
-/// The lifetime is the engine.s: the PDFium engine borrows a binding that is
+/// The lifetime is the engine's: the PDFium engine borrows a binding that is
 /// bound once per process and outlives every document opened through it, and
 /// the memory engine borrows nothing and is `'static`.
 pub struct PdfDocument<'a> {
@@ -251,6 +258,11 @@ impl<'a> PdfDocument<'a> {
             result.truncated = true;
         }
         Ok(result)
+    }
+
+    /// The document's bookmark tree, for the outline rail.
+    pub fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
+        self.backend.outline()
     }
 
     pub fn fields(&self) -> Result<Vec<FormField>> {

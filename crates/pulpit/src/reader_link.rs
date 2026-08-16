@@ -70,6 +70,8 @@ pub enum Told {
     Described {
         info: Box<OpenDocumentInfo>,
         geometry: Vec<PageGeometry>,
+        outline: pulpit_core::navigation::Outline,
+        fields: Vec<pulpit_render::document::FormField>,
     },
     Frame(Box<DocumentFrame>),
     Applied(Box<Applied>),
@@ -282,7 +284,26 @@ fn describe(session: &mut DocumentSession, pages: usize) -> Vec<Told> {
         }
     }
 
-    vec![Told::Described { info, geometry }]
+    // The outline and the field list are asked for in the same exchange:
+    // a rail that filled in a tick later would flicker, and neither answer
+    // is large enough to be worth a round trip of its own.
+    let outline = match session.request(DocumentRequest::Outline) {
+        Ok(DocumentResponse::Outline(outline)) => outline,
+        // A document without bookmarks is not a failure, and neither is a
+        // build that cannot read them; the rail says it has none.
+        _ => Default::default(),
+    };
+    let fields = match session.request(DocumentRequest::ListFields) {
+        Ok(DocumentResponse::Fields(fields)) => fields,
+        _ => Vec::new(),
+    };
+
+    vec![Told::Described {
+        info,
+        geometry,
+        outline,
+        fields,
+    }]
 }
 
 /// Turn anything that is not the expected answer into a report.
