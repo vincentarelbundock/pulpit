@@ -3018,8 +3018,7 @@ impl ReaderSession {
                             .dead_fields_on(placed.page)
                             .into_iter()
                             .map(|mut field| {
-                                field.bounds =
-                                    rotation.rotate_rect(field.bounds, width, height);
+                                field.bounds = rotation.rotate_rect(field.bounds, width, height);
                                 field
                             })
                             .collect(),
