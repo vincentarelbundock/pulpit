@@ -112,6 +112,9 @@ pub enum Message {
     /// Where the presenter chose to write an annotated copy, or `None` if
     /// they dismissed the dialog.
     ExportAnnotatedTo(Option<PathBuf>),
+    /// Where the reader's annotated document should be written. `None` when
+    /// the chooser was dismissed, which is not a failure.
+    SaveDocumentTo(Option<PathBuf>),
     /// The media runtime probes, run on a helper thread at startup.
     MediaProbed(Vec<pulpit_media::RuntimeProbe>),
     WindowOpened {
@@ -1851,6 +1854,8 @@ impl App {
                 Task::none()
             }
             Message::ExportAnnotatedTo(None) => Task::none(),
+            Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
+            Message::SaveDocumentTo(None) => Task::none(),
             Message::Alarm(command) => self.on_alarm_command(command),
             Message::Timer(command) => self.on_timer_command(command),
             Message::Transport(request) => {
@@ -3833,11 +3838,7 @@ impl App {
                 }
                 Task::none()
             }
-            ReadCommand::SaveAs => {
-                // Save As, always: the source is never a destination (A6), so
-                // there is no "Save" that could quietly become one.
-                Task::none()
-            }
+            ReadCommand::SaveAs => self.ask_where_to_save_document(),
             ReadCommand::PageCursor { page, x, y } => {
                 self.reader.pointer_moved(*page, *x, *y);
                 Task::none()
@@ -3865,6 +3866,78 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Are these the same file on disk?
+    ///
+    /// Compared by canonical path where both resolve and literally otherwise,
+    /// because a destination that does not exist yet cannot be canonicalised
+    /// — which is the normal case for a Save As.
+    fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        }
+    }
+
+    /// Ask where the annotated document should go.
+    ///
+    /// Save As, always — there is no "Save" (A6). The suggested name is beside
+    /// the source with `-annotated` on it, which the chooser will refuse to
+    /// let the user reduce back to the source's own name only by accident; the
+    /// engine refuses it outright either way.
+    fn ask_where_to_save_document(&mut self) -> Task<Message> {
+        let Some(document) = self.documents.active() else {
+            return Task::none();
+        };
+        let source = document.path.clone();
+        let directory = source
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".to_string());
+        Task::perform(
+            async move {
+                rfd::AsyncFileDialog::new()
+                    .add_filter("PDF", &["pdf"])
+                    .set_directory(directory)
+                    .set_file_name(format!("{stem}-annotated.pdf"))
+                    .save_file()
+                    .await
+                    .map(|handle| handle.path().to_path_buf())
+            },
+            Message::SaveDocumentTo,
+        )
+    }
+
+    /// Write the annotated document where the user said.
+    fn save_document_to(&mut self, destination: PathBuf) -> Task<Message> {
+        // A6, checked here as well as in the engine: the two checks are not
+        // redundant, because this one can say something useful about it and
+        // the engine's is the one that holds when this is bypassed.
+        if let Some(document) = self.documents.active() {
+            if Self::same_path(&document.path, &destination) {
+                self.notify(
+                    "That is the document you opened. pulpit writes a copy, so choose \
+                     another name."
+                        .to_string(),
+                );
+                return Task::none();
+            }
+        }
+        match self.reader_link.as_mut() {
+            Some(link) => {
+                link.ask(crate::reader_link::Ask::SaveAs {
+                    destination,
+                    options: pulpit_render::document::SaveOptions::verified(),
+                });
+            }
+            None => self.notify("There is no document open to save.".to_string()),
+        }
+        Task::none()
     }
 
     /// Post one atomic user action to the document worker.
