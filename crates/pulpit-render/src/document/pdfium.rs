@@ -2020,14 +2020,36 @@ fn field_format(
                     .unwrap_or_default(),
             };
         }
+        // `AFTime_Format(n)` names one of four presets, the same fixed table
+        // Acrobat has carried since it had a time category at all — so the
+        // number becomes the pattern the time helper writes into.
         if script.contains("AFTime_Format") {
-            return FieldFormat::Time;
+            return FieldFormat::Time {
+                pattern: numbered_argument(&script, "AFTime_Format")
+                    .and_then(time_preset_pattern)
+                    .unwrap_or_default(),
+            };
         }
+        // `AFPercent_Format(nDec, sepStyle)`: the decimals are the first
+        // argument, and the separator style is the engine's business.
         if script.contains("AFPercent_Format") {
-            return FieldFormat::Percent;
+            return FieldFormat::Percent {
+                decimals: numbered_argument(&script, "AFPercent_Format")
+                    .map(|decimals| decimals.min(u8::MAX as u32) as u8)
+                    .unwrap_or(0),
+            };
         }
+        // `AFNumber_Format(nDec, sepStyle, negStyle, currStyle, strCurrency,
+        // bCurrencyPrepend)`. Two of those six are worth carrying: the
+        // decimals, and the currency symbol — the first quoted argument,
+        // because everything before it is a number.
         if script.contains("AFNumber_Format") {
-            return FieldFormat::Number;
+            return FieldFormat::Number {
+                decimals: numbered_argument(&script, "AFNumber_Format")
+                    .map(|decimals| decimals.min(u8::MAX as u32) as u8)
+                    .unwrap_or(0),
+                currency: quoted_argument(&script, "AFNumber_Format").unwrap_or_default(),
+            };
         }
         if script.contains("AFSpecial_Format") {
             use crate::document::model::SpecialFormat;
@@ -2078,6 +2100,19 @@ fn date_preset_pattern(preset: u32) -> Option<String> {
         "m/d/yy h:MM tt",
         "m/d/yy HH:MM",
     ];
+    PRESETS
+        .get(preset as usize)
+        .map(|pattern| pattern.to_string())
+}
+
+/// Acrobat's four numbered `AFTime_Format` presets, as patterns in the same
+/// vocabulary the date patterns use — `HH` a 24-hour hour, `h` a 12-hour one,
+/// `MM` minutes, `ss` seconds, `tt` the am/pm marker.
+///
+/// A number beyond the table is a document from a future Acrobat, and the
+/// honest answer to that is a time with no pattern rather than a guessed one.
+fn time_preset_pattern(preset: u32) -> Option<String> {
+    const PRESETS: [&str; 4] = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
     PRESETS
         .get(preset as usize)
         .map(|pattern| pattern.to_string())
@@ -3231,6 +3266,17 @@ impl DocumentBackend for PdfiumDocument<'_> {
             }
             _ => None,
         });
+        let focused_time = focused.as_ref().and_then(|field| {
+            let pattern = field.format.time_pattern()?;
+            let widget = field.widgets.first()?;
+            Some(crate::document::protocol::FocusedTime {
+                field: field.name.clone(),
+                pattern: pattern.to_owned(),
+                value: field.value.clone(),
+                page: widget.page,
+                bounds: widget.bounds,
+            })
+        });
         // Where to draw the focus ring. The widget on *this* page and no
         // other: a field's widgets can sit on several pages, and the event
         // names one.
@@ -3322,6 +3368,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             opened_choice,
             focused_hint,
             focused_date,
+            focused_time,
             focused_widget,
         })
     }
@@ -3605,6 +3652,102 @@ mod tests {
             date_preset_pattern(99),
             None,
             "a preset from a future Acrobat is honestly patternless"
+        );
+    }
+
+    #[test]
+    fn the_time_presets_become_patterns_a_helper_can_write_into() {
+        // The same bargain the date presets strike: `AFTime_Format(1)` says
+        // nothing a person can read, and the table behind it has not moved
+        // since Acrobat had a time category at all.
+        assert_eq!(time_preset_pattern(0).as_deref(), Some("HH:MM"));
+        assert_eq!(time_preset_pattern(1).as_deref(), Some("h:MM tt"));
+        assert_eq!(time_preset_pattern(3).as_deref(), Some("h:MM:ss tt"));
+        assert_eq!(
+            time_preset_pattern(9),
+            None,
+            "a preset outside the table is honestly patternless"
+        );
+    }
+
+    #[test]
+    fn a_number_script_gives_up_its_decimals_and_its_currency() {
+        // `AFNumber_Format(nDec, sepStyle, negStyle, currStyle, strCurrency,
+        // bCurrencyPrepend)`: the first number and the first quoted argument
+        // are the two a person typing into the field can act on.
+        let script = "AFNumber_Format(2, 0, 0, 0, \"$\", true);";
+        assert_eq!(numbered_argument(script, "AFNumber_Format"), Some(2));
+        assert_eq!(
+            quoted_argument(script, "AFNumber_Format").as_deref(),
+            Some("$")
+        );
+        // A script with no currency at all leaves the symbol unclaimed rather
+        // than borrowing one from further along the line.
+        assert_eq!(
+            quoted_argument(
+                "AFNumber_Format(0, 1, 0, 0, \"\", false);",
+                "AFNumber_Format"
+            ),
+            None
+        );
+        // And a percentage carries its decimals in the same first position.
+        assert_eq!(
+            numbered_argument("AFPercent_Format(1, 0);", "AFPercent_Format"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_number_hint_says_the_shape_before_it_is_typed_wrong() {
+        use crate::document::model::FieldFormat;
+
+        // What the tooltip over the field reads. The decimals matter because
+        // a field that rewrites 3 as 3.00 has already surprised someone.
+        let hint = |format: FieldFormat| format.hint().unwrap_or_default();
+        assert_eq!(
+            hint(FieldFormat::Number {
+                decimals: 0,
+                currency: String::new()
+            }),
+            "a number"
+        );
+        assert_eq!(
+            hint(FieldFormat::Number {
+                decimals: 2,
+                currency: String::new()
+            }),
+            "number, 2 decimals"
+        );
+        assert_eq!(
+            hint(FieldFormat::Number {
+                decimals: 2,
+                currency: "€".into()
+            }),
+            "number in €, 2 decimals"
+        );
+        assert_eq!(
+            hint(FieldFormat::Number {
+                decimals: 0,
+                currency: "$".into()
+            }),
+            "a number in $"
+        );
+        assert_eq!(hint(FieldFormat::Percent { decimals: 0 }), "a percentage");
+        assert_eq!(
+            hint(FieldFormat::Percent { decimals: 1 }),
+            "percentage, 1 decimal"
+        );
+        assert_eq!(
+            hint(FieldFormat::Time {
+                pattern: "h:MM tt".into()
+            }),
+            "time, as h:MM tt"
+        );
+        assert_eq!(
+            hint(FieldFormat::Time {
+                pattern: String::new()
+            }),
+            "a time"
         );
     }
 

@@ -379,6 +379,8 @@ pub struct ReaderData<'a> {
     pub fields: &'a [pulpit_render::document::FormField],
     /// The calendar open over a date field, if one is (§8.6).
     pub date_picker: Option<&'a crate::reader::DatePicker>,
+    /// The hour and minute steppers open over a time field, if any are (§8.6).
+    pub time_picker: Option<&'a crate::reader::TimePicker>,
     /// The option list open over a choice field, if one is (§8.6).
     pub choice_list: Option<&'a crate::reader::ChoiceList>,
     /// The language a picked date is written in.

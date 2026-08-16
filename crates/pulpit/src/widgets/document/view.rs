@@ -156,6 +156,7 @@ fn page_surface<'a, Message: Clone + 'static>(
                 composing,
                 compose,
                 reader.date_picker,
+                reader.time_picker,
                 reader.choice_list,
                 reader.date_language,
                 reader.focused_widget,
@@ -330,6 +331,7 @@ fn sheet<'a, Message: Clone + 'static>(
     composing: Option<&crate::widgets::context::ComposingMark>,
     buffer: Option<&'a iced::widget::text_editor::Content>,
     picker: Option<&crate::reader::DatePicker>,
+    time: Option<&crate::reader::TimePicker>,
     choice: Option<&crate::reader::ChoiceList>,
     language: crate::datefield::Locale,
     focused: Option<&pulpit_render::document::protocol::FocusedWidget>,
@@ -610,7 +612,19 @@ fn sheet<'a, Message: Clone + 'static>(
             choice_list_layer(&choice, shown, origin, drawn, on_event)
         });
 
-    let overlays = [writing, calendar, ring, hint, options];
+    // The hour and minute steppers over a time field, placed exactly as the
+    // calendar is and for the same reason.
+    let clock = time
+        .filter(|picker| picker.page == index)
+        .cloned()
+        .map(|mut picker| {
+            picker.bounds =
+                page.rotation
+                    .rotate_rect(picker.bounds, canonical_upright.0, canonical_upright.1);
+            time_picker_layer(&picker, language, shown, origin, drawn, on_event)
+        });
+
+    let overlays = [writing, calendar, clock, ring, hint, options];
     if overlays.iter().all(Option::is_none) {
         return area;
     }
@@ -949,6 +963,131 @@ fn date_picker_layer<Message: Clone + 'static>(
         .width(Length::Fixed(drawn.0))
         .height(Length::Fixed(drawn.1))
         .into()
+}
+
+/// The hour and minute steppers pulpit draws over a time field (§8.6).
+///
+/// The calendar's counterpart, one format category along. A PDF says a field
+/// holds a time and says its shape — `h:MM tt` — and offers nothing to enter
+/// one with, so a viewer that wants a helper draws one. What comes out is
+/// *text*, written the way the field's own pattern asks for and handed to
+/// PDFium's editor like any typed value, so §8.6's one editing surface
+/// survives the helper sitting on top of it.
+///
+/// Steppers rather than a clock face or a text box: the field itself is
+/// already a text box, and what it lacks is a way to nudge a value without
+/// knowing which of the world's time notations this document wants.
+fn time_picker_layer<Message: Clone + 'static>(
+    picker: &crate::reader::TimePicker,
+    language: crate::datefield::Locale,
+    shown: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
+    /// Wide enough for two two-digit columns, a marker and the buttons under
+    /// them; tall enough for the steppers and the row that accepts.
+    const WIDTH: f32 = 176.0;
+    const HEIGHT: f32 = 132.0;
+    const COLUMN: f32 = 44.0;
+
+    let (left, top) = super::model::Anchor::of(picker.bounds, shown, origin, drawn)
+        .place_beside((WIDTH, HEIGHT), drawn);
+
+    let stepper = move |value: String, minutes: i32| {
+        column![
+            button(
+                text("▲")
+                    .size(theme::type_scale::CAPTION)
+                    .align_x(Alignment::Center)
+            )
+            .width(Length::Fixed(COLUMN))
+            .padding(2.0)
+            .style(theme::ambient::tool_button)
+            .on_press(send(ReadCommand::StepTimePicker(minutes))),
+            container(
+                text(value)
+                    .size(theme::type_scale::LABEL)
+                    .align_x(Alignment::Center)
+            )
+            .width(Length::Fixed(COLUMN))
+            .align_y(Alignment::Center),
+            button(
+                text("▼")
+                    .size(theme::type_scale::CAPTION)
+                    .align_x(Alignment::Center)
+            )
+            .width(Length::Fixed(COLUMN))
+            .padding(2.0)
+            .style(theme::ambient::tool_button)
+            .on_press(send(ReadCommand::StepTimePicker(-minutes))),
+        ]
+        .align_x(Alignment::Center)
+        .spacing(1.0)
+    };
+
+    let hour = if picker.twelve_hour() {
+        picker.time.hour_on_the_clock().to_string()
+    } else {
+        format!("{:02}", picker.time.hour)
+    };
+    let mut dials = row![
+        stepper(hour, 60),
+        container(text(":").size(theme::type_scale::LABEL)).align_y(Alignment::Center),
+        stepper(format!("{:02}", picker.time.minute), 1),
+    ]
+    .spacing(theme::space::XS)
+    .align_y(Alignment::Center);
+    // Half a day, which is exactly what an am/pm toggle is. Offered only when
+    // the pattern carries the marker: a 24-hour field showing one would be
+    // pulpit inventing a distinction the document does not draw.
+    if picker.shows_meridiem() {
+        let marker = language.meridiem(picker.time.afternoon());
+        dials = dials.push(
+            button(
+                text(if marker.is_empty() {
+                    if picker.time.afternoon() {
+                        "PM".to_string()
+                    } else {
+                        "AM".to_string()
+                    }
+                } else {
+                    marker
+                })
+                .size(theme::type_scale::CAPTION)
+                .align_x(Alignment::Center),
+            )
+            .width(Length::Fixed(COLUMN))
+            .padding(theme::space::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(send(ReadCommand::StepTimePicker(12 * 60))),
+        );
+    }
+
+    let panel = container(
+        column![
+            dials,
+            row![
+                button(text("Set").size(theme::type_scale::CAPTION))
+                    .padding(theme::space::XS)
+                    .style(theme::ambient::selected_button)
+                    .on_press(send(ReadCommand::PickTime)),
+                button(text("Close").size(theme::type_scale::CAPTION))
+                    .padding(theme::space::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press(send(ReadCommand::CloseTimePicker)),
+            ]
+            .spacing(theme::space::XS),
+        ]
+        .spacing(theme::space::XS)
+        .align_x(Alignment::Center),
+    )
+    .padding(theme::space::XS)
+    .width(Length::Fixed(WIDTH))
+    .style(theme::ambient::surface);
+
+    placed_over_the_sheet(panel, (left, top), drawn)
 }
 
 /// The caret for a mark being written, on the page where it will land (§8.5).

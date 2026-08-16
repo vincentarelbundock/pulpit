@@ -151,6 +151,146 @@ impl Locale {
     pub fn weekday_initial(self, weekday: Weekday) -> String {
         self.render(weekday.representative(), "%a")
     }
+
+    /// The am/pm marker Acrobat's `tt` asks for, in this locale.
+    ///
+    /// From the locale's own data for the same reason the month names are: a
+    /// table written here would be English and the handful of languages
+    /// somebody remembered. A locale with no marker at all — most of the
+    /// 24-hour world — answers with an empty string, and a `tt` in the
+    /// pattern then contributes nothing, which is what it means there.
+    pub fn meridiem(self, afternoon: bool) -> String {
+        let hour = if afternoon { 13 } else { 1 };
+        let time = chrono::NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or_default();
+        // Through a zoned instant because that is the only shape `chrono`
+        // hangs localised formatting on; the zone never reaches the output,
+        // which is one `%p` and nothing else.
+        Locale::in_month(1)
+            .and_time(time)
+            .and_utc()
+            .format_localized("%p", self.0)
+            .to_string()
+    }
+}
+
+/// A time of day, to the minute, as a form field means one.
+///
+/// Seconds are not held: a field asking for them is asking for a precision a
+/// pair of steppers cannot honestly offer, and the pattern's `ss` is filled
+/// with zeroes rather than left to look like a token nobody replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeOfDay {
+    /// 0–23.
+    pub hour: u32,
+    /// 0–59.
+    pub minute: u32,
+}
+
+impl TimeOfDay {
+    pub fn new(hour: u32, minute: u32) -> TimeOfDay {
+        TimeOfDay {
+            hour: hour % 24,
+            minute: minute % 60,
+        }
+    }
+
+    /// Read a time out of what the field already holds.
+    ///
+    /// Deliberately forgiving about the shape and strict about the numbers:
+    /// the value in the field was written by the field's own format script in
+    /// a locale that is not necessarily this one, so the digits either side of
+    /// the first colon are the only part worth trusting. A trailing pm marker
+    /// is honoured because a 12-hour field is where one appears.
+    pub fn parse(value: &str) -> Option<TimeOfDay> {
+        let trimmed = value.trim();
+        let lowered = trimmed.to_lowercase();
+        let afternoon = lowered.ends_with("pm") || lowered.ends_with("p.m.");
+        let morning = lowered.ends_with("am") || lowered.ends_with("a.m.");
+        let digits: String = trimmed
+            .chars()
+            .take_while(|character| character.is_ascii_digit() || *character == ':')
+            .collect();
+        let (hour, minute) = digits.split_once(':')?;
+        let hour: u32 = hour.trim().parse().ok()?;
+        let minute: u32 = minute.split(':').next()?.trim().parse().ok()?;
+        if minute > 59 {
+            return None;
+        }
+        let hour = match (afternoon, morning, hour) {
+            (_, _, hour) if hour > 23 => return None,
+            (true, _, 12) => 12,
+            (true, _, hour) if hour < 12 => hour + 12,
+            (_, true, 12) => 0,
+            (_, _, hour) => hour,
+        };
+        Some(TimeOfDay { hour, minute })
+    }
+
+    /// Move the time by `minutes`, wrapping around midnight in both
+    /// directions — a stepper that stops at 23:59 is a stepper that cannot
+    /// reach 00:00 from above.
+    pub fn stepped(self, minutes: i32) -> TimeOfDay {
+        let total = (self.hour * 60 + self.minute) as i32 + minutes;
+        let total = total.rem_euclid(24 * 60) as u32;
+        TimeOfDay {
+            hour: total / 60,
+            minute: total % 60,
+        }
+    }
+
+    /// The hour on a 12-hour clock, 12 rather than 0 at either end.
+    pub fn hour_on_the_clock(self) -> u32 {
+        match self.hour % 12 {
+            0 => 12,
+            hour => hour,
+        }
+    }
+
+    pub fn afternoon(self) -> bool {
+        self.hour >= 12
+    }
+
+    /// Fill an Acrobat time pattern with this time, in `locale`.
+    ///
+    /// The same longest-first token walk [`Date::format`] does, over the time
+    /// tokens: `HH` and `H` the 24-hour hour, `hh` and `h` the 12-hour one,
+    /// `MM` minutes, `ss` seconds, `tt` and `t` the am/pm marker. Anything
+    /// else is copied through, so separators and literal words survive.
+    pub fn format(self, pattern: &str, locale: Locale) -> String {
+        let mut out = String::new();
+        let characters: Vec<char> = pattern.chars().collect();
+        let mut index = 0;
+        while index < characters.len() {
+            let rest: String = characters[index..].iter().collect();
+            let token = ["HH", "H", "hh", "h", "MM", "ss", "tt", "t"]
+                .into_iter()
+                .find(|token| rest.starts_with(token));
+            let Some(token) = token else {
+                out.push(characters[index]);
+                index += 1;
+                continue;
+            };
+            match token {
+                "HH" => out.push_str(&format!("{:02}", self.hour)),
+                "H" => out.push_str(&self.hour.to_string()),
+                "hh" => out.push_str(&format!("{:02}", self.hour_on_the_clock())),
+                "h" => out.push_str(&self.hour_on_the_clock().to_string()),
+                "MM" => out.push_str(&format!("{:02}", self.minute)),
+                "ss" => out.push_str("00"),
+                "tt" | "t" => out.push_str(&locale.meridiem(self.afternoon())),
+                _ => unreachable!("the token came from the list above"),
+            }
+            index += token.chars().count();
+        }
+        // A pattern that named nothing — or an empty one, which is what an
+        // `AFTime_Format` preset outside the table comes back as — still has
+        // to produce a time the field's own keystroke script will accept.
+        // 24-hour `HH:MM` is what PDFium parses whatever the pattern says.
+        if out.trim().is_empty() {
+            return format!("{:02}:{:02}", self.hour, self.minute);
+        }
+        out
+    }
 }
 
 /// A day of the week, Monday first.
@@ -571,5 +711,58 @@ mod tests {
             7,
             "two columns headed the same is a calendar nobody can read: {headings:?}"
         );
+    }
+
+    #[test]
+    fn a_time_is_written_the_way_the_fields_own_pattern_asks() {
+        let english = locale("en_US");
+        let afternoon = TimeOfDay::new(14, 5);
+        assert_eq!(afternoon.format("HH:MM", english), "14:05");
+        assert_eq!(afternoon.format("h:MM tt", english), "2:05 PM");
+        assert_eq!(afternoon.format("hh:MM", english), "02:05");
+        // Seconds a stepper cannot honestly offer are written as zeroes
+        // rather than left as a token nobody replaced.
+        assert_eq!(afternoon.format("HH:MM:ss", english), "14:05:00");
+        // Midnight and noon are where a 12-hour clock goes wrong: both are
+        // 12, and one of them is not 0.
+        assert_eq!(TimeOfDay::new(0, 0).format("h:MM tt", english), "12:00 AM");
+        assert_eq!(
+            TimeOfDay::new(12, 30).format("h:MM tt", english),
+            "12:30 PM"
+        );
+        // A pattern that named nothing still has to fill the field, so the
+        // 24-hour form PDFium parses whatever the pattern says comes out.
+        assert_eq!(afternoon.format("", english), "14:05");
+    }
+
+    #[test]
+    fn a_time_helper_opens_on_what_the_field_already_holds() {
+        // The value was written by the field's own format script, in a shape
+        // this code did not choose — so the digits either side of the first
+        // colon, and a marker if there is one, are what is trusted.
+        assert_eq!(TimeOfDay::parse("14:05"), Some(TimeOfDay::new(14, 5)));
+        assert_eq!(TimeOfDay::parse(" 9:07 "), Some(TimeOfDay::new(9, 7)));
+        assert_eq!(TimeOfDay::parse("2:05 pm"), Some(TimeOfDay::new(14, 5)));
+        assert_eq!(TimeOfDay::parse("12:00 AM"), Some(TimeOfDay::new(0, 0)));
+        assert_eq!(TimeOfDay::parse("12:00 pm"), Some(TimeOfDay::new(12, 0)));
+        assert_eq!(TimeOfDay::parse("08:30:00"), Some(TimeOfDay::new(8, 30)));
+        // Nothing readable is nothing claimed: the helper then opens on the
+        // wall clock rather than on a time invented from half a string.
+        assert_eq!(TimeOfDay::parse(""), None);
+        assert_eq!(TimeOfDay::parse("noon"), None);
+        assert_eq!(TimeOfDay::parse("25:00"), None);
+        assert_eq!(TimeOfDay::parse("10:75"), None);
+    }
+
+    #[test]
+    fn the_steppers_wrap_around_midnight_in_both_directions() {
+        // A stepper that stops at 23:59 cannot reach 00:00 from above, and
+        // one that stops at 00:00 cannot reach 23:00 from below.
+        assert_eq!(TimeOfDay::new(23, 30).stepped(60), TimeOfDay::new(0, 30));
+        assert_eq!(TimeOfDay::new(0, 0).stepped(-1), TimeOfDay::new(23, 59));
+        // The am/pm toggle is half a day, and it is its own inverse.
+        let morning = TimeOfDay::new(9, 15);
+        assert_eq!(morning.stepped(12 * 60), TimeOfDay::new(21, 15));
+        assert_eq!(morning.stepped(12 * 60).stepped(12 * 60), morning);
     }
 }

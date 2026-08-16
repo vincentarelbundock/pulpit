@@ -379,11 +379,31 @@ pub enum FieldFormat {
     /// what an Acrobat user would see in the field's properties.
     Date { pattern: String },
     /// A number, per `AFNumber_Format`.
-    Number,
-    /// A percentage, per `AFPercent_Format`.
-    Percent,
+    ///
+    /// Only the two arguments a person typing into the field can act on are
+    /// kept: how many decimals the value is rewritten to, and the currency
+    /// symbol it is shown with. The separator and negative styles change how
+    /// the *engine* draws the committed value, and repeating them in a hint
+    /// would teach a shape nobody has to type.
+    Number {
+        #[serde(default)]
+        decimals: u8,
+        /// The `strCurrency` argument — `$`, `€`, `CHF`. Empty when the
+        /// script named none.
+        #[serde(default)]
+        currency: String,
+    },
+    /// A percentage, per `AFPercent_Format`, with the decimals it asks for.
+    Percent {
+        #[serde(default)]
+        decimals: u8,
+    },
     /// A time of day, per `AFTime_Format`.
-    Time,
+    ///
+    /// The pattern is Acrobat's own vocabulary — `HH:MM`, `h:MM tt` — from
+    /// its fixed four-entry preset table, translated the way the date presets
+    /// are. Empty only for a preset that table does not know.
+    Time { pattern: String },
     /// A telephone number, postcode or similar, per `AFSpecial_Format` or an
     /// explicit `AFSpecial_KeystrokeEx` mask.
     Special { kind: SpecialFormat },
@@ -435,15 +455,51 @@ impl FieldFormat {
             // to show, and "date, as " is worse than "a date".
             FieldFormat::Date { pattern } if pattern.is_empty() => Some("a date".into()),
             FieldFormat::Date { pattern } => Some(format!("date, as {pattern}")),
-            FieldFormat::Number => Some("a number".into()),
-            FieldFormat::Percent => Some("a percentage".into()),
-            FieldFormat::Time => Some("a time".into()),
+            FieldFormat::Number { decimals, currency } => {
+                let subject = if currency.is_empty() {
+                    "number".to_string()
+                } else {
+                    format!("number in {currency}")
+                };
+                Some(match decimals_phrase(*decimals) {
+                    Some(decimals) => format!("{subject}, {decimals}"),
+                    None if currency.is_empty() => "a number".into(),
+                    None => format!("a {subject}"),
+                })
+            }
+            FieldFormat::Percent { decimals } => Some(match decimals_phrase(*decimals) {
+                Some(decimals) => format!("percentage, {decimals}"),
+                None => "a percentage".into(),
+            }),
+            FieldFormat::Time { pattern } if pattern.is_empty() => Some("a time".into()),
+            FieldFormat::Time { pattern } => Some(format!("time, as {pattern}")),
             FieldFormat::Special { kind } => Some(kind.hint()),
         }
     }
 
     pub fn is_date(&self) -> bool {
         matches!(self, FieldFormat::Date { .. })
+    }
+
+    /// The time pattern this field asks for, if it asks for a time at all.
+    pub fn time_pattern(&self) -> Option<&str> {
+        match self {
+            FieldFormat::Time { pattern } => Some(pattern.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// "2 decimals", or nothing at all for a whole number.
+///
+/// Nothing rather than "0 decimals" because a field that takes no fraction is
+/// a field that takes a number, and saying so in the negative is a longer way
+/// of saying less.
+fn decimals_phrase(decimals: u8) -> Option<String> {
+    match decimals {
+        0 => None,
+        1 => Some("1 decimal".into()),
+        many => Some(format!("{many} decimals")),
     }
 }
 
