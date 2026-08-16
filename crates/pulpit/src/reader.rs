@@ -1039,34 +1039,50 @@ impl ReaderSession {
     /// page's own points on whichever page it is over, and a drag that starts
     /// on one page and continues onto the next has to mean one continuous
     /// movement rather than two.
-    fn document_y(&self, page: PageIndex, y: f32) -> Option<f32> {
-        Some(self.column.offset_of(page)? + (y - self.crop_origin(page).1) * self.scale)
+    /// A canonical page point as it stands on the *turned* page: the view
+    /// rotation applied, still in the page's own points.
+    ///
+    /// The one direction the session converts in for display; its inverse is
+    /// taken once, where pointer positions come in ([`Self::pointer_moved`]).
+    fn view_point(&self, page: PageIndex, at: PagePoint) -> PagePoint {
+        let Some(geometry) = self.pages.get(page.get()) else {
+            return at;
+        };
+        self.controls
+            .rotation
+            .rotate_point(at, geometry.width, geometry.height)
     }
 
-    /// Where the drawn sheet's top-left corner is on the page it is a picture
-    /// of, in that page's own points.
+    /// Where the drawn sheet's top-left corner is on the *turned* page, in
+    /// that page's own points.
     ///
-    /// The origin of the crop window, or the page's own origin when there is
-    /// no crop. Everything that converts between a page point and a place on
-    /// the sheet goes through this: without it a crop would leave every pan,
-    /// every mark and every hit test off by the margin it trimmed.
+    /// The origin of the crop window as the reader sees it — turned with the
+    /// page, or the page's own origin when there is no crop. Everything that
+    /// converts between a page point and a place on the sheet goes through
+    /// this: without it a crop would leave every pan, every mark and every
+    /// hit test off by the margin it trimmed.
     fn crop_origin(&self, page: PageIndex) -> (f32, f32) {
-        let window = self.controls.crop.window();
+        let window = crate::widgets::document::model::rotated_region(
+            self.controls.crop.window(),
+            self.controls.rotation,
+        );
         let Some(geometry) = self.pages.get(page.get()) else {
             return (0.0, 0.0);
         };
-        (geometry.width * window.x, geometry.height * window.y)
+        let turned =
+            crate::widgets::document::model::view_rotated(geometry, self.controls.rotation);
+        (turned.width * window.x, turned.height * window.y)
     }
 
-    /// The same across the column: a page point's distance from the column's
-    /// left edge, in layout points.
-    fn document_x(&self, page: PageIndex, x: f32) -> Option<f32> {
-        Some(self.column.left_of(page)? + (x - self.crop_origin(page).0) * self.scale)
-    }
-
-    /// The whole grabbed point, when the column can place it.
+    /// The whole grabbed point, when the column can place it: a canonical
+    /// (upright) page point's place in the laid-out column, in layout points.
     fn document_point(&self, page: PageIndex, x: f32, y: f32) -> Option<(f32, f32)> {
-        Some((self.document_x(page, x)?, self.document_y(page, y)?))
+        let at = self.view_point(page, PagePoint::new(x, y));
+        let origin = self.crop_origin(page);
+        Some((
+            self.column.left_of(page)? + (at.x - origin.0) * self.scale,
+            self.column.offset_of(page)? + (at.y - origin.1) * self.scale,
+        ))
     }
 
     /// Is the hand dragging the page about? The cursor says so while it is.
@@ -1075,7 +1091,24 @@ impl ReaderSession {
     }
 
     /// The pointer moved over a page, at a canonical page point (A4).
+    ///
+    /// The sheet reports the point on the page *as drawn*, which under a view
+    /// rotation is the turned page. Everything in this session speaks the
+    /// upright canonical space the document's own geometry is written in, so
+    /// the rotation is undone here — once, at the boundary — and nothing
+    /// below this line knows the page was ever turned.
     pub fn pointer_moved(&mut self, page: PageIndex, x: f32, y: f32) {
+        let (x, y) = match self.pages.get(page.get()) {
+            Some(geometry) => {
+                let upright = self.controls.rotation.unrotate_point(
+                    PagePoint::new(x, y),
+                    geometry.width,
+                    geometry.height,
+                );
+                (upright.x, upright.y)
+            }
+            None => (x, y),
+        };
         // The marquee owns the pointer while it is armed: the far corner
         // follows the hand, and nothing else on the page hears about it.
         if self.controls.crop.takes_the_pointer() {
@@ -2082,7 +2115,17 @@ impl ReaderSession {
             .map(|placed| (placed, true))
             .chain(margin.into_iter().map(|placed| (placed, false)))
         {
-            let full = renderable_size(placed.width * scale, placed.height * scale);
+            // Frames are always rasterised *upright*: the view rotation is a
+            // way of drawing them, not a second kind of frame, which is what
+            // lets the cache serve every rotation from one picture. Under a
+            // quarter turn the placed sheet's width is the upright page's
+            // height, so the request swaps back before it is sized.
+            let (upright_width, upright_height) = if self.controls.rotation.swaps_axes() {
+                (placed.height, placed.width)
+            } else {
+                (placed.width, placed.height)
+            };
+            let full = renderable_size(upright_width * scale, upright_height * scale);
             let preview = preview_size(full);
             // The coarse frame first, always: it is what a freshly landed
             // page paints from while the full one renders, and asking for it
@@ -2199,10 +2242,18 @@ impl ReaderSession {
         // itself until one is taken. The fit fits what is on the sheet: the
         // point of trimming margins is that the text then fills the window.
         let window = self.controls.crop.window();
+        // …and then as the reader has turned it: the column is laid out from
+        // the pages as they are looked at, and a turned portrait page is
+        // landscape for every question the layout answers.
         let pages: Vec<PageGeometry> = self
             .pages
             .iter()
-            .map(|page| crate::widgets::document::model::cropped(page, window))
+            .map(|page| {
+                crate::widgets::document::model::view_rotated(
+                    &crate::widgets::document::model::cropped(page, window),
+                    self.controls.rotation,
+                )
+            })
             .collect();
         let reference = pages
             .get(self.controls.page.get())
@@ -2331,6 +2382,19 @@ impl ReaderSession {
                 // column they were scrolled down is not the column they are
                 // about to read, so the offset is recovered from the page
                 // rather than kept as a number of points.
+                let page = self.controls.page;
+                self.relayout();
+                if let Some(offset) = self.column.offset_of(page) {
+                    self.scroll_to(offset);
+                }
+                true
+            }
+            ReadCommand::RotateView => {
+                self.controls.rotation = self.controls.rotation.next();
+                // The page the reader is on stays the page they are on, the
+                // same promise a spread change makes: the turned column is
+                // not the column they were scrolled down, so the offset is
+                // recovered from the page rather than kept as points.
                 let page = self.controls.page;
                 self.relayout();
                 if let Some(offset) = self.column.offset_of(page) {
@@ -2571,6 +2635,14 @@ impl ReaderSession {
         if width <= 0.0 || height <= 0.0 {
             return;
         }
+        // The rectangle is filled as the reader sees it: turned with the
+        // page, so a wide region on a quarter-turned page fills the window's
+        // height.
+        let (width, height) = if self.controls.rotation.swaps_axes() {
+            (height, width)
+        } else {
+            (width, height)
+        };
         // The smaller of the two fits, so the whole rectangle is on screen:
         // filling the width of a window with a tall rectangle would put its
         // foot below the fold, which is not "zoom here".
@@ -2629,60 +2701,108 @@ impl ReaderSession {
         search: &pulpit_core::search::SearchState,
     ) -> ReaderData<'a> {
         let current_hit = search.current().map(pulpit_core::search::Hit::key);
+        // Everything in the facet is expressed on the page as the reader sees
+        // it: turned by the view rotation. The session's own geometry is
+        // upright, so this is where each piece is rotated — once, on the way
+        // out — with the frame itself left upright for the sheet to turn.
+        let rotation = self.controls.rotation;
         let visible = if live && self.open {
             self.column
                 .visible(self.controls.offset, self.cell.1)
                 .into_iter()
-                .map(|placed| ReaderPage {
-                    // The open gesture, drawn by the UI so the stroke follows
-                    // the hand rather than the round trip (A2). Only ever on
-                    // the page the gesture is on.
-                    preview: self.preview_for(placed.page),
-                    // Retained ink only: a retained highlight is composited
-                    // into the frame by the caller's `frames`, with the
-                    // multiply blend a real `/Highlight` uses, and drawing it
-                    // here as well would wash it twice.
-                    retained: self
-                        .retained
-                        .iter()
-                        .filter(|mark| mark.page == placed.page && mark.preview.quads.is_empty())
-                        .map(|mark| mark.preview.clone())
-                        .collect(),
-                    canonical: self
+                .map(|placed| {
+                    let (width, height) = self
                         .pages
                         .get(placed.page.get())
                         .map(|page| (page.width, page.height))
-                        .unwrap_or((1.0, 1.0)),
-                    // Whatever frame the cache has, even one drawn at another
-                    // width or before the last edit: it is replaced when a
-                    // newer one arrives (A7). Until the first one does, the
-                    // sheet is drawn blank at its full size, so the column
-                    // does not move under the reader when it lands.
-                    frame: frames(placed.page, placed.width),
-                    // The hit the reader is on is drawn differently from the
-                    // rest, which is the whole use of an overlay: "there are
-                    // six on this page and you are looking at the fourth".
-                    found: search
-                        .hits_on(placed.page)
-                        .filter(|hit| Some(hit.key()) != current_hit)
-                        .flat_map(|hit| hit.quads.iter().copied())
-                        .collect(),
-                    found_current: search
-                        .hits_on(placed.page)
-                        .filter(|hit| Some(hit.key()) == current_hit)
-                        .flat_map(|hit| hit.quads.iter().copied())
-                        .collect(),
-                    // What the reader has picked up, so a held mark looks
-                    // held. Nothing here is in the document (§8.4).
-                    selection: self.selection_for(placed.page),
-                    // The crop window, and the rectangle being drawn or asked
-                    // about when it is on this page.
-                    window: self.controls.crop.window(),
-                    marquee: self
-                        .marquee()
-                        .filter(|(page, _)| *page == placed.page)
-                        .map(|(_, rect)| rect),
-                    placed,
+                        .unwrap_or((1.0, 1.0));
+                    let turn_preview =
+                        |mut preview: crate::widgets::document::preview::GesturePreview| {
+                            for point in &mut preview.points {
+                                *point = rotation.rotate_point(*point, width, height);
+                            }
+                            for quad in &mut preview.quads {
+                                *quad = rotation.rotate_quad(*quad, width, height);
+                            }
+                            preview
+                        };
+                    ReaderPage {
+                        // The open gesture, drawn by the UI so the stroke
+                        // follows the hand rather than the round trip (A2).
+                        // Only ever on the page the gesture is on.
+                        preview: self.preview_for(placed.page).map(turn_preview),
+                        // Retained ink only: a retained highlight is
+                        // composited into the frame by the caller's `frames`,
+                        // with the multiply blend a real `/Highlight` uses,
+                        // and drawing it here as well would wash it twice.
+                        retained: self
+                            .retained
+                            .iter()
+                            .filter(|mark| {
+                                mark.page == placed.page && mark.preview.quads.is_empty()
+                            })
+                            .map(|mark| turn_preview(mark.preview.clone()))
+                            .collect(),
+                        canonical: if rotation.swaps_axes() {
+                            (height, width)
+                        } else {
+                            (width, height)
+                        },
+                        // Whatever frame the cache has, even one drawn at
+                        // another width or before the last edit: it is
+                        // replaced when a newer one arrives (A7). Until the
+                        // first one does, the sheet is drawn blank at its
+                        // full size, so the column does not move under the
+                        // reader when it lands. Frames are rasterised
+                        // upright, so the lookup width is the upright one —
+                        // the same width the render plan asked with.
+                        frame: frames(
+                            placed.page,
+                            if rotation.swaps_axes() {
+                                placed.height
+                            } else {
+                                placed.width
+                            },
+                        ),
+                        // The hit the reader is on is drawn differently from
+                        // the rest, which is the whole use of an overlay:
+                        // "there are six on this page and you are looking at
+                        // the fourth".
+                        found: search
+                            .hits_on(placed.page)
+                            .filter(|hit| Some(hit.key()) != current_hit)
+                            .flat_map(|hit| hit.quads.iter().copied())
+                            .map(|quad| rotation.rotate_quad(quad, width, height))
+                            .collect(),
+                        found_current: search
+                            .hits_on(placed.page)
+                            .filter(|hit| Some(hit.key()) == current_hit)
+                            .flat_map(|hit| hit.quads.iter().copied())
+                            .map(|quad| rotation.rotate_quad(quad, width, height))
+                            .collect(),
+                        // What the reader has picked up, so a held mark looks
+                        // held. Nothing here is in the document (§8.4).
+                        selection: self
+                            .selection_for(placed.page)
+                            .into_iter()
+                            .map(|mut mark| {
+                                mark.bounds = rotation.rotate_rect(mark.bounds, width, height);
+                                mark
+                            })
+                            .collect(),
+                        // The crop window, and the rectangle being drawn or
+                        // asked about when it is on this page.
+                        window: crate::widgets::document::model::rotated_region(
+                            self.controls.crop.window(),
+                            rotation,
+                        ),
+                        marquee: self
+                            .marquee()
+                            .filter(|(page, _)| *page == placed.page)
+                            .map(|(_, rect)| rotation.rotate_rect(rect, width, height)),
+                        rotation,
+                        placed,
+                    }
                 })
                 .collect()
         } else {
@@ -2867,6 +2987,80 @@ mod tests {
         assert_eq!(again, PageIndex(6));
         assert!((fraction_again - 0.5).abs() < 1e-2, "{fraction_again}");
         assert_eq!(reopened.controls().zoom, zoom);
+    }
+
+    #[test]
+    fn rotating_the_view_keeps_the_reader_on_their_page() {
+        use pulpit_core::page::PageRotation;
+        let mut session = open(10);
+        session.apply(&ReadCommand::GoToPage(PageIndex(4)));
+        assert!(
+            session.apply(&ReadCommand::RotateView),
+            "a rotation re-renders"
+        );
+        assert_eq!(session.controls().rotation, PageRotation::Clockwise90);
+        assert_eq!(session.controls().page, PageIndex(4));
+        // The column now holds landscape sheets: a turned portrait page is
+        // wider than it is tall, whatever scale the fit chose.
+        let placed = session.column.pages[4];
+        assert!(
+            (placed.width / placed.height - 792.0 / 612.0).abs() < 1e-3,
+            "{placed:?}"
+        );
+        // Four presses go all the way round.
+        for _ in 0..3 {
+            session.apply(&ReadCommand::RotateView);
+        }
+        assert_eq!(session.controls().rotation, PageRotation::None);
+        assert_eq!(session.controls().page, PageIndex(4));
+    }
+
+    #[test]
+    fn a_turned_page_is_still_requested_as_an_upright_frame() {
+        use pulpit_render::protocol::Quality;
+        let mut session = open(3);
+        session.apply(&ReadCommand::RotateView);
+        let plan = session.render_plan(1.0);
+        let refined = plan
+            .iter()
+            .find(|planned| planned.quality == Quality::Refined)
+            .expect("a settled reader gets a refined frame");
+        // The sheet on screen is landscape, but the raster asked for is the
+        // upright page: one picture serves every rotation.
+        assert!(
+            refined.width < refined.height,
+            "{} x {}",
+            refined.width,
+            refined.height
+        );
+    }
+
+    #[test]
+    fn a_pointer_on_the_turned_sheet_lands_on_the_upright_page() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::RotateView);
+        // On the quarter-turned letter page the sheet is 792 x 612; the view
+        // reports the pointer in the turned page's own points, and the
+        // session's cursor speaks upright canonical space.
+        session.pointer_moved(PageIndex(0), 700.0, 100.0);
+        let (page, at) = session.cursor_position().expect("a cursor on the page");
+        assert_eq!(page, PageIndex(0));
+        assert!((at.x - 100.0).abs() < 1e-3, "{at:?}");
+        assert!((at.y - 92.0).abs() < 1e-3, "{at:?}");
+    }
+
+    #[test]
+    fn the_facet_speaks_the_turned_pages_language() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::RotateView);
+        let search = pulpit_core::search::SearchState::default();
+        let data = session.facet(true, &no_frames, &search);
+        let first = &data.visible[0];
+        // The canonical size handed to the sheet is the turned one, so the
+        // widget's pointer conversion and every overlay agree with the
+        // picture being drawn.
+        assert_eq!(first.canonical, (792.0, 612.0));
+        assert_eq!(first.rotation, pulpit_core::page::PageRotation::Clockwise90);
     }
 
     #[test]

@@ -110,6 +110,8 @@ pub enum Icon {
     SinglePage,
     /// Two facing pages: `book-open`.
     TwoPages,
+    /// Turn every page a quarter turn clockwise: `rotate-cw-square`.
+    RotatePage,
 }
 
 impl Icon {
@@ -152,6 +154,7 @@ impl Icon {
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
             Icon::SinglePage => include_bytes!("../../assets/icons/file.svg"),
             Icon::TwoPages => include_bytes!("../../assets/icons/book-open.svg"),
+            Icon::RotatePage => include_bytes!("../../assets/icons/rotate-cw-square.svg"),
         }
     }
 
@@ -164,7 +167,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 36] = [
+    const ALL: [Icon; 37] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -201,6 +204,7 @@ impl Icon {
         Icon::Check,
         Icon::SinglePage,
         Icon::TwoPages,
+        Icon::RotatePage,
     ];
 
     /// The handle for this icon, built once per process.

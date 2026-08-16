@@ -162,6 +162,9 @@ pub enum ReadCommand {
     CommitPage,
     /// Read one page across the column, or two facing pages.
     SetSpread(crate::widgets::document::model::PageSpread),
+    /// Turn every page a quarter turn clockwise. A view transform, not a
+    /// document edit: nothing reaches the file and the audience never sees it.
+    RotateView,
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
     /// Collapse the outline rail to its header, or open it again.

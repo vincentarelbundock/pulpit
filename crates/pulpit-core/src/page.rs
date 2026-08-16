@@ -288,6 +288,77 @@ impl PageRotation {
     pub fn swaps_axes(self) -> bool {
         matches!(self, PageRotation::Clockwise90 | PageRotation::Clockwise270)
     }
+
+    /// One more quarter turn clockwise, wrapping back upright.
+    pub fn next(self) -> PageRotation {
+        match self {
+            PageRotation::None => PageRotation::Clockwise90,
+            PageRotation::Clockwise90 => PageRotation::Clockwise180,
+            PageRotation::Clockwise180 => PageRotation::Clockwise270,
+            PageRotation::Clockwise270 => PageRotation::None,
+        }
+    }
+
+    /// The turn that undoes this one.
+    pub fn inverse(self) -> PageRotation {
+        match self {
+            PageRotation::None => PageRotation::None,
+            PageRotation::Clockwise90 => PageRotation::Clockwise270,
+            PageRotation::Clockwise180 => PageRotation::Clockwise180,
+            PageRotation::Clockwise270 => PageRotation::Clockwise90,
+        }
+    }
+
+    /// Where `point` on an upright `width` × `height` sheet lands once the
+    /// sheet is turned clockwise by this rotation.
+    ///
+    /// Both spaces are canonical (top-left origin, y down); the rotated sheet
+    /// is `height` × `width` when the axes swap. This is the view-rotation
+    /// mapping: nothing here touches PDF user space, `/Rotate`, or crop boxes.
+    pub fn rotate_point(self, point: PagePoint, width: f32, height: f32) -> PagePoint {
+        match self {
+            PageRotation::None => point,
+            // Clockwise a quarter turn: the sheet's top edge becomes the
+            // rotated sheet's right edge, so x is measured up from the old
+            // bottom and y is the old x.
+            PageRotation::Clockwise90 => PagePoint::new(height - point.y, point.x),
+            PageRotation::Clockwise180 => PagePoint::new(width - point.x, height - point.y),
+            PageRotation::Clockwise270 => PagePoint::new(point.y, width - point.x),
+        }
+    }
+
+    /// The exact inverse of [`PageRotation::rotate_point`]: a point on the
+    /// rotated sheet back to the upright `width` × `height` one.
+    pub fn unrotate_point(self, point: PagePoint, width: f32, height: f32) -> PagePoint {
+        let (rotated_width, rotated_height) = if self.swaps_axes() {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        self.inverse()
+            .rotate_point(point, rotated_width, rotated_height)
+    }
+
+    /// [`PageRotation::rotate_point`] for an axis-aligned rectangle, which
+    /// stays axis-aligned under quarter turns.
+    pub fn rotate_rect(self, rect: PageRect, width: f32, height: f32) -> PageRect {
+        let a = self.rotate_point(PagePoint::new(rect.left, rect.top), width, height);
+        let b = self.rotate_point(PagePoint::new(rect.right, rect.bottom), width, height);
+        PageRect::new(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y))
+    }
+
+    /// [`PageRotation::rotate_point`] corner by corner. The corner names stop
+    /// describing where the corners *are* — a turned line of text has its
+    /// "upper left" at the right of the sheet — but the quad still encloses
+    /// the same run of text, which is all a highlight needs.
+    pub fn rotate_quad(self, quad: PageQuad, width: f32, height: f32) -> PageQuad {
+        PageQuad {
+            upper_left: self.rotate_point(quad.upper_left, width, height),
+            upper_right: self.rotate_point(quad.upper_right, width, height),
+            lower_left: self.rotate_point(quad.lower_left, width, height),
+            lower_right: self.rotate_point(quad.lower_right, width, height),
+        }
+    }
 }
 
 /// Everything needed to convert between canonical page space and PDF user
@@ -665,5 +736,74 @@ mod tests {
     fn pages_are_counted_from_one_when_a_human_reads_them() {
         assert_eq!(PageIndex(0).to_string(), "1");
         assert_eq!(PageIndex(11).get(), 11);
+    }
+
+    #[test]
+    fn a_quarter_turn_sends_the_top_left_corner_to_the_top_right() {
+        let (w, h) = (612.0, 792.0);
+        let corner = PagePoint::new(0.0, 0.0);
+        assert_eq!(
+            PageRotation::Clockwise90.rotate_point(corner, w, h),
+            PagePoint::new(792.0, 0.0)
+        );
+        assert_eq!(
+            PageRotation::Clockwise180.rotate_point(corner, w, h),
+            PagePoint::new(612.0, 792.0)
+        );
+        assert_eq!(
+            PageRotation::Clockwise270.rotate_point(corner, w, h),
+            PagePoint::new(0.0, 612.0)
+        );
+    }
+
+    #[test]
+    fn view_rotation_round_trips_at_every_turn() {
+        let (w, h) = (612.0, 792.0);
+        let point = PagePoint::new(100.0, 250.0);
+        for rotation in PageRotation::ALL {
+            let there = rotation.rotate_point(point, w, h);
+            let back = rotation.unrotate_point(there, w, h);
+            assert!((back.x - point.x).abs() < 1e-4, "{rotation:?}");
+            assert!((back.y - point.y).abs() < 1e-4, "{rotation:?}");
+        }
+    }
+
+    #[test]
+    fn a_rotated_rect_stays_well_formed_and_keeps_its_area() {
+        let rect = PageRect::new(10.0, 20.0, 110.0, 70.0);
+        let (w, h) = (612.0, 792.0);
+        for rotation in PageRotation::ALL {
+            let turned = rotation.rotate_rect(rect, w, h);
+            assert!(turned.left <= turned.right && turned.top <= turned.bottom);
+            let (rw, rh) = if rotation.swaps_axes() {
+                (rect.height(), rect.width())
+            } else {
+                (rect.width(), rect.height())
+            };
+            assert!((turned.width() - rw).abs() < 1e-4);
+            assert!((turned.height() - rh).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn the_rotation_ladder_cycles_and_inverts() {
+        assert_eq!(PageRotation::None.next(), PageRotation::Clockwise90);
+        assert_eq!(PageRotation::Clockwise270.next(), PageRotation::None);
+        for rotation in PageRotation::ALL {
+            assert_eq!(
+                rotation.next().next().next().next(),
+                rotation,
+                "four quarter turns are a full one"
+            );
+            let point = PagePoint::new(33.0, 44.0);
+            let there = rotation.rotate_point(point, 612.0, 792.0);
+            let (rw, rh) = if rotation.swaps_axes() {
+                (792.0, 612.0)
+            } else {
+                (612.0, 792.0)
+            };
+            let back = rotation.inverse().rotate_point(there, rw, rh);
+            assert!((back.x - point.x).abs() < 1e-4 && (back.y - point.y).abs() < 1e-4);
+        }
     }
 }

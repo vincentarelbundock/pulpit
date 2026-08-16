@@ -330,10 +330,21 @@ fn sheet<'a, Message: Clone + 'static>(
     language: crate::datefield::Locale,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
+    // The frame is always an upright raster; the sheet turns the picture to
+    // match the view rotation. `Rotation::Solid` grows the layout to the
+    // turned size, which is exactly the placed size the column reserved.
+    let upright = if page.rotation.swaps_axes() {
+        (page.placed.height, page.placed.width)
+    } else {
+        (page.placed.width, page.placed.height)
+    };
     let inner: Element<'static, Message> = match &page.frame {
         Some(handle) => image(handle.clone())
-            .width(Length::Fixed(page.placed.width))
-            .height(Length::Fixed(page.placed.height))
+            .width(Length::Fixed(upright.0))
+            .height(Length::Fixed(upright.1))
+            .rotation(iced::Rotation::Solid(iced::Radians::from(iced::Degrees(
+                page.rotation.degrees() as f32,
+            ))))
             .into(),
         None => space::horizontal()
             .width(Length::Fixed(page.placed.width))
@@ -435,9 +446,21 @@ fn sheet<'a, Message: Clone + 'static>(
     // The editor for a mark being written is *not* inside the mouse area
     // below: it goes over it, so a press meant for the caret or the buttons is
     // taken by them and does not also place a second mark under the first.
-    let writing = composing.map(|composing| {
+    // The composing mark and the date picker arrive in the page's upright
+    // canonical space — they come from the application and the worker, not
+    // from this facet — so their anchors are turned here to match everything
+    // else drawn on the sheet.
+    let canonical_upright = if page.rotation.swaps_axes() {
+        (page.canonical.1, page.canonical.0)
+    } else {
+        page.canonical
+    };
+    let writing = composing.cloned().map(|mut composing| {
+        composing.at =
+            page.rotation
+                .rotate_point(composing.at, canonical_upright.0, canonical_upright.1);
         compose_layer(
-            composing,
+            &composing,
             buffer,
             (page.placed.width, page.placed.height),
             shown,
@@ -521,7 +544,13 @@ fn sheet<'a, Message: Clone + 'static>(
     // field, not in a dialog covering the form it is filling in.
     let calendar = picker
         .filter(|picker| picker.page == index)
-        .map(|picker| date_picker_layer(picker, language, shown, origin, drawn, on_event));
+        .cloned()
+        .map(|mut picker| {
+            picker.bounds =
+                page.rotation
+                    .rotate_rect(picker.bounds, canonical_upright.0, canonical_upright.1);
+            date_picker_layer(&picker, language, shown, origin, drawn, on_event)
+        });
 
     match (writing, calendar) {
         (Some(writing), Some(calendar)) => iced::widget::stack![area, writing, calendar].into(),
@@ -1009,6 +1038,16 @@ fn navigation<Message: Clone + 'static>(
             },
             reader.controls.spread.other().label(),
             ReadCommand::SetSpread(reader.controls.spread.other()),
+            true
+        ),
+        // A view transform like the crop and the spread: the page is turned
+        // for this reader's eyes, never edited, and the audience never sees
+        // it. One button that keeps turning, because "rotate" is a verb and
+        // four radio states would cost the band three presses' width.
+        step(
+            theme::Icon::RotatePage,
+            "Rotate 90° clockwise",
+            ReadCommand::RotateView,
             true
         ),
     ]);

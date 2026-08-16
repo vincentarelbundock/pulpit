@@ -271,6 +271,12 @@ pub struct ReaderPage {
     /// The marquee being drawn or chosen about, when it is on this page, in
     /// canonical page points.
     pub marquee: Option<pulpit_core::page::PageRect>,
+    /// The reader's view rotation. Everything else in this facet is already
+    /// expressed in the turned page's coordinates; this is carried so the
+    /// sheet can turn the rendered picture — which is always rasterised
+    /// upright — to match, and place the few overlays whose geometry arrives
+    /// from elsewhere (the date picker, the composing editor).
+    pub rotation: pulpit_core::page::PageRotation,
 }
 
 /// The selected annotation, as the page surface draws it.
