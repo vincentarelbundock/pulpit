@@ -1,8 +1,11 @@
 //! pulpit: A Snappy and Snazzy PDF Projector.
 //!
-//! One executable, two roles. Run normally it is the presenter application;
-//! run with `--render-worker` it is a renderer worker process, which is how
-//! the supervisor spawns its pool without needing a second installed binary.
+//! One executable, several roles. Run normally it is the presenter
+//! application; run with `--render-worker` it is a renderer worker process,
+//! and with `--document-worker=FILE` it is a document worker holding one open
+//! PDF. Every role is this same binary re-executed with a flag, which is how
+//! a supervisor spawns what it needs without a second installed binary to
+//! ship, sign or find on `PATH`.
 
 mod annotation_export;
 mod app;
@@ -49,6 +52,15 @@ fn main() -> iced::Result {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--render-worker" => worker = true,
+            // A document worker is another role of this same executable: one
+            // open PDF, one execution context, one process (SPEC-document.md
+            // §5.1 and §6). It takes the document to open as its argument
+            // because a worker serves exactly one and is started for it.
+            _ if argument.starts_with("--document-worker=") => {
+                let path = argument.trim_start_matches("--document-worker=");
+                run_document_worker(PathBuf::from(path));
+                return Ok(());
+            }
             "--typst-worker" => {
                 crate::typst_annotation::run_worker();
                 return Ok(());
@@ -218,6 +230,8 @@ fn print_help() {
            --layouts         open the layout library\n\
            --edit-layout ID  open a layout in the designer\n\
            --render-worker   run as a renderer worker process (internal)\n\
+           --document-worker=FILE\n\
+                             run as a document worker process (internal)\n\
            -h, --help        show this help\n\
            -V, --version     show the version\n\
          \n\
@@ -278,4 +292,88 @@ fn run_worker() {
         tracing::error!(error = %e, "renderer worker exiting");
         std::process::exit(1);
     }
+}
+
+/// Serve the document-worker role: open one PDF and answer for it until the
+/// supervisor closes the pipe.
+///
+/// The engine is built here rather than in `pulpit-render` because this is the
+/// one place that knows a build may have no PDFium — and a document worker
+/// with no PDF library is not a worker that degrades, it is one that has
+/// nothing to say. It exits with the same guidance the renderer worker gives.
+fn run_document_worker(source: PathBuf) {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("PULPIT_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
+    #[cfg(feature = "pdfium")]
+    {
+        use pulpit_render::document::pdfium::PdfiumDocument;
+        use pulpit_render::document::worker::DocumentWorker;
+        use pulpit_render::document::PdfDocument;
+
+        let mut backend = match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
+            Ok(backend) => backend,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    pulpit_render::pdf::missing_pdfium_message(&e.to_string())
+                );
+                std::process::exit(1);
+            }
+        };
+
+        // The identities this worker writes into `/NM` have to differ from
+        // every other session's, or two people editing two copies of one file
+        // would produce annotations that collide when the copies are merged
+        // by hand (A3). The process id and the start time are what this
+        // process has that no other does; the domain crate reads no clock, so
+        // the mixing happens here.
+        let seed = seed_from_process();
+
+        let engine = match PdfiumDocument::open(&mut backend, &source) {
+            Ok(engine) => engine,
+            Err(error) => {
+                eprintln!("cannot open {}: {error}", source.display());
+                std::process::exit(1);
+            }
+        };
+        let mut worker = DocumentWorker::new();
+        worker.adopt(PdfDocument::new(Box::new(engine), seed));
+
+        if let Err(e) = pulpit_render::document::session::serve_stdio(
+            worker,
+            std::io::stdin(),
+            std::io::stdout(),
+        ) {
+            tracing::error!(error = %e, "document worker exiting");
+            std::process::exit(1);
+        }
+    }
+    #[cfg(not(feature = "pdfium"))]
+    {
+        let _ = source;
+        eprintln!(
+            "{}",
+            pulpit_render::pdf::missing_pdfium_message(
+                "this build was compiled without the pdfium feature"
+            )
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Something this process has that no other does, for annotation identity.
+#[cfg(feature = "pdfium")]
+fn seed_from_process() -> u64 {
+    let pid = u64::from(std::process::id());
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0);
+    pid.rotate_left(32) ^ since_epoch
 }

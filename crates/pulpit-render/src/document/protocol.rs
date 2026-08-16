@@ -209,6 +209,12 @@ pub enum DocumentFailure {
     Engine(String),
 }
 
+impl std::fmt::Display for DocumentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 impl DocumentFailure {
     /// May a read-only request that failed this way simply be sent again?
     pub fn is_retryable(&self) -> bool {
