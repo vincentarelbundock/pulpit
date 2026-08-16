@@ -451,12 +451,12 @@ struct PendingReaderPatch {
     /// The full-page frame size the answer is to be composited into.
     frame_width: u32,
     frame_height: u32,
-    /// How many requests are still unanswered for this page. A click is two
-    /// events — down and up — and each asks for a patch; forgetting the entry
-    /// when the *first* answer lands used to drop the second on the floor,
-    /// which read as the field flickering on every interaction.
-    in_flight: usize,
-    /// Whether the newest request covers uncommitted form state.
+    /// Whether *this* request covers uncommitted form state.
+    ///
+    /// Per request, not per page: a keystroke and the commit that follows it
+    /// are both in flight at once, and labelling the keystroke's answer with
+    /// what the commit asked for either blinks the typed text away at the
+    /// next full frame or pins a committed rectangle over the page for ever.
     uncommitted: bool,
 }
 
@@ -582,10 +582,13 @@ pub struct App {
     /// one per page. Dropped when a full frame containing the same revision
     /// arrives, which is the same rule the retained previews follow.
     reader_patches: std::collections::HashMap<pulpit_core::page::PageIndex, ReaderPatch>,
-    /// The full-page frame size each in-flight patch was asked for, so the
-    /// answer can be matched to the frame it was meant to fit.
-    reader_patch_pending:
-        std::collections::HashMap<pulpit_core::page::PageIndex, PendingReaderPatch>,
+    /// What each in-flight patch was asked for, oldest first, so the answer
+    /// can be matched to the frame and the form state *its own* request meant.
+    /// One link, answered in order, so the queue is the order they land in.
+    reader_patch_pending: std::collections::HashMap<
+        pulpit_core::page::PageIndex,
+        std::collections::VecDeque<PendingReaderPatch>,
+    >,
     /// Everything patched on a page since its frame last caught up, in page
     /// points. One patch per page means each new patch *replaces* the last, so
     /// it has to keep covering what earlier ones covered: PDFium draws a combo
@@ -5060,29 +5063,27 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        // One entry per page, counting the answers still owed. Replacing the
-        // entry outright would forget the earlier request the moment a second
-        // one goes out, and its answer — a perfectly good newer picture —
-        // would then be dropped on arrival.
-        let pending = self
-            .reader_patch_pending
+        // One queued entry per request, because more than one is in flight at
+        // a time: a click is a pointer down and a pointer up, and typing then
+        // committing is a keystroke and a commit. Keeping only the newest
+        // would drop the earlier answer on arrival and label the earlier
+        // picture with the later request's meaning.
+        self.reader_patch_pending
             .entry(page)
-            .or_insert(PendingReaderPatch {
+            .or_default()
+            .push_back(PendingReaderPatch {
                 frame_width: key.width,
                 frame_height: key.height,
-                in_flight: 0,
                 uncommitted,
             });
-        pending.frame_width = key.width;
-        pending.frame_height = key.height;
-        pending.in_flight += 1;
-        pending.uncommitted = uncommitted;
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::RenderPatch {
                 page,
                 region,
                 width,
                 height,
+                frame_width: key.width,
+                frame_height: key.height,
                 expected_revision: revision,
             });
         }
@@ -5363,28 +5364,34 @@ impl App {
         if let Some(dirty) = dirty {
             // A keystroke's pixels are uncommitted until the field commits:
             // they live in PDFium's form environment and in no snapshot, so
-            // this patch must survive full frames at the same revision.
-            self.ask_patch_of(page, dirty, revision, result.committed.is_none());
+            // that patch must survive full frames at the same revision. Only
+            // that patch, though — a rollover the pointer drew is state a
+            // full frame reproduces exactly, and marking it uncommitted made
+            // it immortal, growing over the page with every pointer move. The
+            // rule: uncommitted means an interaction is *being held open* —
+            // a caret in a text field, or an open choice list.
+            let editing = result.text_focus || result.focused_choice.is_some();
+            self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
         }
     }
 
     /// A partial repaint arrived. It is held over the page's frame until a
     /// full frame containing the same revision replaces it.
     fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
-        let Some(pending) = self.reader_patch_pending.get_mut(&frame.page) else {
+        let Some(queue) = self.reader_patch_pending.get_mut(&frame.page) else {
             return;
         };
-        let PendingReaderPatch {
+        // The answers come back over one link in the order they were asked
+        // for, so the oldest request outstanding is the one this answers.
+        let Some(PendingReaderPatch {
             frame_width,
             frame_height,
             uncommitted,
-            ..
-        } = *pending;
-        // Every answer owed is settled one at a time; the entry goes only when
-        // nothing is in flight, so a click's second patch — pointer down and
-        // up each ask for one — is composited instead of dropped.
-        pending.in_flight = pending.in_flight.saturating_sub(1);
-        if pending.in_flight == 0 {
+        }) = queue.pop_front()
+        else {
+            return;
+        };
+        if queue.is_empty() {
             self.reader_patch_pending.remove(&frame.page);
         }
         if !frame.is_consistent() {

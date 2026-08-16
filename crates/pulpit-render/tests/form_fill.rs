@@ -346,6 +346,7 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
                 pulpit_core::notes::Region::FULL,
                 width,
                 height,
+                None,
             )
             .expect("the empty form renders");
 
@@ -362,6 +363,7 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
                 pulpit_core::notes::Region::FULL,
                 width,
                 height,
+                None,
             )
             .expect("the form renders while it is being typed into");
 
@@ -529,6 +531,7 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
                 pulpit_core::notes::Region::FULL,
                 width,
                 height,
+                None,
             )
             .unwrap();
         let start = Instant::now();
@@ -540,6 +543,7 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
                     pulpit_core::notes::Region::FULL,
                     width,
                     height,
+                    None,
                 )
                 .unwrap();
         }
@@ -773,6 +777,7 @@ fn field_values_are_drawn_by_the_render_pool_and_not_only_by_the_editor() {
                 region: pulpit_core::notes::Region::FULL,
                 width: width as u32,
                 height: height as u32,
+                full_size: None,
                 with_annotations: true,
             },
             &mut rgba,

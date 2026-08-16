@@ -213,6 +213,7 @@ fn a_snapshot_of_an_edited_document_renders_the_mark_through_the_pool_backend() 
             region: Region::FULL,
             width: 153,
             height: 198,
+            full_size: None,
             with_annotations,
         };
         let mut pixels = vec![0u8; request.rgba_bytes() as usize];

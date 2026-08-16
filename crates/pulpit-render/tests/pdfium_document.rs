@@ -582,6 +582,7 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
             pulpit_core::notes::Region::FULL,
             width,
             height,
+            None,
         )
         .expect("the page renders");
     assert_eq!(before.len(), width as usize * height as usize * 4);
@@ -596,6 +597,7 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
             pulpit_core::notes::Region::FULL,
             width,
             height,
+            None,
         )
         .expect("the page renders again");
     assert_ne!(
@@ -612,6 +614,7 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
             pulpit_core::notes::Region::FULL,
             width,
             height,
+            None,
         )
         .unwrap();
     assert_eq!(after, again, "two renders of one revision differ");
@@ -642,6 +645,7 @@ fn a_partial_render_is_exactly_the_crop_of_the_full_one() {
             pulpit_core::notes::Region::FULL,
             width,
             height,
+            None,
         )
         .expect("the page renders");
 
@@ -650,7 +654,7 @@ fn a_partial_render_is_exactly_the_crop_of_the_full_one() {
     let region = pulpit_core::notes::Region::new(0.25, 0.5, 0.5, 0.25);
     let (crop_width, crop_height) = (width / 2, height / 4);
     let cropped = document
-        .render_page(PageIndex(0), region, crop_width, crop_height)
+        .render_page(PageIndex(0), region, crop_width, crop_height, None)
         .expect("the crop renders");
     assert_eq!(
         cropped.len(),

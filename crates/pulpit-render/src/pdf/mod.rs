@@ -97,6 +97,38 @@ pub struct RenderRequest {
     /// rendered without them is a page with the reader's own marks missing.
     #[serde(default)]
     pub with_annotations: bool,
+    /// The full page's size in pixels, when the caller already knows it.
+    ///
+    /// `None` derives it from the region, which rounds twice and so lands
+    /// within a pixel of — but not on — the scale a full-page render of the
+    /// same page used. A crop that has to be composited into an existing
+    /// frame passes that frame's own size here instead, because "within a
+    /// pixel" is a visible seam (§9.4).
+    #[serde(default)]
+    pub full_size: Option<(u32, u32)>,
+}
+
+/// Where a crop sits on the page, in the terms PDFium's renderer takes: the
+/// full page's size in bitmap pixels, and the origin offset that brings the
+/// crop's corner to the bitmap's.
+pub fn page_placement(
+    region: Region,
+    width: u32,
+    height: u32,
+    full_size: Option<(u32, u32)>,
+) -> (i32, i32, i32, i32) {
+    let (full_width, full_height) = match full_size {
+        Some((full_width, full_height)) if full_width > 0 && full_height > 0 => {
+            (full_width as i32, full_height as i32)
+        }
+        _ => (
+            (width as f32 / region.width).round() as i32,
+            (height as f32 / region.height).round() as i32,
+        ),
+    };
+    let start_x = -((region.x * full_width as f32).round() as i32);
+    let start_y = -((region.y * full_height as f32).round() as i32);
+    (start_x, start_y, full_width, full_height)
 }
 
 impl RenderRequest {
@@ -331,6 +363,7 @@ mod tests {
             region: Region::FULL,
             width: 1920,
             height: 1080,
+            full_size: None,
             with_annotations: false,
         };
         assert!(base.validate().is_ok());
@@ -401,6 +434,7 @@ mod tests {
             region: Region::FULL,
             width: 3840,
             height: 2160,
+            full_size: None,
             with_annotations: false,
         };
         assert_eq!(request.rgba_bytes(), 33_177_600);

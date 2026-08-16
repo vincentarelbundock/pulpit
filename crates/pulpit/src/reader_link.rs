@@ -118,6 +118,13 @@ pub enum Ask {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
+        /// The full-page frame the crop is going to be composited into. Sent
+        /// rather than left to the worker to reconstruct from the region: the
+        /// two roundings disagree by up to a pixel, and a patch drawn at a
+        /// scale the frame beneath it was not drawn at shimmers as the
+        /// rectangle grows with each keystroke (§9.4).
+        frame_width: u32,
+        frame_height: u32,
         expected_revision: DocumentRevision,
     },
 }
@@ -353,6 +360,8 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             region,
             width,
             height,
+            frame_width,
+            frame_height,
             expected_revision,
         } => vec![match session.request(DocumentRequest::Render(
             pulpit_render::document::protocol::DocumentRenderRequest {
@@ -361,6 +370,8 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 height,
                 expected_revision,
                 region,
+                full_width: frame_width,
+                full_height: frame_height,
             },
         )) {
             Ok(DocumentResponse::Frame(frame)) => Told::Patched(frame),

@@ -446,6 +446,7 @@ impl<'a> PdfiumDocument<'a> {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
+        full_size: Option<(u32, u32)>,
         rgba: &mut [u8],
     ) -> Result<()> {
         let Some(form) = self.form_handle() else {
@@ -471,14 +472,13 @@ impl<'a> PdfiumDocument<'a> {
             .filter(|(open, _)| *open == page.get())
             .map(|(_, handle)| handle);
 
-        // The page is drawn at whatever size makes the crop come out at
-        // `width` × `height`, and then shifted so the crop's corner lands on
-        // the bitmap's. The same arithmetic the page render does, because the
-        // two passes have to agree to the pixel.
-        let full_width = (width as f32 / region.width).round() as i32;
-        let full_height = (height as f32 / region.height).round() as i32;
-        let start_x = -((region.x * full_width as f32).round() as i32);
-        let start_y = -((region.y * full_height as f32).round() as i32);
+        // The page is drawn at `full_size`, or at whatever size makes the crop
+        // come out at `width` × `height` when the caller named none, and then
+        // shifted so the crop's corner lands on the bitmap's. The same
+        // placement the page render used, because the two passes have to agree
+        // to the pixel.
+        let (start_x, start_y, full_width, full_height) =
+            crate::pdf::page_placement(region, width, height, full_size);
 
         let mut draw = |handle: FPDF_PAGE| -> crate::pdf::Result<()> {
             {
@@ -3329,6 +3329,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
+        full_size: Option<(u32, u32)>,
         rgba: &mut [u8],
     ) -> Result<()> {
         let request = crate::pdf::RenderRequest {
@@ -3337,6 +3338,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             region,
             width,
             height,
+            full_size,
             with_annotations: true,
         };
         request.validate().map_err(to_document_error)?;
@@ -3344,7 +3346,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             .map_err(to_document_error)?;
         // Live field contents are drawn over the crop, not over the page, so
         // the pass has to know which part of the page it is looking at.
-        self.composite_form_fields(page, region, width, height, rgba)
+        self.composite_form_fields(page, region, width, height, full_size, rgba)
     }
 }
 

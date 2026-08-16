@@ -98,7 +98,13 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
                 .map(DocumentResponse::PageGeometries)
         }
         DocumentRequest::Render(render) => document
-            .render_page(render.page, render.region, render.width, render.height)
+            .render_page(
+                render.page,
+                render.region,
+                render.width,
+                render.height,
+                render.full_size(),
+            )
             .map(|pixels| {
                 DocumentResponse::Frame(Box::new(DocumentFrame {
                     page: render.page,

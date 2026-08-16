@@ -902,6 +902,7 @@ impl PdfBackend for PdfiumBackend {
                 request.width,
                 request.height,
                 request.region,
+                request.full_size,
                 request.with_annotations,
                 cancel,
             )?;
@@ -921,6 +922,7 @@ impl PdfBackend for PdfiumBackend {
                     request.width,
                     request.height,
                     request.region,
+                    request.full_size,
                 );
             }
             Ok(())
@@ -1391,18 +1393,17 @@ fn composite_form_fields(
     width: u32,
     height: u32,
     region: Region,
+    full_size: Option<(u32, u32)>,
 ) {
     if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
         return;
     }
-    // The same arithmetic the page render used, because the two passes have to
+    // The same placement the page render used, because the two passes have to
     // agree to the pixel: the page is drawn at whatever size brings the crop
     // out at `width` × `height`, then shifted so the crop's corner lands on the
     // bitmap's origin.
-    let full_width = (width as f32 / region.width).round() as i32;
-    let full_height = (height as f32 / region.height).round() as i32;
-    let start_x = -((region.x * full_width as f32).round() as i32);
-    let start_y = -((region.y * full_height as f32).round() as i32);
+    let (start_x, start_y, full_width, full_height) =
+        crate::pdf::page_placement(region, width, height, full_size);
 
     // PDFium will not draw fields into a page it has not been told about.
     unsafe { bindings.FORM_OnAfterLoadPage(page, form) };
@@ -1452,6 +1453,7 @@ fn render_page_progressively(
     width: u32,
     height: u32,
     region: Region,
+    full_size: Option<(u32, u32)>,
     with_annotations: bool,
     cancel: &dyn CancelSignal,
 ) -> Result<()> {
@@ -1475,10 +1477,8 @@ fn render_page_progressively(
 
     // Full-page size in bitmap pixels, and the offset that brings the wanted
     // region to the bitmap origin.
-    let full_width = (width as f32 / region.width).round() as i32;
-    let full_height = (height as f32 / region.height).round() as i32;
-    let start_x = -((region.x * full_width as f32).round() as i32);
-    let start_y = -((region.y * full_height as f32).round() as i32);
+    let (start_x, start_y, full_width, full_height) =
+        crate::pdf::page_placement(region, width, height, full_size);
 
     let mut state = PauseState {
         pause: IFSDK_PAUSE {
@@ -1630,6 +1630,7 @@ mod tests {
                     region: Region::FULL,
                     width: 400,
                     height: 300,
+                    full_size: None,
                     with_annotations: false,
                 },
                 &crate::pdf::NeverCancel,
