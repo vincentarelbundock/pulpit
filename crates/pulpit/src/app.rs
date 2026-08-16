@@ -3754,6 +3754,23 @@ impl App {
                     let kind = self.reader_pending.pop_front().unwrap_or(AppliedKind::Edit);
                     self.reader.applied(&applied, kind);
                 }
+                crate::reader_link::Told::Selection { result, finalising } => {
+                    if let Some(transaction) =
+                        self.reader
+                            .selection_resolved(result.quads, result.text, finalising)
+                    {
+                        self.commit_to_document(transaction);
+                    } else if finalising {
+                        // A selection that resolved to nothing commits nothing
+                        // and says why, rather than leaving the reader to
+                        // wonder whether the highlighter is broken (§8.2).
+                        self.notify(
+                            "There is no selectable text there, so there is nothing to \
+                             highlight."
+                                .to_string(),
+                        );
+                    }
+                }
                 crate::reader_link::Told::Saved(saved) => {
                     self.notify(format!("Saved {}", saved.path.display()));
                 }
@@ -3881,6 +3898,20 @@ impl App {
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
             ReadCommand::PageCursor { page, x, y } => {
                 self.reader.pointer_moved(*page, *x, *y);
+                // A drag with the highlighter is a *text* selection, and only
+                // the engine knows where the text is. The query is read-only
+                // and never moves the revision (§6.3); the UI draws whatever
+                // came back last, which is why re-querying as the drag moves
+                // is a redraw rather than a mutation.
+                if let Some((page, selection)) = self.reader.pending_selection() {
+                    if let Some(link) = self.reader_link.as_mut() {
+                        link.ask(crate::reader_link::Ask::SelectText {
+                            page,
+                            selection,
+                            finalising: false,
+                        });
+                    }
+                }
                 Task::none()
             }
             ReadCommand::PagePressed => {
@@ -3892,8 +3923,24 @@ impl App {
             ReadCommand::PageReleased => {
                 // One gesture, one transaction, one revision, one undo entry
                 // (§9.1) — however many marks an eraser sweep took.
-                if let Some(transaction) = self.reader.pointer_released() {
-                    self.commit_to_document(transaction);
+                match self.reader.pointer_released() {
+                    crate::reader::Released::Commit(transaction) => {
+                        self.commit_to_document(transaction);
+                    }
+                    crate::reader::Released::AwaitingSelection { page, selection } => {
+                        // The quads the UI is drawing may be one query behind,
+                        // and `/QuadPoints` has to describe the text that was
+                        // actually selected (§7.2). So the release asks once
+                        // more and the answer is what commits.
+                        if let Some(link) = self.reader_link.as_mut() {
+                            link.ask(crate::reader_link::Ask::SelectText {
+                                page,
+                                selection,
+                                finalising: true,
+                            });
+                        }
+                    }
+                    crate::reader::Released::Nothing => {}
                 }
                 Task::none()
             }

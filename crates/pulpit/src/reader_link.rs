@@ -49,6 +49,15 @@ pub enum Ask {
         pages: usize,
     },
     Render(DocumentRenderRequest),
+    /// Resolve a text selection. Read-only: it never moves the revision
+    /// (§6.3). `finalising` marks the query a release is waiting on, so the
+    /// answer that commits a highlight is told apart from the ones that only
+    /// keep the live selection drawn.
+    SelectText {
+        page: pulpit_core::page::PageIndex,
+        selection: pulpit_render::document::TextSelection,
+        finalising: bool,
+    },
     Apply {
         expected_revision: DocumentRevision,
         transaction: DocumentTransaction,
@@ -74,6 +83,10 @@ pub enum Told {
         fields: Vec<pulpit_render::document::FormField>,
     },
     Frame(Box<DocumentFrame>),
+    Selection {
+        result: pulpit_render::document::TextSelectionResult,
+        finalising: bool,
+    },
     Applied(Box<Applied>),
     Saved(pulpit_render::document::SavedDocument),
     /// Something was refused, or the worker went. `fatal` is the difference
@@ -211,6 +224,16 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             Ok(DocumentResponse::Frame(frame)) => Told::Frame(frame),
             other => unexpected(other, "a frame"),
         }],
+        Ask::SelectText {
+            page,
+            selection,
+            finalising,
+        } => vec![
+            match session.request(DocumentRequest::SelectText { page, selection }) {
+                Ok(DocumentResponse::Selection(result)) => Told::Selection { result, finalising },
+                other => unexpected(other, "a text selection"),
+            },
+        ],
         Ask::Apply {
             expected_revision,
             transaction,

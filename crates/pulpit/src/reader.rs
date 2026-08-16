@@ -16,11 +16,28 @@ use pulpit_core::annotation::AnnotationTool;
 use pulpit_core::page::{PageGeometry, PageIndex, PagePoint};
 use pulpit_render::document::{
     CompatibilityLevel, DocumentRevision, DocumentTransaction, DocumentWarning, FormField,
+    TextSelection,
 };
 
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
 use crate::widgets::document::model::{Column, ReaderControls, Zoom};
 use crate::widgets::event::ReadCommand;
+
+/// What a pointer release produced.
+#[derive(Debug)]
+pub enum Released {
+    /// Nothing worth committing: a press that went nowhere, an eraser sweep
+    /// that touched no mark, a drag that returned to where it started.
+    Nothing,
+    /// One atomic user action, ready to send.
+    Commit(DocumentTransaction),
+    /// A text selection the engine has to resolve before it can be committed.
+    /// The answer arrives through [`ReaderSession::selection_resolved`].
+    AwaitingSelection {
+        page: PageIndex,
+        selection: TextSelection,
+    },
+}
 
 /// Which stack an applied transaction's undo operation belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +104,9 @@ pub struct ReaderSession {
     /// Where the pointer last was, on which page. Transient, and never
     /// snapshotted (§3.2).
     cursor: Option<(PageIndex, PagePoint)>,
+    /// True between a release that needed a selection resolved and the answer
+    /// that resolved it.
+    awaiting_selection: bool,
     /// Does the document carry an AcroForm at all?
     ///
     /// Separate from whether any fields were listed, because the two differ
@@ -223,13 +243,69 @@ impl ReaderSession {
         self.interaction.begin(page, at)
     }
 
+    /// What the open gesture wants the engine to resolve, if anything.
+    ///
+    /// Only the highlighter has one: it selects *text*, and only the engine
+    /// knows where the text is. The query is read-only and never moves the
+    /// revision (§6.3).
+    pub fn pending_selection(&self) -> Option<(PageIndex, TextSelection)> {
+        let (page, anchor, head) = self.interaction.pending_selection()?;
+        Some((page, TextSelection::Range { anchor, head }))
+    }
+
+    /// The engine answered a selection query.
+    ///
+    /// Returns the transaction to commit when the answer was the one the
+    /// release was waiting for — the release cannot commit on its own, because
+    /// the quads it needs may still have been in flight when the pointer came
+    /// up (§8.2).
+    pub fn selection_resolved(
+        &mut self,
+        quads: Vec<pulpit_core::page::PageQuad>,
+        text: String,
+        finalising: bool,
+    ) -> Option<DocumentTransaction> {
+        self.interaction.set_selection_result(quads, text);
+        if !finalising {
+            return None;
+        }
+        self.awaiting_selection = false;
+        self.finish_gesture()
+    }
+
+    /// Is a release waiting on a selection answer? While it is, the toolbar
+    /// must not treat the gesture as finished.
+    pub fn is_awaiting_selection(&self) -> bool {
+        self.awaiting_selection
+    }
+
     /// The pointer came up. Returns the one atomic action it produced, if any.
     ///
     /// Nothing is applied here: the transaction goes to the worker, and the
     /// mark appears when a frame carrying it arrives (A1, A7). A gesture that
     /// resolved to nothing — a selection with no text under it, an eraser
     /// sweep that touched nothing — returns `None` and is not an error.
-    pub fn pointer_released(&mut self) -> Option<DocumentTransaction> {
+    pub fn pointer_released(&mut self) -> Released {
+        if self.interaction.gesture().is_none() {
+            return Released::Nothing;
+        }
+        // A text selection cannot be committed from what the UI happens to
+        // hold: the quads it is drawing may be from a query one movement
+        // behind, and `/QuadPoints` has to describe the text that was actually
+        // selected (§7.2). So the release asks once more and commits on that
+        // answer.
+        if let Some((page, selection)) = self.pending_selection() {
+            self.awaiting_selection = true;
+            return Released::AwaitingSelection { page, selection };
+        }
+        match self.finish_gesture() {
+            Some(transaction) => Released::Commit(transaction),
+            None => Released::Nothing,
+        }
+    }
+
+    /// Close the open gesture and turn it into a transaction, if it made one.
+    fn finish_gesture(&mut self) -> Option<DocumentTransaction> {
         let page = self.interaction.gesture()?.page();
         let geometry = self.pages.get(page.get()).copied()?;
         let outcome = self.interaction.finish(&geometry);
@@ -854,7 +930,9 @@ mod tests {
         for step in 1..20 {
             session.pointer_moved(PageIndex(1), 100.0 + step as f32 * 6.0, 100.0 + step as f32);
         }
-        let transaction = session.pointer_released().expect("a stroke commits");
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("a stroke commits")
+        };
         assert_eq!(transaction.len(), 1, "one gesture is one undo entry");
         assert!(!session.is_drawing());
         assert_eq!(transaction.label(), "Add Ink");
@@ -868,7 +946,7 @@ mod tests {
             !session.pointer_pressed(),
             "an unarmed press must reach the page's own links and fields"
         );
-        assert!(session.pointer_released().is_none());
+        assert!(matches!(session.pointer_released(), Released::Nothing));
     }
 
     #[test]
@@ -880,7 +958,7 @@ mod tests {
         session.pointer_moved(PageIndex(0), 150.0, 90.0);
         session.pointer_cancelled();
         assert!(!session.is_drawing());
-        assert!(session.pointer_released().is_none());
+        assert!(matches!(session.pointer_released(), Released::Nothing));
     }
 
     #[test]
@@ -892,7 +970,7 @@ mod tests {
         session.pointer_moved(PageIndex(0), 150.0, 90.0);
         session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
         assert!(!session.is_drawing());
-        assert!(session.pointer_released().is_none());
+        assert!(matches!(session.pointer_released(), Released::Nothing));
     }
 
     #[test]
@@ -904,7 +982,86 @@ mod tests {
         session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
         session.pointer_moved(PageIndex(0), 90_000.0, 40.0);
         session.pointer_pressed();
-        assert!(session.pointer_released().is_none());
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+    }
+
+    #[test]
+    fn a_highlight_waits_for_the_engine_to_say_where_the_text_is() {
+        // §8.2: the release cannot commit from what the UI happens to hold —
+        // those quads may be one query behind — so it asks once more and the
+        // answer is what commits.
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Highlighter)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        assert!(session.pointer_pressed());
+        session.pointer_moved(PageIndex(0), 300.0, 100.0);
+
+        // While the drag is open the engine is asked where the text is.
+        let (page, _) = session.pending_selection().expect("a selection is open");
+        assert_eq!(page, PageIndex(0));
+
+        let Released::AwaitingSelection { .. } = session.pointer_released() else {
+            panic!("a highlight release waits for the engine")
+        };
+        assert!(session.is_awaiting_selection());
+
+        let quads = vec![pulpit_core::page::PageQuad::from_rect(
+            pulpit_core::page::PageRect::new(72.0, 92.0, 300.0, 108.0),
+        )];
+        let transaction = session
+            .selection_resolved(quads, "the marked words".into(), true)
+            .expect("the resolved selection commits");
+        assert_eq!(transaction.len(), 1);
+        assert_eq!(transaction.label(), "Add Highlight");
+        assert!(!session.is_awaiting_selection());
+    }
+
+    #[test]
+    fn a_selection_with_no_text_under_it_commits_nothing() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Highlighter)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 300.0, 100.0);
+        let Released::AwaitingSelection { .. } = session.pointer_released() else {
+            panic!("a highlight release waits")
+        };
+        assert!(session
+            .selection_resolved(Vec::new(), String::new(), true)
+            .is_none());
+        assert!(!session.is_awaiting_selection());
+        assert!(!session.is_drawing());
+    }
+
+    #[test]
+    fn a_selection_answer_mid_drag_only_updates_what_is_drawn() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Highlighter)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 100.0);
+        let quads = vec![pulpit_core::page::PageQuad::from_rect(
+            pulpit_core::page::PageRect::new(72.0, 92.0, 200.0, 108.0),
+        )];
+        assert!(
+            session
+                .selection_resolved(quads, "some".into(), false)
+                .is_none(),
+            "a query that is not the release's must not commit"
+        );
+        assert!(session.is_drawing(), "the drag is still open");
+    }
+
+    #[test]
+    fn only_the_highlighter_asks_the_engine_where_the_text_is() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        session.pointer_pressed();
+        assert!(
+            session.pending_selection().is_none(),
+            "ink selects no text and must not query for it"
+        );
     }
 
     #[test]

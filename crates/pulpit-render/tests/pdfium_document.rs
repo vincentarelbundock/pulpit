@@ -21,7 +21,8 @@ use pulpit_core::annotate::{
 use pulpit_core::page::{PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::{
-    AppliedEffect, DocumentCommand, DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions,
+    AppliedEffect, DocumentCommand, DocumentRevision, DocumentTransaction, PdfDocument,
+    SaveOptions, TextSelection,
 };
 use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
@@ -326,6 +327,85 @@ fn a_stale_revision_cannot_overwrite_a_later_change() {
         pulpit_render::document::DocumentError::RevisionConflict { .. }
     ));
     assert_eq!(document.annotations(PageIndex(0)).unwrap().len(), 1);
+}
+
+/// §7.2 and §8.2, against real text: the highlighter is a *text* tool, and its
+/// `/QuadPoints` have to describe the text that was actually selected.
+#[test]
+fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("selection");
+    let path = source(&directory);
+    let mut document = open(backend, &path);
+
+    // The synthetic page carries one run of 96-point text with its baseline at
+    // (300, 180) in user space, on a 720 × 405 page. In canonical space that
+    // is near x = 300, y = 405 − 180.
+    let geometry = document.page_geometry(PageIndex(0)).unwrap();
+    let at = geometry.from_user_space(320.0, 200.0);
+
+    let word = document
+        .select_text(PageIndex(0), TextSelection::Word { at })
+        .expect("the page has a text layer");
+    assert!(
+        !word.is_empty(),
+        "no text was found where the fixture writes some"
+    );
+    assert!(
+        !word.text.is_empty(),
+        "the selection came back with no text"
+    );
+    assert!(
+        word.quads.iter().all(|quad| !quad.is_degenerate()),
+        "a quad with no area marks nothing"
+    );
+
+    // The quads mark the text: their bounds sit around where it was drawn.
+    let bounds = word.quads[0].bounds();
+    assert!(
+        bounds.left > 250.0 && bounds.left < 400.0,
+        "the quad is not over the text: {bounds:?}"
+    );
+
+    // …and those quads are what a highlight is written from.
+    let applied = document
+        .apply(
+            DocumentRevision::INITIAL,
+            DocumentTransaction::from_annotations([AnnotationCommand::Create(
+                AnnotationDraft::Highlight(HighlightDraft {
+                    page: PageIndex(0),
+                    quads: word.quads.clone(),
+                    text: word.text.clone(),
+                    style: MarkStyle::highlighter(),
+                }),
+            )]),
+        )
+        .expect("the highlight commits");
+    assert_eq!(applied.document_revision, DocumentRevision(1));
+
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(
+        annotations[0].quads.len(),
+        word.quads.len(),
+        "the /QuadPoints that came back are not the ones that went in"
+    );
+    assert_eq!(
+        annotations[0].contents.text, word.text,
+        "the selected text is recoverable from /Contents"
+    );
+
+    // A point with no text under it is an empty answer, not an error (§6.3).
+    let empty = document
+        .select_text(
+            PageIndex(0),
+            TextSelection::Word {
+                at: PagePoint::new(10.0, 10.0),
+            },
+        )
+        .expect("an empty selection is not a failure");
+    assert!(empty.is_empty());
 }
 
 /// A7, and the reason document mode renders through the engine that holds the

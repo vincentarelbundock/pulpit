@@ -259,6 +259,20 @@ impl AnnotationInteraction {
         }
     }
 
+    /// What the open selection gesture is asking the engine to resolve.
+    ///
+    /// `None` unless a text selection is in progress. The UI draws the live
+    /// selection from the quads the engine returns and may re-query as the
+    /// drag moves; the query itself is read-only and mutates nothing (§8.2).
+    pub fn pending_selection(&self) -> Option<(PageIndex, PagePoint, PagePoint)> {
+        match &self.gesture {
+            Some(Gesture::Selecting {
+                page, anchor, head, ..
+            }) => Some((*page, *anchor, *head)),
+            _ => None,
+        }
+    }
+
     /// The engine answered a selection query for the open drag.
     pub fn set_selection_result(&mut self, quads: Vec<PageQuad>, text: String) {
         if let Some(Gesture::Selecting {
