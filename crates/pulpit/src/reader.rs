@@ -382,6 +382,14 @@ pub struct PlannedRender {
     pub region: pulpit_core::notes::Region,
 }
 
+/// Whether the document asks for this field and has nothing in it (§6.4).
+///
+/// Kept as a free function so the rule lives in one place and can be tested
+/// on a field alone, without a session around it.
+fn is_unfilled_required(field: &pulpit_render::document::FormField) -> bool {
+    field.required && field.is_editable() && field.value.is_empty() && field.selected.is_empty()
+}
+
 // A few readers of this state are the recovery path's, which §11 has yet to
 // write; the rest is live.
 #[allow(dead_code)]
@@ -497,6 +505,28 @@ impl ReaderSession {
                 )
             })
             .flatten()
+            .collect()
+    }
+
+    /// The fields the document marks required and that still hold nothing,
+    /// in file order (§6.4).
+    ///
+    /// The same question the navigator's rows ask, asked once for the whole
+    /// document: a choice field with several selections has no single value,
+    /// so "filled" asks both. A field nobody can fill — read-only, a
+    /// signature, a file picker — is left out, because a review that sends
+    /// the reader to a field they cannot type into is a dead end.
+    ///
+    /// Names as the file gives them, so the caller can jump to one. Never
+    /// enforcement: pulpit only ever writes copies.
+    pub fn unfilled_required_fields(&self) -> Vec<String> {
+        if !self.has_form {
+            return Vec::new();
+        }
+        self.fields
+            .iter()
+            .filter(|field| is_unfilled_required(field))
+            .map(|field| field.name.clone())
             .collect()
     }
 
@@ -3251,6 +3281,122 @@ mod tests {
     #[test]
     fn a_document_with_no_form_badges_nothing() {
         assert!(open(2).dead_fields_on(PageIndex(0)).is_empty());
+    }
+
+    /// A required field, filled or not, of whatever kind, for the review's
+    /// own question.
+    fn required_field(
+        name: &str,
+        kind: pulpit_render::document::FieldKind,
+        value: &str,
+        selected: Vec<u32>,
+        read_only: bool,
+        file_select: bool,
+    ) -> pulpit_render::document::FormField {
+        use pulpit_render::document::{FieldWidget, FormField};
+
+        FormField {
+            name: name.to_string(),
+            kind,
+            value: value.to_string(),
+            selected,
+            read_only,
+            required: true,
+            password: false,
+            file_select,
+            rich_text: false,
+            format: Default::default(),
+            options: Vec::new(),
+            allows_custom_value: false,
+            multiple_selection: false,
+            widgets: vec![FieldWidget {
+                page: PageIndex(0),
+                bounds: pulpit_core::page::PageRect::new(10.0, 10.0, 30.0, 20.0),
+                option: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_review_names_the_required_fields_holding_nothing() {
+        use pulpit_render::document::FieldKind;
+
+        let mut session = form(2);
+        session.set_fields(vec![
+            required_field("empty", FieldKind::Text, "", Vec::new(), false, false),
+            required_field("typed", FieldKind::Text, "Ada", Vec::new(), false, false),
+            // A choice field has no single value, so a selection counts as
+            // filled even with the value empty.
+            required_field("chosen", FieldKind::ListBox, "", vec![1], false, false),
+            required_field(
+                "nothing chosen",
+                FieldKind::ListBox,
+                "",
+                Vec::new(),
+                false,
+                false,
+            ),
+        ]);
+        assert_eq!(
+            session.unfilled_required_fields(),
+            vec!["empty".to_string(), "nothing chosen".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_review_leaves_out_what_nobody_could_fill() {
+        use pulpit_render::document::FieldKind;
+
+        let mut session = form(2);
+        session.set_fields(vec![
+            required_field("locked", FieldKind::Text, "", Vec::new(), true, false),
+            required_field("attachment", FieldKind::Text, "", Vec::new(), false, true),
+            required_field(
+                "sign here",
+                FieldKind::Signature,
+                "",
+                Vec::new(),
+                false,
+                false,
+            ),
+            required_field("open", FieldKind::Text, "", Vec::new(), false, false),
+        ]);
+        assert_eq!(
+            session.unfilled_required_fields(),
+            vec!["open".to_string()],
+            "a read-only, file or signature field is not something to send the reader to"
+        );
+    }
+
+    #[test]
+    fn a_field_the_document_does_not_ask_for_is_never_reviewed() {
+        use pulpit_render::document::FieldKind;
+
+        let mut session = form(2);
+        let mut optional =
+            required_field("optional", FieldKind::Text, "", Vec::new(), false, false);
+        optional.required = false;
+        session.set_fields(vec![optional]);
+        assert!(session.unfilled_required_fields().is_empty());
+    }
+
+    #[test]
+    fn a_document_with_no_form_reviews_nothing() {
+        use pulpit_render::document::FieldKind;
+
+        let mut session = open(2);
+        session.set_fields(vec![required_field(
+            "empty",
+            FieldKind::Text,
+            "",
+            Vec::new(),
+            false,
+            false,
+        )]);
+        assert!(
+            session.unfilled_required_fields().is_empty(),
+            "a document with no form has nothing to review, whatever is in the list"
+        );
     }
 
     #[test]

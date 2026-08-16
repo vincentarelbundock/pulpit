@@ -80,6 +80,10 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if let Some(request) = app.pending_form_goto.as_ref() {
         page = stack![page, form_navigation_dialog(request)].into();
     }
+    // What a save would leave empty, asked before the file is written.
+    if let Some(review) = app.pending_save_review.as_ref() {
+        page = stack![page, save_review_dialog(review)].into();
+    }
     // The alarm popup is a top-level overlay rather than something drawn
     // inside the clock's pane: a clock can be a narrow cell in a strip, and a
     // popup anchored there would be clipped by its own widget.
@@ -1945,6 +1949,50 @@ fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'stat
     // A press on the ground behind declines it: staying where you are is the
     // answer that changes nothing, so it is the safe one to make easy.
     panel(body, Some(Message::DeclineFormNavigation))
+}
+
+/// What a save would leave empty, before it is written (§6.4).
+///
+/// A decision and not a rule: "Save anyway" is a full answer, because the
+/// document names these fields required for its own submit button and pulpit
+/// only ever writes copies. It is asked here rather than reported afterwards
+/// because this is the last moment at which filling the field is still
+/// possible.
+fn save_review_dialog(review: &crate::app::SaveReview) -> Element<'static, Message> {
+    let mut body = column![
+        text("Save with required fields empty?").size(type_scale::TITLE),
+        text(review.headline()).size(type_scale::BODY),
+        text(review.listing()).size(type_scale::BODY),
+    ]
+    .spacing(gap::M);
+
+    let mut actions = row![button(text("Cancel").size(type_scale::LABEL))
+        .padding(gap::S)
+        .style(theme::ambient::tool_button)
+        .on_press(Message::CancelSaveReview),]
+    .spacing(gap::S);
+    // Only offered when there is somewhere to go: a field the producer left
+    // unnamed cannot be focused, and a button that does nothing is worse than
+    // no button.
+    if review.first_named().is_some() {
+        actions = actions.push(
+            button(text("Review").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press(Message::ReviewRequiredFields),
+        );
+    }
+    actions = actions.push(
+        button(text("Save anyway").size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(theme::ambient::alert_button)
+            .on_press(Message::SaveWithoutFilling),
+    );
+    body = body.push(actions);
+
+    // The ground behind declines the save: writing no file is the answer that
+    // changes nothing.
+    panel(body, Some(Message::CancelSaveReview))
 }
 
 /// The offer to recover an interrupted talk.
