@@ -98,7 +98,13 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
                 .map(DocumentResponse::PageGeometries)
         }
         DocumentRequest::Render(render) => document
-            .render_page(render.page, render.region, render.width, render.height)
+            .render_page(
+                render.page,
+                render.region,
+                render.width,
+                render.height,
+                render.full_size(),
+            )
             .map(|pixels| {
                 DocumentResponse::Frame(Box::new(DocumentFrame {
                     page: render.page,
@@ -150,9 +156,9 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
         // back the rectangles the engine invalidated. That is the whole point
         // — there is one implementation of what a keystroke does to a form
         // field, and it is the one that also generates the appearance.
-        DocumentRequest::FormEvent { page, event } => {
-            document.form_event(page, event).map(DocumentResponse::Form)
-        }
+        DocumentRequest::FormEvent { page, event } => document
+            .form_event(page, event)
+            .map(|result| DocumentResponse::Form(Box::new(result))),
         DocumentRequest::Open(_) | DocumentRequest::Close => {
             unreachable!("handled before dispatch")
         }

@@ -138,7 +138,12 @@ pub trait DocumentBackend: Send {
     }
 
     /// Write a field, returning the value the document actually took.
-    fn set_field(&mut self, name: &str, value: &str) -> Result<String>;
+    ///
+    /// `selected` names the target selection, by option index, for a choice
+    /// field that takes several — the one shape of value a string cannot
+    /// carry. Empty for everything else, and a backend may derive a single
+    /// selection from `value` when it is.
+    fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String>;
 
     fn field_value(&self, name: &str) -> Result<String>;
 
@@ -190,6 +195,10 @@ pub trait DocumentBackend: Send {
 
     /// Rasterise one page into `rgba`, which the caller has sized.
     ///
+    /// `full_size` is the full page's pixel size when the caller knows it, so
+    /// a crop lands on exactly the scale the frame it is composited into was
+    /// drawn at rather than one derived by rounding (§9.4).
+    ///
     /// Here rather than in the render worker pool because a frame has to
     /// contain the annotation that was just committed, and only the engine
     /// holding the mutated document can promise that (A7). A backend with no
@@ -201,6 +210,7 @@ pub trait DocumentBackend: Send {
         _region: pulpit_core::notes::Region,
         _width: u32,
         _height: u32,
+        _full_size: Option<(u32, u32)>,
         _rgba: &mut [u8],
     ) -> Result<()> {
         Err(DocumentError::Backend(
@@ -371,8 +381,8 @@ impl<'a> PdfDocument<'a> {
     ///
     /// Present so the trait's surface is reachable, and refused by the engine
     /// that has a form-fill environment (§8.6): values are typed on the page.
-    pub fn set_field(&mut self, name: &str, value: &str) -> Result<String> {
-        self.backend.set_field(name, value)
+    pub fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String> {
+        self.backend.set_field(name, value, selected)
     }
 
     /// Forward one raw input event to the form-fill environment (§8.6).
@@ -574,6 +584,7 @@ impl<'a> PdfDocument<'a> {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
+        full_size: Option<(u32, u32)>,
     ) -> Result<Vec<u8>> {
         self.check_page(page)?;
         if !region.is_valid() {
@@ -591,7 +602,7 @@ impl<'a> PdfDocument<'a> {
         }
         let mut rgba = vec![0u8; bytes as usize];
         self.backend
-            .render_page(page, region, width, height, &mut rgba)?;
+            .render_page(page, region, width, height, full_size, &mut rgba)?;
         Ok(rgba)
     }
 
@@ -692,14 +703,17 @@ impl<'a> PdfDocument<'a> {
                 })
             }
             DocumentCommand::SetField { name, value } => {
-                let previous = self.backend.field_value(name)?;
-                let taken = self.backend.set_field(name, value)?;
-                let widget = self
+                // The whole before-image, not only the value: a multi-select
+                // list box's state is its selection, and the string alone
+                // restores at most one of three choices.
+                let before = self
                     .backend
                     .fields()?
                     .into_iter()
                     .find(|field| field.name == *name)
-                    .and_then(|field| field.widgets.first().cloned());
+                    .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
+                let taken = self.backend.set_field(name, value, &[])?;
+                let widget = before.widgets.first().cloned();
                 Ok(Step {
                     page: widget.as_ref().map(|widget| widget.page),
                     region: widget.map(|widget| widget.bounds),
@@ -709,7 +723,8 @@ impl<'a> PdfDocument<'a> {
                     },
                     undo: UndoOperation::SetField {
                         name: name.clone(),
-                        value: previous,
+                        value: before.value,
+                        selected: before.selected,
                     },
                 })
             }
@@ -754,9 +769,18 @@ impl<'a> PdfDocument<'a> {
                     },
                 })
             }
-            UndoOperation::SetField { name, value } => {
-                let previous = self.backend.field_value(name)?;
-                let taken = self.backend.set_field(name, value)?;
+            UndoOperation::SetField {
+                name,
+                value,
+                selected,
+            } => {
+                let current = self
+                    .backend
+                    .fields()?
+                    .into_iter()
+                    .find(|field| field.name == *name)
+                    .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
+                let taken = self.backend.set_field(name, value, selected)?;
                 Ok(Step {
                     page: None,
                     region: None,
@@ -766,7 +790,8 @@ impl<'a> PdfDocument<'a> {
                     },
                     undo: UndoOperation::SetField {
                         name: name.clone(),
-                        value: previous,
+                        value: current.value,
+                        selected: current.selected,
                     },
                 })
             }

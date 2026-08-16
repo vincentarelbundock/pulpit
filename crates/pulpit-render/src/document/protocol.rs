@@ -20,7 +20,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 1;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 3;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,11 +240,19 @@ pub struct DocumentRenderRequest {
     /// page's size in pixels. A smaller region is the §9.4 partial repaint:
     /// the caller has a frame of the page already and needs only the rectangle
     /// an edit changed, so `width` × `height` is that rectangle's size and the
-    /// page is drawn at `width / region.width` across. Same renderer, same
+    /// page is drawn at `full_width` across. Same renderer, same
     /// document, same appearance — which is what §9.4 requires of a partial
     /// composite, and why this is a crop rather than a second way to draw.
     #[serde(default = "full_region")]
     pub region: pulpit_core::notes::Region,
+    /// The whole page's size in pixels, when the caller already has a frame of
+    /// it. Zero means "work it out from the region", which rounds and so lands
+    /// within a pixel of the frame's own scale instead of on it — a partial
+    /// repaint composited at that scale shows a seam (§9.4).
+    #[serde(default)]
+    pub full_width: u32,
+    #[serde(default)]
+    pub full_height: u32,
 }
 
 fn full_region() -> pulpit_core::notes::Region {
@@ -262,6 +270,11 @@ impl DocumentRenderRequest {
         u64::from(self.width) * u64::from(self.height) * 4
     }
 
+    /// The full page size to draw at, or `None` to derive it from the region.
+    pub fn full_size(&self) -> Option<(u32, u32)> {
+        (self.full_width > 0 && self.full_height > 0).then_some((self.full_width, self.full_height))
+    }
+
     pub fn validate(&self) -> Result<(), LimitExceeded> {
         if self.width == 0 || self.height == 0 {
             return Err(LimitExceeded {
@@ -274,6 +287,19 @@ impl DocumentRenderRequest {
                 what: "render dimensions",
                 limit: Self::MAX_DIMENSION as usize,
             });
+        }
+        // A page smaller than the crop taken out of it is not a page.
+        if let Some((full_width, full_height)) = self.full_size() {
+            if full_width < self.width
+                || full_height < self.height
+                || full_width > Self::MAX_DIMENSION
+                || full_height > Self::MAX_DIMENSION
+            {
+                return Err(LimitExceeded {
+                    what: "a full page size that does not contain the region",
+                    limit: Self::MAX_DIMENSION as usize,
+                });
+            }
         }
         Ok(())
     }
@@ -382,8 +408,9 @@ pub struct FormEventResult {
 pub struct FocusedDate {
     pub field: String,
     /// The Acrobat pattern the field's own format script names — `dd mmmm
-    /// yyyy`. Empty when the script used a numbered preset, which names no
-    /// pattern anyone could render.
+    /// yyyy`. A numbered preset — `AFDate_Format(2)` — arrives translated
+    /// through Acrobat's fixed preset table; empty only for a preset that
+    /// table does not know.
     pub pattern: String,
     pub page: PageIndex,
     /// Where the widget is, in canonical page space (A4), so the caller can
@@ -462,6 +489,14 @@ pub struct CommittedField {
     /// the event was dispatched, because afterwards the old value is gone.
     pub previous: String,
     pub revision: DocumentRevision,
+    /// Which options are chosen now, by index, for a choice field. Empty for
+    /// every other kind. (No `serde` attribute for the reason given on
+    /// [`FormEventResult::requests`]: bincode is positional.)
+    pub selected: Vec<u32>,
+    /// Which options were chosen before this commit — the selection half of
+    /// `previous`, and the only faithful before-image a multi-select list box
+    /// has: three selections cannot be named by one string.
+    pub previous_selected: Vec<u32>,
 }
 
 /// What the worker answers.
@@ -481,7 +516,7 @@ pub enum DocumentResponse {
     Found(HitChunk),
     Fields(Vec<FormField>),
     Outline(pulpit_core::navigation::Outline),
-    Form(FormEventResult),
+    Form(Box<FormEventResult>),
     Applied(Box<Applied>),
     Saved(SavedDocument),
     Closed,
@@ -738,6 +773,52 @@ mod tests {
     }
 
     #[test]
+    fn a_patch_carries_the_frame_it_is_to_be_composited_into() {
+        let patch = DocumentRenderRequest {
+            page: PageIndex(0),
+            width: 100,
+            height: 50,
+            expected_revision: DocumentRevision::INITIAL,
+            region: pulpit_core::notes::Region::new(0.25, 0.5, 0.25, 0.25),
+            full_width: 401,
+            full_height: 201,
+        };
+        assert!(patch.validate().is_ok());
+        // The size the caller gave, not the one the region rounds to: 100/0.25
+        // is 400, and a patch drawn on that page is a pixel off the frame.
+        assert_eq!(patch.full_size(), Some((401, 201)));
+
+        // A whole-page render says nothing and is drawn at its own size.
+        let full = DocumentRenderRequest {
+            region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
+            ..patch
+        };
+        assert_eq!(full.full_size(), None);
+        assert!(full.validate().is_ok());
+
+        // A page smaller than the crop taken out of it is not a page.
+        assert!(DocumentRenderRequest {
+            full_width: 10,
+            ..patch
+        }
+        .validate()
+        .is_err());
+
+        // Absent on the wire — an older peer's request — reads as "derive it".
+        let wire = serde_json::to_string(&patch).expect("the request serialises");
+        assert_eq!(
+            serde_json::from_str::<DocumentRenderRequest>(&wire).unwrap(),
+            patch
+        );
+        let older: DocumentRenderRequest =
+            serde_json::from_str(r#"{"page":0,"width":100,"height":50,"expected_revision":0}"#)
+                .expect("a request without the fields still parses");
+        assert_eq!(older.full_size(), None);
+    }
+
+    #[test]
     fn an_over_long_password_is_refused_rather_than_sent() {
         let request = DocumentRequest::Open(OpenDocument {
             path: "/tmp/x.pdf".into(),
@@ -772,6 +853,10 @@ mod tests {
                 options: Vec::new(),
                 allows_custom_value: true,
                 multiple_selection: false,
+                required: false,
+                password: false,
+                file_select: false,
+                rich_text: false,
                 selected: Vec::new(),
                 widgets: Vec::new(),
             };
@@ -836,13 +921,15 @@ mod tests {
             request
         );
 
-        let answer = DocumentResponse::Form(FormEventResult {
+        let answer = DocumentResponse::Form(Box::new(FormEventResult {
             invalidated: vec![PageRect::new(0.0, 0.0, 10.0, 10.0)],
             committed: Some(CommittedField {
                 name: "name".into(),
                 value: "Ada".into(),
                 previous: String::new(),
                 revision: DocumentRevision(4),
+                selected: Vec::new(),
+                previous_selected: Vec::new(),
             }),
             requests: vec![HostRequest::Alert {
                 message: "filled".into(),
@@ -852,7 +939,7 @@ mod tests {
             focused_choice: None,
             focused_hint: None,
             focused_date: None,
-        });
+        }));
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
@@ -865,6 +952,6 @@ mod tests {
         let result = FormEventResult::default();
         assert!(result.invalidated.is_empty());
         assert!(result.committed.is_none());
-        assert!(DocumentResponse::Form(result).validate().is_ok());
+        assert!(DocumentResponse::Form(Box::new(result)).validate().is_ok());
     }
 }

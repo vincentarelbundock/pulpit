@@ -567,6 +567,7 @@ impl ReaderSession {
             operations: vec![UndoOperation::SetField {
                 name: committed.name.clone(),
                 value: committed.previous.clone(),
+                selected: committed.previous_selected.clone(),
             }],
             restores,
             label: format!("Fill {}", committed.name),
@@ -3723,6 +3724,8 @@ mod tests {
             value: value.into(),
             previous: previous.into(),
             revision: DocumentRevision(4),
+            selected: Vec::new(),
+            previous_selected: Vec::new(),
         }
     }
 
@@ -3758,6 +3761,7 @@ mod tests {
                 // Back to what was there before, which for a first fill is
                 // an empty field rather than the value just typed.
                 value: String::new(),
+                selected: Vec::new(),
             }]
         );
         assert_eq!(

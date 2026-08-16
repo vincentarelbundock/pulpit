@@ -437,6 +437,27 @@ struct ReaderPatch {
     frame_height: u32,
     pixels: Vec<u8>,
     revision: pulpit_render::document::DocumentRevision,
+    /// True when the pixels show form-field state PDFium holds *uncommitted* —
+    /// typing in progress, a value not yet under `/V`. No snapshot contains
+    /// that state, so a full frame at the same revision must not take this
+    /// patch down: the frame was drawn without the typed characters, and
+    /// removing the patch makes them vanish until the next keystroke.
+    uncommitted: bool,
+}
+
+/// A patch the worker has been asked for and not yet answered.
+#[derive(Clone, Copy)]
+struct PendingReaderPatch {
+    /// The full-page frame size the answer is to be composited into.
+    frame_width: u32,
+    frame_height: u32,
+    /// Whether *this* request covers uncommitted form state.
+    ///
+    /// Per request, not per page: a keystroke and the commit that follows it
+    /// are both in flight at once, and labelling the keystroke's answer with
+    /// what the commit asked for either blinks the typed text away at the
+    /// next full frame or pins a committed rectangle over the page for ever.
+    uncommitted: bool,
 }
 
 /// Where the reader's pages are rendered from.
@@ -561,9 +582,22 @@ pub struct App {
     /// one per page. Dropped when a full frame containing the same revision
     /// arrives, which is the same rule the retained previews follow.
     reader_patches: std::collections::HashMap<pulpit_core::page::PageIndex, ReaderPatch>,
-    /// The full-page frame size each in-flight patch was asked for, so the
-    /// answer can be matched to the frame it was meant to fit.
-    reader_patch_pending: std::collections::HashMap<pulpit_core::page::PageIndex, (u32, u32)>,
+    /// What each in-flight patch was asked for, oldest first, so the answer
+    /// can be matched to the frame and the form state *its own* request meant.
+    /// One link, answered in order, so the queue is the order they land in.
+    reader_patch_pending: std::collections::HashMap<
+        pulpit_core::page::PageIndex,
+        std::collections::VecDeque<PendingReaderPatch>,
+    >,
+    /// Everything patched on a page since its frame last caught up, in page
+    /// points. One patch per page means each new patch *replaces* the last, so
+    /// it has to keep covering what earlier ones covered: PDFium draws a combo
+    /// box's open list into the page, a hover then invalidates only the two
+    /// rows that changed, and a patch of just those rows would take the rest
+    /// of the list back to a frame that never had it — the popup visibly
+    /// breaking apart and reassembling as the pointer moves.
+    reader_patch_scope:
+        std::collections::HashMap<pulpit_core::page::PageIndex, pulpit_core::page::PageRect>,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -1087,6 +1121,7 @@ impl App {
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             reader_patches: std::collections::HashMap::new(),
             reader_patch_pending: std::collections::HashMap::new(),
+            reader_patch_scope: std::collections::HashMap::new(),
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -4048,12 +4083,15 @@ impl App {
                             // repaint was standing in for (§9.4): once one
                             // contains the patch's revision, the patch is a
                             // second copy of pixels the frame already has.
-                            if self
-                                .reader_patches
-                                .get(&page)
-                                .is_some_and(|patch| patch.revision <= snapshot.revision)
-                            {
+                            // …unless the patch shows *uncommitted* typing,
+                            // which no snapshot contains: taking it down here
+                            // made half-typed values blink out whenever a
+                            // deferred frame landed behind them.
+                            if self.reader_patches.get(&page).is_some_and(|patch| {
+                                patch.revision <= snapshot.revision && !patch.uncommitted
+                            }) {
                                 self.reader_patches.remove(&page);
+                                self.reader_patch_scope.remove(&page);
                                 self.wash_cache.borrow_mut().clear();
                             }
                         }
@@ -4392,6 +4430,7 @@ impl App {
                     // now, and a repaint of page three of the last one is not
                     // a repaint of anything.
                     self.reader_patches.clear();
+                    self.reader_patch_scope.clear();
                     self.reader_patch_pending.clear();
                     self.wash_cache.borrow_mut().clear();
                     self.reader
@@ -4563,8 +4602,25 @@ impl App {
                 crate::reader_link::Told::Patched(frame) => {
                     self.reader_patch_landed(*frame);
                 }
-                crate::reader_link::Told::Saved(saved) => {
+                crate::reader_link::Told::Saved {
+                    saved,
+                    unfilled_required,
+                } => {
                     self.notify(format!("Saved {}", saved.path.display()));
+                    // Said once, at the moment the copy exists, and never
+                    // enforced: the document names these fields required for
+                    // *its* submit button, and pulpit only writes copies.
+                    if !unfilled_required.is_empty() {
+                        self.notify(format!(
+                            "The form marks {} required and still empty: {}",
+                            if unfilled_required.len() == 1 {
+                                "this field"
+                            } else {
+                                "these fields"
+                            },
+                            unfilled_required.join(", ")
+                        ));
+                    }
                     // The copy just written is the same document with more in
                     // it, and it hashes differently, so it would open as a
                     // stranger. Give it whatever this file was remembered as
@@ -4942,7 +4998,7 @@ impl App {
         let [page] = applied.dirty_pages[..] else {
             return;
         };
-        self.ask_patch_of(page, dirty, applied.document_revision);
+        self.ask_patch_of(page, dirty, applied.document_revision, false);
     }
 
     /// Ask for one rectangle of one page, at the revision it should contain.
@@ -4952,11 +5008,17 @@ impl App {
     /// typed into (§9.4). A keystroke reaches here through the same path a
     /// stroke does, because it is the same problem — the picture on screen was
     /// drawn from a snapshot that predates the edit.
+    ///
+    /// `uncommitted` says the rectangle shows form state PDFium has not yet
+    /// committed into the document, which no snapshot can contain — the patch
+    /// then outlives full frames at the same revision instead of being taken
+    /// down by one that was drawn without the typed characters.
     fn ask_patch_of(
         &mut self,
         page: pulpit_core::page::PageIndex,
         dirty: pulpit_core::page::PageRect,
         revision: pulpit_render::document::DocumentRevision,
+        uncommitted: bool,
     ) {
         let Some((surface_width, _)) = self.page_surface_size() else {
             return;
@@ -4970,6 +5032,21 @@ impl App {
         if geometry.width <= 0.0 || geometry.height <= 0.0 {
             return;
         }
+        // Cover everything patched since the frame last caught up, not only
+        // what this event dirtied. The next patch will *replace* the one on
+        // screen, and a combo box's open list — drawn into the page by PDFium,
+        // then invalidated two rows at a time as the pointer moves — must not
+        // be narrowed back down to two rows of popup over a frame that has no
+        // popup at all. The scope resets when a full frame takes the page's
+        // patch down.
+        let dirty = match self.reader_patch_scope.entry(page) {
+            std::collections::hash_map::Entry::Occupied(mut scope) => {
+                let grown = scope.get().union(&dirty);
+                scope.insert(grown);
+                grown
+            }
+            std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
+        };
         // A margin, in page points, so the edge of a mark's antialiasing is
         // inside the patch rather than split down the middle of a pixel by it.
         const MARGIN: f32 = 2.0;
@@ -4986,14 +5063,27 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
+        // One queued entry per request, because more than one is in flight at
+        // a time: a click is a pointer down and a pointer up, and typing then
+        // committing is a keystroke and a commit. Keeping only the newest
+        // would drop the earlier answer on arrival and label the earlier
+        // picture with the later request's meaning.
         self.reader_patch_pending
-            .insert(page, (key.width, key.height));
+            .entry(page)
+            .or_default()
+            .push_back(PendingReaderPatch {
+                frame_width: key.width,
+                frame_height: key.height,
+                uncommitted,
+            });
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::RenderPatch {
                 page,
                 region,
                 width,
                 height,
+                frame_width: key.width,
+                frame_height: key.height,
                 expected_revision: revision,
             });
         }
@@ -5272,17 +5362,38 @@ impl App {
             .copied()
             .reduce(|all, one| all.union(&one));
         if let Some(dirty) = dirty {
-            self.ask_patch_of(page, dirty, revision);
+            // A keystroke's pixels are uncommitted until the field commits:
+            // they live in PDFium's form environment and in no snapshot, so
+            // that patch must survive full frames at the same revision. Only
+            // that patch, though — a rollover the pointer drew is state a
+            // full frame reproduces exactly, and marking it uncommitted made
+            // it immortal, growing over the page with every pointer move. The
+            // rule: uncommitted means an interaction is *being held open* —
+            // a caret in a text field, or an open choice list.
+            let editing = result.text_focus || result.focused_choice.is_some();
+            self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
         }
     }
 
     /// A partial repaint arrived. It is held over the page's frame until a
     /// full frame containing the same revision replaces it.
     fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
-        let Some((frame_width, frame_height)) = self.reader_patch_pending.remove(&frame.page)
+        let Some(queue) = self.reader_patch_pending.get_mut(&frame.page) else {
+            return;
+        };
+        // The answers come back over one link in the order they were asked
+        // for, so the oldest request outstanding is the one this answers.
+        let Some(PendingReaderPatch {
+            frame_width,
+            frame_height,
+            uncommitted,
+        }) = queue.pop_front()
         else {
             return;
         };
+        if queue.is_empty() {
+            self.reader_patch_pending.remove(&frame.page);
+        }
         if !frame.is_consistent() {
             return;
         }
@@ -5304,6 +5415,7 @@ impl App {
                 frame_height,
                 pixels: frame.pixels,
                 revision: frame.revision,
+                uncommitted,
             },
         );
     }

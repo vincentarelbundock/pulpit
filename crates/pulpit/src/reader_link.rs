@@ -118,6 +118,13 @@ pub enum Ask {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
+        /// The full-page frame the crop is going to be composited into. Sent
+        /// rather than left to the worker to reconstruct from the region: the
+        /// two roundings disagree by up to a pixel, and a patch drawn at a
+        /// scale the frame beneath it was not drawn at shimmers as the
+        /// rectangle grows with each keystroke (§9.4).
+        frame_width: u32,
+        frame_height: u32,
         expected_revision: DocumentRevision,
     },
 }
@@ -185,7 +192,14 @@ pub enum Told {
     /// over the page's frame until a full frame containing the same revision
     /// arrives (§9.2, §9.4).
     Patched(Box<pulpit_render::document::protocol::DocumentFrame>),
-    Saved(pulpit_render::document::SavedDocument),
+    Saved {
+        saved: pulpit_render::document::SavedDocument,
+        /// The required fields (`/Ff` bit 2) still holding nothing when the
+        /// copy was written. Told, never enforced: pulpit is not the form's
+        /// submit button, but a copy quietly missing what the document says it
+        /// needs is worth one sentence.
+        unfilled_required: Vec<String>,
+    },
     /// Something was refused, or the worker went. `fatal` is the difference
     /// that matters: a refusal is an answer and the session carries on; a lost
     /// worker means nothing more will be answered until the document is
@@ -346,6 +360,8 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             region,
             width,
             height,
+            frame_width,
+            frame_height,
             expected_revision,
         } => vec![match session.request(DocumentRequest::Render(
             pulpit_render::document::protocol::DocumentRenderRequest {
@@ -354,6 +370,8 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 height,
                 expected_revision,
                 region,
+                full_width: frame_width,
+                full_height: frame_height,
             },
         )) {
             Ok(DocumentResponse::Frame(frame)) => Told::Patched(frame),
@@ -407,10 +425,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
         }],
         Ask::FormEvent { page, event } => {
             match session.request(DocumentRequest::FormEvent { page, event }) {
-                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged {
-                    page,
-                    result: Box::new(result),
-                }],
+                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged { page, result }],
                 // A refused keystroke is not a lost worker and not a lost
                 // edit: the field simply did not take it. Reported at debug
                 // level rather than as a failure banner, because a document
@@ -457,7 +472,25 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 options,
             },
         )) {
-            Ok(DocumentResponse::Saved(saved)) => Told::Saved(saved),
+            Ok(DocumentResponse::Saved(saved)) => {
+                // What the document says it still needs, read after the write
+                // so the answer describes the copy that was actually made. A
+                // form that cannot be listed simply reports nothing missing.
+                let unfilled_required = match session.request(DocumentRequest::ListFields) {
+                    Ok(DocumentResponse::Fields(fields)) => fields
+                        .into_iter()
+                        .filter(|field| {
+                            field.required && field.value.is_empty() && field.selected.is_empty()
+                        })
+                        .map(|field| field.name)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Told::Saved {
+                    saved,
+                    unfilled_required,
+                }
+            }
             other => unexpected(other, "a saved document"),
         }],
     }

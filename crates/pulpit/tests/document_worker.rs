@@ -159,6 +159,8 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
             height: 260,
             expected_revision: DocumentRevision(1),
             region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
         }))
         .expect("the page renders")
     else {
@@ -479,6 +481,7 @@ fn a_filled_field_can_be_undone_and_redone_across_the_boundary() {
         operations: vec![UndoOperation::SetField {
             name: committed.name.clone(),
             value: committed.previous.clone(),
+            selected: committed.previous_selected.clone(),
         }],
         restores: DocumentRevision::INITIAL,
         label: format!("Fill {}", committed.name),

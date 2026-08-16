@@ -476,6 +476,7 @@ fn render_one(
             region: job.region,
             width: job.width,
             height: job.height,
+            full_size: None,
             with_annotations: job.with_annotations,
         };
         let mut pixels = vec![0u8; bytes as usize];
@@ -538,6 +539,7 @@ fn render_one(
         region: job.region,
         width: job.width,
         height: job.height,
+        full_size: None,
         // A presentation job leaves this off — the presenter's marks are a
         // transient overlay — and a reader page job turns it on, because
         // there the document's own annotations are the point.
