@@ -707,6 +707,14 @@ pub struct App {
     /// keyboard needs them to move a selection up and down the grid and to
     /// keep it on screen, so the view records them as it builds.
     pub overview_grid: std::cell::Cell<OverviewGrid>,
+    /// A slide the grid was asked to show before it knew its own shape.
+    ///
+    /// The shape is only known after the grid has laid itself out, so on the
+    /// first open there is nothing to scroll by yet and the request would be
+    /// dropped — leaving the presenter at page one of a deck they are in the
+    /// middle of. It is held here instead and honoured on the first tick
+    /// after the measurements arrive.
+    overview_reveal: Option<usize>,
     /// Every page as a small picture, on its own budget.
     pub thumbnails: crate::thumbnails::ThumbnailCache,
     /// Pages still wanting one, nearest the presenter first, each with the
@@ -1101,6 +1109,7 @@ impl App {
             overview_settling: None,
             overview_scroll: 0.0,
             overview_grid: std::cell::Cell::new(OverviewGrid::default()),
+            overview_reveal: None,
             thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnail_requests: std::collections::HashSet::new(),
@@ -1292,6 +1301,10 @@ impl App {
             // A scroll settles in about a tenth of a second; the settled tick
             // would miss the moment the grid stopped moving entirely.
             || self.overview_settling.is_some()
+            // A grid waiting to jump to the page it was opened on. The
+            // settled tick is far too slow for that: it would open at the
+            // top and hop, in full view of the presenter.
+            || self.overview_reveal.is_some()
             || self
                 .media_supervisor
                 .as_ref()
@@ -2217,6 +2230,8 @@ impl App {
                     };
                     return self.reveal_in_overview(slide);
                 }
+                // A grid that is closed has nowhere to scroll to.
+                self.overview_reveal = None;
                 Task::none()
             }
             Message::GoToFromOverview(slide) => {
@@ -3408,6 +3423,18 @@ impl App {
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
         //     Return would then jump back to a slide nobody can see.
+        // 1c-i. A reveal asked for before the grid knew its own shape. The
+        //       measurements arrive with the first view pass, so this is the
+        //       earliest the scroll can be worked out at all.
+        if self.overview
+            && self.overview_reveal.is_some()
+            && self.overview_grid.get().viewport_height > 0.0
+        {
+            if let Some(slide) = self.overview_reveal.take() {
+                tasks.push(self.reveal_in_overview(slide));
+            }
+        }
+
         if let Some(last) = self.overview_settling {
             if now.saturating_duration_since(last) >= OVERVIEW_SETTLE {
                 self.overview_settling = None;
@@ -6975,8 +7002,12 @@ impl App {
         self.overview_settling = None;
         let grid = self.overview_grid.get();
         if grid.row_height <= 0.0 || grid.viewport_height <= 0.0 {
+            // The grid has not been laid out yet, which is the ordinary case
+            // the first time it is opened. Remembered rather than dropped.
+            self.overview_reveal = Some(slide);
             return Task::none();
         }
+        self.overview_reveal = None;
         let row = (slide / grid.columns.max(1)) as f32;
         let top = row * grid.row_height;
         let bottom = top + grid.row_height;
