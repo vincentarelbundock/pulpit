@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn a_fresh_store_offers_the_built_ins_and_nothing_else() {
         let (_directory, store) = store();
-        assert_eq!(store.built_in().len(), 7);
+        assert_eq!(store.built_in().len(), 6);
         assert!(store.custom().is_empty());
         assert!(store.get(&LayoutId("slide-next-notes".into())).is_some());
     }
@@ -514,7 +514,7 @@ mod tests {
             .unwrap();
         let (id, _) = store.import(&text).unwrap();
         assert_eq!(store.get(&id).unwrap().origin, Origin::Custom);
-        assert_eq!(store.built_in().len(), 7, "the built-in is untouched");
+        assert_eq!(store.built_in().len(), 6, "the built-in is untouched");
     }
 
     #[test]

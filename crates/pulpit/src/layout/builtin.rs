@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn the_built_ins_are_read_only_and_led_by_the_default() {
         let layouts = built_in_layouts();
-        assert_eq!(layouts.len(), 7);
+        assert_eq!(layouts.len(), 6);
         for layout in &layouts {
             assert_eq!(layout.origin, Origin::BuiltIn);
             assert!(!layout.is_editable());

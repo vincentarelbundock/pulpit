@@ -103,7 +103,7 @@
                   "text_size": 0.025,
                   "pointer_radius": 0.012,
                   "spotlight_radius": 0.08,
-                  "audience_visible": false
+                  "audience_visible": true
                 }
               }
             },
