@@ -61,7 +61,13 @@ impl Content {
             | WidgetKind::CurrentSection
             | WidgetKind::AudienceScreenStatus
             | WidgetKind::ConnectionStatus => Content::Caption,
-            WidgetKind::Annotations => Content::Marks,
+            WidgetKind::Annotations | WidgetKind::AnnotationTools => Content::Marks,
+            // The reader.
+            WidgetKind::DocumentPage => Content::Slide,
+            WidgetKind::DocumentNav => Content::Buttons(2),
+            // A rail of bookmark titles and page numbers sketches as lines.
+            WidgetKind::DocumentOutline => Content::Lines(5),
+            WidgetKind::FormFields => Content::Lines(3),
         }
     }
 }

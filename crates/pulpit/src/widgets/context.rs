@@ -221,6 +221,73 @@ pub struct MediaData {
     pub transport: Option<crate::widgets::media::model::Transport>,
 }
 
+/// A page of the open document, ready to be drawn in the scrolled column.
+#[derive(Debug, Clone)]
+pub struct ReaderPage {
+    pub placed: crate::widgets::document::model::PlacedPage,
+    /// The most recent complete frame for this page at roughly this size, or
+    /// `None` while one is being rendered. A page with no frame yet draws its
+    /// sheet and nothing on it, rather than nothing at all: the column must
+    /// not jump when a frame arrives.
+    pub frame: Option<ImageHandle>,
+}
+
+/// One entry in the outline rail.
+#[derive(Debug, Clone)]
+pub struct OutlineRow {
+    pub title: String,
+    pub page: pulpit_core::page::PageIndex,
+    /// How deep in the bookmark tree, for the indent.
+    pub depth: usize,
+}
+
+/// The open document, as the reader's widgets need to see it.
+///
+/// Assembled by the application from the worker's answers; nothing here is a
+/// PDFium handle or an object number (A3), and every rectangle is canonical
+/// page geometry (A4).
+#[allow(dead_code)] // see `crate::reader::ReaderSession`
+pub struct ReaderData<'a> {
+    /// `None` when no document is open, which is a different thing from a
+    /// document with no pages.
+    pub open: bool,
+    pub page_count: usize,
+    /// Where every page sits in the scrolled column at the current zoom.
+    pub column: &'a crate::widgets::document::model::Column,
+    /// The pages currently in the window, with whatever frames exist.
+    pub visible: Vec<ReaderPage>,
+    pub controls: &'a crate::widgets::document::model::ReaderControls,
+    /// The resolved scale, so the zoom control can say "83%" for a fit.
+    pub scale: f32,
+    pub outline: &'a [OutlineRow],
+    pub fields: &'a [pulpit_render::document::FormField],
+    /// What pulpit can honour in this document, and what it cannot (§3.4).
+    pub level: pulpit_render::document::CompatibilityLevel,
+    pub warnings: &'a [pulpit_render::document::DocumentWarning],
+    /// Has anything been changed since the document was opened (§11.2)?
+    pub dirty: bool,
+    /// What has been typed into the page box, when the reader is typing in it.
+    pub page_entry: Option<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+impl ReaderData<'_> {
+    /// "12 / 40", or an em dash when nothing is open.
+    pub fn counter(&self) -> String {
+        if !self.open || self.page_count == 0 {
+            "—".to_string()
+        } else {
+            format!("{} / {}", self.controls.page.get() + 1, self.page_count)
+        }
+    }
+
+    /// Can the highlighter, the eraser and the rest do anything here?
+    pub fn annotatable(&self) -> bool {
+        self.open && self.level.allows_annotation()
+    }
+}
+
 /// The facets together, for the dispatcher to pick from.
 ///
 /// Only the layout renderer takes this whole thing. A family render function
@@ -239,6 +306,11 @@ pub struct Context<'a> {
     pub document: DocumentData<'a>,
     pub audience: AudienceData,
     pub media: MediaData,
+    /// The open document, for the reader's widgets. Present in every context
+    /// because a document layout and a presenter layout are the same layout
+    /// machinery (§2); a presenter layout simply has no reader widget to hand
+    /// it to.
+    pub reader: ReaderData<'a>,
 }
 
 #[cfg(test)]

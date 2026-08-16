@@ -42,6 +42,61 @@ pub enum WidgetEvent {
     Alarm(AlarmCommand),
     /// Something the presenter asked of the timer itself.
     Timer(TimerCommand),
+    /// Something the reader asked of the open document.
+    Read(ReadCommand),
+}
+
+/// What the reader's widgets can ask for.
+///
+/// One vocabulary for the whole family, for the same reason the palette has
+/// one: five widgets over one document is one thing for the application to
+/// map, not five sets of variants loose among the rest.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // see `crate::reader::ReaderSession`
+pub enum ReadCommand {
+    /// Scroll the page column to an offset in layout points.
+    ScrollTo(f32),
+    /// Put a page's top at the top of the window.
+    GoToPage(pulpit_core::page::PageIndex),
+    /// Fit the width, fit the page or set a scale.
+    SetZoom(crate::widgets::document::model::Zoom),
+    ZoomIn,
+    ZoomOut,
+    /// What has been typed into the page box, as typed. The model decides
+    /// what of it is a page number.
+    TypePage(String),
+    /// Take what is in the page box as the page to go to.
+    CommitPage,
+    /// Show bookmarks or thumbnails in the outline rail.
+    SetOutlineView(crate::widgets::document::model::OutlineView),
+    /// Arm a document tool, or hand the pointer back to the document's own
+    /// links and form fields.
+    Arm(Option<pulpit_core::annotation::AnnotationTool>),
+    /// The pointer moved over the page surface, in canonical page points on
+    /// the page it is over (A4).
+    PageCursor {
+        page: pulpit_core::page::PageIndex,
+        x: f32,
+        y: f32,
+    },
+    /// The page surface was pressed, released, or the gesture was abandoned.
+    PagePressed,
+    PageReleased,
+    PageCancelled,
+    // Form filling has no command of its own on purpose (§8.6). Field values
+    // are edited *in place on the page*, by PDFium's own form-fill
+    // environment, which the page surface forwards raw input events to; the
+    // application never draws a field editor and never sets a value itself.
+    // That is what makes one editing surface rather than two, and removes the
+    // whole class of bugs where an inspector and a widget disagree about what
+    // a field holds. The `FormFields` widget navigates to a field; the events
+    // above are what carry the typing.
+    /// Take back the last edit, or put it back.
+    Undo,
+    Redo,
+    /// Write the annotated document somewhere else. Never over the source
+    /// (A6), which is why there is no plain "Save".
+    SaveAs,
 }
 
 /// What the timer's menu can ask for.

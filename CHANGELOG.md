@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The foundation of document mode: pulpit can open an ordinary PDF, mark it
+  with **native PDF annotations** and write the result out through Save As.
+  A completed ink gesture becomes an `/Ink` annotation in the open document —
+  not a flattened mark and not an overlay kept beside the file — and survives
+  saving and reopening with its identity, geometry and style intact, in any
+  standards-compliant viewer. Text highlighting writes a true `/Highlight`
+  whose `/QuadPoints` describe the marked text runs, free text writes
+  `/FreeText`, notes write `/Text`, and checks and crosses write `/Stamp`.
+  The source file is never written: it is refused outright as a save
+  destination.
+
+  Underneath: canonical page geometry that survives every page rotation and
+  crop box, stable annotation identity through `/NM`, one revision and one
+  undo entry per user action with undo *restoring* an annotation rather than
+  recreating it, and whole-or-nothing transactions so an eraser sweep that
+  fails part-way leaves nothing applied. The AcroForm hazard corpus — 55
+  documents that are each wrong in one named way — moved into the new
+  development-only `pulpit-testkit` crate and runs against the engine.
+
+  Document mode is a *layout*, not a second application: the new **Reader**
+  and **Reader + Fields** built-ins sit beside the presenter layouts in the
+  same designer, over the same store, and a PDF opening into one never
+  changes which presenter layout is selected.
+
+  This is the first part of `SPEC-document.md`. The reader's controls are in
+  place and the engine behind them is tested, but the worker plumbing that
+  joins the two is not written yet, so document mode is not reachable from
+  the application in this state.
+
 ### Changed
 
 - Choosing which display the audience window uses is no longer claimed as a

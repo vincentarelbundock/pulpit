@@ -94,16 +94,25 @@ pub fn validate(layout: &Layout, area: Frame) -> Vec<Issue> {
     // ---- operability, warnings ------------------------------------------
     let widgets = layout.widgets();
 
-    if !widgets.iter().any(|widget| widget.shows_current_slide()) {
+    // The three warnings below are about *presenting*: a screen with no slide
+    // on it and no way to advance is a presenter screen that cannot present.
+    // A document layout has neither and needs neither — a reader turns pages,
+    // not slides — so asking a Reader for a current-slide widget would be
+    // asking it to be something else (§2, §2.1).
+    let presenting = crate::layout::builtin::LayoutMode::of(layout)
+        == crate::layout::builtin::LayoutMode::Presentation;
+
+    if presenting && !widgets.iter().any(|widget| widget.shows_current_slide()) {
         issues.push(Issue::warning(
             "No current-slide widget",
             "You will not be able to see what the audience is seeing.",
         ));
     }
 
-    if !widgets
-        .iter()
-        .any(|widget| widget.provides_forward_navigation())
+    if presenting
+        && !widgets
+            .iter()
+            .any(|widget| widget.provides_forward_navigation())
     {
         issues.push(Issue::warning(
             "No forward-navigation control",
@@ -112,9 +121,10 @@ pub fn validate(layout: &Layout, area: Frame) -> Vec<Issue> {
         ));
     }
 
-    if !widgets
-        .iter()
-        .any(|widget| widget.provides_backward_navigation())
+    if presenting
+        && !widgets
+            .iter()
+            .any(|widget| widget.provides_backward_navigation())
     {
         issues.push(Issue::warning(
             "No backward-navigation control",

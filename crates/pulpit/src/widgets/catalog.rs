@@ -38,7 +38,7 @@ const SLIDE_PARTS: &[WidgetKind] = &[
 const NONE: &[WidgetKind] = &[];
 
 /// The catalog. Order is the order of the library sidebar within each group.
-pub const CATALOG: [WidgetDefinition; 18] = [
+pub const CATALOG: [WidgetDefinition; 23] = [
     WidgetDefinition {
         kind: WidgetKind::CurrentSlide,
         group: WidgetGroup::Slides,
@@ -229,6 +229,66 @@ pub const CATALOG: [WidgetDefinition; 18] = [
         multi_instance: true,
         minimum_size: (140.0, 24.0),
     },
+    WidgetDefinition {
+        kind: WidgetKind::DocumentPage,
+        group: WidgetGroup::Document,
+        label: "Page",
+        short_label: "Page",
+        tooltip: "The document itself: scroll it, zoom it, mark it and fill it in.",
+        parts: NONE,
+        // One page surface. Two would be two scroll positions in one document,
+        // and the marks would be going into whichever one had the pointer.
+        multi_instance: false,
+        // A page is the artifact; below this there is not enough of it left to
+        // read a line of it.
+        minimum_size: (240.0, 240.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::DocumentNav,
+        group: WidgetGroup::Document,
+        label: "Page Navigation",
+        short_label: "Pages",
+        tooltip: "Which page you are on, and the zoom: fit the width, fit the page, or set it.",
+        parts: NONE,
+        multi_instance: false,
+        // A counter, a page box and four controls in one row.
+        minimum_size: (280.0, 32.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::DocumentOutline,
+        group: WidgetGroup::Document,
+        label: "Outline",
+        short_label: "Outline",
+        tooltip: "The document's bookmarks and page thumbnails, for getting somewhere quickly.",
+        parts: NONE,
+        multi_instance: false,
+        // Narrow, because it holds page numbers and bookmark titles rather
+        // than prose; every point past that is a point the page is not getting.
+        minimum_size: (150.0, 160.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::FormFields,
+        group: WidgetGroup::Document,
+        label: "Form Fields",
+        short_label: "Fields",
+        tooltip: "Every field in the document, and what it currently holds.",
+        parts: NONE,
+        multi_instance: false,
+        // A field name above its editor, at a width a value is readable at.
+        minimum_size: (220.0, 160.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::AnnotationTools,
+        group: WidgetGroup::Document,
+        label: "Annotation Tools",
+        short_label: "Tools",
+        tooltip: "Choose what a press does to the page: draw, highlight, type, note or erase.",
+        parts: NONE,
+        // One toolbar, for the same reason as the presenter palette: two would
+        // show two armed tools and only one of them could be telling the truth.
+        multi_instance: false,
+        minimum_size: (300.0, 26.0),
+    },
 ];
 
 /// The definition of a kind. Total by construction, and proved so by the
@@ -323,6 +383,11 @@ mod tests {
                 WidgetKind::EndPresentation,
                 WidgetKind::Annotations,
                 WidgetKind::MediaTransport,
+                WidgetKind::DocumentPage,
+                WidgetKind::DocumentNav,
+                WidgetKind::DocumentOutline,
+                WidgetKind::FormFields,
+                WidgetKind::AnnotationTools,
             ]
         );
     }

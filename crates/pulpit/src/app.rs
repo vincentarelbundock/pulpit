@@ -223,6 +223,8 @@ pub enum Message {
     /// how long the talk is.
     Timer(crate::widgets::event::TimerCommand),
     Transport(crate::widgets::event::TransportRequest),
+    /// Something the reader asked of the open document.
+    Read(crate::widgets::event::ReadCommand),
     /// A widget that produces nothing (preview mode).
     Ignore,
 }
@@ -623,6 +625,11 @@ pub struct App {
     /// The scrub card's anchor pane, memoised by panel size while a drag is
     /// in progress so the layout is not re-solved on every pass of it.
     pub scrub_anchor_cache: ScrubAnchorCache,
+    /// The reader: the viewport, the armed document tool and the answers the
+    /// worker last gave about the open document. Beside the presentation
+    /// state rather than replacing it, because mode is which layout is
+    /// mounted, not which document is loaded (§2.3 of `SPEC-document.md`).
+    pub reader: crate::reader::ReaderSession,
     /// Live tool choices for the annotation palette. These are session
     /// controls, not mutations to a built-in layout.
     pub annotation_controls: crate::widgets::AnnotationControls,
@@ -892,6 +899,7 @@ impl App {
             settings_throttle: crate::session::SaveThrottle::default(),
             pending_pointer_move: None,
             scrub_anchor_cache: std::cell::RefCell::new(None),
+            reader: crate::reader::ReaderSession::new(),
             annotation_controls,
             alarm_controls,
             timer_controls,
@@ -1825,6 +1833,16 @@ impl App {
                 self.on_annotation_command(command);
                 Task::none()
             }
+            Message::Read(command) => {
+                // The viewport is the session's; the commands that mutate the
+                // document are routed to the worker from here once the
+                // document-mode worker protocol lands. Until then an armed
+                // tool changes what a press *would* do and nothing else, which
+                // is honest: a mark that cannot be committed must not be
+                // drawn as though it had been (A1, §9.2).
+                let _needs_render = self.reader.apply(&command);
+                Task::none()
+            }
             Message::ExportAnnotatedTo(Some(path)) => {
                 self.export_annotations(path);
                 Task::none()
@@ -2412,6 +2430,10 @@ impl App {
                 },
                 sample_notes,
             },
+            // The reader's facet. A presentation has no document open in the
+            // reader's sense, so its widgets say so rather than drawing a
+            // sample page that would be mistaken for the user's own (§2).
+            reader: self.reader.facet(live),
             audience: crate::widgets::context::AudienceData {
                 blank: self.state.blank(),
                 connected: self.coordinator.snapshot.len() > 1,
@@ -4014,6 +4036,9 @@ impl App {
                     .extend_erase(point, self.annotation_options().eraser_radius);
             }
             Some(AnnotationTool::Text) => {}
+            // Document-mode tools. A live slide is not a document surface, so
+            // the pointer stays with links and media overlays here.
+            Some(AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select) => {}
             None => {}
         }
     }
@@ -4056,6 +4081,9 @@ impl App {
                 self.annotations
                     .begin_text(point, options.text_size, options.text_color);
             }
+            // Document-mode tools. The presenter palette cannot arm one
+            // (`AnnotationTool::ALL`), so the press is not the annotations'.
+            AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select => return false,
         }
         true
     }
@@ -4286,6 +4314,9 @@ impl App {
                         self.annotation_controls.options.pointer_radius = value
                     }
                     AnnotationTool::Text => self.annotation_controls.options.text_size = value,
+                    // The presenter palette draws no control for these
+                    // (see `AnnotationTool::ALL`), so nothing can name one.
+                    AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select => {}
                 }
                 self.annotation_controls.options.sanitise();
             }
@@ -4299,7 +4330,11 @@ impl App {
                         self.annotation_controls.options.pointer_color = color
                     }
                     AnnotationTool::Text => self.annotation_controls.options.text_color = color,
-                    AnnotationTool::Spotlight | AnnotationTool::Eraser => {}
+                    AnnotationTool::Spotlight
+                    | AnnotationTool::Eraser
+                    | AnnotationTool::Note
+                    | AnnotationTool::Stamp
+                    | AnnotationTool::Select => {}
                 }
                 // A colour chosen from the wheel is the wheel finished.
                 if self.annotation_controls.wheel == Some(tool) {

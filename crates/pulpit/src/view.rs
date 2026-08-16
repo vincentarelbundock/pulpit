@@ -1053,6 +1053,7 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
         crate::widgets::WidgetEvent::SlideCursor { x, y } => Message::SlideCursor { x, y },
         crate::widgets::WidgetEvent::SlidePressed => Message::SlidePressed,
         crate::widgets::WidgetEvent::Annotate(command) => Message::Annotate(command),
+        crate::widgets::WidgetEvent::Read(command) => Message::Read(command),
         crate::widgets::WidgetEvent::Alarm(command) => Message::Alarm(command),
         crate::widgets::WidgetEvent::Timer(command) => Message::Timer(command),
         crate::widgets::WidgetEvent::ToggleTimer => Message::Nav(Nav::ToggleTimer),

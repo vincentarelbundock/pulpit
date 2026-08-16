@@ -89,3 +89,40 @@ pub fn transport() -> Option<crate::widgets::media::model::Transport> {
         readout: "1:35 / 3:34".to_string(),
     })
 }
+
+/// A reader with nothing open, for the editor and for a presenter layout.
+///
+/// Statics rather than constructors because the render context borrows them,
+/// and the editor's context has to outlive the call that builds it.
+#[allow(dead_code)] // see `closed_reader`
+pub static EMPTY_COLUMN: std::sync::LazyLock<crate::widgets::document::model::Column> =
+    std::sync::LazyLock::new(crate::widgets::document::model::Column::default);
+
+#[allow(dead_code)] // see `closed_reader`
+pub static READER_CONTROLS: std::sync::LazyLock<crate::widgets::document::model::ReaderControls> =
+    std::sync::LazyLock::new(crate::widgets::document::model::ReaderControls::default);
+
+/// The reader facet for a context with no document behind it.
+///
+/// Not a fake document: a reader widget in a presenter layout, or in the
+/// editor, has nothing to show, and says so (§2) rather than drawing a sample
+/// page that would be mistaken for the user's own.
+#[allow(dead_code)] // used by the layout renderer.s own tests
+pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
+    crate::widgets::context::ReaderData {
+        open: false,
+        page_count: 0,
+        column: &EMPTY_COLUMN,
+        visible: Vec::new(),
+        controls: &READER_CONTROLS,
+        scale: 1.0,
+        outline: &[],
+        fields: &[],
+        level: pulpit_render::document::CompatibilityLevel::AnnotateOnly,
+        warnings: &[],
+        dirty: false,
+        page_entry: None,
+        can_undo: false,
+        can_redo: false,
+    }
+}

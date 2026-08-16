@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn a_fresh_store_offers_the_built_ins_and_nothing_else() {
         let (_directory, store) = store();
-        assert_eq!(store.built_in().len(), 5);
+        assert_eq!(store.built_in().len(), 7);
         assert!(store.custom().is_empty());
         assert!(store.get(&LayoutId("slide-next-notes".into())).is_some());
     }
@@ -514,7 +514,7 @@ mod tests {
             .unwrap();
         let (id, _) = store.import(&text).unwrap();
         assert_eq!(store.get(&id).unwrap().origin, Origin::Custom);
-        assert_eq!(store.built_in().len(), 5, "the built-in is untouched");
+        assert_eq!(store.built_in().len(), 7, "the built-in is untouched");
     }
 
     #[test]
@@ -620,7 +620,11 @@ mod fixtures {
     /// Several, because one layout cannot hold every widget: instance limits
     /// and compound occupancy would make it invalid. Between them they cover
     /// every kind, which the test below proves.
-    const FIXTURES: [(&str, &str); 5] = [
+    const FIXTURES: [(&str, &str); 6] = [
+        (
+            "reader-fields.json",
+            include_str!("fixtures/reader-fields.json"),
+        ),
         (
             "slide-next-notes.json",
             include_str!("fixtures/slide-next-notes.json"),
@@ -718,6 +722,10 @@ mod fixtures {
                 crate::layout::builtin::slide_time_beside(),
             ),
             ("every-other-widget.json", every_other_widget()),
+            (
+                "reader-fields.json",
+                crate::layout::builtin::reader_fields(crate::layout::AspectRatio::SixteenNine),
+            ),
         ];
         for (name, layout) in layouts {
             std::fs::write(directory.join(name), export_to_string(&layout).unwrap()).unwrap();

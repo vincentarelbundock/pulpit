@@ -6,6 +6,7 @@
 //! progress when one page is expensive.
 
 pub mod cache;
+pub mod document;
 pub mod pdf;
 pub mod protocol;
 pub mod shm;

@@ -71,6 +71,37 @@ pub enum Icon {
     Ellipsis,
     /// This reading is also a control: `settings`.
     Gear,
+
+    // Document mode. A reader has controls a presenter has no use for — you
+    // do not zoom a slide or pick a mark up off it — so these are their own
+    // run rather than being folded into the palette's set above.
+    /// A sticky note left on a page: `sticky-note`.
+    StickyNote,
+    /// A check, a cross or a visible mark placed on a page: `stamp`.
+    Stamp,
+    /// Pick an existing annotation up: `mouse-pointer`.
+    ///
+    /// Distinct from [`Icon::Pointer`], which is the dot that follows a
+    /// presenter's hand; this one is an arrow that picks things up.
+    Select,
+    /// `zoom-in`.
+    ZoomIn,
+    /// `zoom-out`.
+    ZoomOut,
+    /// Fit the page's width to the cell: `move-horizontal`.
+    FitWidth,
+    /// Fit the whole page in the cell: `maximize`.
+    FitPage,
+    /// The previous page: `chevron-left`.
+    ChevronLeft,
+    /// The next page: `chevron-right`.
+    ChevronRight,
+    /// The bookmark tree: `list-tree`.
+    Outline,
+    /// A document, for a page thumbnail with nothing in it yet: `file-text`.
+    Document,
+    /// A filled or satisfied thing: `check`.
+    Check,
 }
 
 impl Icon {
@@ -97,6 +128,18 @@ impl Icon {
             Icon::Ellipsis => include_bytes!("../../assets/icons/ellipsis.svg"),
             Icon::Gear => include_bytes!("../../assets/icons/settings.svg"),
             Icon::Save => include_bytes!("../../assets/icons/save.svg"),
+            Icon::StickyNote => include_bytes!("../../assets/icons/sticky-note.svg"),
+            Icon::Stamp => include_bytes!("../../assets/icons/stamp.svg"),
+            Icon::Select => include_bytes!("../../assets/icons/mouse-pointer.svg"),
+            Icon::ZoomIn => include_bytes!("../../assets/icons/zoom-in.svg"),
+            Icon::ZoomOut => include_bytes!("../../assets/icons/zoom-out.svg"),
+            Icon::FitWidth => include_bytes!("../../assets/icons/move-horizontal.svg"),
+            Icon::FitPage => include_bytes!("../../assets/icons/maximize.svg"),
+            Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
+            Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
+            Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
+            Icon::Document => include_bytes!("../../assets/icons/file-text.svg"),
+            Icon::Check => include_bytes!("../../assets/icons/check.svg"),
         }
     }
 
@@ -109,7 +152,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 20] = [
+    const ALL: [Icon; 32] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -130,6 +173,18 @@ impl Icon {
         Icon::Ellipsis,
         Icon::Gear,
         Icon::Save,
+        Icon::StickyNote,
+        Icon::Stamp,
+        Icon::Select,
+        Icon::ZoomIn,
+        Icon::ZoomOut,
+        Icon::FitWidth,
+        Icon::FitPage,
+        Icon::ChevronLeft,
+        Icon::ChevronRight,
+        Icon::Outline,
+        Icon::Document,
+        Icon::Check,
     ];
 
     /// The handle for this icon, built once per process.

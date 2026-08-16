@@ -225,6 +225,32 @@ impl PdfiumBackend {
         self.library_path.as_deref()
     }
 
+    /// The raw bindings, for the document engine.
+    ///
+    /// `crate::document::pdfium` is the other half of this backend rather than
+    /// a second one: PDFium is bound once per process (see [`BOUND`]), so the
+    /// document engine borrows this binding instead of opening its own, which
+    /// is also what §5.1 means by document mutation being a capability of the
+    /// existing worker rather than a new helper.
+    pub(crate) fn bindings(&self) -> &dyn PdfiumLibraryBindings {
+        self.bindings.as_ref()
+    }
+
+    /// The open document behind an id, for the document engine.
+    pub(crate) fn document_handle(&self, document: BackendDocumentId) -> Result<FPDF_DOCUMENT> {
+        self.handle(document)
+    }
+
+    /// Run `f` with a loaded page, closing it afterwards however `f` ended.
+    pub(crate) fn on_page<T>(
+        &self,
+        document: BackendDocumentId,
+        page: usize,
+        f: impl FnOnce(FPDF_PAGE) -> Result<T>,
+    ) -> Result<T> {
+        self.with_page(document, page, f)
+    }
+
     fn handle(&self, document: BackendDocumentId) -> Result<FPDF_DOCUMENT> {
         self.documents
             .get(&document.0)
@@ -451,7 +477,7 @@ impl PdfiumBackend {
     /// Buffering the whole file before a byte of it reaches the destination
     /// is what makes [`write_atomically`] able to promise the presenter that
     /// a save either produced a complete PDF or produced nothing.
-    fn save_to_memory(&self, document: FPDF_DOCUMENT) -> Result<Vec<u8>> {
+    pub(crate) fn save_to_memory(&self, document: FPDF_DOCUMENT) -> Result<Vec<u8>> {
         // The C struct PDFium writes through; `writer` is the Rust tail this
         // module casts back to in the callback. `#[repr(C)]` and the header
         // coming first are what make that cast sound.
@@ -849,7 +875,7 @@ fn channel(value: f32) -> std::ffi::c_uint {
 /// directory, so an interrupted save leaves the presenter's chosen path
 /// either untouched or holding a complete PDF — never half of one, and never
 /// a truncated overwrite of a file they already had.
-fn write_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
 
     let directory = destination.parent().unwrap_or_else(|| Path::new("."));

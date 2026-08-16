@@ -197,6 +197,9 @@ pub fn widget<Message: Clone + 'static>(
             scale,
             accent,
         ),
+        Family::Document => {
+            crate::widgets::document::view::view(widget, &context.reader, context.mode, on_event)
+        }
         Family::Status => status::view::view(
             widget,
             &context.document,
@@ -268,6 +271,7 @@ mod tests {
                 section: Some("Reconnection".to_string()),
                 sample_notes: sample::NOTES,
             },
+            reader: crate::widgets::sample::closed_reader(),
             audience: AudienceData {
                 blank: Blank::Off,
                 connected: true,

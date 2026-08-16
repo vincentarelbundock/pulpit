@@ -55,6 +55,21 @@ impl Builder {
         Node::Leaf(cell)
     }
 
+    /// A page cell: the document on a mount.
+    ///
+    /// The inverse of [`Builder::slide`]. A slide is bright against a dark
+    /// screen because that is how it will look on the wall; a page has no
+    /// wall, and the space a portrait page leaves in a landscape cell should
+    /// read as a mount around the sheet rather than as a hole. The page
+    /// surface scrolls inside the cell, so the cell takes no padding of its
+    /// own.
+    fn page(&mut self) -> Node {
+        let mut cell = Cell::with_widget(self.id(), Widget::new(WidgetKind::DocumentPage));
+        cell.background = CellBackground::Canvas;
+        cell.padding = 0.0;
+        Node::Leaf(cell)
+    }
+
     /// A presenter-tool cell: a dark panel separated by its split's gutter.
     fn panel(&mut self, kind: WidgetKind) -> Node {
         let mut cell = Cell::with_widget(self.id(), Widget::new(kind));
@@ -83,12 +98,19 @@ impl Builder {
     }
 }
 
-fn finish(name: &str, id: &str, root: Node) -> Layout {
+/// Assemble a built-in at a design ratio.
+///
+/// The ratio is a parameter rather than a constant because a Reader is used in
+/// an application window at whatever size the user dragged it to, and often a
+/// tall one, since a page is portrait (§2.4). Layouts are stored
+/// proportionally and scale to whatever they land on either way; the ratio
+/// only sets what the designer previews.
+fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
     let mut layout = Layout::from_parts(
         LayoutId(id.to_string()),
         name.to_string(),
         Origin::BuiltIn,
-        AspectRatio::SixteenNine,
+        ratio,
         root,
     );
     layout.renumber();
@@ -158,7 +180,12 @@ pub fn presenter_default() -> Layout {
         &[0.92, 0.08],
         vec![stage, controls],
     );
-    finish("Presenter Default", "presenter-default", root)
+    finish(
+        "Presenter Default",
+        "presenter-default",
+        root,
+        AspectRatio::SixteenNine,
+    )
 }
 
 /// **Slide + Next + Notes** — a slide-first alternative. The current slide gets
@@ -191,7 +218,12 @@ pub fn slide_next_notes() -> Layout {
         &[0.72, 0.28],
         root_children,
     );
-    finish("Slide + Next + Notes", "slide-next-notes", root)
+    finish(
+        "Slide + Next + Notes",
+        "slide-next-notes",
+        root,
+        AspectRatio::SixteenNine,
+    )
 }
 
 /// **Slide + Notes Beside** — a full-height slide with notes and compact
@@ -219,7 +251,12 @@ pub fn slide_notes_beside() -> Layout {
         &[0.75, 0.25],
         root_children,
     );
-    finish("Slide + Notes Beside", "slide-notes-beside", root)
+    finish(
+        "Slide + Notes Beside",
+        "slide-notes-beside",
+        root,
+        AspectRatio::SixteenNine,
+    )
 }
 
 /// **Slide + Time Below** — only the current slide and a shallow timing strip.
@@ -249,7 +286,12 @@ pub fn slide_time_below() -> Layout {
         &[0.90, 0.10],
         vec![slide, tools],
     );
-    finish("Slide + Time Below", "slide-time-below", root)
+    finish(
+        "Slide + Time Below",
+        "slide-time-below",
+        root,
+        AspectRatio::SixteenNine,
+    )
 }
 
 /// **Slide + Time Beside** — the same deliberately minimal information in a
@@ -276,11 +318,111 @@ pub fn slide_time_beside() -> Layout {
         &[0.75, 0.25],
         vec![slide, rail],
     );
-    finish("Slide + Time Beside", "slide-time-beside", root)
+    finish(
+        "Slide + Time Beside",
+        "slide-time-beside",
+        root,
+        AspectRatio::SixteenNine,
+    )
 }
 
-/// The built-ins, in the order the library shows them. The first is what a
-/// fresh install opens with.
+/// **Reader** — the layout a document opens with.
+///
+/// The page gets everything that is not a control: a shallow band along the
+/// top carries navigation and the annotation tools, and a narrow rail carries
+/// the outline.
+///
+/// The band is the height of a button and no more. The rail is narrower than
+/// the presenter's, because it holds page thumbnails and bookmark titles
+/// rather than notes set as prose, and every point past what those need is a
+/// point the page is not getting.
+///
+/// `FormFields` is deliberately absent. Most PDFs have no AcroForm, and a rail
+/// that is empty for most documents is worse than one more built-in; fields
+/// are reachable in place on the page, which is enough for the default.
+/// [`reader_fields`] is the variant for people who fill forms often.
+pub fn reader_default(ratio: AspectRatio) -> Layout {
+    let mut b = Builder::new();
+
+    let band_children = vec![
+        b.panel(WidgetKind::DocumentNav),
+        b.panel(WidgetKind::AnnotationTools),
+    ];
+    let band = b.split(
+        "Navigation and tools",
+        Direction::Horizontal,
+        &[0.5, 0.5],
+        band_children,
+    );
+
+    let body_children = vec![b.panel(WidgetKind::DocumentOutline), b.page()];
+    let body = b.split(
+        "Document",
+        Direction::Horizontal,
+        &[0.18, 0.82],
+        body_children,
+    );
+
+    let root = b.split(
+        "Reader",
+        Direction::Vertical,
+        &[0.07, 0.93],
+        vec![band, body],
+    );
+    finish("Reader", "reader-default", root, ratio)
+}
+
+/// **Reader + Fields** — the Reader with the field inspector as a right-hand
+/// rail, for people who fill forms often.
+///
+/// A built-in rather than the default for the same reason `slide-next-notes`
+/// is: the variants are where preferences live, and the default stays the one
+/// that is right for the most documents.
+pub fn reader_fields(ratio: AspectRatio) -> Layout {
+    let mut b = Builder::new();
+
+    let band_children = vec![
+        b.panel(WidgetKind::DocumentNav),
+        b.panel(WidgetKind::AnnotationTools),
+    ];
+    let band = b.split(
+        "Navigation and tools",
+        Direction::Horizontal,
+        &[0.5, 0.5],
+        band_children,
+    );
+
+    // The inspector takes a wider rail than the outline: it holds field names
+    // above their values, and a value truncated to fit is a value the person
+    // filling the form cannot check.
+    let body_children = vec![
+        b.panel(WidgetKind::DocumentOutline),
+        b.page(),
+        b.panel(WidgetKind::FormFields),
+    ];
+    let body = b.split(
+        "Document",
+        Direction::Horizontal,
+        &[0.16, 0.60, 0.24],
+        body_children,
+    );
+
+    let root = b.split(
+        "Reader",
+        Direction::Vertical,
+        &[0.07, 0.93],
+        vec![band, body],
+    );
+    finish("Reader + Fields", "reader-fields", root, ratio)
+}
+
+/// The built-ins, in the order the library shows them.
+///
+/// The list is bimodal (§2.1): **Presenter Default** is what a presentation
+/// opens with and **Reader** is what a document opens with, and neither is a
+/// variant of the other. `built_in_layouts` passes the `SixteenNine` fallback
+/// so the list stays parameterless, display-free and testable; a caller with a
+/// live window builds a Reader at that window's ratio instead.
 pub fn built_in_layouts() -> Vec<Layout> {
     vec![
         presenter_default(),
@@ -288,7 +430,59 @@ pub fn built_in_layouts() -> Vec<Layout> {
         slide_notes_beside(),
         slide_time_below(),
         slide_time_beside(),
+        reader_default(AspectRatio::SixteenNine),
+        reader_fields(AspectRatio::SixteenNine),
     ]
+}
+
+/// Which built-in a mode opens with (§2.3).
+///
+/// A property of the document rather than of a global setting: choosing a
+/// presenter variant never changes what a PDF opens into, and the reverse.
+pub fn default_for(mode: LayoutMode) -> LayoutId {
+    match mode {
+        LayoutMode::Presentation => LayoutId("presenter-default".to_string()),
+        LayoutMode::Document => LayoutId("reader-default".to_string()),
+    }
+}
+
+/// What a layout is for.
+///
+/// Not a property of the layout tree: presentation widgets in a document
+/// layout and document widgets in a presenter layout are not errors (§2), and
+/// a cell whose widget has nothing to show renders its empty behaviour. This
+/// says which layout is *mounted*, which is the whole of what "mode" means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutMode {
+    Presentation,
+    Document,
+}
+
+impl LayoutMode {
+    /// Which mode a built-in belongs to, by the widgets it actually carries.
+    ///
+    /// Derived rather than declared, so a user's copy of a built-in answers
+    /// the same way the built-in does without carrying a flag that could
+    /// disagree with its contents.
+    pub fn of(layout: &Layout) -> LayoutMode {
+        let document = layout
+            .widgets()
+            .iter()
+            .any(|widget| widget.kind().family() == crate::widgets::Family::Document);
+        if document {
+            LayoutMode::Document
+        } else {
+            LayoutMode::Presentation
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LayoutMode::Presentation => "Presentation",
+            LayoutMode::Document => "Document",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -300,7 +494,7 @@ mod tests {
     #[test]
     fn the_built_ins_are_read_only_and_led_by_the_default() {
         let layouts = built_in_layouts();
-        assert_eq!(layouts.len(), 5);
+        assert_eq!(layouts.len(), 7);
         for layout in &layouts {
             assert_eq!(layout.origin, Origin::BuiltIn);
             assert!(!layout.is_editable());
@@ -314,8 +508,120 @@ mod tests {
                 "slide-next-notes",
                 "slide-notes-beside",
                 "slide-time-below",
-                "slide-time-beside"
+                "slide-time-beside",
+                "reader-default",
+                "reader-fields",
             ]
+        );
+    }
+
+    /// §2.1: `reader-default` is a stable identifier, and the assertion on
+    /// exact ids above is what keeps a stored user layout's `LayoutId` from
+    /// silently colliding with a new built-in. This is the other half: the two
+    /// roots are the two modes, and neither is a variant of the other.
+    #[test]
+    fn the_built_in_list_is_bimodal_and_each_mode_has_one_root() {
+        let layouts = built_in_layouts();
+        assert_eq!(LayoutMode::of(&layouts[0]), LayoutMode::Presentation);
+        assert_eq!(
+            default_for(LayoutMode::Presentation),
+            layouts[0].id,
+            "a presentation opens into the first presenter built-in"
+        );
+
+        let reader = reader_default(AspectRatio::SixteenNine);
+        assert_eq!(LayoutMode::of(&reader), LayoutMode::Document);
+        assert_eq!(default_for(LayoutMode::Document), reader.id);
+        assert_ne!(
+            default_for(LayoutMode::Document),
+            default_for(LayoutMode::Presentation),
+            "choosing one mode's default must not change the other's"
+        );
+    }
+
+    #[test]
+    fn the_reader_is_a_page_a_control_band_and_an_outline_rail() {
+        let reader = reader_default(AspectRatio::SixteenNine);
+        let root = reader.root.as_split().unwrap();
+        assert_eq!(root.name.as_deref(), Some("Reader"));
+        assert_eq!(root.sizes, vec![0.07, 0.93]);
+        assert_eq!(root.children[0].as_split().unwrap().sizes, vec![0.5, 0.5]);
+        assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.18, 0.82]);
+
+        let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();
+        for required in [
+            WidgetKind::DocumentPage,
+            WidgetKind::DocumentNav,
+            WidgetKind::DocumentOutline,
+            WidgetKind::AnnotationTools,
+        ] {
+            assert!(kinds.contains(&required), "Reader is missing {required:?}");
+        }
+        assert!(
+            !kinds.contains(&WidgetKind::FormFields),
+            "the field inspector is the Reader + Fields variant, not the default"
+        );
+    }
+
+    #[test]
+    fn reader_plus_fields_is_the_reader_with_the_inspector_added() {
+        let fields = reader_fields(AspectRatio::SixteenNine);
+        let kinds: Vec<WidgetKind> = fields.widgets().iter().map(|w| w.kind()).collect();
+        assert!(kinds.contains(&WidgetKind::FormFields));
+        assert!(kinds.contains(&WidgetKind::DocumentPage));
+        assert_eq!(LayoutMode::of(&fields), LayoutMode::Document);
+        // The page keeps the majority of the width even with two rails.
+        let body = fields.root.as_split().unwrap().children[1]
+            .as_split()
+            .unwrap();
+        assert!(body.sizes[1] > body.sizes[0] + body.sizes[2]);
+    }
+
+    /// §2.2: the page is on a mount, which is the inverse of a slide's cell.
+    #[test]
+    fn the_page_cell_is_a_document_on_a_canvas_rather_than_a_slide_in_the_dark() {
+        for layout in [
+            reader_default(AspectRatio::SixteenNine),
+            reader_fields(AspectRatio::SixteenNine),
+        ] {
+            let page = layout
+                .cells()
+                .into_iter()
+                .find(|cell| {
+                    cell.widget.as_ref().map(|w| w.kind()) == Some(WidgetKind::DocumentPage)
+                })
+                .expect("a document layout has a page");
+            assert_eq!(page.background, CellBackground::Canvas);
+            assert_eq!(
+                page.padding, 0.0,
+                "the page surface scrolls inside the cell and takes no padding of its own"
+            );
+        }
+    }
+
+    /// §2.4: this is the only built-in whose ratio is not a fixed preset, so
+    /// the designer previews a Reader the size a Reader is actually used at.
+    #[test]
+    fn a_reader_is_designed_at_the_ratio_it_is_asked_for() {
+        let tall = reader_default(AspectRatio::Detected {
+            width: 1200,
+            height: 1600,
+        });
+        assert_eq!(
+            tall.design_ratio,
+            AspectRatio::Detected {
+                width: 1200,
+                height: 1600
+            }
+        );
+        // …and the parameterless list stays display-free.
+        assert_eq!(
+            built_in_layouts()
+                .into_iter()
+                .find(|layout| layout.id.0 == "reader-default")
+                .unwrap()
+                .design_ratio,
+            AspectRatio::SixteenNine
         );
     }
 
@@ -471,7 +777,14 @@ mod tests {
     fn built_ins_have_named_structural_nodes_for_the_tree_panel() {
         for layout in built_in_layouts() {
             let root = layout.root.as_split().expect("a real layout has structure");
-            assert_eq!(root.name.as_deref(), Some("Presenter screen"));
+            // Named for what the layout *is*, which is what the tree panel
+            // shows: a presenter screen and a reader are not the same thing
+            // with two names.
+            let expected = match LayoutMode::of(&layout) {
+                LayoutMode::Presentation => "Presenter screen",
+                LayoutMode::Document => "Reader",
+            };
+            assert_eq!(root.name.as_deref(), Some(expected), "{}", layout.name);
         }
     }
 }

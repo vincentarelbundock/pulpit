@@ -14,6 +14,7 @@ pub mod annotations;
 pub mod catalog;
 pub mod common;
 pub mod context;
+pub mod document;
 pub mod event;
 pub mod media;
 pub mod navigation;
@@ -45,6 +46,8 @@ pub enum WidgetGroup {
     PresenterInformation,
     PresentationControls,
     OptionalInformation,
+    /// The reader.
+    Document,
 }
 
 impl WidgetGroup {
@@ -54,14 +57,16 @@ impl WidgetGroup {
             WidgetGroup::PresenterInformation => "Presenter information",
             WidgetGroup::PresentationControls => "Presentation controls",
             WidgetGroup::OptionalInformation => "Optional information",
+            WidgetGroup::Document => "Document",
         }
     }
 
-    pub const ALL: [WidgetGroup; 4] = [
+    pub const ALL: [WidgetGroup; 5] = [
         WidgetGroup::Slides,
         WidgetGroup::PresenterInformation,
         WidgetGroup::PresentationControls,
         WidgetGroup::OptionalInformation,
+        WidgetGroup::Document,
     ];
 }
 
@@ -99,10 +104,23 @@ pub enum WidgetKind {
     Annotations,
     /// Play, pause and scrub whatever media is on the current slide.
     MediaTransport,
+
+    // Document
+    /// The page surface: continuous scroll, free zoom, annotation and form
+    /// interaction. The one widget a document layout cannot omit.
+    DocumentPage,
+    /// Page counter, page entry, zoom control, fit-width and fit-page.
+    DocumentNav,
+    /// Bookmarks and page thumbnails.
+    DocumentOutline,
+    /// The AcroForm field inspector and editor.
+    FormFields,
+    /// Tool selection and style for ink, highlighter, text, notes and stamps.
+    AnnotationTools,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 18] = [
+    pub const ALL: [WidgetKind; 23] = [
         WidgetKind::CurrentSlide,
         WidgetKind::PreviousSlide,
         WidgetKind::NextSlide,
@@ -121,6 +139,11 @@ impl WidgetKind {
         WidgetKind::ConnectionStatus,
         WidgetKind::Annotations,
         WidgetKind::MediaTransport,
+        WidgetKind::DocumentPage,
+        WidgetKind::DocumentNav,
+        WidgetKind::DocumentOutline,
+        WidgetKind::FormFields,
+        WidgetKind::AnnotationTools,
     ];
 
     /// Which family implements this kind. The dispatcher
@@ -144,6 +167,11 @@ impl WidgetKind {
             | WidgetKind::CurrentSection
             | WidgetKind::AudienceScreenStatus
             | WidgetKind::ConnectionStatus => Family::Status,
+            WidgetKind::DocumentPage
+            | WidgetKind::DocumentNav
+            | WidgetKind::DocumentOutline
+            | WidgetKind::FormFields
+            | WidgetKind::AnnotationTools => Family::Document,
         }
     }
 
@@ -196,6 +224,8 @@ impl WidgetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Slides,
+    /// The reader: the page surface and the controls around it.
+    Document,
     Annotations,
     Media,
     Notes,
@@ -262,7 +292,15 @@ impl WidgetConfig {
             | WidgetKind::CurrentSection
             | WidgetKind::AudienceScreenStatus
             | WidgetKind::ConnectionStatus
-            | WidgetKind::MediaTransport => WidgetConfig::None,
+            | WidgetKind::MediaTransport
+            | WidgetKind::DocumentPage
+            | WidgetKind::DocumentNav
+            | WidgetKind::DocumentOutline
+            | WidgetKind::FormFields => WidgetConfig::None,
+            // The document toolbar carries the same colour and size choices
+            // the presenter palette does, so a mark made in one mode looks
+            // the same in the other.
+            WidgetKind::AnnotationTools => WidgetConfig::Annotations(AnnotationOptions::default()),
         }
     }
 

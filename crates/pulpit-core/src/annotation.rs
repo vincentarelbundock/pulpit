@@ -35,6 +35,21 @@ pub enum AnnotationTool {
     Eraser,
     /// Places a text label, then sends keyboard input to it until committed.
     Text,
+    /// Places a sticky note: an icon on the page with text behind it.
+    ///
+    /// Document mode only. A presenter has no use for a mark that has to be
+    /// opened to be read, but a reader annotating a paper does.
+    Note,
+    /// Places a check, a cross or a visible signature.
+    ///
+    /// Document mode only, and never described as a cryptographic signature
+    /// (§1 of `SPEC-document.md`).
+    Stamp,
+    /// Picks an existing annotation up, to move, resize, restyle or delete it.
+    ///
+    /// Document mode only: presenter marks last as long as the slide does, so
+    /// there is nothing to come back to and edit.
+    Select,
 }
 
 impl AnnotationTool {
@@ -49,6 +64,40 @@ impl AnnotationTool {
         AnnotationTool::Text,
     ];
 
+    /// The tools a document layout's `AnnotationTools` widget offers, in the
+    /// order it draws them.
+    ///
+    /// A different list from [`AnnotationTool::ALL`], not a superset of it:
+    /// the pointer and the spotlight are things you do to a slide in front of
+    /// an audience, and selecting an existing mark to edit it is a thing you
+    /// do to a document that keeps its marks. Each mode shows the tools it can
+    /// honour rather than greying out the other's.
+    pub const DOCUMENT: [AnnotationTool; 6] = [
+        AnnotationTool::Select,
+        AnnotationTool::Ink,
+        AnnotationTool::Highlighter,
+        AnnotationTool::Text,
+        AnnotationTool::Note,
+        AnnotationTool::Eraser,
+    ];
+
+    /// Does this tool make a durable PDF annotation when its gesture ends?
+    pub fn makes_an_annotation(self) -> bool {
+        match self {
+            AnnotationTool::Ink
+            | AnnotationTool::Highlighter
+            | AnnotationTool::Text
+            | AnnotationTool::Note
+            | AnnotationTool::Stamp => true,
+            // The eraser changes the document but makes nothing; the other
+            // three are transient effects (§3.2).
+            AnnotationTool::Eraser
+            | AnnotationTool::Pointer
+            | AnnotationTool::Spotlight
+            | AnnotationTool::Select => false,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             AnnotationTool::Pointer => "Pointer",
@@ -57,6 +106,9 @@ impl AnnotationTool {
             AnnotationTool::Highlighter => "Highlighter",
             AnnotationTool::Eraser => "Eraser",
             AnnotationTool::Text => "Text",
+            AnnotationTool::Note => "Note",
+            AnnotationTool::Stamp => "Stamp",
+            AnnotationTool::Select => "Select",
         }
     }
 }

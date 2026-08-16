@@ -1,0 +1,149 @@
+{
+  "format_version": 1,
+  "name": "Reader + Fields",
+  "design_ratio": "sixteen-nine",
+  "root": {
+    "type": "split",
+    "id": 0,
+    "name": "Reader",
+    "direction": "vertical",
+    "children": [
+      {
+        "type": "split",
+        "id": 1,
+        "name": "Navigation and tools",
+        "direction": "horizontal",
+        "children": [
+          {
+            "type": "leaf",
+            "id": 2,
+            "widget": {
+              "kind": "document-nav",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 3,
+            "widget": {
+              "kind": "annotation-tools",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "annotations": {
+                  "tool": "ink",
+                  "ink_color": "black",
+                  "highlight_color": "yellow",
+                  "pointer_color": "red",
+                  "text_color": "black",
+                  "pointer_spotlight": false,
+                  "ink_width": 0.004,
+                  "highlight_width": 0.025,
+                  "eraser_radius": 0.02,
+                  "text_size": 0.025,
+                  "pointer_radius": 0.012,
+                  "spotlight_radius": 0.08,
+                  "audience_visible": true
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          }
+        ],
+        "sizes": [
+          0.5,
+          0.5
+        ],
+        "gap": 8.0,
+        "min_child": 0.05
+      },
+      {
+        "type": "split",
+        "id": 4,
+        "name": "Document",
+        "direction": "horizontal",
+        "children": [
+          {
+            "type": "leaf",
+            "id": 5,
+            "widget": {
+              "kind": "document-outline",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 6,
+            "widget": {
+              "kind": "document-page",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 0.0,
+            "background": "canvas",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 7,
+            "widget": {
+              "kind": "form-fields",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          }
+        ],
+        "sizes": [
+          0.16,
+          0.6,
+          0.24
+        ],
+        "gap": 8.0,
+        "min_child": 0.05
+      }
+    ],
+    "sizes": [
+      0.07,
+      0.93
+    ],
+    "gap": 8.0,
+    "min_child": 0.05
+  }
+}

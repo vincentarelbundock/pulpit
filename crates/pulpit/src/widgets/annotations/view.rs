@@ -421,6 +421,11 @@ fn overflow_menu<Message: Clone + 'static>(
                     AnnotationTool::Text => {
                         tool_glyph(theme::Icon::Type, glyph, options.text_color)
                     }
+                    AnnotationTool::Note => {
+                        tool_glyph(theme::Icon::StickyNote, glyph, options.text_color)
+                    }
+                    AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
+                    AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
                 };
                 let mut arm = button(
                     row![icon, text(armable.label()).size(theme::type_scale::CAPTION)]
@@ -521,6 +526,9 @@ fn tool_control<Message: Clone + 'static>(
         AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
         AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
         AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph, options.text_color),
+        AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph, options.text_color),
+        AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
+        AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
     };
     let mut main = button(icon)
         .padding(Padding::from([size * 0.12, size * 0.2]))
@@ -614,7 +622,14 @@ fn colour_of(tool: AnnotationTool, options: crate::widgets::AnnotationOptions) -
         AnnotationTool::Highlighter => options.highlight_color,
         AnnotationTool::Pointer => options.pointer_color,
         AnnotationTool::Text => options.text_color,
-        AnnotationTool::Spotlight | AnnotationTool::Eraser => options.ink_color,
+        AnnotationTool::Note => options.text_color,
+        // The eraser, the spotlight, the stamp and the selection arrow lay no
+        // colour down; they answer with the ink's so the wheel has something
+        // to open on.
+        AnnotationTool::Spotlight
+        | AnnotationTool::Eraser
+        | AnnotationTool::Stamp
+        | AnnotationTool::Select => options.ink_color,
     }
 }
 
@@ -635,6 +650,11 @@ fn options_panel<Message: Clone + 'static>(
         AnnotationTool::Pointer => (options.pointer_radius, POINTER_RADIUS_RANGE),
         AnnotationTool::Spotlight => (options.spotlight_radius, SPOTLIGHT_RADIUS_RANGE),
         AnnotationTool::Text => (options.text_size, (0.008, 0.12)),
+        // Document-mode tools, which the presenter palette never draws an
+        // options panel for. The text measures keep the slider well formed.
+        AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select => {
+            (options.text_size, (0.008, 0.12))
+        }
     };
     // The track carries a position from 0 to 1 rather than the measure
     // itself, because these ranges span an order of magnitude: laid out

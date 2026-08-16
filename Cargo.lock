@@ -4165,6 +4165,7 @@ dependencies = [
  "memmap2",
  "pdfium-render",
  "pulpit-core",
+ "pulpit-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -4172,6 +4173,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "pulpit-testkit"
+version = "0.0.5"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
