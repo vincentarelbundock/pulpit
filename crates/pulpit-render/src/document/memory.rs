@@ -459,10 +459,6 @@ impl DocumentBackend for MemoryDocument {
     fn source(&self) -> Option<&Path> {
         self.source.as_deref()
     }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-        self
-    }
 }
 
 #[cfg(test)]

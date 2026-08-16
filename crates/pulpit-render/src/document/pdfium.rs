@@ -82,8 +82,15 @@ const COLOR_TYPE_COLOR: std::os::raw::c_uint = 0;
 const APPEARANCE_NORMAL: std::os::raw::c_int = 0;
 
 /// One open PDF, mutated in place.
-pub struct PdfiumDocument {
-    backend: PdfiumBackend,
+///
+/// The binding is *borrowed*, not owned: PDFium is bound once per process
+/// (see [`PdfiumBackend::bind`]), and the worker that renders is the worker
+/// that mutates — §5.1 makes document mutation a capability of the existing
+/// worker rather than a new helper. Rendering and mutation therefore go
+/// through the same open handle, which is what makes a frame drawn after a
+/// commit contain the commit (A7).
+pub struct PdfiumDocument<'a> {
+    backend: &'a PdfiumBackend,
     document: BackendDocumentId,
     info: OpenDocumentInfo,
     source: Option<PathBuf>,
@@ -99,14 +106,15 @@ pub struct PdfiumDocument {
 
 // PDFium is not thread safe; the whole point of the worker process is that one
 // document is owned by one execution context (§6).
-unsafe impl Send for PdfiumDocument {}
+unsafe impl Send for PdfiumDocument<'_> {}
 
-impl PdfiumDocument {
+impl<'a> PdfiumDocument<'a> {
     /// Open `source` for reading and annotating.
     ///
-    /// The backend is moved in: rendering and mutation are the same document
-    /// handle, so a frame drawn after a commit contains the commit (A7).
-    pub fn open(mut backend: PdfiumBackend, source: &Path) -> Result<PdfiumDocument> {
+    /// Opening needs the binding mutably — it registers a handle — and
+    /// everything afterwards does not, which is why this takes `&mut` and the
+    /// document keeps a shared borrow.
+    pub fn open(backend: &'a mut PdfiumBackend, source: &Path) -> Result<PdfiumDocument<'a>> {
         let document = backend
             .open(source)
             .map_err(|error| DocumentError::Backend(error.to_string()))?;
@@ -129,21 +137,21 @@ impl PdfiumDocument {
 
     /// The backend, for rendering the same open document.
     pub fn backend(&self) -> &PdfiumBackend {
-        &self.backend
+        self.backend
     }
 
     pub fn backend_document(&self) -> BackendDocumentId {
         self.document
     }
 
-    /// Close the document and hand the backend back.
+    /// Close the open document.
     ///
-    /// PDFium is bound once per process, so the binding outlives any one
-    /// document: closing a file and opening another is a document lifetime,
-    /// not a library one.
-    pub fn into_backend(mut self) -> PdfiumBackend {
-        self.backend.close(self.document);
-        self.backend
+    /// The binding outlives it: PDFium is bound once per process, so closing
+    /// a file and opening another is a document lifetime, not a library one.
+    /// Taking `&mut PdfiumBackend` is what proves nothing else is still
+    /// reading this document when it goes.
+    pub fn close(self, backend: &mut PdfiumBackend) {
+        backend.close(self.document);
     }
 
     /// What pulpit can tell the user about this document before they start
@@ -175,7 +183,7 @@ impl PdfiumDocument {
         // once, interpreted here for a different question. A finding is never
         // invented: a document with no evidence of a feature is reported as
         // not having it.
-        let evidence = PdfBackend::evidence(&self.backend, self.document).unwrap_or_default();
+        let evidence = PdfBackend::evidence(self.backend, self.document).unwrap_or_default();
         let mut has_form = false;
         let mut level = CompatibilityLevel::AnnotateOnly;
         match evidence.form_type {
@@ -875,7 +883,7 @@ fn to_document_error(error: PdfError) -> DocumentError {
     }
 }
 
-impl DocumentBackend for PdfiumDocument {
+impl DocumentBackend for PdfiumDocument<'_> {
     fn info(&self) -> &OpenDocumentInfo {
         &self.info
     }
@@ -1102,10 +1110,6 @@ impl DocumentBackend for PdfiumDocument {
 
     fn source(&self) -> Option<&Path> {
         self.source.as_deref()
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-        self
     }
 }
 

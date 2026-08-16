@@ -136,26 +136,22 @@ pub trait DocumentBackend: Send {
 
     /// The path this document was opened from, so a save can refuse it.
     fn source(&self) -> Option<&Path>;
-
-    /// The concrete engine, for the one caller that needs it back.
-    ///
-    /// PDFium is bound once per process, so a harness that opens several
-    /// documents in turn has to recover the binding from the document it has
-    /// finished with. Nothing in the application uses this; it exists so the
-    /// engine does not have to be `Clone` or reference-counted to be testable.
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
 
 /// A worker-confined open document (§6).
-pub struct PdfDocument {
-    backend: Box<dyn DocumentBackend>,
+///
+/// The lifetime is the engine.s: the PDFium engine borrows a binding that is
+/// bound once per process and outlives every document opened through it, and
+/// the memory engine borrows nothing and is `'static`.
+pub struct PdfDocument<'a> {
+    backend: Box<dyn DocumentBackend + 'a>,
     revision: DocumentRevision,
     ids: IdGenerator,
     /// True from the first successful mutation. Visible in the UI (§11.2).
     dirty: bool,
 }
 
-impl std::fmt::Debug for PdfDocument {
+impl std::fmt::Debug for PdfDocument<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PdfDocument")
             .field("revision", &self.revision)
@@ -165,10 +161,10 @@ impl std::fmt::Debug for PdfDocument {
     }
 }
 
-impl PdfDocument {
+impl<'a> PdfDocument<'a> {
     /// Wrap a backend. `id_seed` is what [`IdGenerator`] mixes into the names
     /// this session writes; the worker passes something session-unique.
-    pub fn new(backend: Box<dyn DocumentBackend>, id_seed: u64) -> PdfDocument {
+    pub fn new(backend: Box<dyn DocumentBackend + 'a>, id_seed: u64) -> PdfDocument<'a> {
         PdfDocument {
             backend,
             revision: DocumentRevision::INITIAL,
@@ -399,11 +395,6 @@ impl PdfDocument {
             bytes,
             verified_ids: Vec::new(),
         })
-    }
-
-    /// Take the engine back out. See [`DocumentBackend::into_any`].
-    pub fn into_backend(self) -> Box<dyn DocumentBackend> {
-        self.backend
     }
 
     /// The identities this session has handed out, for diagnostics.
@@ -638,7 +629,7 @@ mod tests {
     use pulpit_core::annotate::{InkDraft, InkPoint, MarkStyle};
     use pulpit_core::page::PagePoint;
 
-    fn document() -> PdfDocument {
+    fn document() -> PdfDocument<'static> {
         PdfDocument::new(Box::new(MemoryDocument::letter(3)), 99)
     }
 

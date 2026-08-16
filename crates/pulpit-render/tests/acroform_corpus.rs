@@ -33,15 +33,15 @@ fn workspace_lib() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib")
 }
 
-fn binding() -> Option<MutexGuard<'static, Option<PdfiumBackend>>> {
-    static BACKEND: OnceLock<Option<Mutex<Option<PdfiumBackend>>>> = OnceLock::new();
-    let slot = BACKEND
+fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
+    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
+    let backend = BACKEND
         .get_or_init(|| {
             if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
                 std::env::set_var("PULPIT_PDFIUM_PATH", workspace_lib());
             }
             match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(Some(backend))),
+                Ok(backend) => Some(Mutex::new(backend)),
                 Err(error) => {
                     eprintln!("skipping the AcroForm corpus: {error}");
                     None
@@ -49,17 +49,11 @@ fn binding() -> Option<MutexGuard<'static, Option<PdfiumBackend>>> {
             }
         })
         .as_ref()?;
-    Some(slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
-}
-
-/// Hand the binding back, so the next case can open its own document.
-fn close(slot: &mut Option<PdfiumBackend>, document: PdfDocument) {
-    let engine = *document
-        .into_backend()
-        .into_any()
-        .downcast::<PdfiumDocument>()
-        .expect("these documents are PDFium documents");
-    *slot = Some(engine.into_backend());
+    Some(
+        backend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
 
 /// One ink stroke, which is the mutation every case gets: it exercises the
@@ -79,13 +73,14 @@ fn stroke() -> DocumentTransaction {
 #[test]
 fn every_corpus_case_survives_being_opened_annotated_and_saved() {
     let Some(mut guard) = binding() else { return };
-    let slot = &mut *guard;
+    let backend = &mut *guard;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let cases = corpus();
     assert!(cases.len() > 40, "the corpus did not survive the fold");
 
     let mut opened = 0usize;
+    let mut refused: Vec<(&str, String)> = Vec::new();
 
     for case in cases {
         let source = pulpit_testkit::write_pdf(directory.path(), case.name, &case.bytes);
@@ -93,25 +88,18 @@ fn every_corpus_case_survives_being_opened_annotated_and_saved() {
         // the source is the file it must never write (A6).
         let unchanged = Unchanged::new(&source, case.name);
 
-        let backend = slot.take().expect("the binding is free");
         let engine = match PdfiumDocument::open(backend, &source) {
             Ok(engine) => engine,
             Err(error) => {
-                // A clean error would be an acceptable outcome for a document
-                // malformed enough not to open — the corpus only promises
-                // "either a readable PDF or a clean error". But `open`
-                // consumed the binding on the way in and PDFium binds once per
-                // process, so there is no way to carry on: a refused open ends
-                // the run loudly rather than silently skipping every case
-                // after it. Reaching here at all means the engine survived,
-                // which is the invariant that matters; the panic is about the
-                // harness, and the message says so.
+                // A clean error is an acceptable outcome for a document
+                // malformed enough not to open: the corpus promises "either a
+                // readable PDF or a clean error", and reaching this line at
+                // all is the proof that it was not a crash. The source is
+                // still checked, because a failed open must leave nothing
+                // behind either.
                 unchanged.check();
-                panic!(
-                    "{}: opening was refused, which loses the process-wide \
-                     binding and stops the corpus: {error}",
-                    case.name
-                );
+                refused.push((case.name, error.to_string()));
+                continue;
             }
         };
         let mut document = PdfDocument::new(Box::new(engine), 1_234);
@@ -135,28 +123,36 @@ fn every_corpus_case_survives_being_opened_annotated_and_saved() {
         }
 
         let destination = directory.path().join(format!("{}-saved.pdf", case.name));
-        if let Ok(saved) = document.save_as(&destination, SaveOptions::verified()) {
-            assert!(saved.bytes > 0, "{}: saved an empty file", case.name);
-            assert!(destination.exists());
-            // The output has to be readable, not merely written.
-            let backend = {
-                close(slot, document);
-                slot.take().expect("the binding is free")
-            };
+        let written = match document.save_as(&destination, SaveOptions::verified()) {
+            Ok(saved) => {
+                assert!(saved.bytes > 0, "{}: saved an empty file", case.name);
+                assert!(destination.exists());
+                true
+            }
+            Err(_) => false,
+        };
+        // Dropping the document gives the binding back, which is what lets the
+        // saved file be opened next.
+        drop(document);
+
+        if written {
+            // The output has to be *readable*, not merely written.
             let reopened = PdfiumDocument::open(backend, &destination).unwrap_or_else(|error| {
                 panic!("{}: the saved file will not open: {error}", case.name)
             });
             let reopened = PdfDocument::new(Box::new(reopened), 1);
             assert!(reopened.page_count() > 0, "{}: saved no pages", case.name);
-            close(slot, reopened);
-        } else {
-            close(slot, document);
         }
 
         unchanged.check();
     }
 
-    assert!(opened > 40, "only {opened} cases opened");
+    // A case that will not open is an acceptable outcome, but a corpus where
+    // most of them do not is a broken engine wearing a green test.
+    assert!(
+        opened > 40,
+        "only {opened} of the corpus opened; refused: {refused:?}"
+    );
 }
 
 /// The corpus promises more than this file checks, and says so out loud.
