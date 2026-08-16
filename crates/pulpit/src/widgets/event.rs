@@ -249,6 +249,15 @@ pub enum ReadCommand {
     PickDate(crate::datefield::Date),
     /// Put the calendar away without choosing anything.
     CloseDatePicker,
+    /// Move the open time helper by this many minutes, in either direction
+    /// (§8.6). One command rather than four, because an hour up and a minute
+    /// down differ only by how far they go.
+    StepTimePicker(i32),
+    /// Put the time the helper is showing into the field it is open over,
+    /// written the way that field's own pattern asks for.
+    PickTime,
+    /// Put the time helper away without choosing anything.
+    CloseTimePicker,
     /// Choose one option of the choice field the open list belongs to, by the
     /// index PDFium knows it under (§8.6).
     ///

@@ -5721,6 +5721,11 @@ impl App {
         self.reader.set_date_language(self.date_language);
         self.reader
             .set_focused_date(result.focused_date.as_ref(), today());
+        // And the steppers when it lands in a time field, on the same terms:
+        // the wall clock is read here, at the edge, and handed in as the
+        // starting time for a field that holds nothing readable.
+        self.reader
+            .set_focused_time(result.focused_time.as_ref(), now_time());
         // What this field wants, said once as the caret arrives in it rather
         // than once per keystroke — every event carries the hint, including
         // the ones that changed nothing, so the dedup is what keeps it a hint
@@ -6008,6 +6013,29 @@ impl App {
         ))
     }
 
+    /// Put the time the helper is showing into the field it is open over.
+    ///
+    /// Word for word the calendar's path: the chosen value becomes the same
+    /// `SetField` an undo uses, so PDFium's own editor takes it, the field's
+    /// format script runs over it, and it lands in the shared undo history
+    /// like any other change (§9.1). pulpit chooses the *text* and nothing
+    /// more.
+    fn commit_focused_time(&mut self) -> Task<Message> {
+        let Some(picker) = self.reader.time_picker() else {
+            return Task::none();
+        };
+        let value = picker.time.format(&picker.pattern, self.date_language);
+        let transaction = pulpit_render::document::DocumentTransaction::one(
+            pulpit_render::document::DocumentCommand::SetField {
+                name: picker.field.clone(),
+                value,
+            },
+        );
+        self.reader.close_time_picker();
+        self.commit_to_document(transaction);
+        Task::none()
+    }
+
     /// The keys that mean something different while a document is being read.
     ///
     /// `None` when the key is not one of them, or when the reader is not what
@@ -6032,6 +6060,20 @@ impl App {
         if key == Some("Escape") && self.reader.date_picker().is_some() {
             self.reader.close_date_picker();
             return Some(Task::none());
+        }
+        // The time helper answers the same two keys, and answers them here
+        // for the same reason: Escape closes the nearest open thing, and
+        // Enter accepts what an open helper is showing — which is what Enter
+        // means everywhere a small panel is up. Neither reaches the field,
+        // because while the helper is open it is what the reader is using.
+        if self.reader.time_picker().is_some() {
+            if key == Some("Escape") {
+                self.reader.close_time_picker();
+                return Some(Task::none());
+            }
+            if key == Some("Enter") {
+                return Some(self.commit_focused_time());
+            }
         }
 
         // Tab walks the form's own fields, and it does so whether or not one
@@ -6367,6 +6409,7 @@ impl App {
                 self.commit_to_document(transaction);
                 Task::none()
             }
+            ReadCommand::PickTime => self.commit_focused_time(),
             ReadCommand::PickOption(index) => {
                 use pulpit_render::document::protocol::FormInputEvent;
 
@@ -10181,6 +10224,15 @@ fn today() -> crate::datefield::Date {
     use chrono::Datelike;
     let now = chrono::Local::now().date_naive();
     crate::datefield::Date::new(now.year(), now.month(), now.day())
+}
+
+/// The wall clock, to the minute, for a time field that holds nothing a
+/// helper can open on. Read here for the same reason `today` is: the reader's
+/// state is tested, and a test cannot argue with a clock.
+fn now_time() -> crate::datefield::TimeOfDay {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    crate::datefield::TimeOfDay::new(now.hour(), now.minute())
 }
 
 /// Which end of a pointer gesture is being handed to the form.

@@ -449,6 +449,13 @@ pub struct FormEventResult {
     /// widget is so the calendar can open beside it rather than somewhere
     /// else on the page.
     pub focused_date: Option<FocusedDate>,
+    /// The time field holding the caret, when one does.
+    ///
+    /// The same argument as [`Self::focused_date`], one category along: the
+    /// file says the field holds a time and says its shape, and the steppers
+    /// that make typing one unnecessary are the viewer's to draw.
+    #[serde(default)]
+    pub focused_time: Option<FocusedTime>,
     /// Where the widget holding the focus is, whatever kind of field it
     /// belongs to.
     ///
@@ -497,6 +504,24 @@ pub struct FocusedDate {
     pub page: PageIndex,
     /// Where the widget is, in canonical page space (A4), so the caller can
     /// place the calendar without knowing anything about PDF coordinates.
+    pub bounds: PageRect,
+}
+
+/// The time field with the caret in it (§8.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FocusedTime {
+    pub field: String,
+    /// The Acrobat pattern the field's own format script names — `h:MM tt`.
+    /// Empty only for an `AFTime_Format` preset the fixed table does not know.
+    pub pattern: String,
+    /// What the field holds now, so the helper can open on the time already
+    /// written rather than on an arbitrary one. The committed value: PDFium
+    /// reports no half-typed text, and asking for it would be wire traffic
+    /// per keystroke for a starting position.
+    pub value: String,
+    pub page: PageIndex,
+    /// Where the widget is, in canonical page space (A4), so the helper can
+    /// be placed without knowing anything about PDF coordinates.
     pub bounds: PageRect,
 }
 
@@ -1123,6 +1148,7 @@ mod tests {
             opened_choice: true,
             focused_hint: None,
             focused_date: None,
+            focused_time: None,
             focused_widget: Some(FocusedWidget {
                 field: "name".into(),
                 page: PageIndex(2),

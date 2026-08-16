@@ -118,6 +118,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         viewport: 600.0,
         visible: Vec::new(),
         date_picker: None,
+        time_picker: None,
         focused_widget: None,
         focused_hint: None,
         choice_list: None,

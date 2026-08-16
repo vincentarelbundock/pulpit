@@ -924,7 +924,17 @@ fn a_date_field_is_recognised_and_says_what_it_expects() {
 
         // A number field is told apart from a date, and a plain one from both.
         let count = fields.iter().find(|f| f.name == "count").expect("a number");
-        assert_eq!(count.format, FieldFormat::Number);
+        // …and the decimals its own script asks for come with it: the
+        // fixture's `AFNumber_Format(1, …)` is a number to one place, and a
+        // hint that says so teaches the shape before it is typed wrong.
+        assert_eq!(
+            count.format,
+            FieldFormat::Number {
+                decimals: 1,
+                currency: String::new(),
+            }
+        );
+        assert_eq!(count.format.hint().as_deref(), Some("number, 1 decimal"));
         let plain = fields
             .iter()
             .find(|f| f.name == "who")

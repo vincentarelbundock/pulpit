@@ -169,6 +169,44 @@ pub struct DatePicker {
     pub today: crate::datefield::Date,
 }
 
+/// The hour and minute steppers pulpit draws over a time field (§8.6).
+///
+/// The calendar's counterpart, and the same bargain: pulpit chooses the
+/// *text*, PDFium's editor still commits it and still runs the field's own
+/// format script over it, so there is one implementation of what a value
+/// looks like in a field and it is not this one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimePicker {
+    /// The field the chosen time goes into, by name — the same name a
+    /// `SetField` names, so it is an ordinary edit with an ordinary undo.
+    pub field: String,
+    /// The Acrobat pattern to write the time in. Empty when the format script
+    /// named a preset outside Acrobat's table, in which case a 24-hour
+    /// `HH:MM` is written: PDFium's own keystroke script parses that whatever
+    /// the pattern says, so the field is filled rather than left empty.
+    pub pattern: String,
+    pub page: PageIndex,
+    /// The widget, in canonical page space, so the steppers open beside the
+    /// field rather than in the middle of the page.
+    pub bounds: pulpit_core::page::PageRect,
+    /// The time on show, which the reader steps up and down.
+    pub time: crate::datefield::TimeOfDay,
+}
+
+impl TimePicker {
+    /// Whether the pattern's hour is a 12-hour one — `h`, as against `HH`.
+    /// What the steppers show has to be what the field will show.
+    pub fn twelve_hour(&self) -> bool {
+        self.pattern.contains('h')
+    }
+
+    /// Whether the pattern carries an am/pm marker, which is the only case
+    /// where a toggle for one is worth the room it takes.
+    pub fn shows_meridiem(&self) -> bool {
+        self.pattern.contains('t')
+    }
+}
+
 /// The option list pulpit draws over a non-editable choice field (§8.6).
 ///
 /// PDFium draws one of its own into the page bitmap, and that list is the
@@ -291,6 +329,10 @@ pub struct ReaderSession {
     /// is the viewer's to draw, which is why Acrobat and PDF Studio each have
     /// one of their own.
     date_picker: Option<DatePicker>,
+    /// The steppers open over a time field (§8.6). The calendar's argument one
+    /// category along: the file names a time and its shape and offers no way
+    /// to enter one.
+    time_picker: Option<TimePicker>,
     /// The language a picked date is written in, set once from the
     /// environment. Held here so drawing the calendar needs no argument
     /// threaded through every view function that stands between.
@@ -739,6 +781,58 @@ impl ReaderSession {
 
     pub fn close_date_picker(&mut self) {
         self.date_picker = None;
+    }
+
+    /// The steppers open over a time field, if any are.
+    pub fn time_picker(&self) -> Option<&TimePicker> {
+        self.time_picker.as_ref()
+    }
+
+    /// Open, move or close the time steppers as the caret moves between
+    /// fields.
+    ///
+    /// Opening is not re-opening, exactly as for the calendar: a caret that
+    /// stays in the field it was already in must not throw away the time the
+    /// reader has stepped to, or one keystroke would undo a dozen presses.
+    ///
+    /// They open on the time the field already holds when that can be read,
+    /// and on `now` when it cannot — the wall clock being the answer a time
+    /// field is usually asking for. `now` is passed in rather than read here,
+    /// because state that reads a clock cannot be tested.
+    pub fn set_focused_time(
+        &mut self,
+        focused: Option<&pulpit_render::document::protocol::FocusedTime>,
+        now: crate::datefield::TimeOfDay,
+    ) {
+        let Some(focused) = focused else {
+            self.time_picker = None;
+            return;
+        };
+        if self
+            .time_picker
+            .as_ref()
+            .is_some_and(|open| open.field == focused.field)
+        {
+            return;
+        }
+        self.time_picker = Some(TimePicker {
+            field: focused.field.clone(),
+            pattern: focused.pattern.clone(),
+            page: focused.page,
+            bounds: focused.bounds,
+            time: crate::datefield::TimeOfDay::parse(&focused.value).unwrap_or(now),
+        });
+    }
+
+    /// Step the open time helper by `minutes`, in either direction.
+    pub fn step_time_picker(&mut self, minutes: i32) {
+        if let Some(picker) = self.time_picker.as_mut() {
+            picker.time = picker.time.stepped(minutes);
+        }
+    }
+
+    pub fn close_time_picker(&mut self) {
+        self.time_picker = None;
     }
 
     /// Whether `hint` is new, and record it if it is.
@@ -2824,10 +2918,19 @@ impl ReaderSession {
                 self.close_date_picker();
                 false
             }
+            ReadCommand::StepTimePicker(minutes) => {
+                self.step_time_picker(*minutes);
+                false
+            }
+            ReadCommand::CloseTimePicker => {
+                self.close_time_picker();
+                false
+            }
             // The pick itself is a document edit and belongs to the layer that
             // can post one; nothing about the viewport changes here. So is
             // choosing an option, which crosses to PDFium as a `SelectOption`.
             ReadCommand::PickDate(_)
+            | ReadCommand::PickTime
             | ReadCommand::PickOption(_)
             | ReadCommand::ToggleOption(_) => false,
             ReadCommand::CloseChoiceList => {
@@ -2853,6 +2956,7 @@ impl ReaderSession {
                 self.form_hint = None;
                 self.form_widget = None;
                 self.date_picker = None;
+                self.time_picker = None;
                 false
             }
             ReadCommand::ToolOptions(tool) => {
@@ -3244,6 +3348,7 @@ impl ReaderSession {
             has_form: self.has_form,
             fields: &self.fields,
             date_picker: self.date_picker.as_ref(),
+            time_picker: self.time_picker.as_ref(),
             focused_widget: self.form_widget.as_ref(),
             focused_hint: self.form_hint.as_deref(),
             choice_list: self.choice_list.as_ref(),
@@ -5018,6 +5123,85 @@ mod tests {
             session.date_picker().is_none(),
             "a calendar left open over a page being drawn on is chrome nobody asked for"
         );
+    }
+
+    fn focused_time(
+        field: &str,
+        pattern: &str,
+        value: &str,
+    ) -> pulpit_render::document::protocol::FocusedTime {
+        pulpit_render::document::protocol::FocusedTime {
+            field: field.into(),
+            pattern: pattern.into(),
+            value: value.into(),
+            page: PageIndex(0),
+            bounds: pulpit_core::page::PageRect::new(100.0, 100.0, 300.0, 130.0),
+        }
+    }
+
+    #[test]
+    fn the_time_helper_opens_on_the_value_and_falls_back_to_the_clock() {
+        let mut session = open_with_form(1);
+        let now = crate::datefield::TimeOfDay::new(11, 45);
+        assert!(session.time_picker().is_none());
+
+        session.set_focused_time(Some(&focused_time("at", "h:MM tt", "2:05 pm")), now);
+        let picker = session.time_picker().expect("steppers over the field");
+        assert_eq!(picker.field, "at");
+        assert_eq!(picker.time, crate::datefield::TimeOfDay::new(14, 5));
+        assert!(picker.twelve_hour() && picker.shows_meridiem());
+
+        // An empty field has nothing to open on, so the wall clock is what a
+        // reader is most likely to want and least likely to be annoyed by.
+        session.set_focused_time(Some(&focused_time("other", "HH:MM", "")), now);
+        let picker = session
+            .time_picker()
+            .expect("steppers over the other field");
+        assert_eq!(picker.time, now);
+        assert!(
+            !picker.twelve_hour() && !picker.shows_meridiem(),
+            "a 24-hour field must not be given an am/pm toggle"
+        );
+
+        session.set_focused_time(None, now);
+        assert!(session.time_picker().is_none());
+    }
+
+    #[test]
+    fn stepping_the_time_survives_the_next_event_in_the_same_field() {
+        // The calendar's argument exactly: every form event re-reports the
+        // focused field, and a helper rebuilt on each one would undo a dozen
+        // presses on the first keystroke.
+        let mut session = open_with_form(1);
+        let now = crate::datefield::TimeOfDay::new(11, 45);
+        session.set_focused_time(Some(&focused_time("at", "HH:MM", "09:00")), now);
+        session.apply(&ReadCommand::StepTimePicker(60));
+        session.apply(&ReadCommand::StepTimePicker(-1));
+        assert_eq!(
+            session.time_picker().unwrap().time,
+            crate::datefield::TimeOfDay::new(9, 59)
+        );
+
+        session.set_focused_time(Some(&focused_time("at", "HH:MM", "09:00")), now);
+        assert_eq!(
+            session.time_picker().unwrap().time,
+            crate::datefield::TimeOfDay::new(9, 59),
+            "the time the reader stepped to was thrown away"
+        );
+
+        session.apply(&ReadCommand::CloseTimePicker);
+        assert!(session.time_picker().is_none());
+    }
+
+    #[test]
+    fn arming_a_tool_puts_the_time_helper_away() {
+        let mut session = open_with_form(1);
+        session.set_focused_time(
+            Some(&focused_time("at", "HH:MM", "09:00")),
+            crate::datefield::TimeOfDay::new(11, 45),
+        );
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(session.time_picker().is_none());
     }
     #[test]
     fn a_press_with_nothing_armed_belongs_to_the_document() {
