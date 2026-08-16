@@ -234,6 +234,21 @@ pub struct DocumentRenderRequest {
     /// revision — but the answer carries the revision it actually contains,
     /// which is how a preview knows when it may be dropped (A7, §9.2).
     pub expected_revision: DocumentRevision,
+    /// Which part of the page to draw, as a fraction of it.
+    ///
+    /// [`Region::FULL`] is the whole page, and `width` × `height` is then the
+    /// page's size in pixels. A smaller region is the §9.4 partial repaint:
+    /// the caller has a frame of the page already and needs only the rectangle
+    /// an edit changed, so `width` × `height` is that rectangle's size and the
+    /// page is drawn at `width / region.width` across. Same renderer, same
+    /// document, same appearance — which is what §9.4 requires of a partial
+    /// composite, and why this is a crop rather than a second way to draw.
+    #[serde(default = "full_region")]
+    pub region: pulpit_core::notes::Region,
+}
+
+fn full_region() -> pulpit_core::notes::Region {
+    pulpit_core::notes::Region::FULL
 }
 
 impl DocumentRenderRequest {
@@ -275,6 +290,10 @@ pub struct DocumentFrame {
     pub revision: DocumentRevision,
     /// Tightly packed RGBA8.
     pub pixels: Vec<u8>,
+    /// The part of the page this covers, so a partial repaint knows where on
+    /// the page it belongs. [`Region::FULL`] for a whole page.
+    #[serde(default = "full_region")]
+    pub region: pulpit_core::notes::Region,
 }
 
 impl DocumentFrame {

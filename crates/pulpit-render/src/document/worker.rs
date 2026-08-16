@@ -98,12 +98,13 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
                 .map(DocumentResponse::PageGeometries)
         }
         DocumentRequest::Render(render) => document
-            .render_page(render.page, render.width, render.height)
+            .render_page(render.page, render.region, render.width, render.height)
             .map(|pixels| {
                 DocumentResponse::Frame(Box::new(DocumentFrame {
                     page: render.page,
                     width: render.width,
                     height: render.height,
+                    region: render.region,
                     // The revision the frame actually contains, which is the
                     // document's now — not the one the caller expected (A7).
                     revision: document.revision(),

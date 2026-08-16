@@ -422,7 +422,12 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
 
     let (width, height) = (306u32, 396u32);
     let before = document
-        .render_page(PageIndex(0), width, height)
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
         .expect("the page renders");
     assert_eq!(before.len(), width as usize * height as usize * 4);
 
@@ -431,7 +436,12 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
         .expect("the stroke commits");
 
     let after = document
-        .render_page(PageIndex(0), width, height)
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
         .expect("the page renders again");
     assert_ne!(
         before, after,
@@ -441,8 +451,70 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
 
     // …and it is the *annotation* that changed the picture, not the render
     // being non-deterministic.
-    let again = document.render_page(PageIndex(0), width, height).unwrap();
+    let again = document
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
+        .unwrap();
     assert_eq!(after, again, "two renders of one revision differ");
+}
+
+/// §9.4: a partial repaint is a *crop* of the full render, not a second way of
+/// drawing the page. So the pixels it returns have to be the pixels the full
+/// render puts in that rectangle — which is the whole basis on which a patch
+/// may be pasted into a frame.
+#[test]
+fn a_partial_render_is_exactly_the_crop_of_the_full_one() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("crop");
+    let path = source(&directory);
+    let mut document = open(backend, &path);
+
+    // A mark to make the page's content non-uniform, so an accidentally blank
+    // or misaligned crop cannot pass.
+    document
+        .apply(DocumentRevision::INITIAL, DocumentTransaction::one(ink(0)))
+        .expect("the stroke commits");
+
+    let (width, height) = (400u32, 520u32);
+    let full = document
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
+        .expect("the page renders");
+
+    // A quarter of the page, on exact pixel boundaries so there is a single
+    // right answer to compare against.
+    let region = pulpit_core::notes::Region::new(0.25, 0.5, 0.5, 0.25);
+    let (crop_width, crop_height) = (width / 2, height / 4);
+    let cropped = document
+        .render_page(PageIndex(0), region, crop_width, crop_height)
+        .expect("the crop renders");
+    assert_eq!(
+        cropped.len(),
+        crop_width as usize * crop_height as usize * 4
+    );
+
+    let x0 = (width / 4) as usize;
+    let y0 = (height / 2) as usize;
+    for row in 0..crop_height as usize {
+        let from = row * crop_width as usize * 4;
+        let to = ((y0 + row) * width as usize + x0) * 4;
+        assert_eq!(
+            &cropped[from..from + crop_width as usize * 4],
+            &full[to..to + crop_width as usize * 4],
+            "row {row} of the crop is not the same row of the full render — \
+             the partial repaint is drawing the page at a different offset \
+             or a different scale"
+        );
+    }
 }
 
 #[test]

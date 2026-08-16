@@ -158,6 +158,7 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
             width: 200,
             height: 260,
             expected_revision: DocumentRevision(1),
+            region: pulpit_core::notes::Region::FULL,
         }))
         .expect("the page renders")
     else {

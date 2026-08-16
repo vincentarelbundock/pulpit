@@ -86,6 +86,22 @@ pub enum Ask {
         destination: PathBuf,
         options: SaveOptions,
     },
+    /// Draw the rectangle an edit changed, from the document the worker
+    /// holds, so the page can show that edit without waiting for a snapshot.
+    ///
+    /// The §9.4 partial repaint. It is the same renderer drawing the same
+    /// document that the snapshot would have been taken from, so what comes
+    /// back is what the full render would have put in that rectangle — a crop,
+    /// not a second opinion. A full frame from a snapshot remains the correct
+    /// baseline and supersedes every patch on its page; a patch that fails or
+    /// arrives late costs nothing but the wait it was trying to save.
+    RenderPatch {
+        page: pulpit_core::page::PageIndex,
+        region: pulpit_core::notes::Region,
+        width: u32,
+        height: u32,
+        expected_revision: DocumentRevision,
+    },
 }
 
 /// Something the document worker had to say.
@@ -127,6 +143,10 @@ pub enum Told {
         message: String,
     },
     Applied(Box<Applied>),
+    /// The rectangle an edit changed, drawn from the worker's document. Held
+    /// over the page's frame until a full frame containing the same revision
+    /// arrives (§9.2, §9.4).
+    Patched(Box<pulpit_render::document::protocol::DocumentFrame>),
     Saved(pulpit_render::document::SavedDocument),
     /// Something was refused, or the worker went. `fatal` is the difference
     /// that matters: a refusal is an answer and the session carries on; a lost
@@ -282,6 +302,32 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 message: error.to_string(),
             },
             other => unexpected(other, "a snapshot"),
+        }],
+        Ask::RenderPatch {
+            page,
+            region,
+            width,
+            height,
+            expected_revision,
+        } => vec![match session.request(DocumentRequest::Render(
+            pulpit_render::document::protocol::DocumentRenderRequest {
+                page,
+                width,
+                height,
+                expected_revision,
+                region,
+            },
+        )) {
+            Ok(DocumentResponse::Frame(frame)) => Told::Patched(frame),
+            // A patch is an optimisation over waiting for the snapshot
+            // that is coming anyway, so a failure is not reported to the
+            // reader: the page keeps its previews and the snapshot lands
+            // as it would have.
+            Err(error) if !error.is_worker_loss() => {
+                tracing::debug!(%error, "a partial repaint was refused");
+                return Vec::new();
+            }
+            other => unexpected(other, "a page patch"),
         }],
         Ask::ListAnnotations { page } => vec![match session
             .request(DocumentRequest::ListAnnotations { page })

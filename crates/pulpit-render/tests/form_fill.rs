@@ -321,7 +321,12 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
     let mut document = PdfDocument::new(Box::new(engine), 59);
     let (width, height) = (400u32, 500u32);
     let empty = document
-        .render_page(PageIndex(0), width, height)
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
         .expect("the empty form renders");
 
     click_into(&mut document, "name");
@@ -332,7 +337,12 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
     }
 
     let typed = document
-        .render_page(PageIndex(0), width, height)
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
         .expect("the form renders while it is being typed into");
 
     let changed = empty
@@ -457,11 +467,25 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
 
     // …and the redraw that follows one, at a size a reader actually looks at.
     let (width, height) = (900u32, 1200u32);
-    let _ = document.render_page(PageIndex(0), width, height).unwrap();
+    let _ = document
+        .render_page(
+            PageIndex(0),
+            pulpit_core::notes::Region::FULL,
+            width,
+            height,
+        )
+        .unwrap();
     let start = Instant::now();
     let rounds = 10;
     for _ in 0..rounds {
-        let _ = document.render_page(PageIndex(0), width, height).unwrap();
+        let _ = document
+            .render_page(
+                PageIndex(0),
+                pulpit_core::notes::Region::FULL,
+                width,
+                height,
+            )
+            .unwrap();
     }
     let per_redraw = start.elapsed() / rounds;
 

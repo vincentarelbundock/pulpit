@@ -51,6 +51,69 @@ struct RetainedMark {
     /// worker's answer. Commits are answered in order, so the oldest unstamped
     /// mark is the one each answer names.
     revision: Option<pulpit_render::document::DocumentRevision>,
+    /// The name the worker gave it, once it has answered.
+    ///
+    /// Identity is what lets a later delete or move in the same breath find
+    /// this preview again and take it down or move it, instead of leaving a
+    /// mark drawn that the document no longer contains.
+    id: Option<pulpit_core::annotate::AnnotationId>,
+}
+
+/// Whether a committed transaction leaves the rendered picture complete.
+///
+/// The picture the reader shows is a rendered frame plus the previews stacked
+/// on it (§9.2). When every part of a transaction is drawn by a preview, that
+/// combination is not a stale picture waiting for a real one — it is right,
+/// and re-rendering would produce the same thing at the cost of a full
+/// document snapshot, a reopen and a cold rasterisation of every visible page.
+/// Ordered so that combining the urgencies of several commands is `max`:
+/// one part of a transaction the previews cannot cover makes the whole of it
+/// prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum RasterUrgency {
+    /// Nothing on screen is wrong. The renderer can catch up when the hand
+    /// stops.
+    #[default]
+    Deferred,
+    /// Something on screen is wrong until it is re-rendered: a mark no preview
+    /// can draw, or a change to something already in the picture.
+    Prompt,
+}
+
+/// What the preview painter would draw for a draft, if it can draw it at all.
+///
+/// The painter takes polylines and quads (§9.2), which is ink and highlights.
+/// A stamp's picture and typeset text are not among them, and drawing an
+/// approximation of them would be exactly the second appearance the retained
+/// preview exists to avoid.
+fn preview_of(
+    draft: &pulpit_core::annotate::AnnotationDraft,
+) -> Option<(PageIndex, crate::widgets::document::preview::GesturePreview)> {
+    use pulpit_core::annotate::AnnotationDraft;
+
+    let (page, points, quads, style) = match draft {
+        AnnotationDraft::Ink(ink) => (
+            ink.page,
+            ink.points.iter().map(|point| point.at).collect(),
+            Vec::new(),
+            ink.style,
+        ),
+        AnnotationDraft::Highlight(highlight) => (
+            highlight.page,
+            Vec::new(),
+            highlight.quads.clone(),
+            highlight.style,
+        ),
+        _ => return None,
+    };
+    let preview = crate::widgets::document::preview::GesturePreview {
+        points,
+        quads,
+        color: style.color.rgb(),
+        opacity: style.opacity,
+        width: style.width,
+    };
+    (!preview.is_empty()).then_some((page, preview))
 }
 
 /// What a pointer release produced.
@@ -269,7 +332,12 @@ impl ReaderSession {
     /// ordinary edit pushes onto undo and clears the redo stack, because the
     /// future the user had taken back is no longer reachable from where they
     /// now are; an undo pushes onto redo, and a redo back onto undo.
-    pub fn applied(&mut self, applied: &pulpit_render::document::Applied, kind: AppliedKind) {
+    #[must_use]
+    pub fn applied(
+        &mut self,
+        applied: &pulpit_render::document::Applied,
+        kind: AppliedKind,
+    ) -> RasterUrgency {
         self.revision = applied.document_revision;
         self.dirty = true;
         match kind {
@@ -295,17 +363,68 @@ impl ReaderSession {
             self.annotation_requests.remove(page);
         }
 
-        // Commits are answered in order, so this answer names the oldest
-        // retained mark still waiting for its revision.
+        // Give the previews the names and the revision the worker just made
+        // for them. Matched by name where there is one — a replace keeps the
+        // mark's identity — and otherwise by order, because a create has no
+        // name until this answer and commits are answered in order.
         if kind == AppliedKind::Edit {
-            if let Some(mark) = self
+            for effect in &applied.effects {
+                let pulpit_render::document::AppliedEffect::Annotation(summary) = effect else {
+                    continue;
+                };
+                let named = self
+                    .retained
+                    .iter()
+                    .position(|mark| mark.id.as_ref() == Some(&summary.id));
+                let at = named.or_else(|| {
+                    self.retained
+                        .iter()
+                        .position(|mark| mark.id.is_none() && mark.revision.is_none())
+                });
+                if let Some(mark) = at.and_then(|at| self.retained.get_mut(at)) {
+                    mark.id = Some(summary.id.clone());
+                }
+            }
+            // Every preview still waiting belongs to this answer: commits are
+            // answered in order, so anything older is already stamped. The
+            // stamp does not depend on the effects — a preview that never got
+            // one would never come down.
+            for mark in self
                 .retained
                 .iter_mut()
-                .find(|mark| mark.revision.is_none())
+                .filter(|mark| mark.revision.is_none())
             {
                 mark.revision = Some(applied.document_revision);
             }
+            return RasterUrgency::Deferred;
         }
+
+        // An undo or a redo. Which of the two cases it is only becomes clear
+        // from what it did: taking back a mark that is still only a preview
+        // is dropping the preview, and costs no render. Taking back anything
+        // the renderer has already drawn, or putting something back, does.
+        let mut urgency = RasterUrgency::Deferred;
+        for effect in &applied.effects {
+            match effect {
+                pulpit_render::document::AppliedEffect::Deleted(id) => {
+                    match self
+                        .retained
+                        .iter()
+                        .position(|mark| mark.id.as_ref() == Some(id))
+                    {
+                        Some(at) => {
+                            self.retained.remove(at);
+                        }
+                        None => urgency = RasterUrgency::Prompt,
+                    }
+                }
+                // Something was restored or changed back. The before-image is
+                // the worker's, not the preview painter's, so the picture is
+                // only right once it has been drawn.
+                _ => urgency = RasterUrgency::Prompt,
+            }
+        }
+        urgency
     }
 
     /// Keep drawing what `transaction` creates until a frame containing it
@@ -314,49 +433,80 @@ impl ReaderSession {
     /// takes it down (§9.2).
     ///
     /// Only ink and highlights are retained: they are what the preview
-    /// painter can draw, and they are the tools whose marks used to vanish at
-    /// release. Text, notes and stamps stay editor-shaped until their frame
-    /// arrives, and an eraser's effect is an absence nothing can predraw.
-    pub fn retain_commit(&mut self, transaction: &pulpit_render::document::DocumentTransaction) {
-        use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft};
+    /// painter can draw. Text, notes and stamps stay editor-shaped until their
+    /// frame arrives.
+    ///
+    /// The answer says whether the rendered picture has to catch up promptly
+    /// or may wait for a quiet spell. A transaction every part of which is
+    /// drawn by a preview leaves the picture *complete* rather than merely
+    /// not-yet-stale, so nothing is gained by re-rendering it now — which is
+    /// what lets a mark made and taken back within a few seconds cost no
+    /// render at all.
+    #[must_use]
+    pub fn retain_commit(
+        &mut self,
+        transaction: &pulpit_render::document::DocumentTransaction,
+    ) -> RasterUrgency {
+        use pulpit_core::annotate::AnnotationCommand;
+
+        let mut urgency = RasterUrgency::Deferred;
         for command in &transaction.0 {
             let pulpit_render::document::DocumentCommand::Annotation(command) = command else {
+                // A form field's value is drawn by the renderer and by nothing
+                // else here.
+                urgency = RasterUrgency::Prompt;
                 continue;
             };
-            let draft = match command {
-                AnnotationCommand::Create(draft) => draft,
-                AnnotationCommand::Replace { .. } | AnnotationCommand::Delete { .. } => continue,
-            };
-            let (page, points, quads, style) = match draft {
-                AnnotationDraft::Ink(ink) => (
-                    ink.page,
-                    ink.points.iter().map(|point| point.at).collect(),
-                    Vec::new(),
-                    ink.style,
-                ),
-                AnnotationDraft::Highlight(highlight) => (
-                    highlight.page,
-                    Vec::new(),
-                    highlight.quads.clone(),
-                    highlight.style,
-                ),
-                _ => continue,
-            };
-            let preview = crate::widgets::document::preview::GesturePreview {
-                points,
-                quads,
-                color: style.color.rgb(),
-                opacity: style.opacity,
-                width: style.width,
-            };
-            if !preview.is_empty() {
-                self.retained.push(RetainedMark {
-                    page,
-                    preview,
-                    revision: None,
-                });
+            match command {
+                AnnotationCommand::Create(draft) => match preview_of(draft) {
+                    Some((page, preview)) => self.retained.push(RetainedMark {
+                        page,
+                        preview,
+                        revision: None,
+                        id: None,
+                    }),
+                    // Nothing can predraw it, so the page is wrong until the
+                    // renderer has drawn it.
+                    None => urgency = RasterUrgency::Prompt,
+                },
+                AnnotationCommand::Delete { id } => {
+                    // A mark that is only a preview is unmade by dropping the
+                    // preview, and the picture underneath was never wrong. A
+                    // mark already in the picture is an absence nothing can
+                    // predraw.
+                    let held = self
+                        .retained
+                        .iter()
+                        .position(|mark| mark.id.as_ref() == Some(id));
+                    match held {
+                        Some(at) => {
+                            self.retained.remove(at);
+                        }
+                        None => urgency = RasterUrgency::Prompt,
+                    }
+                }
+                AnnotationCommand::Replace { id, replacement } => {
+                    let held = self
+                        .retained
+                        .iter_mut()
+                        .find(|mark| mark.id.as_ref() == Some(id));
+                    match (held, preview_of(replacement)) {
+                        // Moving or restyling something that is still only a
+                        // preview: the preview moves with it.
+                        (Some(mark), Some((page, preview))) => {
+                            mark.page = page;
+                            mark.preview = preview;
+                            // It is about to have a new revision, and until
+                            // the worker says which, it must not be taken down
+                            // by a frame at the old one.
+                            mark.revision = None;
+                        }
+                        _ => urgency = RasterUrgency::Prompt,
+                    }
+                }
             }
         }
+        urgency
     }
 
     /// The retained highlight washes on `page`, for the caller that
@@ -378,6 +528,15 @@ impl ReaderSession {
             .filter(|mark| mark.page == page && !mark.preview.quads.is_empty())
             .map(|mark| &mark.preview)
             .collect()
+    }
+
+    /// How many marks are currently drawn as previews rather than rendered.
+    ///
+    /// Each one is composited on every draw, so the set has to be bounded:
+    /// deferring the render is free for a handful of marks and stops being
+    /// free for a hundred.
+    pub fn retained_count(&self) -> usize {
+        self.retained.len()
     }
 
     /// A commit was refused or lost: the oldest unstamped retained mark is a
@@ -404,6 +563,61 @@ impl ReaderSession {
         self.retained.retain(|mark| {
             mark.page != page || mark.revision.map(|r| r > revision).unwrap_or(true)
         });
+    }
+
+    /// A partial repaint of `region` at `revision` arrived for `page`.
+    ///
+    /// The answer says whether it may be used. A patch is drawn from the
+    /// worker's document, so inside its rectangle it contains *every* mark
+    /// committed at or before its revision — the ones previews are standing in
+    /// for included. Any preview wholly inside it is therefore redundant and
+    /// comes down, exactly as it would for a full frame (§9.2).
+    ///
+    /// A preview that only *partly* overlaps the rectangle is the case that
+    /// cannot be reconciled: half of it is in the patch and half is not, so
+    /// neither keeping it (the overlap would be drawn twice, and a highlight
+    /// drawn twice is visibly darker) nor dropping it (the outside half would
+    /// vanish) is right. The patch is refused, and the page waits for the
+    /// snapshot it would have waited for anyway.
+    #[must_use]
+    pub fn patch_landed(
+        &mut self,
+        page: PageIndex,
+        region: pulpit_core::notes::Region,
+        revision: pulpit_render::document::DocumentRevision,
+    ) -> bool {
+        let Some(geometry) = self.page_geometry(page) else {
+            return false;
+        };
+        let patched = pulpit_core::page::PageRect::new(
+            region.x * geometry.width,
+            region.y * geometry.height,
+            (region.x + region.width) * geometry.width,
+            (region.y + region.height) * geometry.height,
+        );
+        let covered = |mark: &RetainedMark| -> bool {
+            mark.preview
+                .bounds()
+                .is_some_and(|bounds| patched.contains_rect(&bounds))
+        };
+        let overlaps = |mark: &RetainedMark| -> bool {
+            mark.preview
+                .bounds()
+                .is_some_and(|bounds| patched.intersects(&bounds))
+        };
+        if self
+            .retained
+            .iter()
+            .any(|mark| mark.page == page && overlaps(mark) && !covered(mark))
+        {
+            return false;
+        }
+        self.retained.retain(|mark| {
+            mark.page != page
+                || !covered(mark)
+                || mark.revision.map(|at| at > revision).unwrap_or(true)
+        });
+        true
     }
 
     /// What is on a page, for hit-testing. Replaced wholesale, because the
@@ -2116,7 +2330,7 @@ mod tests {
     fn opening_a_second_document_forgets_the_first() {
         let mut session = open(5);
         session.apply(&ReadCommand::GoToPage(PageIndex(4)));
-        session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
         session.opened(
             vec![PageGeometry::upright(612.0, 792.0); 2],
             CompatibilityLevel::AnnotateOnly,
@@ -2376,7 +2590,7 @@ mod tests {
         let mut session = open(2);
         let facet = session.facet(true, &no_frames, &pulpit_core::search::SearchState::new());
         assert!(!facet.can_undo && !facet.can_redo);
-        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         let facet = session.facet(true, &no_frames, &pulpit_core::search::SearchState::new());
         assert!(facet.can_undo && !facet.can_redo);
         assert!(facet.dirty);
@@ -2432,7 +2646,7 @@ mod tests {
         session.set_annotations(PageIndex(0), &[]);
         assert!(session.annotations_wanted().is_empty());
 
-        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         assert_eq!(
             session.annotations_wanted(),
             vec![PageIndex(0)],
@@ -2455,7 +2669,7 @@ mod tests {
     #[test]
     fn undo_and_redo_move_operations_between_the_two_stacks() {
         let mut session = open(2);
-        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         assert!(
             session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
@@ -2468,7 +2682,7 @@ mod tests {
         );
 
         let operation = session.undo_operation().expect("something to undo");
-        session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
         assert!(
             !session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
@@ -2482,7 +2696,7 @@ mod tests {
         let _ = operation;
 
         session.redo_operation().expect("something to redo");
-        session.applied(&applied(DocumentRevision(3)), AppliedKind::Redo);
+        let _ = session.applied(&applied(DocumentRevision(3)), AppliedKind::Redo);
         assert!(
             session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
@@ -2500,16 +2714,16 @@ mod tests {
         // Standard undo semantics, stated because getting it wrong leaves a
         // redo control that puts back an edit from a history the user left.
         let mut session = open(2);
-        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         session.undo_operation();
-        session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
         assert!(
             session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
                 .can_redo
         );
 
-        session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
         assert!(
             !session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
@@ -2911,7 +3125,7 @@ mod tests {
         let mut session = open(2);
         session.set_annotations(PageIndex(0), &[stroke_at(100.0)]);
         assert!(session.annotations_wanted().is_empty());
-        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         assert!(
             session.annotations_wanted().contains(&PageIndex(0)),
             "the edited page's marks were not re-read"
@@ -2981,7 +3195,7 @@ mod tests {
         let Released::Commit(transaction) = session.pointer_released() else {
             panic!("the stroke commits")
         };
-        session.retain_commit(&transaction);
+        let _ = session.retain_commit(&transaction);
 
         let shown = |session: &ReaderSession| {
             session
@@ -2993,7 +3207,7 @@ mod tests {
         assert!(shown(&session), "drawn while the commit is in flight");
 
         // The worker answers, stamping the mark with its revision.
-        session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
         assert!(shown(&session), "still drawn until a frame contains it");
 
         // A frame from before the commit changes nothing…
@@ -3017,7 +3231,7 @@ mod tests {
         let Released::Commit(transaction) = session.pointer_released() else {
             panic!("the stroke commits")
         };
-        session.retain_commit(&transaction);
+        let _ = session.retain_commit(&transaction);
         session.commit_refused();
         assert!(
             session
@@ -3051,7 +3265,7 @@ mod tests {
         let transaction = pulpit_render::document::DocumentTransaction::from_annotations([
             AnnotationCommand::Create(draft),
         ]);
-        session.retain_commit(&transaction);
+        let _ = session.retain_commit(&transaction);
 
         assert_eq!(session.retained_washes(PageIndex(0)).len(), 1);
         assert!(
@@ -3068,9 +3282,232 @@ mod tests {
         );
 
         // …and it comes down like any retained mark.
-        session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
         session.frame_landed(PageIndex(0), DocumentRevision(2));
         assert!(session.retained_washes(PageIndex(0)).is_empty());
+    }
+
+    /// An answer that names the annotation it made, which is what gives a
+    /// retained preview its identity.
+    fn applied_naming(
+        revision: DocumentRevision,
+        summary: pulpit_render::document::AnnotationSummary,
+    ) -> pulpit_render::document::Applied {
+        pulpit_render::document::Applied {
+            effects: vec![pulpit_render::document::AppliedEffect::Annotation(
+                Box::new(summary),
+            )],
+            ..applied(revision)
+        }
+    }
+
+    /// A stroke drawn and taken back before the renderer ever heard of it: the
+    /// preview goes, the picture underneath was never wrong, and nothing has
+    /// to be rendered to make the screen right. This is what makes undo of a
+    /// fresh mark instant.
+    #[test]
+    fn undoing_a_mark_that_is_still_only_a_preview_costs_no_render() {
+        let mut session = open(1);
+        let stroke = stroke_at(100.0);
+        let id = stroke.id.clone();
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        assert_eq!(
+            session.retain_commit(&transaction),
+            RasterUrgency::Deferred,
+            "a stroke the preview painter can draw needs no render"
+        );
+        let _ = session.applied(
+            &applied_naming(DocumentRevision(2), stroke),
+            AppliedKind::Edit,
+        );
+        assert_eq!(session.retained_count(), 1);
+
+        // The undo comes back as a deletion of that same mark.
+        let undone = pulpit_render::document::Applied {
+            effects: vec![pulpit_render::document::AppliedEffect::Deleted(id)],
+            ..applied(DocumentRevision(3))
+        };
+        assert_eq!(
+            session.applied(&undone, AppliedKind::Undo),
+            RasterUrgency::Deferred,
+            "unmaking a preview is not a reason to re-render"
+        );
+        assert_eq!(
+            session.retained_count(),
+            0,
+            "the preview outlived the mark it was drawing"
+        );
+    }
+
+    /// The other half: taking back something the renderer has already drawn
+    /// into the page is an absence no preview can express, so the picture is
+    /// wrong until it is rendered again.
+    #[test]
+    fn undoing_a_mark_the_page_already_shows_asks_for_a_render() {
+        let mut session = open(1);
+        let undone = pulpit_render::document::Applied {
+            effects: vec![pulpit_render::document::AppliedEffect::Deleted(
+                stroke_at(100.0).id,
+            )],
+            ..applied(DocumentRevision(2))
+        };
+        assert_eq!(
+            session.applied(&undone, AppliedKind::Undo),
+            RasterUrgency::Prompt
+        );
+    }
+
+    /// Deleting a mark that is still only a preview is the same case as
+    /// undoing one, reached through the eraser instead of the undo button.
+    #[test]
+    fn erasing_a_mark_that_is_still_only_a_preview_costs_no_render() {
+        use pulpit_core::annotate::AnnotationCommand;
+
+        let mut session = open(1);
+        let stroke = stroke_at(100.0);
+        let id = stroke.id.clone();
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        let _ = session.retain_commit(&transaction);
+        let _ = session.applied(
+            &applied_naming(DocumentRevision(2), stroke),
+            AppliedKind::Edit,
+        );
+
+        let erase = pulpit_render::document::DocumentTransaction::from_annotations([
+            AnnotationCommand::Delete { id },
+        ]);
+        assert_eq!(session.retain_commit(&erase), RasterUrgency::Deferred);
+        assert_eq!(session.retained_count(), 0);
+
+        // …but erasing something that was already in the picture is not free.
+        let other = pulpit_render::document::DocumentTransaction::from_annotations([
+            AnnotationCommand::Delete {
+                id: stroke_at(400.0).id,
+            },
+        ]);
+        assert_eq!(session.retain_commit(&other), RasterUrgency::Prompt);
+    }
+
+    /// A mark the preview painter has no way to draw has to be rendered before
+    /// the page is right, however cheap deferring would be.
+    #[test]
+    fn a_mark_no_preview_can_draw_asks_for_a_render() {
+        use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, FreeTextDraft};
+
+        let mut session = open(1);
+        let draft = AnnotationDraft::FreeText(FreeTextDraft {
+            page: PageIndex(0),
+            rect: pulpit_core::page::PageRect::new(100.0, 100.0, 300.0, 140.0),
+            text: "a thought".into(),
+            source: pulpit_core::annotate::TextSource::Plain,
+            style: pulpit_core::annotate::MarkStyle::default(),
+        });
+        let transaction = pulpit_render::document::DocumentTransaction::from_annotations([
+            AnnotationCommand::Create(draft),
+        ]);
+        assert_eq!(session.retain_commit(&transaction), RasterUrgency::Prompt);
+        assert_eq!(
+            session.retained_count(),
+            0,
+            "nothing was drawn, so nothing is retained"
+        );
+    }
+
+    /// A stroke retained on a page, ready for the patch tests. The stroke runs
+    /// from (100, 100) to (200, 140) on a 612 × 792 page.
+    fn session_with_a_retained_stroke() -> ReaderSession {
+        let mut session = open(1);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        let _ = session.retain_commit(&transaction);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
+        session
+    }
+
+    /// A partial repaint contains every mark the document holds inside its
+    /// rectangle, so a preview wholly inside it has been drawn for real and
+    /// comes down — the same rule a full frame follows.
+    #[test]
+    fn a_patch_takes_down_the_previews_it_contains() {
+        let mut session = session_with_a_retained_stroke();
+        assert_eq!(session.retained_count(), 1);
+
+        // The top-left quarter of the page, which holds the whole stroke.
+        let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.5, 0.5);
+        assert!(session.patch_landed(PageIndex(0), region, DocumentRevision(2)));
+        assert_eq!(
+            session.retained_count(),
+            0,
+            "the patch drew the mark the preview was standing in for"
+        );
+    }
+
+    /// …but only if it contains the whole of it. A preview split by the
+    /// rectangle's edge can be neither kept nor dropped without showing
+    /// something wrong, so the patch is refused and the page waits.
+    #[test]
+    fn a_patch_that_splits_a_preview_is_refused() {
+        let mut session = session_with_a_retained_stroke();
+
+        // A band that cuts the stroke in half down its length.
+        let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.25, 1.0);
+        assert!(
+            !session.patch_landed(PageIndex(0), region, DocumentRevision(2)),
+            "half a stroke inside the patch is not a usable patch"
+        );
+        assert_eq!(
+            session.retained_count(),
+            1,
+            "a refused patch changes nothing"
+        );
+    }
+
+    /// A patch older than the mark says nothing about it: the mark was
+    /// committed after the patch was drawn, so the patch cannot contain it.
+    #[test]
+    fn a_patch_older_than_a_preview_leaves_it_alone() {
+        let mut session = session_with_a_retained_stroke();
+        let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.5, 0.5);
+        assert!(session.patch_landed(PageIndex(0), region, DocumentRevision(1)));
+        assert_eq!(session.retained_count(), 1);
+    }
+
+    /// A patch on another page says nothing about this one's previews.
+    #[test]
+    fn a_patch_on_another_page_leaves_this_ones_previews_alone() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        let _ = session.retain_commit(&transaction);
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
+
+        let whole = pulpit_core::notes::Region::FULL;
+        assert!(session.patch_landed(PageIndex(1), whole, DocumentRevision(2)));
+        assert_eq!(session.retained_count(), 1);
     }
 
     #[test]

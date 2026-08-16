@@ -197,6 +197,7 @@ pub trait DocumentBackend: Send {
     fn render_page(
         &self,
         _page: PageIndex,
+        _region: pulpit_core::notes::Region,
         _width: u32,
         _height: u32,
         _rgba: &mut [u8],
@@ -566,8 +567,19 @@ impl<'a> PdfDocument<'a> {
     /// Allocates the buffer here rather than taking one, because the caller is
     /// a protocol handler answering a request rather than a frame cache with
     /// storage of its own; the size is bounded before the allocation (A8).
-    pub fn render_page(&self, page: PageIndex, width: u32, height: u32) -> Result<Vec<u8>> {
+    pub fn render_page(
+        &self,
+        page: PageIndex,
+        region: pulpit_core::notes::Region,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
         self.check_page(page)?;
+        if !region.is_valid() {
+            return Err(DocumentError::Backend(
+                "a render region that is not part of a page".into(),
+            ));
+        }
         let bytes = u64::from(width) * u64::from(height) * 4;
         // The same ceiling the render path keeps. Checked before the
         // allocation, not after it.
@@ -577,7 +589,8 @@ impl<'a> PdfDocument<'a> {
             )));
         }
         let mut rgba = vec![0u8; bytes as usize];
-        self.backend.render_page(page, width, height, &mut rgba)?;
+        self.backend
+            .render_page(page, region, width, height, &mut rgba)?;
         Ok(rgba)
     }
 

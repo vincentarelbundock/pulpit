@@ -145,6 +145,18 @@ impl PageRect {
             && other.top <= self.bottom
     }
 
+    /// Does this rectangle hold the whole of `other`?
+    ///
+    /// Used to decide whether a partial repaint already contains a mark, where
+    /// "mostly" is not an answer: a mark half inside a repainted rectangle has
+    /// to be treated as outside it.
+    pub fn contains_rect(&self, other: &PageRect) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && other.right <= self.right
+            && other.bottom <= self.bottom
+    }
+
     /// Grow by `amount` on every side. Used to turn a stroke's centre-line
     /// bounds into the `/Rect` that encloses its painted width.
     pub fn inflated(&self, amount: f32) -> PageRect {

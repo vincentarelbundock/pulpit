@@ -102,6 +102,15 @@ pub struct PdfiumDocument<'a> {
     /// and the alternative is measuring every page at open on the chance one
     /// of them is looked at.
     geometry: RefCell<HashMap<usize, PageGeometry>>,
+    /// Which page an annotation was last found on.
+    ///
+    /// A PDF has no index by `/NM`, so [`Self::locate`] has to walk `/Annots`.
+    /// Walking *every* page to find one mark makes an eraser sweep, an undo
+    /// and a replace each cost the whole document; a hint that says which page
+    /// to look at first makes them cost one page. It is only ever a hint — the
+    /// page is still searched, and a miss falls back to the full walk — so a
+    /// stale entry costs a wasted page scan and never a wrong answer.
+    located: RefCell<HashMap<AnnotationId, usize>>,
     /// PDFium's interactive form-fill environment, and the handle it gave back
     /// (§8.6).
     ///
@@ -115,6 +124,27 @@ pub struct PdfiumDocument<'a> {
     /// address of the environment's first field and calls back through it. It
     /// is dropped in [`PdfiumDocument::close`], after the handle.
     form: Option<FormBinding>,
+    /// The page a text selection is being swept across, held loaded together
+    /// with its text layer.
+    ///
+    /// The second place a native handle outlives a call, and for the same
+    /// reason as [`FormBinding::open_page`]: a highlighter drag asks where the
+    /// text is on every pointer sample, and `FPDF_LoadPage` +
+    /// `FPDFText_LoadPage` re-parse the content stream and rebuild the whole
+    /// text layer each time — tens of milliseconds per sample on a text-heavy
+    /// page, paid at pointer rate.
+    ///
+    /// It is a cache of a *read*, so it is dropped before any mutation and in
+    /// [`PdfiumDocument::close`]: no handle survives an edit, and a selection
+    /// never observes a half-changed page.
+    text_page: RefCell<Option<TextPageCache>>,
+}
+
+/// A loaded page and its text layer, held across the samples of one drag.
+struct TextPageCache {
+    page: usize,
+    handle: FPDF_PAGE,
+    text: FPDF_TEXTPAGE,
 }
 
 /// The form-fill environment together with the handle that borrows it.
@@ -171,7 +201,9 @@ impl<'a> PdfiumDocument<'a> {
             },
             source: Some(source.to_path_buf()),
             geometry: RefCell::new(HashMap::new()),
+            located: RefCell::new(HashMap::new()),
             form: None,
+            text_page: RefCell::new(None),
         };
         engine.info = engine.survey()?;
         engine.open_form_environment();
@@ -277,6 +309,22 @@ impl<'a> PdfiumDocument<'a> {
         }
     }
 
+    /// Let go of the page a selection was being swept across, if there is one.
+    ///
+    /// Takes `&self` because it is called from the read path as well as before
+    /// every mutation, and closing a cache entry is not a change to the
+    /// document.
+    fn release_text_page(&self) {
+        let Some(cache) = self.text_page.borrow_mut().take() else {
+            return;
+        };
+        let bindings = self.backend.bindings();
+        unsafe {
+            bindings.FPDFText_ClosePage(cache.text);
+            bindings.FPDF_ClosePage(cache.handle);
+        }
+    }
+
     /// Draw the live form field contents over a rendered page.
     ///
     /// This pass is not optional and not an optimisation. `FPDF_RenderPageBitmap`
@@ -292,6 +340,7 @@ impl<'a> PdfiumDocument<'a> {
     fn composite_form_fields(
         &self,
         page: PageIndex,
+        region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
         rgba: &mut [u8],
@@ -319,6 +368,15 @@ impl<'a> PdfiumDocument<'a> {
             .filter(|(open, _)| *open == page.get())
             .map(|(_, handle)| handle);
 
+        // The page is drawn at whatever size makes the crop come out at
+        // `width` × `height`, and then shifted so the crop's corner lands on
+        // the bitmap's. The same arithmetic the page render does, because the
+        // two passes have to agree to the pixel.
+        let full_width = (width as f32 / region.width).round() as i32;
+        let full_height = (height as f32 / region.height).round() as i32;
+        let start_x = -((region.x * full_width as f32).round() as i32);
+        let start_y = -((region.y * full_height as f32).round() as i32);
+
         let mut draw = |handle: FPDF_PAGE| -> crate::pdf::Result<()> {
             {
                 // The same buffer the page was just drawn into, wrapped rather
@@ -344,10 +402,10 @@ impl<'a> PdfiumDocument<'a> {
                         form,
                         bitmap,
                         handle,
-                        0,
-                        0,
-                        width as i32,
-                        height as i32,
+                        start_x,
+                        start_y,
+                        full_width,
+                        full_height,
                         0,
                         // The same byte-order flag the page render used, so
                         // the two passes agree about what a pixel is. Without
@@ -460,6 +518,7 @@ impl<'a> PdfiumDocument<'a> {
         // handle lives, so exiting the environment is what makes it safe for
         // the box to be dropped when `self` goes.
         self.release_form_page();
+        self.release_text_page();
         if let Some(form) = self.form.take() {
             unsafe {
                 backend
@@ -622,29 +681,39 @@ impl<'a> PdfiumDocument<'a> {
     /// at. Linear, because `/Annots` is an array and there is no index by
     /// `/NM` in a PDF; bounded by the page limit above.
     fn locate(&self, id: &AnnotationId) -> Result<(PageIndex, usize)> {
-        for page in 0..self.info.page_count {
-            let page = PageIndex(page);
-            self.measure(page)?;
-            let found = self.on_annotations(page, |index, annotation, _| {
-                let name = self.string_value(annotation, "NM")?;
-                (AnnotationId::imported(&name).as_ref() == Some(id)).then_some(index)
-            })?;
-            if let Some(index) = found.first() {
-                return Ok((page, *index));
+        // The page this id was last found on, tried first. An annotation does
+        // not move between pages under any edit pulpit offers, so this hits
+        // for every repeat lookup — which is what an eraser sweep, a replace
+        // and an undo are made of.
+        let hint = self.located.borrow().get(id).copied();
+        if let Some(page) = hint {
+            if let Some(index) = self.locate_on(id, PageIndex(page))? {
+                return Ok((PageIndex(page), index));
             }
         }
+        for page in 0..self.info.page_count {
+            if hint == Some(page) {
+                continue;
+            }
+            let page = PageIndex(page);
+            if let Some(index) = self.locate_on(id, page)? {
+                self.located.borrow_mut().insert(id.clone(), page.get());
+                return Ok((page, index));
+            }
+        }
+        // Gone, so the hint is worse than nothing: it would send the next
+        // lookup down a page that cannot answer.
+        self.located.borrow_mut().remove(id);
         Err(DocumentError::NoSuchAnnotation(id.clone()))
     }
 
-    /// Every page measured, so [`Self::locate`] can search them.
-    ///
-    /// Measuring is what fills the geometry cache, and an annotation on a page
-    /// nobody has looked at yet would otherwise be invisible to a search.
-    fn measure_all(&self) -> Result<()> {
-        for page in 0..self.info.page_count {
-            self.measure(PageIndex(page))?;
-        }
-        Ok(())
+    /// Where `id` sits in one page's `/Annots`, if it is on that page.
+    fn locate_on(&self, id: &AnnotationId, page: PageIndex) -> Result<Option<usize>> {
+        let found = self.on_annotations(page, |index, annotation, _| {
+            let name = self.string_value(annotation, "NM")?;
+            (AnnotationId::imported(&name).as_ref() == Some(id)).then_some(index)
+        })?;
+        Ok(found.first().copied())
     }
 
     fn string_value(&self, annotation: FPDF_ANNOTATION, key: &str) -> Option<String> {
@@ -1733,7 +1802,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn create(&mut self, id: &AnnotationId, draft: &AnnotationDraft) -> Result<AnnotationSummary> {
+        self.release_text_page();
         let page = draft.page();
+        // Where it is about to be, so the first lookup after it is made — the
+        // undo of this very create, most often — does not walk the document.
+        self.located.borrow_mut().insert(id.clone(), page.get());
         let geometry = self.measure(page)?;
         let subtype = match draft.kind() {
             AnnotationKind::Ink => subtype::INK,
@@ -1780,7 +1853,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn replace(&mut self, id: &AnnotationId, draft: &AnnotationDraft) -> Result<AnnotationSummary> {
-        self.measure_all()?;
+        self.release_text_page();
         let (page, index) = self.locate(id)?;
         if draft.page() != page {
             return Err(DocumentError::Backend(
@@ -1806,7 +1879,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn delete(&mut self, id: &AnnotationId) -> Result<AnnotationBeforeImage> {
-        self.measure_all()?;
+        self.release_text_page();
         let before = self.before_image(id)?;
         let (page, index) = self.locate(id)?;
         let bindings = self.backend.bindings();
@@ -1820,6 +1893,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 Ok(())
             })
             .map_err(to_document_error)?;
+        self.located.borrow_mut().remove(id);
         Ok(before)
     }
 
@@ -1832,7 +1906,6 @@ impl DocumentBackend for PdfiumDocument<'_> {
             .draft
             .clone()
             .ok_or_else(|| DocumentError::NotEditable(id.clone()))?;
-        self.measure_all()?;
         // Restoring over an annotation that is still there is the undo of a
         // replace; restoring one that is gone is the undo of a delete.
         if self.locate(id).is_ok() {
@@ -2141,18 +2214,49 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ) -> Result<TextSelectionResult> {
         let geometry = self.geometry_of(page)?;
         let bindings = self.backend.bindings();
-        self.backend
-            .on_page(self.document, page.get(), |handle| {
-                let text_page = unsafe { bindings.FPDFText_LoadPage(handle) };
-                if text_page.is_null() {
-                    // No text layer is an empty result, not a failure (§6.3).
-                    return Ok(TextSelectionResult::default());
-                }
-                let result = resolve_selection(bindings, text_page, &geometry, selection);
-                unsafe { bindings.FPDFText_ClosePage(text_page) };
-                Ok(result)
-            })
-            .map_err(to_document_error)
+
+        // The samples of one drag all land on the same page, so the loaded
+        // page and its text layer are kept between them rather than rebuilt
+        // per sample. A different page ends the previous one first.
+        if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
+            self.release_text_page();
+            let document = self
+                .backend
+                .document_handle(self.document)
+                .map_err(to_document_error)?;
+            let count = self.info.page_count;
+            if page.get() >= count {
+                return Err(DocumentError::NoSuchPage {
+                    page: page.get(),
+                    count,
+                });
+            }
+            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
+            if handle.is_null() {
+                return Err(DocumentError::Backend(format!(
+                    "cannot load page {} to select text on",
+                    page.get()
+                )));
+            }
+            let text = unsafe { bindings.FPDFText_LoadPage(handle) };
+            if text.is_null() {
+                // No text layer is an empty result, not a failure (§6.3).
+                unsafe { bindings.FPDF_ClosePage(handle) };
+                return Ok(TextSelectionResult::default());
+            }
+            *self.text_page.borrow_mut() = Some(TextPageCache {
+                page: page.get(),
+                handle,
+                text,
+            });
+        }
+
+        let cache = self.text_page.borrow();
+        let text = cache
+            .as_ref()
+            .expect("the text page was just loaded for this page")
+            .text;
+        Ok(resolve_selection(bindings, text, &geometry, selection))
     }
 
     fn find_text(
@@ -2204,6 +2308,9 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn write_to(&mut self, destination: &Path, options: SaveOptions) -> Result<u64> {
+        // What is serialised must not be a document with a page held open
+        // behind the writer's back.
+        self.release_text_page();
         let handle = self
             .backend
             .document_handle(self.document)
@@ -2228,11 +2335,18 @@ impl DocumentBackend for PdfiumDocument<'_> {
     /// the commit (A7), which a separate read-only copy of the file could not
     /// promise. Annotations are drawn, because a page rendered without them
     /// would be a page with the user's marks missing.
-    fn render_page(&self, page: PageIndex, width: u32, height: u32, rgba: &mut [u8]) -> Result<()> {
+    fn render_page(
+        &self,
+        page: PageIndex,
+        region: pulpit_core::notes::Region,
+        width: u32,
+        height: u32,
+        rgba: &mut [u8],
+    ) -> Result<()> {
         let request = crate::pdf::RenderRequest {
             document: self.document,
             page: page.get(),
-            region: pulpit_core::notes::Region::FULL,
+            region,
             width,
             height,
             with_annotations: true,
@@ -2240,7 +2354,9 @@ impl DocumentBackend for PdfiumDocument<'_> {
         request.validate().map_err(to_document_error)?;
         PdfBackend::render_into(self.backend, &request, rgba, &crate::pdf::NeverCancel)
             .map_err(to_document_error)?;
-        self.composite_form_fields(page, width, height, rgba)
+        // Live field contents are drawn over the crop, not over the page, so
+        // the pass has to know which part of the page it is looking at.
+        self.composite_form_fields(page, region, width, height, rgba)
     }
 }
 

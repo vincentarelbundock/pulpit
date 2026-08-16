@@ -39,6 +39,31 @@ impl GesturePreview {
     pub fn is_empty(&self) -> bool {
         self.points.len() < 1 && self.quads.is_empty()
     }
+
+    /// The page rectangle this covers, stroke width included.
+    ///
+    /// Used to decide whether a partial repaint already contains the mark this
+    /// preview is standing in for, so it is the *painted* extent rather than
+    /// the path's: half the stroke width lies either side of the line.
+    pub fn bounds(&self) -> Option<pulpit_core::page::PageRect> {
+        let corners = self
+            .quads
+            .iter()
+            .flat_map(|quad| {
+                let bounds = quad.bounds();
+                [
+                    pulpit_core::page::PagePoint::new(bounds.left, bounds.top),
+                    pulpit_core::page::PagePoint::new(bounds.right, bounds.bottom),
+                ]
+            })
+            .chain(self.points.iter().copied());
+        let bounds = pulpit_core::page::PageRect::enclosing(corners)?;
+        Some(if self.points.is_empty() {
+            bounds
+        } else {
+            bounds.inflated(self.width / 2.0)
+        })
+    }
 }
 
 /// Draw `preview` at the size a sheet was drawn at.

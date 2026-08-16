@@ -402,6 +402,30 @@ struct PendingEdit {
     /// The transaction, for the journal. `None` for an undo or a redo, whose
     /// journal entry is written from the answer instead.
     transaction: Option<pulpit_render::document::DocumentTransaction>,
+    /// Whether the previews this edit left on screen cover it completely, so
+    /// the rendered picture may wait. Decided when the edit is sent for a
+    /// commit, and from the answer for an undo or a redo.
+    urgency: crate::reader::RasterUrgency,
+}
+
+/// A rectangle of a page, drawn by the document worker from the document it
+/// actually holds, standing in for the part of the frame an edit invalidated
+/// until a full frame containing that edit arrives (§9.4).
+///
+/// Bounded to one per page: the interesting case is an edit or two while the
+/// snapshot is on its way, and a page accumulating patches is a page that
+/// should simply be re-rendered.
+struct ReaderPatch {
+    region: pulpit_core::notes::Region,
+    width: u32,
+    height: u32,
+    /// The full-page frame size this was drawn to fit. A frame of any other
+    /// size — the reader zoomed, the window moved — cannot take it, and waits
+    /// for its own render instead of being handed a mismatched rectangle.
+    frame_width: u32,
+    frame_height: u32,
+    pixels: Vec<u8>,
+    revision: pulpit_render::document::DocumentRevision,
 }
 
 /// Where the reader's pages are rendered from.
@@ -424,6 +448,13 @@ struct ReaderRenderState {
     /// When the last confirmed edit landed, for the debounce that lets a
     /// burst of strokes become one snapshot rather than one each.
     edited_at: Option<Instant>,
+    /// How soon the pending edits need the picture to catch up: the strongest
+    /// urgency among them, since one mark the previews cannot draw makes the
+    /// whole wait pointless.
+    urgency: crate::reader::RasterUrgency,
+    /// Take the next snapshot regardless of the clock: the page is about to
+    /// stop being shown, or is about to be written out.
+    forced: bool,
     /// Counts snapshots, and names their files, documents and generations.
     serial: u64,
 }
@@ -447,10 +478,27 @@ struct ReaderSnapshot {
 /// presentation jobs with it.
 const READER_RENDER_BASE: u64 = 1 << 32;
 
-/// How long after the last confirmed edit the snapshot is taken. Long enough
-/// to coalesce a flurry of strokes, short enough that a mark sharpens on the
-/// page while the pen is still in the air.
+/// How long after an edit the picture cannot show, the snapshot is taken.
+/// Long enough to coalesce a flurry, short enough that a mark no preview can
+/// draw sharpens on the page while the pen is still in the air.
 const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// How long after an edit the previews *do* cover, the snapshot is taken.
+///
+/// Much longer, because nothing is waiting on it: the page already shows the
+/// mark. What it buys is the taking down of previews and a frame that needs no
+/// compositing, which is worth doing when the hand stops and worth nothing
+/// while it is moving. Making a mark and taking it back inside this window
+/// costs no render at all.
+const SNAPSHOT_QUIET: Duration = Duration::from_secs(2);
+
+/// How many marks may be drawn as previews before the picture is made to catch
+/// up regardless of the clock.
+///
+/// Deferring costs one composite per retained mark per draw. That is nothing
+/// for the handful a burst of drawing produces and is not nothing for a
+/// hand that never pauses, so the quiet spell is not the only way out.
+const MAX_RETAINED_MARKS: usize = 24;
 
 /// Where reader snapshots are written: a per-process scratch directory, so a
 /// crash leaves nothing worse than temporary files and two running pulpits
@@ -488,6 +536,13 @@ pub struct App {
     /// `&self`; bounded by a hard cap, and empty again the moment the frames
     /// containing the real highlights arrive.
     wash_cache: std::cell::RefCell<std::collections::HashMap<u64, iced::widget::image::Handle>>,
+    /// The partial repaints standing in for edits the page's frame predates,
+    /// one per page. Dropped when a full frame containing the same revision
+    /// arrives, which is the same rule the retained previews follow.
+    reader_patches: std::collections::HashMap<pulpit_core::page::PageIndex, ReaderPatch>,
+    /// The full-page frame size each in-flight patch was asked for, so the
+    /// answer can be matched to the frame it was meant to fit.
+    reader_patch_pending: std::collections::HashMap<pulpit_core::page::PageIndex, (u32, u32)>,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -953,6 +1008,8 @@ impl App {
             cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
             handles: std::collections::HashMap::new(),
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            reader_patches: std::collections::HashMap::new(),
+            reader_patch_pending: std::collections::HashMap::new(),
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -1218,7 +1275,19 @@ impl App {
             // a quarter of a second per step for no reason other than the
             // clock — which is what "it takes a long time to appear" is.
             || !self.reader_pending.is_empty()
-            || self.reader_render.edited_at.is_some()
+            // A text selection being swept out. The answer that says where
+            // the text is comes back on a round trip drained from the tick,
+            // so at the settled tick the quads follow the hand at four frames
+            // a second — which is what "selecting text lags" is.
+            || self.selection_query_in_flight
+            || self.selection_query_waiting.is_some()
+            // An edit the page cannot show yet. An edit the previews *do*
+            // show is not on this list: it is already on screen, and its
+            // snapshot is two seconds away, which the settled tick notices
+            // perfectly well.
+            || (self.reader_render.edited_at.is_some()
+                && (self.reader_render.forced
+                    || self.reader_render.urgency == crate::reader::RasterUrgency::Prompt))
             || self.reader_render.snapshot_in_flight.is_some()
             // A scroll settles in about a tenth of a second; the settled tick
             // would miss the moment the grid stopped moving entirely.
@@ -3798,10 +3867,20 @@ impl App {
                 if key.kind == FrameKind::Page {
                     if let Some(snapshot) = &self.reader_render.snapshot {
                         if key.generation >= snapshot.generation {
-                            self.reader.frame_landed(
-                                pulpit_core::page::PageIndex(key.slide),
-                                snapshot.revision,
-                            );
+                            let page = pulpit_core::page::PageIndex(key.slide);
+                            self.reader.frame_landed(page, snapshot.revision);
+                            // A full frame is the baseline every partial
+                            // repaint was standing in for (§9.4): once one
+                            // contains the patch's revision, the patch is a
+                            // second copy of pixels the frame already has.
+                            if self
+                                .reader_patches
+                                .get(&page)
+                                .is_some_and(|patch| patch.revision <= snapshot.revision)
+                            {
+                                self.reader_patches.remove(&page);
+                                self.wash_cache.borrow_mut().clear();
+                            }
                         }
                     }
                 }
@@ -4125,6 +4204,12 @@ impl App {
                     // can be *offered*. It is not applied: recovery needs an
                     // explicit answer, and the offer itself is inert (§11.4).
                     self.reader_recovery = self.pending_reader_recovery.take();
+                    // A different document: page numbers mean something else
+                    // now, and a repaint of page three of the last one is not
+                    // a repaint of anything.
+                    self.reader_patches.clear();
+                    self.reader_patch_pending.clear();
+                    self.wash_cache.borrow_mut().clear();
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone());
                     self.reader.set_outline(
@@ -4181,10 +4266,29 @@ impl App {
                         .as_ref()
                         .map(|pending| pending.kind)
                         .unwrap_or(AppliedKind::Edit);
-                    self.reader.applied(&applied, kind);
+                    // What the previews could not absorb — decided when the
+                    // edit was sent, and from the answer for an undo or a
+                    // redo, which only says what it did once it has done it.
+                    let urgency = self.reader.applied(&applied, kind).max(
+                        pending
+                            .as_ref()
+                            .map(|pending| pending.urgency)
+                            .unwrap_or_default(),
+                    );
                     // The render pool cannot see this commit until the next
-                    // snapshot, so arm the debounce that takes one.
+                    // snapshot, so arm the wait that takes one. How long a
+                    // wait is what `urgency` decides.
                     self.reader_render.edited_at = Some(Instant::now());
+                    self.reader_render.urgency = self.reader_render.urgency.max(urgency);
+                    if self.reader.retained_count() > MAX_RETAINED_MARKS {
+                        self.reader_render.forced = true;
+                    }
+                    // Nothing on screen draws this edit, so ask the worker for
+                    // the rectangle it changed rather than making the page
+                    // wait on the snapshot behind it (§9.4).
+                    if urgency == crate::reader::RasterUrgency::Prompt {
+                        self.ask_reader_patch(&applied);
+                    }
 
                     // A mark the presenter drew now has a name. Giving it to
                     // the overlay stroke is what makes the two one thing: the
@@ -4257,6 +4361,9 @@ impl App {
                                 .to_string(),
                         );
                     }
+                }
+                crate::reader_link::Told::Patched(frame) => {
+                    self.reader_patch_landed(*frame);
                 }
                 crate::reader_link::Told::Saved(saved) => {
                     self.notify(format!("Saved {}", saved.path.display()));
@@ -4335,7 +4442,16 @@ impl App {
         let Some(edited_at) = self.reader_render.edited_at else {
             return;
         };
-        if edited_at.elapsed() < SNAPSHOT_DEBOUNCE {
+        // How long the edits are left to settle depends on whether anything is
+        // waiting for them. A mark the previews already draw is on the page
+        // now; re-rendering it sooner shows the user nothing they cannot
+        // already see, and costs a whole-document snapshot, a reopen and a
+        // cold render of every visible page.
+        let settle = match self.reader_render.urgency {
+            crate::reader::RasterUrgency::Prompt => SNAPSHOT_DEBOUNCE,
+            crate::reader::RasterUrgency::Deferred => SNAPSHOT_QUIET,
+        };
+        if !self.reader_render.forced && edited_at.elapsed() < settle {
             return;
         }
         let Some(link) = self.reader_link.as_mut() else {
@@ -4354,6 +4470,8 @@ impl App {
             self.reader_render.serial = serial;
             self.reader_render.snapshot_in_flight = Some((serial, destination));
             self.reader_render.edited_at = None;
+            self.reader_render.urgency = crate::reader::RasterUrgency::Deferred;
+            self.reader_render.forced = false;
         }
     }
 
@@ -4539,15 +4657,119 @@ impl App {
     ) -> Option<iced::widget::image::Handle> {
         let key = self.ready_reader_frame_key(page, width)?;
         let washes = self.reader.retained_washes(page);
-        if !washes.is_empty() {
-            if let Some(washed) = self.washed_frame(key, page, &washes) {
-                return Some(washed);
+        // A patch drawn for a frame of another size belongs to a page that has
+        // since been resized; it is dropped rather than stretched.
+        let patch = self
+            .reader_patches
+            .get(&page)
+            .filter(|patch| patch.frame_width == key.width && patch.frame_height == key.height);
+        if !washes.is_empty() || patch.is_some() {
+            if let Some(composed) = self.composited_frame(key, page, &washes, patch) {
+                return Some(composed);
             }
         }
         self.handles.get(&key).cloned()
     }
 
-    /// The page picture with its retained highlights multiplied in.
+    /// Ask the document worker to draw the rectangle an edit changed (§9.4).
+    ///
+    /// Only for edits no preview can stand in for, and only for the frame the
+    /// reader is actually looking at: a patch is worth a round trip because it
+    /// replaces a *snapshot* round trip plus a reopen plus a cold render of
+    /// every visible page, and it is worth nothing at all for a page nobody
+    /// can see.
+    fn ask_reader_patch(&mut self, applied: &pulpit_render::document::Applied) {
+        let Some(dirty) = applied.dirty_region else {
+            return;
+        };
+        // One page, because a rectangle belongs to one page. A transaction
+        // that touched several waits for the snapshot, as it did before.
+        let [page] = applied.dirty_pages[..] else {
+            return;
+        };
+        let Some((surface_width, _)) = self.page_surface_size() else {
+            return;
+        };
+        let Some(key) = self.ready_reader_frame_key(page, surface_width) else {
+            return;
+        };
+        let Some(geometry) = self.reader.page_geometry(page) else {
+            return;
+        };
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return;
+        }
+        // A margin, in page points, so the edge of a mark's antialiasing is
+        // inside the patch rather than split down the middle of a pixel by it.
+        const MARGIN: f32 = 2.0;
+        let left = ((dirty.left - MARGIN) / geometry.width).clamp(0.0, 1.0);
+        let top = ((dirty.top - MARGIN) / geometry.height).clamp(0.0, 1.0);
+        let right = ((dirty.right + MARGIN) / geometry.width).clamp(0.0, 1.0);
+        let bottom = ((dirty.bottom + MARGIN) / geometry.height).clamp(0.0, 1.0);
+        let region = pulpit_core::notes::Region::new(left, top, right - left, bottom - top);
+        if !region.is_valid() {
+            return;
+        }
+        let width = (region.width * key.width as f32).round() as u32;
+        let height = (region.height * key.height as f32).round() as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.reader_patch_pending
+            .insert(page, (key.width, key.height));
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::RenderPatch {
+                page,
+                region,
+                width,
+                height,
+                expected_revision: applied.document_revision,
+            });
+        }
+    }
+
+    /// A partial repaint arrived. It is held over the page's frame until a
+    /// full frame containing the same revision replaces it.
+    fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
+        let Some((frame_width, frame_height)) = self.reader_patch_pending.remove(&frame.page)
+        else {
+            return;
+        };
+        if !frame.is_consistent() {
+            return;
+        }
+        // Only usable if the previews on the page can be reconciled with it.
+        if !self
+            .reader
+            .patch_landed(frame.page, frame.region, frame.revision)
+        {
+            return;
+        }
+        self.wash_cache.borrow_mut().clear();
+        self.reader_patches.insert(
+            frame.page,
+            ReaderPatch {
+                region: frame.region,
+                width: frame.width,
+                height: frame.height,
+                frame_width,
+                frame_height,
+                pixels: frame.pixels,
+                revision: frame.revision,
+            },
+        );
+    }
+
+    /// The page picture with the parts an edit changed pasted in and its
+    /// retained highlights multiplied in.
+    ///
+    /// Two stand-ins for the same thing — a frame that predates an edit — and
+    /// they compose in this order because they are not alternatives. The patch
+    /// is the renderer's own pixels for a rectangle, so it goes down first and
+    /// replaces what was there; the washes are pulpit's arithmetic for marks
+    /// the renderer has not drawn yet, so they go on top. A wash inside a
+    /// patched rectangle is not both: [`crate::reader::ReaderSession::patch_landed`]
+    /// takes it down as the patch arrives, or refuses the patch.
     ///
     /// A committed `/Highlight` is blended by multiplying, so text under it
     /// stays fully dark; a translucent rectangle drawn over the frame would
@@ -4555,16 +4777,30 @@ impl App {
     /// arrived (§9.2). Multiplying the frame's own pixels — `p·(1 − a·(1−c))`
     /// per channel, which is multiply at `/CA` — is the same arithmetic the
     /// renderer does, so the retained wash and the rendered one match.
-    fn washed_frame(
+    fn composited_frame(
         &self,
         key: FrameKey,
         page: pulpit_core::page::PageIndex,
         washes: &[&crate::widgets::document::preview::GesturePreview],
+        patch: Option<&ReaderPatch>,
     ) -> Option<iced::widget::image::Handle> {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
+        if let Some(patch) = patch {
+            patch.revision.hash(&mut hasher);
+            patch.width.hash(&mut hasher);
+            patch.height.hash(&mut hasher);
+            for value in [
+                patch.region.x,
+                patch.region.y,
+                patch.region.width,
+                patch.region.height,
+            ] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
         for wash in washes {
             for quad in &wash.quads {
                 let bounds = quad.bounds();
@@ -4592,6 +4828,24 @@ impl App {
         let scale_y = frame.height as f32 / geometry.height;
 
         let mut pixels = (*frame.pixels).clone();
+
+        // The renderer's own pixels for the rectangle that changed, row by
+        // row into the frame. Clipped rather than trusted: the patch was sized
+        // from this frame's dimensions, but a rounding disagreement at the
+        // right or bottom edge must not run off the end of the buffer.
+        if let Some(patch) = patch {
+            let x0 = (patch.region.x * frame.width as f32).round() as usize;
+            let y0 = (patch.region.y * frame.height as f32).round() as usize;
+            let columns = (patch.width as usize).min((frame.width as usize).saturating_sub(x0));
+            let rows = (patch.height as usize).min((frame.height as usize).saturating_sub(y0));
+            for row in 0..rows {
+                let from = row * patch.width as usize * 4;
+                let to = ((y0 + row) * frame.width as usize + x0) * 4;
+                pixels[to..to + columns * 4]
+                    .copy_from_slice(&patch.pixels[from..from + columns * 4]);
+            }
+        }
+
         for wash in washes {
             let alpha = wash.opacity.clamp(0.0, 1.0);
             // 8.8 fixed point per channel; 256 is "leave the pixel alone".
@@ -4819,6 +5073,8 @@ impl App {
                     },
                     names_a_presenter_mark: false,
                     transaction: None,
+                    // Not knowable until the answer says what came back.
+                    urgency: crate::reader::RasterUrgency::Deferred,
                 });
                 if let Some(link) = self.reader_link.as_mut() {
                     link.ask(crate::reader_link::Ask::Undo {
@@ -4851,6 +5107,11 @@ impl App {
                 Task::none()
             }
             ReadCommand::PageCursor { page, x, y } => {
+                // The hand moves faster than the tick. Draining here means a
+                // selection answer is taken up on the very next pointer
+                // sample rather than waiting on the clock, so the quads land
+                // at pointer rate instead of tick rate.
+                self.pump_reader();
                 self.reader.pointer_moved(*page, *x, *y);
                 // The hand moved the document, and the scrollable has no way
                 // of knowing that unless it is told.
@@ -4939,6 +5200,9 @@ impl App {
                 iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
             }
             ReadCommand::PageReleased => {
+                // The release commits on the newest answer, so take up
+                // anything already waiting before asking for the last one.
+                self.pump_reader();
                 // One gesture, one transaction, one revision, one undo entry
                 // (§9.1) — however many marks an eraser sweep took.
                 match self.reader.pointer_released() {
@@ -5086,6 +5350,7 @@ impl App {
                         kind: AppliedKind::Undo,
                         names_a_presenter_mark: false,
                         transaction: None,
+                        urgency: crate::reader::RasterUrgency::Deferred,
                     });
                     match self.reader_link.as_mut() {
                         Some(link) => {
@@ -5763,15 +6028,17 @@ impl App {
             return false;
         }
         let expected = self.reader.revision();
+        // Keep drawing what this commit creates until a frame containing it
+        // arrives (§9.2): the stroke must not vanish at release and reappear
+        // a snapshot round trip later. The answer also says whether that frame
+        // is owed *soon* or merely eventually.
+        let urgency = self.reader.retain_commit(&transaction);
         self.reader_pending.push_back(PendingEdit {
             kind: AppliedKind::Edit,
             names_a_presenter_mark: false,
             transaction: Some(transaction.clone()),
+            urgency,
         });
-        // Keep drawing what this commit creates until a frame containing it
-        // arrives (§9.2): the stroke must not vanish at release and reappear
-        // a snapshot round trip later.
-        self.reader.retain_commit(&transaction);
         let sent = match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::Apply {
                 expected_revision: expected,
