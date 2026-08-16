@@ -91,6 +91,11 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if let Some(plan) = app.pending_restore.as_ref() {
         page = stack![page, restore_session_dialog(plan)].into();
     }
+    // The same rule for a document: what a previous run left unsaved is
+    // offered, never applied, and the offer has no way out but an answer.
+    if let Some(journal) = app.reader_recovery.as_ref() {
+        page = stack![page, restore_edits_dialog(journal)].into();
+    }
     // Its own renderer, its own atlas, its own residency — exactly as the
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
@@ -1859,6 +1864,45 @@ fn restore_session_dialog(plan: &crate::session::RestorePlan) -> Element<'static
     // No way out but an answer: restoring puts a slide in front of an
     // audience, and a stray press on the ground behind must not decide that
     // either way.
+    panel(body, None)
+}
+
+/// Offer back the edits a previous run did not save (§11.4).
+///
+/// The wording is deliberately careful about what pulpit does not know: the
+/// journal records what was edited, not whether the user saved a copy
+/// elsewhere afterwards, so it says what it has rather than promising that
+/// applying it is safe.
+fn restore_edits_dialog(
+    journal: &crate::reader_journal::RecoveredJournal,
+) -> Element<'static, Message> {
+    let body = column![
+        text("Put back the unsaved edits?").size(type_scale::TITLE),
+        text(
+            "Pulpit did not shut down cleanly, and this document had edits that had \
+              not been saved to a copy."
+        )
+        .size(type_scale::BODY),
+        text(journal.summary()).size(type_scale::BODY),
+        text(
+            "They are applied to the document as it is now. If you already saved a \
+              copy with them, start fresh."
+        )
+        .size(type_scale::LABEL),
+        row![
+            button(text("Start fresh").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press(Message::DiscardReaderEdits),
+            button(text("Put them back").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::alert_button)
+                .on_press(Message::RestoreReaderEdits),
+        ]
+        .spacing(gap::S),
+    ]
+    .spacing(gap::M);
+
     panel(body, None)
 }
 

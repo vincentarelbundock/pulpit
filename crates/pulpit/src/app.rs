@@ -229,6 +229,9 @@ pub enum Message {
     Transport(crate::widgets::event::TransportRequest),
     /// Something the reader asked of the open document.
     Read(crate::widgets::event::ReadCommand),
+    /// Put back the edits a previous run did not save, or do not.
+    RestoreReaderEdits,
+    DiscardReaderEdits,
     /// A widget that produces nothing (preview mode).
     Ignore,
 }
@@ -374,6 +377,14 @@ type ThumbnailPlanInputs = (
     usize,
     usize,
 );
+
+/// One mutation sent to the document worker, waiting to be confirmed.
+struct PendingEdit {
+    kind: AppliedKind,
+    /// The transaction, for the journal. `None` for an undo or a redo, whose
+    /// journal entry is written from the answer instead.
+    transaction: Option<pulpit_render::document::DocumentTransaction>,
+}
 
 pub struct App {
     pub state: PresentationState,
@@ -638,11 +649,24 @@ pub struct App {
     /// available for it. `None` when nothing is open, or when the worker
     /// could not be started — presentation mode does not depend on it.
     reader_link: Option<crate::reader_link::ReaderLink>,
-    /// Which stack each in-flight mutation's answer belongs on.
+    /// What each in-flight mutation was, waiting for its answer.
     ///
     /// The worker answers in order and says nothing about why it was asked,
-    /// so the intent is remembered here rather than guessed from the answer.
-    reader_pending: std::collections::VecDeque<AppliedKind>,
+    /// so the intent is remembered here rather than guessed from the answer —
+    /// and the transaction is kept with it, because it is journalled when the
+    /// answer confirms it and not before. A mutation with no answer is not a
+    /// mutation that happened (§11.5).
+    reader_pending: std::collections::VecDeque<PendingEdit>,
+    /// Every edit, on disk as it is made (§11.1). `None` when there is no
+    /// document open, or when the journal could not be written — in which
+    /// case the user has been told that a crash would lose their edits.
+    reader_journal: Option<crate::reader_journal::Journal>,
+    /// What the last run left unsaved for the document being opened, held
+    /// until the document is up and the offer can be made.
+    pending_reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
+    /// The offer itself, drawn as a dialogue with no way out but an answer.
+    /// Inert: nothing is applied until one is given (§11.4).
+    pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
     /// Live tool choices for the annotation palette. These are session
     /// controls, not mutations to a built-in layout.
     pub annotation_controls: crate::widgets::AnnotationControls,
@@ -915,6 +939,9 @@ impl App {
             reader: crate::reader::ReaderSession::new(),
             reader_link: None,
             reader_pending: std::collections::VecDeque::new(),
+            reader_journal: None,
+            pending_reader_recovery: None,
+            reader_recovery: None,
             annotation_controls,
             alarm_controls,
             timer_controls,
@@ -1849,6 +1876,8 @@ impl App {
                 Task::none()
             }
             Message::Read(command) => self.on_read_command(command),
+            Message::RestoreReaderEdits => self.restore_reader_edits(),
+            Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::ExportAnnotatedTo(Some(path)) => {
                 self.export_annotations(path);
                 Task::none()
@@ -2794,8 +2823,16 @@ impl App {
             tracing::warn!(error = %e, "cannot save settings");
         }
         // A clean exit must never offer a restore, so the snapshot goes with
-        // the process.
+        // the process — and so does the document journal, for the same reason
+        // and by the same rule (§11.1).
+        //
+        // Unsaved annotations are lost here, and that is the honest outcome:
+        // they were never written to a file, and quitting is the user saying
+        // so. What must not happen is the *next* run offering to put them
+        // back into a document that has moved on.
         self.session.clear();
+        self.reader_journal = None;
+        crate::reader_journal::Journal::discard(&Self::journal_path());
         iced::exit()
     }
 
@@ -3677,6 +3714,20 @@ impl App {
     fn open_for_reading(&mut self, path: &std::path::Path) {
         self.reader.closed();
         self.reader_link = None;
+        self.reader_journal = None;
+
+        // Anything the last run left unsaved for *this* file, before a new
+        // journal replaces it. The offer is inert: nothing is applied without
+        // an explicit answer (§11.4).
+        let journal_path = Self::journal_path();
+        let fingerprint = crate::session::fingerprint(path);
+        self.pending_reader_recovery = crate::reader_journal::Journal::recover(&journal_path)
+            .filter(|recovered| {
+                fingerprint
+                    .as_ref()
+                    .is_some_and(|current| recovered.applies_to(path, current))
+            });
+
         match crate::reader_link::ReaderLink::open(path) {
             Ok(mut link) => {
                 // Ask for the shape of it straight away: the reader can lay
@@ -3687,7 +3738,57 @@ impl App {
             }
             Err(error) => {
                 tracing::warn!(%error, "document mode is unavailable for this file");
+                return;
             }
+        }
+
+        // A journal for this run. Started only once the document opened: a
+        // file that cannot be read has nothing to journal about.
+        match fingerprint {
+            Some(fingerprint) => {
+                match crate::reader_journal::Journal::start(&journal_path, path, fingerprint) {
+                    Ok(journal) => self.reader_journal = Some(journal),
+                    Err(error) => {
+                        // Editing still works; what is lost is the promise
+                        // that an edit survives a crash, and saying so is
+                        // better than discovering it after one.
+                        self.notify(format!("Unsaved edits will not survive a crash: {error}"));
+                    }
+                }
+            }
+            None => tracing::warn!("no fingerprint for the document; edits are not journalled"),
+        }
+    }
+
+    /// Where the document journal lives: beside the session snapshot, because
+    /// it answers the same question about the same run (§11.1).
+    fn journal_path() -> PathBuf {
+        crate::settings::store::config_directory().join("document-journal.jsonl")
+    }
+
+    /// Record one revision-incrementing operation, durably, at commit.
+    ///
+    /// A failure here is reported once and does not stop the edit: the edit is
+    /// in the document, which is what the user asked for. What is lost is only
+    /// its survival of a crash.
+    fn journal(&mut self, entry: crate::reader_journal::JournalEntry) {
+        let Some(journal) = self.reader_journal.as_mut() else {
+            return;
+        };
+        let full = journal.is_full();
+        if let Err(error) = journal.append(&entry) {
+            self.reader_journal = None;
+            self.notify(format!(
+                "Unsaved edits are no longer being recorded: {error}"
+            ));
+            return;
+        }
+        if !full && self.reader_journal.as_ref().is_some_and(|j| j.is_full()) {
+            self.notify(
+                "This session has more edits than the crash journal holds; \
+                 the newest are not recorded. Save to be safe."
+                    .to_string(),
+            );
         }
     }
 
@@ -3715,6 +3816,10 @@ impl App {
                     outline,
                     fields,
                 } => {
+                    // The document is up, so what the last run left unsaved
+                    // can be *offered*. It is not applied: recovery needs an
+                    // explicit answer, and the offer itself is inert (§11.4).
+                    self.reader_recovery = self.pending_reader_recovery.take();
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone());
                     self.reader.set_has_form(info.has_form);
@@ -3751,8 +3856,30 @@ impl App {
                     );
                 }
                 crate::reader_link::Told::Applied(applied) => {
-                    let kind = self.reader_pending.pop_front().unwrap_or(AppliedKind::Edit);
+                    let pending = self.reader_pending.pop_front();
+                    let kind = pending
+                        .as_ref()
+                        .map(|pending| pending.kind)
+                        .unwrap_or(AppliedKind::Edit);
                     self.reader.applied(&applied, kind);
+
+                    // Journalled now that the worker has confirmed it, and
+                    // not when it was sent: a mutation with no answer is not
+                    // a mutation that happened (§11.5). Undos and redos are
+                    // recorded like anything else, in revision order, so
+                    // replay reproduces the history rather than only its
+                    // surviving edits (§11.1).
+                    let entry = match pending.and_then(|pending| pending.transaction) {
+                        Some(transaction) => crate::reader_journal::JournalEntry::Applied {
+                            revision: applied.document_revision,
+                            transaction,
+                        },
+                        None => crate::reader_journal::JournalEntry::Reversed {
+                            revision: applied.document_revision,
+                            operation: Box::new(applied.undo.clone()),
+                        },
+                    };
+                    self.journal(entry);
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
                     self.reader.set_annotations(page, &summaries);
@@ -3776,6 +3903,12 @@ impl App {
                 }
                 crate::reader_link::Told::Saved(saved) => {
                     self.notify(format!("Saved {}", saved.path.display()));
+                    // Nothing is unsaved any more: the edits are in the file
+                    // the user just wrote. A journal kept past a save would
+                    // offer to replay edits a document already has.
+                    if let Some(journal) = self.reader_journal.as_mut() {
+                        journal.finish();
+                    }
                 }
                 crate::reader_link::Told::Failed { message, fatal } => {
                     // A refusal is reported and the reader carries on; a lost
@@ -3893,10 +4026,13 @@ impl App {
                 // An undo is itself a mutation and takes the same optimistic
                 // revision check as any other (§6.2).
                 let expected = self.reader.revision();
-                self.reader_pending.push_back(if redoing {
-                    AppliedKind::Redo
-                } else {
-                    AppliedKind::Undo
+                self.reader_pending.push_back(PendingEdit {
+                    kind: if redoing {
+                        AppliedKind::Redo
+                    } else {
+                        AppliedKind::Undo
+                    },
+                    transaction: None,
                 });
                 if let Some(link) = self.reader_link.as_mut() {
                     link.ask(crate::reader_link::Ask::Undo {
@@ -3966,6 +4102,66 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Put back what a previous run left unsaved (§11.4).
+    ///
+    /// Replayed in revision order, undos and redos included, so the document
+    /// ends where the last run left it rather than carrying every edit that
+    /// was ever made — an edit the user took back stays taken back.
+    ///
+    /// Each entry is sent like any other mutation and is validated by the
+    /// engine under the current limits. An entry that no longer applies —
+    /// naming an annotation that is not there — is refused by the worker and
+    /// reported, rather than applied to a guessed target.
+    fn restore_reader_edits(&mut self) -> Task<Message> {
+        let Some(recovered) = self.reader_recovery.take() else {
+            return Task::none();
+        };
+        let entries = recovered.in_order();
+        let count = entries.len();
+        for entry in entries {
+            match entry {
+                crate::reader_journal::JournalEntry::Applied { transaction, .. } => {
+                    self.commit_to_document(transaction);
+                }
+                crate::reader_journal::JournalEntry::Reversed { operation, .. } => {
+                    // Replayed as an undo, which is what it was. The revision
+                    // it expects is whatever the replay has reached, not the
+                    // one it had in the run that recorded it.
+                    let expected = self.reader.revision();
+                    self.reader_pending.push_back(PendingEdit {
+                        kind: AppliedKind::Undo,
+                        transaction: None,
+                    });
+                    match self.reader_link.as_mut() {
+                        Some(link) => {
+                            link.ask(crate::reader_link::Ask::Undo {
+                                expected_revision: expected,
+                                operation: *operation,
+                            });
+                        }
+                        None => {
+                            self.reader_pending.pop_back();
+                        }
+                    }
+                }
+            }
+        }
+        self.notify(format!(
+            "Putting back {count} unsaved {}.",
+            if count == 1 { "edit" } else { "edits" }
+        ));
+        Task::none()
+    }
+
+    /// Start fresh: the journal goes, and the document is the file on disk.
+    fn discard_reader_edits(&mut self) -> Task<Message> {
+        self.reader_recovery = None;
+        // The journal for *this* run has already replaced the old file, so
+        // there is nothing left to remove; dropping the offer is the whole of
+        // the answer.
+        Task::none()
     }
 
     /// Move between reading the document and presenting it (§2.3).
@@ -4091,7 +4287,10 @@ impl App {
             return false;
         }
         let expected = self.reader.revision();
-        self.reader_pending.push_back(AppliedKind::Edit);
+        self.reader_pending.push_back(PendingEdit {
+            kind: AppliedKind::Edit,
+            transaction: Some(transaction.clone()),
+        });
         match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::Apply {
                 expected_revision: expected,
