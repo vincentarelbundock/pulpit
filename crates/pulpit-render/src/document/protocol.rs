@@ -383,6 +383,18 @@ pub struct FormEventResult {
     /// PDFium's own way in, and choosing the index to pass it needs to know
     /// what is selected now and how many options there are.
     pub focused_choice: Option<FocusedChoice>,
+    /// This event pressed a non-editable choice widget, and the engine focused
+    /// it *without* opening its own list.
+    ///
+    /// The press is answered by focus alone because the list a click would
+    /// open is transient viewer chrome: PDFium draws it into the page bitmap,
+    /// reports slivers of it as invalidated, and asks for a round trip per
+    /// hovered row. The application draws the list instead, from
+    /// [`Self::focused_choice`], and commits what is chosen through
+    /// [`FormInputEvent::SelectOption`] — so the value and its appearance are
+    /// still PDFium's, and only the open list is not (§8.6).
+    /// (No `serde` attribute: bincode is positional. See `requests`.)
+    pub opened_choice: bool,
     /// What the field that just took the caret expects, when it expects
     /// something in particular — "date, as dd mmmm yyyy".
     ///
@@ -443,15 +455,46 @@ pub struct FocusedDate {
     pub bounds: PageRect,
 }
 
-/// What the focused combo box currently holds (§8.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What the focused choice field currently holds (§8.6).
+///
+/// Reported for a combo box and for a list box alike. It carries the labels as
+/// well as the count because a *non-editable* choice field's open list is
+/// drawn by the application rather than by PDFium: a list that is only ever
+/// viewer chrome — it appears in no saved file — so drawing it app-side costs
+/// §8.6 nothing, while the value it chooses still goes back through
+/// [`FormInputEvent::SelectOption`] and is still PDFium's to commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FocusedChoice {
+    /// The field's name, so the application can tell the caret moving *within*
+    /// a field from its moving to another one.
+    pub field: String,
     /// Which option is chosen, if any. `None` for a combo box holding a value
     /// that is not in its own `/Opt` list, which is a case the corpus carries.
     pub selected: Option<u32>,
     /// How many options there are, so a caller can step within them without
     /// asking for the list.
     pub options: u32,
+    /// The option labels, in the order PDFium indexes them — which is the
+    /// order a [`FormInputEvent::SelectOption`] index names. Bounded by
+    /// [`limits::MAX_FIELD_OPTIONS`] and each label by
+    /// [`limits::MAX_FIELD_VALUE_BYTES`], like every other list on this wire.
+    pub labels: Vec<String>,
+    /// Whether the field takes a value of its own — `/Ff` bit 19, an editable
+    /// combo box. An editable combo is a text box with a list attached, and
+    /// its list is PDFium's: drawing one over a caret PDFium is also drawing
+    /// would be two editing surfaces for one field, which §8.6 forbids.
+    pub editable: bool,
+    /// Whether the field takes several options at once. Reported so the
+    /// application can say what it does not offer rather than quietly choosing
+    /// one option where the field allows three.
+    pub multiple_selection: bool,
+    /// Whether the field is a list box rather than a combo box. A list box is
+    /// always showing its rows; a combo box shows one.
+    pub list_box: bool,
+    /// Where the widget is, in canonical page space (A4), so an
+    /// application-drawn list can be anchored to the field it belongs to.
+    pub page: PageIndex,
+    pub bounds: PageRect,
 }
 
 /// Something a document's JavaScript asked the host to do (§8.6).
@@ -737,11 +780,31 @@ impl DocumentResponse {
                     })
                 }
             }
-            DocumentResponse::Form(result) => limits::within(
-                "invalidated rectangles",
-                result.invalidated.len(),
-                limits::MAX_ANNOTATIONS_PER_PAGE,
-            ),
+            DocumentResponse::Form(result) => {
+                limits::within(
+                    "invalidated rectangles",
+                    result.invalidated.len(),
+                    limits::MAX_ANNOTATIONS_PER_PAGE,
+                )?;
+                // The option list the application is about to draw comes from
+                // a document it does not trust, so it is bounded here like
+                // every other list that crosses this wire (A8).
+                if let Some(choice) = &result.focused_choice {
+                    limits::within(
+                        "options in a focused choice field",
+                        choice.labels.len(),
+                        limits::MAX_FIELD_OPTIONS,
+                    )?;
+                    for label in &choice.labels {
+                        limits::within(
+                            "option label length",
+                            label.len(),
+                            limits::MAX_FIELD_VALUE_BYTES,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -961,7 +1024,18 @@ mod tests {
                 title: "pulpit".into(),
             }],
             text_focus: true,
-            focused_choice: None,
+            focused_choice: Some(FocusedChoice {
+                field: "country".into(),
+                selected: Some(1),
+                options: 2,
+                labels: vec!["France".into(), "Japan".into()],
+                editable: false,
+                multiple_selection: false,
+                list_box: false,
+                page: PageIndex(2),
+                bounds: PageRect::new(10.0, 20.0, 120.0, 36.0),
+            }),
+            opened_choice: true,
             focused_hint: None,
             focused_date: None,
             focused_widget: Some(FocusedWidget {
@@ -975,6 +1049,33 @@ mod tests {
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
             answer
         );
+    }
+
+    #[test]
+    fn an_option_list_the_application_would_draw_is_bounded() {
+        let choice = |labels: Vec<String>| {
+            DocumentResponse::Form(Box::new(FormEventResult {
+                focused_choice: Some(FocusedChoice {
+                    field: "country".into(),
+                    selected: None,
+                    options: labels.len() as u32,
+                    labels,
+                    editable: false,
+                    multiple_selection: false,
+                    list_box: true,
+                    page: PageIndex(0),
+                    bounds: PageRect::new(0.0, 0.0, 10.0, 10.0),
+                }),
+                ..FormEventResult::default()
+            }))
+        };
+        assert!(choice(vec!["one".into(), "two".into()]).validate().is_ok());
+        assert!(choice(vec!["x".into(); limits::MAX_FIELD_OPTIONS + 1])
+            .validate()
+            .is_err());
+        assert!(choice(vec!["x".repeat(limits::MAX_FIELD_VALUE_BYTES + 1)])
+            .validate()
+            .is_err());
     }
 
     #[test]

@@ -881,6 +881,23 @@ code that generates its appearance.
   (caret position, uncommitted text) is PDFium's and is not in the undo
   history.
 - A read-only field is displayed and not editable; the engine enforces this.
+- The one exception to "the application never renders a field's editing
+  state" is a **non-editable** combo box's or list box's *open list*, which
+  pulpit draws itself. An open dropdown is transient viewer chrome: no saved
+  file contains one, so nothing about it is an appearance to imitate. A press
+  on such a widget is answered by focusing it — `FORM_SetFocusedAnnot`, not
+  `FORM_OnLButtonDown` — so the engine opens no list of its own, and the
+  option the drawn list chooses crosses back as `SelectOption`
+  (`FORM_SetIndexSelected`). The engine still performs the selection,
+  generates the appearance and runs the field's scripts, so there is still one
+  implementation of the committed value and it is PDFium's. An **editable**
+  combo box is excluded and keeps the engine's own list: it has a caret PDFium
+  is drawing, and a second editing surface over that is what this section
+  forbids. Which path a field takes is read from `/Ff` bit 19, not decided by
+  the application.
+- **Known limitation:** the drawn list is single-select. A multi-select list
+  box commits one option at a time through the same path; choosing several at
+  once is not offered rather than half-offered.
 - **Known limitation:** in-progress IME composition is not displayed inside
   the field; committed characters are forwarded. This is documented as a
   compatibility limitation (§3.4), not silently degraded.

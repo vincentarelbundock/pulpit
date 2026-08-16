@@ -596,10 +596,13 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
         if let Some(mut document) = open_case(&mut guard, "list-box-multi-select", directory.path())
         {
             assert_eq!(document.field_value("colour").unwrap(), "Red");
-            // The click lands on a row and selects it, so where the arrow
-            // starts from depends on the geometry. What matters is that the
-            // key moves it at all — the value after the click is the baseline.
-            click_into(&mut document, "colour");
+            // The press is answered with focus alone now: a non-editable
+            // choice field's list is the application's to draw, so the click
+            // never reaches `FORM_OnLButtonDown` (§8.6). What matters here is
+            // that the key still moves the selection — the value after the
+            // press is the baseline whatever the press did to it.
+            let pressed = click_into(&mut document, "colour");
+            assert!(pressed.is_some());
             let after_click = document.field_value("colour").unwrap();
             let arrowed = document
                 .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::Down })
@@ -608,11 +611,16 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
                 !arrowed.invalidated.is_empty(),
                 "a list box must repaint when its selection moves"
             );
-            assert!(
-                arrowed.focused_choice.is_none(),
-                "a list box needs no translation, so it must not be reported as \
-                 one that does"
-            );
+            // A list box needs no translation of the arrow key, but it is
+            // still reported: its rows are drawn by the application, which
+            // needs the labels and the widget's rectangle to draw them.
+            let choice = arrowed
+                .focused_choice
+                .expect("a focused list box must be reported with its options");
+            assert!(choice.list_box);
+            assert!(!choice.editable);
+            assert_eq!(choice.labels.len(), choice.options as usize);
+            assert!(!choice.labels.is_empty());
             document
                 .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
                 .unwrap();
@@ -675,6 +683,92 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
             committed.previous, "Canada",
             "a choice is undoable like any other field edit"
         );
+    });
+}
+
+/// A press on a non-editable choice field focuses it and opens nothing.
+///
+/// PDFium would draw its own list into the page bitmap. That list is viewer
+/// chrome — no saved file has one in it — and compositing it costs a guess at
+/// where the engine put it plus a round trip per hovered row, so the press is
+/// answered with focus alone and the application draws the list from what
+/// comes back (§8.6). The value is still PDFium's: the option chosen goes back
+/// as `SelectOption`.
+#[test]
+fn a_press_on_a_plain_combo_box_focuses_it_without_opening_a_list() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(case) = corpus()
+            .into_iter()
+            .find(|case| case.name == "combo-box-plain-options")
+        else {
+            return;
+        };
+        let path = directory.path().join("combo.pdf");
+        std::fs::write(&path, &case.bytes).expect("the fixture is written");
+        let Ok(engine) = PdfiumDocument::open(&mut guard, &path) else {
+            return;
+        };
+        let mut document = PdfDocument::new(Box::new(engine), 71);
+
+        let bounds = document
+            .fields()
+            .expect("the form lists its fields")
+            .into_iter()
+            .find(|field| field.name == "country")
+            .and_then(|field| field.anchor_on(PageIndex(0)))
+            .expect("the combo box has a widget");
+        let at = PagePoint {
+            x: (bounds.left + bounds.right) / 2.0,
+            y: (bounds.top + bounds.bottom) / 2.0,
+        };
+
+        let pressed = document
+            .form_event(PageIndex(0), FormInputEvent::PointerDown { at })
+            .expect("the press is answered");
+        assert!(
+            pressed.opened_choice,
+            "a press on a plain combo box must be answered with focus and \
+             leave the list to the application"
+        );
+        let choice = pressed
+            .focused_choice
+            .expect("the focused combo box is reported with its options");
+        assert!(!choice.editable);
+        assert!(!choice.list_box);
+        assert_eq!(choice.field, "country");
+        assert_eq!(choice.labels.len(), choice.options as usize);
+        assert!(choice.labels.contains(&"France".to_string()));
+        assert_eq!(choice.page, PageIndex(0));
+        assert!(choice.bounds.right > choice.bounds.left);
+
+        // The release of a press the engine never saw is not the engine's
+        // either, and neither of them changed the value.
+        let released = document
+            .form_event(PageIndex(0), FormInputEvent::PointerUp { at })
+            .expect("the release is answered");
+        assert!(!released.opened_choice);
+        assert_eq!(document.field_value("country").unwrap(), "Canada");
+
+        // …and what the drawn list chooses is committed by PDFium, exactly as
+        // a click on its own list would have been.
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::SelectOption {
+                    index: 1,
+                    selected: true,
+                },
+            )
+            .expect("the choice is answered");
+        let committed = document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .expect("the focus loss is answered")
+            .committed
+            .expect("choosing an option is a committed change");
+        assert_eq!(committed.name, "country");
+        assert_eq!(committed.value, "France");
     });
 }
 

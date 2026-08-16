@@ -240,6 +240,16 @@ pub enum ReadCommand {
     PickDate(crate::datefield::Date),
     /// Put the calendar away without choosing anything.
     CloseDatePicker,
+    /// Choose one option of the choice field the open list belongs to, by the
+    /// index PDFium knows it under (§8.6).
+    ///
+    /// The list is pulpit's; the selection is not. This becomes a
+    /// `SelectOption` — `FORM_SetIndexSelected` — so the engine performs it and
+    /// generates the appearance, as it does for a list it drew itself.
+    PickOption(u32),
+    /// Put the option list away without choosing anything. The field keeps the
+    /// caret, as a closed dropdown does.
+    CloseChoiceList,
     /// Take back the last edit, or put it back.
     Undo,
     Redo,

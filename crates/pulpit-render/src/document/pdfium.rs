@@ -664,6 +664,52 @@ impl<'a> PdfiumDocument<'a> {
         field
     }
 
+    /// The choice widget under `point` whose open list the *application*
+    /// draws, if one is there (§8.6).
+    ///
+    /// Answered from the form environment's own open page, for the reason
+    /// [`Self::focus_field_widget`] gives: an annotation read off a second
+    /// `FPDF_PAGE` for the same page is not one `FORM_SetFocusedAnnot`
+    /// recognises. The later annotation wins, because a widget drawn over
+    /// another is the one a press lands on.
+    ///
+    /// Walking the page's widgets costs a read per annotation, and it is paid
+    /// on a press rather than on a keystroke or a pointer move.
+    fn overlay_choice_widget(
+        &self,
+        page: PageIndex,
+        handle: FPDF_PAGE,
+        point: PagePoint,
+    ) -> Option<i32> {
+        let form = self.form_handle()?;
+        let bindings = self.backend.bindings();
+        let geometry = self.measure(page).ok()?;
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+        let mut found = None;
+        for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+            let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+            if annotation.is_null() {
+                continue;
+            }
+            let takes_it = (unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
+                == FPDF_ANNOT_WIDGET)
+                .then(|| read_form_field(bindings, form, annotation, page, &geometry))
+                .flatten()
+                .is_some_and(|field| {
+                    application_draws_the_list(&field)
+                        && field
+                            .widgets
+                            .iter()
+                            .any(|widget| widget.page == page && widget.bounds.contains(point))
+                });
+            unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+            if takes_it {
+                found = Some(index);
+            }
+        }
+        found
+    }
+
     /// Focus the first widget of `name` on `page`, on the page the form
     /// environment has open, and return that page's handle.
     ///
@@ -2405,6 +2451,23 @@ fn key_code(key: crate::document::protocol::FormKey) -> std::os::raw::c_int {
     }
 }
 
+/// Whether this field's *open list* is the application's to draw (§8.6).
+///
+/// True for a plain combo box and a list box, whose list is transient viewer
+/// chrome: it appears in no saved file, so drawing it outside PDFium costs the
+/// one-implementation rule nothing — the chosen index still goes back through
+/// `FORM_SetIndexSelected`, and the value and its appearance are still
+/// PDFium's.
+///
+/// False for an *editable* combo box, which is a text box with a list attached
+/// and has a caret PDFium is already drawing, and false for a read-only field,
+/// which has no list to open at all.
+fn application_draws_the_list(field: &FormField) -> bool {
+    matches!(field.kind, FieldKind::ComboBox | FieldKind::ListBox)
+        && !field.allows_custom_value
+        && !field.read_only
+}
+
 /// One widget annotation, read as the field it draws.
 ///
 /// Returns the field's name, kind and value together with the one rectangle
@@ -3001,16 +3064,47 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // handled there is nothing focused left to name it.
         let was_focused = self.focused_form_field(page);
         let dropping_focus = matches!(&event, FormInputEvent::Focus { gained: false });
+        // A press on a non-editable choice widget is answered with *focus*
+        // rather than with the click itself. `FORM_OnLButtonDown` on one of
+        // those opens PDFium's own list, drawn into the page bitmap and
+        // reported back a sliver at a time, with a round trip per hovered row;
+        // the application draws the list instead and commits what is chosen
+        // through `SelectOption` (§8.6). Which widgets those are is read from
+        // the document — an editable combo keeps the engine's list — rather
+        // than decided here.
+        let overlay_press = match &event {
+            FormInputEvent::PointerDown { at: point } | FormInputEvent::PointerUp { at: point } => {
+                self.overlay_choice_widget(page, handle, *point)
+            }
+            _ => None,
+        };
+        let opened_choice =
+            overlay_press.is_some() && matches!(&event, FormInputEvent::PointerDown { .. });
         unsafe {
             match event {
-                FormInputEvent::PointerDown { at: point } => {
-                    let (x, y) = at(point);
-                    bindings.FORM_OnLButtonDown(form, handle, 0, f64::from(x), f64::from(y));
-                }
-                FormInputEvent::PointerUp { at: point } => {
+                FormInputEvent::PointerDown { at: point } => match overlay_press {
+                    // Focus alone: the widget takes the caret, and its list
+                    // stays shut because the application is about to draw one.
+                    Some(index) => {
+                        let annotation = bindings.FPDFPage_GetAnnot(handle, index);
+                        if !annotation.is_null() {
+                            bindings.FORM_SetFocusedAnnot(form, annotation);
+                            bindings.FPDFPage_CloseAnnot(annotation);
+                        }
+                    }
+                    None => {
+                        let (x, y) = at(point);
+                        bindings.FORM_OnLButtonDown(form, handle, 0, f64::from(x), f64::from(y));
+                    }
+                },
+                // The release of a press the engine never saw is not the
+                // engine's either: forwarding it alone would land a button-up
+                // in a widget with no button-down behind it.
+                FormInputEvent::PointerUp { at: point } if overlay_press.is_none() => {
                     let (x, y) = at(point);
                     bindings.FORM_OnLButtonUp(form, handle, 0, f64::from(x), f64::from(y));
                 }
+                FormInputEvent::PointerUp { .. } => {}
                 FormInputEvent::PointerMove { at: point } => {
                     let (x, y) = at(point);
                     bindings.FORM_OnMouseMove(form, handle, 0, f64::from(x), f64::from(y));
@@ -3148,12 +3242,36 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 bounds: widget.bounds,
             })
         });
+        // Reported for a list box as well as for a combo box: a list box needs
+        // nothing from the arrow keys — it moves its own selection — but its
+        // rows are drawn by the application on the same terms as a combo's,
+        // and drawing them takes the labels and the widget's rectangle.
         let focused_choice = focused.as_ref().and_then(|field| {
-            (field.kind == FieldKind::ComboBox).then(|| crate::document::protocol::FocusedChoice {
+            if !matches!(field.kind, FieldKind::ComboBox | FieldKind::ListBox) {
+                return None;
+            }
+            let widget = field
+                .widgets
+                .iter()
+                .find(|widget| widget.page == page)
+                .or_else(|| field.widgets.first())?;
+            Some(crate::document::protocol::FocusedChoice {
+                field: field.name.clone(),
                 selected: field.selected.first().copied(),
                 options: field.options.len().min(u32::MAX as usize) as u32,
+                labels: field.options.clone(),
+                editable: field.allows_custom_value,
+                multiple_selection: field.multiple_selection,
+                list_box: field.kind == FieldKind::ListBox,
+                page: widget.page,
+                bounds: widget.bounds,
             })
         });
+        // Only the *editable* combo boxes reach this now: a press on any other
+        // choice widget is answered with focus alone and its list is drawn by
+        // the application, so PDFium has no popup on the page to composite.
+        // The widening stays for the fields that still open one.
+        //
         // A focused combo box may have its list open, and PDFium draws that
         // list into the page while reporting only the slivers that changed —
         // opening it invalidates a few pixels of border, not the rows about to
@@ -3201,6 +3319,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             requests,
             text_focus,
             focused_choice,
+            opened_choice,
             focused_hint,
             focused_date,
             focused_widget,

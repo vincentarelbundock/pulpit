@@ -5185,6 +5185,24 @@ impl App {
         Some(Task::none())
     }
 
+    /// Commit the row an open list is on, and close it.
+    ///
+    /// The choice crosses as a `SelectOption`, which is `FORM_SetIndexSelected`
+    /// on the other side: the engine performs the selection, generates the
+    /// appearance and runs the field's scripts, exactly as it would for a
+    /// click on a list it had drawn itself (§8.6).
+    fn choose_highlighted_option(&mut self) -> Task<Message> {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        if let Some(index) = self.reader.take_highlighted_option() {
+            self.ask_form_key(FormInputEvent::SelectOption {
+                index,
+                selected: true,
+            });
+        }
+        Task::none()
+    }
+
     /// Route one key press to the field that holds the caret (§8.6).
     ///
     /// `None` means the key was not the field's and should carry on to the
@@ -5204,6 +5222,33 @@ impl App {
         // for a Ctrl-V to reach anyway.
         if control {
             return None;
+        }
+
+        // An open option list takes the keys a list takes, and it takes them
+        // before the field does: while it is open the arrows move a highlight
+        // rather than the field's value, and nothing is committed until Enter
+        // (§8.6). Escape puts the list away and leaves the field focused,
+        // which is what closing a dropdown means everywhere else — so it is
+        // consumed here rather than falling through to abandon the field edit.
+        if self.reader.choice_list().is_some() {
+            match key {
+                Some("ArrowUp") | Some("Up") => {
+                    self.reader.step_choice_list(false);
+                    return Some(Task::none());
+                }
+                Some("ArrowDown") | Some("Down") => {
+                    self.reader.step_choice_list(true);
+                    return Some(Task::none());
+                }
+                Some("Enter") => {
+                    return Some(self.choose_highlighted_option());
+                }
+                Some("Escape") => {
+                    self.reader.close_choice_list();
+                    return Some(Task::none());
+                }
+                _ => {}
+            }
         }
 
         // The named keys a field uses. Escape is deliberately absent: it is
@@ -5308,10 +5353,19 @@ impl App {
     fn form_changed(
         &mut self,
         page: pulpit_core::page::PageIndex,
-        result: pulpit_render::document::protocol::FormEventResult,
+        mut result: pulpit_render::document::protocol::FormEventResult,
     ) {
         self.reader.set_form_typing(result.text_focus);
-        self.reader.set_focused_choice(result.focused_choice);
+        let opened_choice = result.opened_choice;
+        // Read before the choice moves into the reader: the uncommitted rule
+        // at the bottom of this function still needs to know one is held.
+        let editing_choice = result.focused_choice.is_some();
+        self.reader.set_focused_choice(result.focused_choice.take());
+        // A press landed on a choice field whose list PDFium deliberately did
+        // not open, because this is the layer that draws it (§8.6).
+        if opened_choice {
+            self.reader.open_choice_list();
+        }
         // Where to draw the focus ring, taken as fact like the caret itself.
         // The answer that says nothing is focused matters as much as the one
         // that names a widget: it is what takes the ring off the last field.
@@ -5377,7 +5431,7 @@ impl App {
             // it immortal, growing over the page with every pointer move. The
             // rule: uncommitted means an interaction is *being held open* —
             // a caret in a text field, or an open choice list.
-            let editing = result.text_focus || result.focused_choice.is_some();
+            let editing = result.text_focus || editing_choice;
             self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
         }
     }
@@ -5842,6 +5896,11 @@ impl App {
                 if self.reader.pointer_pressed() {
                     return Task::none();
                 }
+                // A press that missed an open option list puts it away and
+                // chooses nothing — the click-away every dropdown has. The
+                // press still goes on to PDFium below, because that is what
+                // moves the caret to wherever it actually landed.
+                self.reader.close_choice_list();
                 // …and if the document has fields, "the document's own" means
                 // exactly that: the press goes to PDFium, which decides
                 // whether it landed in one. Sent for a press on bare page too,
@@ -5884,6 +5943,23 @@ impl App {
                 );
                 self.reader.close_date_picker();
                 self.commit_to_document(transaction);
+                Task::none()
+            }
+            ReadCommand::PickOption(index) => {
+                use pulpit_render::document::protocol::FormInputEvent;
+
+                // Closed first: the answer that comes back re-reports the
+                // field, and a list still open would simply take the new
+                // selection and stay up over a choice already made.
+                self.reader.close_choice_list();
+                self.ask_form_key(FormInputEvent::SelectOption {
+                    index: *index,
+                    selected: true,
+                });
+                Task::none()
+            }
+            ReadCommand::CloseChoiceList => {
+                self.reader.close_choice_list();
                 Task::none()
             }
             ReadCommand::DeleteSelected => {

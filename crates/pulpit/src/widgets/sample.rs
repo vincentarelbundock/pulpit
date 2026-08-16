@@ -120,6 +120,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         date_picker: None,
         focused_widget: None,
         focused_hint: None,
+        choice_list: None,
         date_language: crate::datefield::Locale::default(),
         controls: &READER_CONTROLS,
         scale: 1.0,
