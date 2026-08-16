@@ -144,7 +144,7 @@ impl Icon {
             Icon::ZoomIn => include_bytes!("../../assets/icons/zoom-in.svg"),
             Icon::ZoomOut => include_bytes!("../../assets/icons/zoom-out.svg"),
             Icon::FitWidth => include_bytes!("../../assets/icons/move-horizontal.svg"),
-            Icon::FitPage => include_bytes!("../../assets/icons/maximize.svg"),
+            Icon::FitPage => include_bytes!("../../assets/icons/expand.svg"),
             Icon::FitHeight => include_bytes!("../../assets/icons/move-vertical.svg"),
             Icon::Crop => include_bytes!("../../assets/icons/crop.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
