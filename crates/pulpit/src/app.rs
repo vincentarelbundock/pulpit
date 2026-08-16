@@ -2201,14 +2201,36 @@ impl App {
                 self.pump_thumbnails();
                 if self.overview {
                     // Open on the slide the presenter is on, however far down
-                    // a long deck that is.
-                    let slide = self.state.preview();
+                    // a long deck that is — and in a document layout that is
+                    // the page the reader is showing, not the session index.
+                    let slide = if crate::layout::builtin::LayoutMode::of(&self.active_layout)
+                        == crate::layout::builtin::LayoutMode::Document
+                    {
+                        let slide = self.slide_showing(self.reader.controls().page.get());
+                        // The grid's cursor and accent read the preview slide,
+                        // so it is seeded here rather than left where the last
+                        // presentation left it.
+                        let _ = self.state.apply(Nav::PreviewGoTo(slide), self.now);
+                        slide
+                    } else {
+                        self.state.preview()
+                    };
                     return self.reveal_in_overview(slide);
                 }
                 Task::none()
             }
             Message::GoToFromOverview(slide) => {
                 self.overview = false;
+                // In a document layout the grid is a way of moving the reader,
+                // not of showing a slide to a room: the session index would
+                // change with nothing on screen following it.
+                if crate::layout::builtin::LayoutMode::of(&self.active_layout)
+                    == crate::layout::builtin::LayoutMode::Document
+                {
+                    let page = self.page_showing(slide);
+                    return self
+                        .on_read_command(crate::widgets::event::ReadCommand::GoToPage(page));
+                }
                 self.update(Message::Nav(Nav::GoTo(slide)))
             }
             Message::Ignore => Task::none(),
@@ -5664,6 +5686,26 @@ impl App {
         // finding a slide is looking for it, not showing it to the room.
         let slide = self.slide_showing(hit.page.get());
         self.update(Message::Nav(pulpit_core::Command::PreviewGoTo(slide)))
+    }
+
+    /// Which PDF page a given slide shows.
+    ///
+    /// The inverse of `slide_showing`, and asked of the mapping for the same
+    /// reason: under a paired deck the grid's index and the reader's page are
+    /// not the same number.
+    fn page_showing(&self, slide: usize) -> pulpit_core::PageIndex {
+        let pdf_pages = self
+            .state
+            .document()
+            .map(|document| document.pdf_pages)
+            .unwrap_or(0);
+        let page = self
+            .state
+            .mapping()
+            .audience_source(slide, pdf_pages)
+            .map(|source| source.pdf_page)
+            .unwrap_or(slide);
+        pulpit_core::PageIndex(page)
     }
 
     /// Which slide shows a given PDF page.
