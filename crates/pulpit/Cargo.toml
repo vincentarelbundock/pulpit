@@ -29,6 +29,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"
+# Identifies an open document by its contents, so a file that was moved or
+# renamed still opens into the layout it was last read in. Chosen for speed:
+# this runs on the file the user just asked to open, so it has to be fast
+# enough to be invisible on a deck of any size.
+blake3 = "1"
 notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

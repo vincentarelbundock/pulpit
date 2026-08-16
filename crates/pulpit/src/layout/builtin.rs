@@ -198,144 +198,6 @@ pub fn presenter_default() -> Layout {
     )
 }
 
-/// **Slide + Next + Notes** — a slide-first alternative. The current slide gets
-/// the full height and nearly three quarters of the width; the information a
-/// presenter looks ahead to lives in a narrow rail.
-pub fn slide_next_notes() -> Layout {
-    let mut b = Builder::new();
-
-    let rail_children = vec![
-        b.slide(WidgetKind::NextSlide),
-        b.panel(WidgetKind::SpeakerNotes),
-        b.panel(WidgetKind::Annotations),
-        b.panel(WidgetKind::SlideSlider),
-        b.panel(WidgetKind::SlideButtons),
-    ];
-    let rail = b.split(
-        "Look-ahead rail",
-        Direction::Vertical,
-        // The next slide and the notes share the rail equally; the palette,
-        // the scrubber and the buttons take only the height their controls
-        // need, so the reading matter keeps the rest.
-        &[0.385, 0.385, 0.06, 0.07, 0.10],
-        rail_children,
-    );
-
-    let root_children = vec![b.slide(WidgetKind::CurrentSlide), rail];
-    let root = b.split(
-        "Presenter screen",
-        Direction::Horizontal,
-        &[0.72, 0.28],
-        root_children,
-    );
-    finish(
-        "Slide + Next + Notes",
-        "slide-next-notes",
-        root,
-        AspectRatio::SixteenNine,
-    )
-}
-
-/// **Slide + Notes Beside** — a full-height slide with notes and compact
-/// navigation in a 25% side rail. On a 16:9 presenter display the 75/25 split
-/// gives a 4:3 deck an exact, padding-free slide region.
-pub fn slide_notes_beside() -> Layout {
-    let mut b = Builder::new();
-
-    let rail_children = vec![
-        b.panel(WidgetKind::SpeakerNotes),
-        b.panel(WidgetKind::SlideSlider),
-        b.panel(WidgetKind::SlideButtons),
-    ];
-    let rail = b.split(
-        "Notes rail",
-        Direction::Vertical,
-        &[0.77, 0.07, 0.16],
-        rail_children,
-    );
-
-    let root_children = vec![b.slide(WidgetKind::CurrentSlide), rail];
-    let root = b.split(
-        "Presenter screen",
-        Direction::Horizontal,
-        &[0.75, 0.25],
-        root_children,
-    );
-    finish(
-        "Slide + Notes Beside",
-        "slide-notes-beside",
-        root,
-        AspectRatio::SixteenNine,
-    )
-}
-
-/// **Slide + Time Below** — only the current slide and a shallow timing strip.
-/// The 90/10 split exactly fits a 16:9 deck above the otherwise unused strip
-/// on a 16:10 presenter display.
-pub fn slide_time_below() -> Layout {
-    let mut b = Builder::new();
-
-    // Four widgets share the strip end to end. The timer is given more room
-    // than the clock, being the reading that is glanced at; the buttons get
-    // the largest share, being what you press without looking.
-    let timer = b.panel(WidgetKind::Timer);
-    let clock = b.panel(WidgetKind::Clock);
-    let slider = b.panel(WidgetKind::SlideSlider);
-    let buttons = b.panel(WidgetKind::SlideButtons);
-    let tools = b.split(
-        "Time and navigation",
-        Direction::Horizontal,
-        &[0.17, 0.13, 0.32, 0.38],
-        vec![timer, clock, slider, buttons],
-    );
-    let slide = b.slide(WidgetKind::CurrentSlide);
-
-    let root = b.split(
-        "Presenter screen",
-        Direction::Vertical,
-        &[0.90, 0.10],
-        vec![slide, tools],
-    );
-    finish(
-        "Slide + Time Below",
-        "slide-time-below",
-        root,
-        AspectRatio::SixteenNine,
-    )
-}
-
-/// **Slide + Time Beside** — the same deliberately minimal information in a
-/// 25% rail. This is the padding-free counterpart for a 4:3 deck on a 16:9
-/// presenter display.
-pub fn slide_time_beside() -> Layout {
-    let mut b = Builder::new();
-
-    // In a rail there is height to spare, so the two readings stack.
-    let timer = b.panel(WidgetKind::Timer);
-    let clock = b.panel(WidgetKind::Clock);
-    let slider = b.panel(WidgetKind::SlideSlider);
-    let buttons = b.panel(WidgetKind::SlideButtons);
-    let rail = b.split(
-        "Time and navigation",
-        Direction::Vertical,
-        &[0.24, 0.16, 0.16, 0.44],
-        vec![timer, clock, slider, buttons],
-    );
-    let slide = b.slide(WidgetKind::CurrentSlide);
-    let root = b.split(
-        "Presenter screen",
-        Direction::Horizontal,
-        &[0.75, 0.25],
-        vec![slide, rail],
-    );
-    finish(
-        "Slide + Time Beside",
-        "slide-time-beside",
-        root,
-        AspectRatio::SixteenNine,
-    )
-}
-
 /// **Reader** — the layout a document opens with.
 ///
 /// The page gets everything that is not a control: a shallow band along the
@@ -391,10 +253,6 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
 pub fn built_in_layouts() -> Vec<Layout> {
     vec![
         presenter_default(),
-        slide_next_notes(),
-        slide_notes_beside(),
-        slide_time_below(),
-        slide_time_beside(),
         reader_default(AspectRatio::SixteenNine),
     ]
 }
@@ -458,24 +316,14 @@ mod tests {
     #[test]
     fn the_built_ins_are_read_only_and_led_by_the_default() {
         let layouts = built_in_layouts();
-        assert_eq!(layouts.len(), 6);
+        assert_eq!(layouts.len(), 2);
         for layout in &layouts {
             assert_eq!(layout.origin, Origin::BuiltIn);
             assert!(!layout.is_editable());
             assert!(!layout.name.is_empty());
         }
         let ids: Vec<&str> = layouts.iter().map(|layout| layout.id.0.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "presenter-default",
-                "slide-next-notes",
-                "slide-notes-beside",
-                "slide-time-below",
-                "slide-time-beside",
-                "reader-default",
-            ]
-        );
+        assert_eq!(ids, vec!["presenter-default", "reader-default"]);
     }
 
     /// §2.1: `reader-default` is a stable identifier, and the assertion on
@@ -531,20 +379,17 @@ mod tests {
     /// §2.2: the page is on a mount, which is the inverse of a slide's cell.
     #[test]
     fn the_page_cell_is_a_document_on_a_canvas_rather_than_a_slide_in_the_dark() {
-        for layout in [reader_default(AspectRatio::SixteenNine)] {
-            let page = layout
-                .cells()
-                .into_iter()
-                .find(|cell| {
-                    cell.widget.as_ref().map(|w| w.kind()) == Some(WidgetKind::DocumentPage)
-                })
-                .expect("a document layout has a page");
-            assert_eq!(page.background, CellBackground::Canvas);
-            assert_eq!(
-                page.padding, 0.0,
-                "the page surface scrolls inside the cell and takes no padding of its own"
-            );
-        }
+        let layout = reader_default(AspectRatio::SixteenNine);
+        let page = layout
+            .cells()
+            .into_iter()
+            .find(|cell| cell.widget.as_ref().map(|w| w.kind()) == Some(WidgetKind::DocumentPage))
+            .expect("a document layout has a page");
+        assert_eq!(page.background, CellBackground::Canvas);
+        assert_eq!(
+            page.padding, 0.0,
+            "the page surface scrolls inside the cell and takes no padding of its own"
+        );
     }
 
     /// §2.3: each mode remembers its own last-used layout, so choosing a
@@ -555,7 +400,6 @@ mod tests {
     fn a_copy_of_a_layout_belongs_to_the_same_mode_as_its_original() {
         for (original, mode) in [
             (presenter_default(), LayoutMode::Presentation),
-            (slide_time_beside(), LayoutMode::Presentation),
             (
                 reader_default(AspectRatio::SixteenNine),
                 LayoutMode::Document,
@@ -647,59 +491,6 @@ mod tests {
         ] {
             assert!(kinds.contains(&required), "default is missing {required:?}");
         }
-    }
-
-    #[test]
-    fn each_built_in_contains_what_its_description_promises() {
-        let default = slide_next_notes();
-        let kinds: Vec<WidgetKind> = default.widgets().iter().map(|w| w.kind()).collect();
-        for required in [
-            WidgetKind::CurrentSlide,
-            WidgetKind::NextSlide,
-            WidgetKind::SpeakerNotes,
-            WidgetKind::Annotations,
-            WidgetKind::SlideSlider,
-            WidgetKind::SlideButtons,
-        ] {
-            assert!(kinds.contains(&required), "default is missing {required:?}");
-        }
-
-        let notes = slide_notes_beside();
-        let kinds: Vec<WidgetKind> = notes.widgets().iter().map(|w| w.kind()).collect();
-        assert!(kinds.contains(&WidgetKind::CurrentSlide));
-        assert!(kinds.contains(&WidgetKind::SpeakerNotes));
-        assert!(kinds.contains(&WidgetKind::SlideSlider));
-        assert!(kinds.contains(&WidgetKind::SlideButtons));
-
-        let below = slide_time_below();
-        let kinds: Vec<WidgetKind> = below.widgets().iter().map(|w| w.kind()).collect();
-        assert_eq!(kinds.len(), 5);
-        assert!(kinds.contains(&WidgetKind::CurrentSlide));
-        assert!(kinds.contains(&WidgetKind::Timer));
-        assert!(kinds.contains(&WidgetKind::Clock));
-        assert!(kinds.contains(&WidgetKind::SlideSlider));
-        assert!(kinds.contains(&WidgetKind::SlideButtons));
-
-        let beside = slide_time_beside();
-        let kinds: Vec<WidgetKind> = beside.widgets().iter().map(|w| w.kind()).collect();
-        assert!(kinds.contains(&WidgetKind::CurrentSlide));
-        assert!(kinds.contains(&WidgetKind::Timer));
-        assert!(kinds.contains(&WidgetKind::Clock));
-        assert!(kinds.contains(&WidgetKind::SlideSlider));
-        assert!(kinds.contains(&WidgetKind::SlideButtons));
-    }
-
-    #[test]
-    fn built_ins_give_the_current_slide_the_documented_proportions() {
-        let default = slide_next_notes();
-        assert!((default.root.as_split().unwrap().sizes[0] - 0.72).abs() < 1e-3);
-
-        for layout in [slide_notes_beside(), slide_time_beside()] {
-            assert!((layout.root.as_split().unwrap().sizes[0] - 0.75).abs() < 1e-3);
-        }
-
-        let below = slide_time_below();
-        assert!((below.root.as_split().unwrap().sizes[0] - 0.90).abs() < 1e-3);
     }
 
     #[test]

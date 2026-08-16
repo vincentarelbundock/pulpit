@@ -108,6 +108,13 @@ pub enum Message {
     },
     Do(Action),
     Nav(Nav),
+    /// The back button: return to the place the last jump left behind, or —
+    /// when nothing has been jumped from — step back one, so the control is
+    /// never dead. The keys are deliberately not routed here (§ history).
+    NavBack,
+    /// The forward button: the inverse of [`Message::NavBack`], stepping
+    /// forward one when the presenter is at the head of their history.
+    NavForward,
     OpenDialog,
     Opened(Option<PathBuf>),
     /// Where the reader's annotated document should be written. `None` when
@@ -406,6 +413,10 @@ struct PendingEdit {
     /// the rendered picture may wait. Decided when the edit is sent for a
     /// commit, and from the answer for an undo or a redo.
     urgency: crate::reader::RasterUrgency,
+    /// For an undo or a redo, the operation itself and the history epoch it
+    /// was taken in, so a refusal can put it back on the stack it came off.
+    /// `None` for an ordinary edit, which takes nothing off a stack.
+    reversal: Option<(u64, Box<pulpit_render::document::DocumentUndo>)>,
 }
 
 /// A rectangle of a page, drawn by the document worker from the document it
@@ -509,6 +520,16 @@ fn reader_snapshot_directory() -> PathBuf {
 
 pub struct App {
     pub state: PresentationState,
+    /// Where the presenter has been, for the two navigation buttons. Only
+    /// jumps are recorded; stepping with the keys is a reading motion, not
+    /// travel, and unwinding it one page at a time would be a slower left
+    /// arrow.
+    pub nav_history: pulpit_core::NavHistory,
+    /// Set while a back or forward is being carried out, so the jump it
+    /// performs is not itself recorded as a new one — which would push the
+    /// place just left onto the stack and make back oscillate between two
+    /// pages for ever.
+    navigating_history: bool,
     /// Which page the presenter window is showing.
     pub page: crate::designer::Page,
     pub layouts: LayoutStore,
@@ -834,6 +855,11 @@ pub struct App {
     /// What the last run left unsaved for the document being opened, held
     /// until the document is up and the offer can be made.
     pending_reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
+    /// The open document's identity for remembered preferences: the BLAKE3 of
+    /// the bytes that were opened. `None` when nothing is open, or when the
+    /// file could not be read — in which case this file simply remembers
+    /// nothing rather than borrowing somebody else's memory.
+    document_hash: Option<String>,
     /// The offer itself, drawn as a dialogue with no way out but an answer.
     /// Inert: nothing is applied until one is given (§11.4).
     pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
@@ -857,6 +883,15 @@ pub struct App {
     presenter_interaction: pulpit_core::annotate::AnnotationInteraction,
     /// The note or text mark being written, if one is.
     pub composing_mark: Option<ComposingMark>,
+    /// The buffer that mark is typed into.
+    ///
+    /// Owned by the application and lent to the page surface, because a
+    /// multi-line editor's buffer holds the caret, the selection and the
+    /// shaped lines as well as the text: rebuilt from a string each frame it
+    /// would forget where the reader was between keystrokes. Beside
+    /// [`ComposingMark`] rather than inside it, because that is cloned and
+    /// compared and a text buffer is neither.
+    compose_buffer: iced::widget::text_editor::Content,
     /// Live tool choices for the annotation palette. These are session
     /// controls, not mutations to a built-in layout.
     pub annotation_controls: crate::widgets::AnnotationControls,
@@ -1008,6 +1043,8 @@ impl App {
 
         let mut app = Self {
             state: PresentationState::default(),
+            nav_history: pulpit_core::NavHistory::new(),
+            navigating_history: false,
             page: crate::designer::Page::Presenter,
             layouts,
             active_layout,
@@ -1141,9 +1178,11 @@ impl App {
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
+            document_hash: None,
             reader_recovery: None,
             presenter_interaction: pulpit_core::annotate::AnnotationInteraction::new(),
             composing_mark: None,
+            compose_buffer: iced::widget::text_editor::Content::new(),
             annotation_controls,
             alarm_controls,
             timer_controls,
@@ -1901,6 +1940,8 @@ impl App {
                 Task::none()
             }
             Message::Do(action) => self.on_action(action),
+            Message::NavBack => self.nav_back(),
+            Message::NavForward => self.nav_forward(),
             Message::Nav(command) => {
                 // A scrub is a drag on the slider, and `PreviewGoTo` is the
                 // only thing that carries one. Every other navigation — a
@@ -1908,7 +1949,18 @@ impl App {
                 // never happened, so the thumbnail is not left behind by
                 // some path nobody thought of.
                 self.scrubbing = matches!(command, Nav::PreviewGoTo(_));
+                // A jump is what history is made of: `GoTo` and the commit of
+                // a preview both land somewhere the presenter chose, rather
+                // than one step along from where they were. `Next`,
+                // `Previous`, `First` and `Last` are stepping and are
+                // deliberately absent.
+                let jumping = !self.navigating_history
+                    && matches!(command, Nav::GoTo(_) | Nav::CommitPreview);
+                let origin = jumping.then(|| self.current_place());
                 let changed = self.state.apply(command, self.now);
+                if let Some(origin) = origin {
+                    self.nav_history.record_jump(origin, self.current_place());
+                }
                 if changed.committed {
                     // The clock starts here: the state has moved, and every
                     // millisecond after this is one the presenter is waiting.
@@ -2551,12 +2603,30 @@ impl App {
         Task::none()
     }
 
-    /// Make a layout the active presenter layout and remember it.
+    /// The user chose this layout: mount it, and remember that they did.
     ///
     /// If a presentation is live the presenter screen switches immediately;
     /// the audience display is not touched, because the layout describes the
     /// presenter screen alone.
+    ///
+    /// A choice made while a document is open is remembered against *that*
+    /// document as well as against its mode, and outranks what the shape of
+    /// the page would have suggested next time the same file is opened. This
+    /// is the only path that records one: what auto-detection mounts is a
+    /// guess, and a guess that wrote itself down would be indistinguishable
+    /// from an answer the moment it was wrong.
     fn adopt_layout(&mut self, layout: Layout) {
+        if let Some(hash) = self.document_hash.clone() {
+            self.settings
+                .layout
+                .remember_layout_for_document(hash, layout.id.0.clone());
+        }
+        self.mount_layout(layout);
+    }
+
+    /// Mount a layout and remember it for its mode, without claiming the user
+    /// asked for it on this particular document.
+    fn mount_layout(&mut self, layout: Layout) {
         self.diagnostics
             .note(format!("presenter layout: {}", layout.name));
         // Each mode remembers its own (§2.3): choosing a presenter variant
@@ -2777,6 +2847,10 @@ impl App {
                 // page surface is where it is drawn (§8.5).
                 if live {
                     reader.composing = self.composing_mark.clone();
+                    // Likewise the history: it spans both modes and outlives
+                    // any one session, so the application is what knows it.
+                    reader.can_go_back = self.nav_history.can_go_back();
+                    reader.can_go_forward = self.nav_history.can_go_forward();
                 }
                 reader
             },
@@ -4119,6 +4193,11 @@ impl App {
             }
         };
         self.document_serial += 1;
+        // Who this document is, for the purpose of remembered preferences.
+        // Taken from the bytes on disk before anything has had a chance to
+        // touch them, and taken here rather than in `open_for_reading` so it
+        // exists even when document mode is switched off or fails to start.
+        self.document_hash = crate::session::content_hash(&path);
         // Slide 7 of one deck has nothing to do with slide 7 of another, so
         // opening a document starts with a clean sheet. The new document's own
         // marks arrive from its engine once it has described itself.
@@ -4260,7 +4339,7 @@ impl App {
                     self.reader_patch_pending.clear();
                     self.wash_cache.borrow_mut().clear();
                     self.reader
-                        .opened(geometry, info.level, info.warnings.clone());
+                        .opened(geometry, info.level, info.warnings.clone(), info.has_form);
                     self.reader.set_outline(
                         outline
                             .flattened()
@@ -4277,6 +4356,9 @@ impl App {
                             })
                             .collect(),
                     );
+                    // Now that the pages have been measured, the file can say
+                    // what it is for.
+                    self.settle_layout_for_document();
                     // Every warning is said once, before the first edit, which
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {
@@ -4416,11 +4498,53 @@ impl App {
                 }
                 crate::reader_link::Told::Saved(saved) => {
                     self.notify(format!("Saved {}", saved.path.display()));
+                    // The copy just written is the same document with more in
+                    // it, and it hashes differently, so it would open as a
+                    // stranger. Give it whatever this file was remembered as
+                    // — and only that: a file with no remembered choice hands
+                    // its copy nothing, so the copy is auto-detected on its
+                    // own shape like any other new file.
+                    if let (Some(from), Some(to)) = (
+                        self.document_hash.clone(),
+                        crate::session::content_hash(&saved.path),
+                    ) {
+                        self.settings.layout.carry_layout_to_saved_copy(&from, to);
+                        self.persist();
+                    }
                     // Nothing is unsaved any more: the edits are in the file
                     // the user just wrote. A journal kept past a save would
                     // offer to replay edits a document already has.
                     if let Some(journal) = self.reader_journal.as_mut() {
                         journal.finish();
+                    }
+                }
+                crate::reader_link::Told::EditFailed { message, fatal } => {
+                    // This answered one mutation, and only that one: the queue
+                    // of edits in flight moves on by exactly one entry, so
+                    // every later answer still lines up with the request that
+                    // asked for it. Leaving it in place used to shift the whole
+                    // queue by one, after which an ordinary edit's answer was
+                    // read as an undo's and pushed onto the wrong stack.
+                    self.notify(message);
+                    let pending = self.reader_pending.pop_front();
+                    // An undo or a redo took its operation off a stack when it
+                    // was sent. It was not applied, so it goes back.
+                    if let Some(pending) = pending {
+                        if let Some((epoch, operation)) = pending.reversal {
+                            self.reader
+                                .restore_operation(pending.kind, epoch, *operation);
+                        }
+                    }
+                    // Whatever this edit was drawing on top of the page is a
+                    // picture of a document that does not exist.
+                    self.reader.commit_refused();
+                    if fatal {
+                        self.reader.closed();
+                        self.reset_reader_rendering();
+                        self.reader_link = None;
+                        // Nothing in flight will ever be answered now.
+                        self.reader_pending.clear();
+                        return;
                     }
                 }
                 crate::reader_link::Told::Failed { message, fatal } => {
@@ -4448,6 +4572,8 @@ impl App {
                         self.reader.closed();
                         self.reset_reader_rendering();
                         self.reader_link = None;
+                        // Nothing in flight will ever be answered now.
+                        self.reader_pending.clear();
                         return;
                     }
                 }
@@ -5101,6 +5227,10 @@ impl App {
         use crate::widgets::event::ReadCommand;
 
         match &command {
+            // Handled above the session: the history is the application's,
+            // and where these land may not even be a page in this document.
+            ReadCommand::HistoryBack => self.nav_back(),
+            ReadCommand::HistoryForward => self.nav_forward(),
             ReadCommand::Undo | ReadCommand::Redo => {
                 let redoing = matches!(command, ReadCommand::Redo);
                 let operation = if redoing {
@@ -5113,17 +5243,20 @@ impl App {
                 };
                 // An undo is itself a mutation and takes the same optimistic
                 // revision check as any other (§6.2).
-                let expected = self.reader.revision();
+                let expected = self.expected_revision();
+                let kind = if redoing {
+                    AppliedKind::Redo
+                } else {
+                    AppliedKind::Undo
+                };
+                let epoch = self.reader.history_epoch();
                 self.reader_pending.push_back(PendingEdit {
-                    kind: if redoing {
-                        AppliedKind::Redo
-                    } else {
-                        AppliedKind::Undo
-                    },
+                    kind,
                     names_a_presenter_mark: false,
                     transaction: None,
                     // Not knowable until the answer says what came back.
                     urgency: crate::reader::RasterUrgency::Deferred,
+                    reversal: Some((epoch, Box::new(operation.clone()))),
                 });
                 if let Some(link) = self.reader_link.as_mut() {
                     link.ask(crate::reader_link::Ask::Undo {
@@ -5132,15 +5265,24 @@ impl App {
                     });
                 } else {
                     self.reader_pending.pop_back();
+                    // Nothing will answer, so the operation goes back where it
+                    // came from rather than being dropped on the floor.
+                    self.reader.restore_operation(kind, epoch, operation);
                 }
                 Task::none()
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
             // Writing a mark on the page is the same four steps the dialog
             // used to be, minus the dialog (§8.5).
-            ReadCommand::ComposeMark(text) => {
-                if let Some(composing) = self.composing_mark.as_mut() {
-                    composing.text = text.clone();
+            ReadCommand::ComposeMark(action) => {
+                if self.composing_mark.is_some() {
+                    self.compose_buffer.perform(action.clone());
+                    // The mark's text is a mirror of the buffer, kept up to
+                    // date here so that committing, validating and undoing all
+                    // read one string rather than reaching into a widget.
+                    if let Some(composing) = self.composing_mark.as_mut() {
+                        composing.text = self.compose_buffer.text();
+                    }
                 }
                 Task::none()
             }
@@ -5187,7 +5329,7 @@ impl App {
                 // one. Those have no gesture: the click chooses the spot and
                 // the text arrives from an editor (§8.5).
                 if let Some((page, at, tool)) = self.reader.placement() {
-                    self.composing_mark = Some(ComposingMark {
+                    return self.begin_composing(ComposingMark {
                         page,
                         at,
                         tool,
@@ -5195,14 +5337,6 @@ impl App {
                         typst: false,
                         editing: None,
                     });
-                    // The caret goes to the box on the page, and nowhere else.
-                    // Without this the keyboard is still wherever it was — the
-                    // page-number box, or the presenter's own bindings — and
-                    // typing the mark's text navigates the document instead of
-                    // writing it.
-                    return iced::widget::operation::focus(
-                        crate::widgets::document::view::compose_input_id(),
-                    );
                 }
                 Task::none()
             }
@@ -5219,15 +5353,14 @@ impl App {
                 let Some(found) = self.reader.selected_editable() else {
                     return Task::none();
                 };
-                self.composing_mark = Some(ComposingMark {
+                self.begin_composing(ComposingMark {
                     page: found.page,
                     at: found.at,
                     tool: found.tool,
                     text: found.text,
                     typst: found.typst,
                     editing: Some(found.id),
-                });
-                iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
+                })
             }
             ReadCommand::PageDoubleClicked => {
                 // Whatever the armed tool is: opening what a mark says is not
@@ -5238,15 +5371,14 @@ impl App {
                 let Some(found) = self.reader.text_under_cursor() else {
                     return Task::none();
                 };
-                self.composing_mark = Some(ComposingMark {
+                self.begin_composing(ComposingMark {
                     page: found.page,
                     at: found.at,
                     tool: found.tool,
                     text: found.text,
                     typst: found.typst,
                     editing: Some(found.id),
-                });
-                iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
+                })
             }
             ReadCommand::PageReleased => {
                 // The release commits on the newest answer, so take up
@@ -5274,7 +5406,17 @@ impl App {
                 Task::none()
             }
             _ => {
+                // The reader's jumps: a page chosen in the overview, typed
+                // into the page box, or arrived at by following a link. A
+                // scroll — by wheel, by hand or by `ScrollByWindows` from the
+                // keys — is reading, and is not recorded.
+                let origin = (!self.navigating_history
+                    && matches!(command, ReadCommand::GoToPage(_) | ReadCommand::CommitPage))
+                .then(|| self.current_place());
                 let _needs_render = self.reader.apply(&command);
+                if let Some(origin) = origin {
+                    self.nav_history.record_jump(origin, self.current_place());
+                }
                 // A page jump or a zoom moves the session's offset, and the
                 // scrollable has no way of knowing that: it is told. A scroll
                 // is the other direction — the widget is already where it
@@ -5294,6 +5436,27 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Open the editor on a mark, new or being rewritten (§8.5).
+    ///
+    /// The buffer is rebuilt from the mark's text rather than cleared, so
+    /// reopening a mark shows what it says; and the caret goes to the box on
+    /// the page and nowhere else. Without the focus the keyboard is still
+    /// wherever it was — the page-number box, or the presenter's own bindings
+    /// — and typing the mark's text navigates the document instead of writing
+    /// it.
+    fn begin_composing(&mut self, mark: ComposingMark) -> Task<Message> {
+        self.compose_buffer = iced::widget::text_editor::Content::with_text(&mark.text);
+        self.composing_mark = Some(mark);
+        iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
+    }
+
+    /// The buffer the page surface draws the editor over, when a mark is
+    /// being written. `None` when none is: an editor with nothing to write
+    /// into is an editor that should not be on the page.
+    pub fn compose_buffer(&self) -> Option<&iced::widget::text_editor::Content> {
+        self.composing_mark.as_ref().map(|_| &self.compose_buffer)
     }
 
     /// Place the mark that was being written (§8.5).
@@ -5394,12 +5557,15 @@ impl App {
                     // Replayed as an undo, which is what it was. The revision
                     // it expects is whatever the replay has reached, not the
                     // one it had in the run that recorded it.
-                    let expected = self.reader.revision();
+                    let expected = self.expected_revision();
                     self.reader_pending.push_back(PendingEdit {
                         kind: AppliedKind::Undo,
                         names_a_presenter_mark: false,
                         transaction: None,
                         urgency: crate::reader::RasterUrgency::Deferred,
+                        // Replay takes nothing off a stack: the history is
+                        // being rebuilt by the answers, not read.
+                        reversal: None,
                     });
                     match self.reader_link.as_mut() {
                         Some(link) => {
@@ -5429,6 +5595,72 @@ impl App {
         // there is nothing left to remove; dropping the offer is the whole of
         // the answer.
         Task::none()
+    }
+
+    /// Put the newly opened document into the layout it belongs in.
+    ///
+    /// Called once, as soon as the document has described itself, because the
+    /// first page's size is the whole of the evidence and it does not exist
+    /// until then. In order:
+    ///
+    /// 1. **What the user chose for this exact file**, keyed by content hash.
+    ///    An answer, and it wins outright.
+    /// 2. **What the shape of the first page suggests** — a talk-shaped page
+    ///    presents, a paper-shaped page reads. A guess, and it only picks the
+    ///    *mode*: which layout that mode opens into is still the one the user
+    ///    was last in, so somebody who works in their own presenter layout
+    ///    gets theirs and not the built-in.
+    ///
+    /// Nothing happens when the answer is the layout already mounted, which is
+    /// the common case: no toast, no relayout, no entry in the diagnostics.
+    fn settle_layout_for_document(&mut self) {
+        use crate::layout::builtin::LayoutMode;
+
+        let remembered = self
+            .document_hash
+            .as_ref()
+            .and_then(|hash| self.settings.layout.layout_for_document(hash))
+            .map(|id| LayoutId(id.to_string()))
+            // A layout the user has since deleted is not an answer any more.
+            .filter(|id| self.layouts.get(id).is_some());
+
+        let chosen = remembered.is_some();
+        let id = match remembered {
+            Some(id) => id,
+            None => {
+                // The first page is the evidence, and a document that measured
+                // no pages is no evidence at all — which is not a reason to
+                // move a presentation into the Reader.
+                let Some(first) = self.reader.page_geometry(pulpit_core::page::PageIndex(0)) else {
+                    return;
+                };
+                let mode = crate::layout::detect::mode_for_page(first.width, first.height);
+                let last_used = match mode {
+                    LayoutMode::Presentation => self.settings.layout.active.clone(),
+                    LayoutMode::Document => self.settings.layout.active_document.clone(),
+                };
+                last_used
+                    .map(LayoutId)
+                    .filter(|id| self.layouts.get(id).is_some())
+                    .unwrap_or_else(|| crate::layout::builtin::default_for(mode))
+            }
+        };
+
+        // Already there, which is the common case: opening a second deck while
+        // the presenter screen is up should be a document change and nothing
+        // more.
+        if id == self.active_layout.id {
+            return;
+        }
+        let Some(layout) = self.layouts.get(&id).cloned() else {
+            return;
+        };
+        self.diagnostics.note(format!(
+            "document layout: {} ({})",
+            layout.name,
+            if chosen { "remembered" } else { "detected" }
+        ));
+        self.mount_layout(layout);
     }
 
     /// Move between reading the document and presenting it (§2.3).
@@ -5713,6 +5945,96 @@ impl App {
         // finding a slide is looking for it, not showing it to the room.
         let slide = self.slide_showing(hit.page.get());
         self.update(Message::Nav(pulpit_core::Command::PreviewGoTo(slide)))
+    }
+
+    /// Whether the presenter screen is currently reading a document rather
+    /// than driving a deck. The two modes count in different units, so every
+    /// history question starts here.
+    fn in_document_mode(&self) -> bool {
+        crate::layout::builtin::LayoutMode::of(&self.active_layout)
+            == crate::layout::builtin::LayoutMode::Document
+    }
+
+    /// Where the presenter is now, in whichever unit the current mode counts
+    /// in.
+    fn current_place(&self) -> pulpit_core::Place {
+        if self.in_document_mode() {
+            pulpit_core::Place::Page(self.reader.controls().page.get())
+        } else {
+            pulpit_core::Place::Slide(self.state.committed())
+        }
+    }
+
+    /// Go to a remembered place, translating it into the unit the current
+    /// mode counts in.
+    ///
+    /// A place recorded in the reader can be returned to after switching to a
+    /// deck layout and the other way round, which is the whole reason history
+    /// is kept in [`pulpit_core::Place`] rather than in a bare index. The move
+    /// is made with `navigating_history` held, so it is not recorded as a new
+    /// jump.
+    fn go_to_place(&mut self, place: pulpit_core::Place) -> Task<Message> {
+        self.navigating_history = true;
+        let task = if self.in_document_mode() {
+            let page = match place {
+                pulpit_core::Place::Page(page) => pulpit_core::PageIndex(page),
+                pulpit_core::Place::Slide(slide) => self.page_showing(slide),
+            };
+            self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(page))
+        } else {
+            let slide = match place {
+                pulpit_core::Place::Slide(slide) => slide,
+                pulpit_core::Place::Page(page) => self.slide_showing(page),
+            };
+            self.update(Message::Nav(Nav::GoTo(slide)))
+        };
+        self.navigating_history = false;
+        task
+    }
+
+    /// The back button. Unwinds one jump, or — with nothing to unwind — steps
+    /// back one, so the control does the obvious thing before any jump has
+    /// been made rather than sitting inert.
+    fn nav_back(&mut self) -> Task<Message> {
+        let current = self.current_place();
+        match self.nav_history.go_back(current) {
+            Some(place) => self.go_to_place(place),
+            None => self.step_sequentially(false),
+        }
+    }
+
+    /// The forward button: the inverse of [`App::nav_back`].
+    fn nav_forward(&mut self) -> Task<Message> {
+        let current = self.current_place();
+        match self.nav_history.go_forward(current) {
+            Some(place) => self.go_to_place(place),
+            None => self.step_sequentially(true),
+        }
+    }
+
+    /// One step in the reading direction, which is what the buttons fall back
+    /// to and what the keys always do.
+    fn step_sequentially(&mut self, forward: bool) -> Task<Message> {
+        if self.in_document_mode() {
+            let page = self.reader.controls().page.get();
+            let page = if forward {
+                page.saturating_add(1)
+            } else {
+                page.saturating_sub(1)
+            };
+            // Stepping is not travel, so it is deliberately routed through
+            // `go_to_place`'s suppression rather than through a bare
+            // `GoToPage`, which would be recorded as a jump.
+            self.navigating_history = true;
+            let task = self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(
+                pulpit_core::PageIndex(page),
+            ));
+            self.navigating_history = false;
+            task
+        } else {
+            let command = if forward { Nav::Next } else { Nav::Previous };
+            self.update(Message::Nav(command))
+        }
     }
 
     /// Which PDF page a given slide shows.
@@ -6085,6 +6407,24 @@ impl App {
         self.annotations.adopt(strokes);
     }
 
+    /// The revision the next mutation should expect (§6.2).
+    ///
+    /// Not the last *confirmed* revision: mutations are posted to a worker
+    /// that answers them in order and one at a time, so a second edit — or an
+    /// undo pressed while a stroke is still being committed, or the second
+    /// entry of a journal replay — is sent before the first has been
+    /// answered. Every mutation the worker accepts advances the revision by
+    /// exactly one, so the revision this one will meet is the confirmed one
+    /// plus however many are still in flight ahead of it. Expecting the
+    /// confirmed revision instead made every pipelined mutation conflict.
+    fn expected_revision(&self) -> pulpit_render::document::DocumentRevision {
+        let mut revision = self.reader.revision();
+        for _ in 0..self.reader_pending.len() {
+            revision = revision.next();
+        }
+        revision
+    }
+
     /// Post one atomic user action to the document worker.
     ///
     /// One transaction is one revision and one undo entry, whatever it
@@ -6096,7 +6436,7 @@ impl App {
         if transaction.is_empty() {
             return false;
         }
-        let expected = self.reader.revision();
+        let expected = self.expected_revision();
         // Keep drawing what this commit creates until a frame containing it
         // arrives (§9.2): the stroke must not vanish at release and reappear
         // a snapshot round trip later. The answer also says whether that frame
@@ -6107,6 +6447,7 @@ impl App {
             names_a_presenter_mark: false,
             transaction: Some(transaction.clone()),
             urgency,
+            reversal: None,
         });
         let sent = match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::Apply {

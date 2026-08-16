@@ -1041,7 +1041,7 @@ fn canvas_cell<'a>(
     // with its name in it tells you nothing about whether the arrangement
     // works, which is the only question the editor exists to answer.
     let inner: Element<'a, Message> = match &cell.widget {
-        Some(widget) => crate::layout_renderer::widget(widget, context, |_| Message::Ignore),
+        Some(widget) => crate::layout_renderer::widget(widget, context, None, |_| Message::Ignore),
         None => container(
             text("Drop a widget here")
                 .size(12)

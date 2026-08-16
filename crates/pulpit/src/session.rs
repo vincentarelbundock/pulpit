@@ -564,6 +564,30 @@ pub fn fingerprint(path: &Path) -> Option<DocumentFingerprint> {
     })
 }
 
+/// Identify a document by what is in it rather than by where it is.
+///
+/// The lowercase hex BLAKE3 of the file's bytes, or `None` when it cannot be
+/// read — an unreadable file simply has no remembered preferences, which is
+/// the same as a file that has never been opened before.
+///
+/// By contents so that moving, renaming or copying a document keeps whatever
+/// the user chose for it, and so that the *same* document fetched twice from
+/// two places is one document as far as those choices go. [`fingerprint`]
+/// answers a different question — "is this the same file, unmodified, that we
+/// were reading an hour ago" — and deliberately notices an edit in place,
+/// which is what makes it right for crash recovery and wrong here.
+///
+/// This reads the whole file, on the thread that asked. It runs once per open,
+/// where the surrounding work is starting worker processes and parsing a PDF,
+/// and BLAKE3 moves at gigabytes a second: a deck costs under a millisecond
+/// and a large scanned book costs tens.
+pub fn content_hash(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +645,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("session.json"));
         (dir, store)
+    }
+
+    /// The property the remembered-layout list depends on: identity follows
+    /// the bytes, not the name, so a renamed file is the same document and an
+    /// edited one is not.
+    #[test]
+    fn a_documents_hash_follows_its_contents_and_not_its_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let one = directory.path().join("talk.pdf");
+        let copy = directory.path().join("talk-renamed.pdf");
+        let other = directory.path().join("other.pdf");
+        std::fs::write(&one, b"%PDF-1.7 the same bytes").unwrap();
+        std::fs::write(&copy, b"%PDF-1.7 the same bytes").unwrap();
+        std::fs::write(&other, b"%PDF-1.7 different bytes").unwrap();
+
+        let hash = content_hash(&one).expect("a readable file hashes");
+        assert_eq!(content_hash(&copy).as_deref(), Some(hash.as_str()));
+        assert_ne!(content_hash(&other), Some(hash.clone()));
+        assert_eq!(hash.len(), 64, "lowercase hex BLAKE3");
+
+        // An unreadable file has no identity, which is the same as never
+        // having been opened.
+        assert_eq!(content_hash(&directory.path().join("absent.pdf")), None);
     }
 
     #[test]

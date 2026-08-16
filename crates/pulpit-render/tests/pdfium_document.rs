@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pulpit_core::annotate::{
-    AnnotationCommand, AnnotationDraft, AnnotationId, HighlightDraft, InkDraft, InkPoint,
-    MarkStyle, NoteDraft,
+    AnnotationCommand, AnnotationDraft, AnnotationId, FreeTextDraft, HighlightDraft, InkDraft,
+    InkPoint, MarkStyle, NoteDraft, TextSource,
 };
 use pulpit_core::page::{PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
 use pulpit_core::search::{HitSource, Query};
@@ -270,7 +270,6 @@ fn several_kinds_of_mark_round_trip_through_a_saved_file() {
                 page: PageIndex(0),
                 at: PagePoint::new(400.0, 100.0),
                 text: "a note to self".into(),
-                open: false,
                 style: MarkStyle::default(),
             })),
         ]);
@@ -306,6 +305,162 @@ fn several_kinds_of_mark_round_trip_through_a_saved_file() {
         .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::Note)
         .expect("the note is in the file");
     assert_eq!(note.contents.text, "a note to self");
+
+    // The keys a note needs in order to be a note in somebody else's reader
+    // (§7.4). `/Contents` alone is what pulpit used to write, and a note that
+    // carries only its text is one other viewers make very little of: no
+    // icon, no author to group it under, no date to sort it by, and — since
+    // PDF 2.0 requires an appearance — nothing a strict viewer will draw.
+    let raw = std::fs::read(&destination).unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    for key in ["/Name", "/T", "/CreationDate", "/M", "/Subj", "/F 4"] {
+        assert!(raw.contains(key), "the saved note carries {key}");
+    }
+    assert!(
+        raw.contains("/AP"),
+        "the marks carry their own appearance, so every viewer draws the same mark"
+    );
+}
+
+/// A mark's text may be a paragraph, and a paragraph has line breaks in it.
+#[test]
+fn a_note_and_a_text_mark_keep_the_lines_they_were_written_on() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("lines");
+    let path = source(&directory);
+    let destination = directory.join("lines.pdf");
+    let written = "first line\nsecond line";
+
+    {
+        let mut document = open(backend, &path);
+        document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::from_annotations([
+                    AnnotationCommand::Create(AnnotationDraft::Note(NoteDraft {
+                        page: PageIndex(0),
+                        at: PagePoint::new(120.0, 120.0),
+                        text: written.into(),
+                        style: MarkStyle::note(),
+                    })),
+                    AnnotationCommand::Create(AnnotationDraft::FreeText(FreeTextDraft {
+                        page: PageIndex(0),
+                        rect: PageRect::new(200.0, 120.0, 420.0, 200.0),
+                        // Brackets and a backslash, which are what a literal
+                        // string in an appearance gives meaning to.
+                        text: "a (bracketed) line\nand a \\ second".into(),
+                        source: TextSource::Plain,
+                        style: MarkStyle::default(),
+                    })),
+                ]),
+            )
+            .expect("both marks commit");
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .unwrap();
+    }
+
+    let reopened = PdfiumDocument::open(backend, &destination).unwrap();
+    let document = PdfDocument::new(Box::new(reopened), 8);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    let note = annotations
+        .iter()
+        .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::Note)
+        .expect("the note is in the file");
+    assert_eq!(
+        note.contents.text, written,
+        "the line break survived the round trip"
+    );
+    let text = annotations
+        .iter()
+        .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::FreeText)
+        .expect("the text mark is in the file");
+    assert_eq!(text.contents.text, "a (bracketed) line\nand a \\ second");
+}
+
+/// A note written by another reader has no `/NM`, and editing it has to find
+/// it again on the next event-loop turn — which an identity derived from a
+/// PDFium handle could not (rule 2).
+#[test]
+fn a_note_from_another_reader_can_be_rewritten_in_place() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("foreign");
+    let path = source(&directory);
+    let foreign = directory.join("foreign.pdf");
+    let rewritten = directory.join("rewritten.pdf");
+
+    // Stand in for the other reader: a note pulpit made, stripped of the one
+    // key pulpit uses to recognise its own work.
+    {
+        let mut document = open(backend, &path);
+        document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::from_annotations([AnnotationCommand::Create(
+                    AnnotationDraft::Note(NoteDraft {
+                        page: PageIndex(0),
+                        at: PagePoint::new(200.0, 120.0),
+                        text: "somebody else wrote this".into(),
+                        style: MarkStyle::note(),
+                    }),
+                )]),
+            )
+            .unwrap();
+        document.save_as(&foreign, SaveOptions::verified()).unwrap();
+    }
+    let stripped = String::from_utf8_lossy(&std::fs::read(&foreign).unwrap())
+        .replace("/NM", "/XX")
+        .into_bytes();
+    std::fs::write(&foreign, stripped).unwrap();
+
+    let mut document = open(backend, &foreign);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    let note = annotations
+        .iter()
+        .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::Note)
+        .expect("the other reader's note is there");
+    assert_eq!(note.contents.text, "somebody else wrote this");
+    assert!(
+        note.editable(),
+        "a note is editable whoever wrote it — the hand opens it by name, not by author"
+    );
+
+    // The identity survives the turn it was read in, which is the whole
+    // point: the edit is applied through a fresh call, and a session identity
+    // built from a PDFium handle would already be meaningless by now.
+    let id = note.id.clone();
+    document
+        .apply(
+            document.revision(),
+            DocumentTransaction::from_annotations([AnnotationCommand::Replace {
+                id: id.clone(),
+                replacement: AnnotationDraft::Note(NoteDraft {
+                    page: PageIndex(0),
+                    at: PagePoint::new(200.0, 120.0),
+                    text: "and pulpit rewrote it".into(),
+                    style: MarkStyle::note(),
+                }),
+            }]),
+        )
+        .expect("another reader's note is editable in place");
+    document
+        .save_as(&rewritten, SaveOptions::verified())
+        .unwrap();
+    drop(document);
+
+    let reopened = PdfiumDocument::open(backend, &rewritten).unwrap();
+    let document = PdfDocument::new(Box::new(reopened), 8);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    let note = annotations
+        .iter()
+        .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::Note)
+        .expect("the note is still there");
+    assert_eq!(note.contents.text, "and pulpit rewrote it");
+    // The edit gave it a durable name, so the next session finds it by
+    // identity rather than by where it happens to sit.
+    assert_eq!(note.id, id, "the rewrite kept the mark's identity (A3)");
 }
 
 #[test]

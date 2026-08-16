@@ -125,9 +125,10 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         dirty: false,
         page_entry: None,
         can_undo: false,
+        can_go_back: false,
+        can_go_forward: false,
         can_redo: false,
         selected: false,
-        selected_editable: false,
         panning: false,
         composing: None,
     }

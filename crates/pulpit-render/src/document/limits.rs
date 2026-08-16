@@ -139,6 +139,22 @@ const _: () = {
 /// cheaper than hundreds of small ones (§8.6, A8).
 pub const MAX_DIRTY_RECTS: usize = 16;
 
+/// The most host requests one form event may leave queued (§8.6).
+///
+/// A document's JavaScript can call `app.alert` in a loop. Each call is a
+/// request the host would otherwise have to show, so the queue is bounded and
+/// requests past the bound are dropped with a diagnostic rather than allowed to
+/// become an unbounded pile of dialogs (A8).
+pub const MAX_HOST_REQUESTS: usize = 8;
+
+/// The most UTF-16 code units read from a string a document's JavaScript
+/// passes to the host — a title, a message, a URL.
+///
+/// PDFium hands these over as null-terminated `FPDF_WIDESTRING` with no length,
+/// so this is also the bound that stops a missing terminator from being read
+/// past (A8).
+pub const MAX_JS_STRING_UNITS: usize = 4_096;
+
 #[cfg(test)]
 mod tests {
     use super::*;

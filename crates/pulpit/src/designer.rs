@@ -307,7 +307,7 @@ impl Designer {
     pub fn recommendations(&self) -> Vec<crate::layout::fit::Recommendation> {
         // The answer depends only on the design area's shape and the deck
         // ratio, yet the view asks per pass — and computing it constructs
-        // all four built-in layouts and measures each one. Memoised on the
+        // both built-in layouts and measures each one. Memoised on the
         // two inputs.
         let key = (
             self.canvas_ratio.ratio().to_bits(),
@@ -1007,12 +1007,21 @@ impl Designer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::builtin::{slide_next_notes, slide_notes_beside, slide_time_below};
+    use crate::layout::builtin::presenter_default;
 
     fn designer_with_two_cells() -> Designer {
         let mut designer = Designer::create("Test");
         let root = designer.layout().root.id();
         designer.split(root, Direction::Horizontal);
+        designer
+    }
+
+    /// A slide pane as wide as the 16:9 canvas it fills, so the space report
+    /// has an unambiguous answer: a 16:9 deck fits it and a 4:3 deck does not.
+    fn wide_slide_designer() -> Designer {
+        let mut designer = Designer::create("Wide");
+        designer.place(designer.layout().root.id(), WidgetKind::CurrentSlide);
+        designer.canvas_ratio = AspectRatio::SixteenNine;
         designer
     }
 
@@ -1168,7 +1177,7 @@ mod tests {
 
     #[test]
     fn a_built_in_layout_refuses_every_edit_and_says_why() {
-        let mut designer = Designer::open(slide_next_notes());
+        let mut designer = Designer::open(presenter_default());
         let before = designer.layout().clone();
         let root = designer.layout().root.id();
 
@@ -1695,7 +1704,7 @@ mod tests {
     fn the_deck_shape_is_previewed_independently_of_the_presenter_screen() {
         // A 4:3 deck on a 16:9 presenter screen: the editor must be able to
         // show this without that projector being attached.
-        let mut designer = Designer::open(slide_time_below());
+        let mut designer = wide_slide_designer();
         designer.canvas_ratio = AspectRatio::SixteenNine;
         let before = designer.layout().clone();
 
@@ -1713,7 +1722,7 @@ mod tests {
 
     #[test]
     fn a_layout_that_letterboxes_most_of_its_slide_pane_says_so() {
-        let mut designer = Designer::open(slide_time_below());
+        let mut designer = wide_slide_designer();
         designer.slide_ratio = AspectRatio::FourThree;
 
         let warning = designer.space_warning().expect("this wastes real space");
@@ -1724,8 +1733,10 @@ mod tests {
 
     #[test]
     fn a_layout_that_fits_the_deck_is_not_warned_about() {
-        let mut designer = Designer::open(slide_notes_beside());
-        // A 75/25 split of a 16:9 screen gives the slide an exactly 4:3 pane.
+        // A single slide pane filling a 4:3 canvas fits a 4:3 deck exactly.
+        let mut designer = Designer::create("Mine");
+        designer.place(designer.layout().root.id(), WidgetKind::CurrentSlide);
+        designer.canvas_ratio = AspectRatio::FourThree;
         designer.slide_ratio = AspectRatio::FourThree;
         assert_eq!(designer.space_warning(), None);
     }
@@ -1738,7 +1749,7 @@ mod tests {
         let before = designer.layout().clone();
 
         let ranked = designer.recommendations();
-        assert_eq!(ranked.len(), 6, "one per built-in");
+        assert_eq!(ranked.len(), 2, "one per built-in");
         for pair in ranked.windows(2) {
             assert!(
                 pair[0].wasted_fraction <= pair[1].wasted_fraction,
@@ -1760,7 +1771,7 @@ mod tests {
         designer.place(designer.layout().root.id(), WidgetKind::CurrentSlide);
         let before = designer.layout().clone();
 
-        let suggested = LayoutId("slide-notes-beside".to_string());
+        let suggested = LayoutId("presenter-default".to_string());
         designer.handle(Msg::PreviewRecommendation(suggested.clone()), &mut store);
 
         assert_eq!(designer.previewed_recommendation, Some(suggested));

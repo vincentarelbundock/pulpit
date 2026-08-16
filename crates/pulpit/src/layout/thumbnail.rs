@@ -199,12 +199,12 @@ fn collect_leaves(node: &Node, into: &mut Vec<(NodeId, Option<WidgetKind>)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::builtin::{slide_notes_beside, slide_time_below};
+    use crate::layout::builtin::presenter_default;
     use crate::layout::Layout;
 
     #[test]
     fn a_thumbnail_has_one_entry_per_pane_and_none_for_the_splits() {
-        let layout = slide_notes_beside();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 320.0, 180.0, AspectRatio::SixteenNine);
         assert_eq!(thumbnail.cells.len(), layout.cells().len());
         for cell in &thumbnail.cells {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_thumbnail_carries_only_internal_cell_separators() {
-        let layout = slide_time_below();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 320.0, 180.0, AspectRatio::SixteenNine);
         let (_, dividers) = tree::compute(&layout.root, thumbnail.bounds, false);
 
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn every_pane_stays_inside_the_thumbnail() {
-        let layout = slide_time_below();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 300.0, 120.0, AspectRatio::FourThree);
         for cell in &thumbnail.cells {
             assert!(cell.frame.x >= -0.01);
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn only_slide_panes_carry_a_fitted_slide() {
-        let layout = slide_notes_beside();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 320.0, 180.0, AspectRatio::SixteenNine);
         for cell in &thumbnail.cells {
             let is_slide = cell
@@ -250,12 +250,12 @@ mod tests {
                 if is_slide { "" } else { "not " }
             );
         }
-        assert_eq!(thumbnail.slide_cells().len(), 1);
+        assert_eq!(thumbnail.slide_cells().len(), 2);
     }
 
     #[test]
     fn the_fitted_slide_sits_inside_its_pane_and_is_centred() {
-        let layout = slide_notes_beside();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 320.0, 180.0, AspectRatio::FourThree);
         let cell = thumbnail.slide_cells()[0];
         let slide = cell.slide.expect("a slide pane");
@@ -268,11 +268,16 @@ mod tests {
 
     #[test]
     fn the_same_layout_letterboxes_differently_for_different_decks() {
-        // Slide + Notes Beside gives its slide a 4:3 pane on a 16:9 screen,
-        // so a 4:3 deck fills it and a 16:9 deck does not.
-        let layout = slide_notes_beside();
-        let classic = Thumbnail::of(&layout.root, 1600.0, 900.0, AspectRatio::FourThree);
-        let wide = Thumbnail::of(&layout.root, 1600.0, 900.0, AspectRatio::SixteenNine);
+        // A single slide pane on a 4:3 area: a 4:3 deck fills it and a 16:9
+        // deck does not.
+        let mut layout = Layout::empty("Slide");
+        let cell = layout.cells()[0].id;
+        layout
+            .set_widget(cell, crate::widgets::Widget::new(WidgetKind::CurrentSlide))
+            .unwrap();
+        layout.root.cell_mut(cell).unwrap().padding = 0.0;
+        let classic = Thumbnail::of(&layout.root, 1200.0, 900.0, AspectRatio::FourThree);
+        let wide = Thumbnail::of(&layout.root, 1200.0, 900.0, AspectRatio::SixteenNine);
         let classic_waste = classic.slide_cells()[0].slide.unwrap().padding_fraction();
         assert!(classic_waste < 0.01, "a 4:3 deck all but fills it");
         assert!(wide.slide_cells()[0].has_letterbox());
@@ -301,7 +306,7 @@ mod tests {
 
     #[test]
     fn a_thumbnail_with_no_room_still_produces_panes_rather_than_panicking() {
-        let layout = slide_time_below();
+        let layout = presenter_default();
         let thumbnail = Thumbnail::of(&layout.root, 0.0, 0.0, AspectRatio::SixteenNine);
         assert_eq!(thumbnail.cells.len(), layout.cells().len());
         assert!(thumbnail.slide_cells().is_empty(), "nothing to fit");
@@ -309,7 +314,7 @@ mod tests {
 
     #[test]
     fn slide_cells_finds_exactly_the_panes_that_show_slides() {
-        let layout = crate::layout::builtin::slide_next_notes();
+        let layout = presenter_default();
         let area = Frame::new(0.0, 0.0, 1600.0, 900.0);
         // The current slide and the next slide, and nothing else.
         assert_eq!(slide_cells(&layout.root, area).len(), 2);

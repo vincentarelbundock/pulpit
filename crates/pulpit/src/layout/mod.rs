@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod builtin;
+pub mod detect;
 pub mod fit;
 pub mod history;
 pub mod model;

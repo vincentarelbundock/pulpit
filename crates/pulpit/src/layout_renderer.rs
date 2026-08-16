@@ -20,23 +20,25 @@ use crate::widgets::event::WidgetEvent;
 use crate::widgets::{annotations, navigation, notes, slides, status, timing, Family, Widget};
 
 /// Draw a whole layout.
-pub fn layout<Message: Clone + 'static>(
+pub fn layout<'a, Message: Clone + 'static>(
     layout: &Layout,
     context: &Context<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
-    node(&layout.root, context, on_event)
+) -> Element<'a, Message> {
+    node(&layout.root, context, compose, on_event)
 }
 
-fn node<Message: Clone + 'static>(
+fn node<'a, Message: Clone + 'static>(
     node: &Node,
     context: &Context<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     match node {
         Node::Leaf(cell) => {
-            let content: Element<'static, Message> = match &cell.widget {
-                Some(widget) => self::widget(widget, context, on_event),
+            let content: Element<'a, Message> = match &cell.widget {
+                Some(widget) => self::widget(widget, context, compose, on_event),
                 None => blank_panel(),
             };
             // Every widget sits in the middle of its cell, both ways.
@@ -73,9 +75,14 @@ fn node<Message: Clone + 'static>(
                             content = content.push(split_separator(split.direction, split.gap));
                         }
                         content = content.push(
-                            container(self::node(&split.children[index], context, on_event))
-                                .width(Length::FillPortion(portion(index)))
-                                .height(Length::Fill),
+                            container(self::node(
+                                &split.children[index],
+                                context,
+                                compose,
+                                on_event,
+                            ))
+                            .width(Length::FillPortion(portion(index)))
+                            .height(Length::Fill),
                         );
                     }
                     content.width(Length::Fill).height(Length::Fill).into()
@@ -87,9 +94,14 @@ fn node<Message: Clone + 'static>(
                             content = content.push(split_separator(split.direction, split.gap));
                         }
                         content = content.push(
-                            container(self::node(&split.children[index], context, on_event))
-                                .width(Length::Fill)
-                                .height(Length::FillPortion(portion(index))),
+                            container(self::node(
+                                &split.children[index],
+                                context,
+                                compose,
+                                on_event,
+                            ))
+                            .width(Length::Fill)
+                            .height(Length::FillPortion(portion(index))),
                         );
                     }
                     content.width(Length::Fill).height(Length::Fill).into()
@@ -150,11 +162,12 @@ fn blank_panel<Message: 'static>() -> Element<'static, Message> {
 ///
 /// Each arm passes only the facets that family uses, which is what keeps a
 /// renderer's dependencies visible in its signature.
-pub fn widget<Message: Clone + 'static>(
+pub fn widget<'a, Message: Clone + 'static>(
     widget: &Widget,
     context: &Context<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     let accent = theme::ambient::accent();
     let scale = widget.style.scale.clamp(
         crate::widgets::common::SCALE_RANGE.0,
@@ -197,9 +210,13 @@ pub fn widget<Message: Clone + 'static>(
             scale,
             accent,
         ),
-        Family::Document => {
-            crate::widgets::document::view::view(widget, &context.reader, context.mode, on_event)
-        }
+        Family::Document => crate::widgets::document::view::view(
+            widget,
+            &context.reader,
+            compose,
+            context.mode,
+            on_event,
+        ),
         Family::Search => {
             crate::widgets::search::view::view(widget, &context.search, context.mode, on_event)
         }
@@ -303,7 +320,7 @@ mod tests {
             let context = context(mode);
             for kind in WidgetKind::ALL {
                 let widget = Widget::new(kind);
-                let _: iced::Element<'static, ()> = self::widget(&widget, &context, |_| ());
+                let _: iced::Element<'_, ()> = self::widget(&widget, &context, None, |_| ());
             }
         }
     }
@@ -313,7 +330,7 @@ mod tests {
         for mode in [Mode::Live, Mode::Preview, Mode::Editing] {
             let context = context(mode);
             for built_in in crate::layout::builtin::built_in_layouts() {
-                let _: iced::Element<'static, ()> = layout(&built_in, &context, |_| ());
+                let _: iced::Element<'_, ()> = layout(&built_in, &context, None, |_| ());
             }
         }
     }

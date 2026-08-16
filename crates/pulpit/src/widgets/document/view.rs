@@ -680,18 +680,22 @@ fn navigation<Message: Clone + 'static>(
     };
 
     let pages = group(row![
+        // Back and forward, not strictly previous and next: these follow the
+        // history when a jump has been made and step a page when it has not,
+        // so returning from an overview jump is one press rather than a hunt
+        // for the page you were on.
         step(
             theme::Icon::ChevronLeft,
-            "Previous page",
-            ReadCommand::GoToPage(PageIndex(reader.controls.page.get().saturating_sub(1))),
-            previous
+            "Back",
+            ReadCommand::HistoryBack,
+            previous || reader.can_go_back
         ),
         entry,
         step(
             theme::Icon::ChevronRight,
-            "Next page",
-            ReadCommand::GoToPage(PageIndex(reader.controls.page.get() + 1)),
-            next
+            "Forward",
+            ReadCommand::HistoryForward,
+            next || reader.can_go_forward
         ),
     ]);
 

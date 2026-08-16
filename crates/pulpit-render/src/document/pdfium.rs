@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use pdfium_render::prelude::*;
 use pulpit_core::annotate::{
     AnnotationDraft, AnnotationId, AnnotationKind, FreeTextDraft, HighlightDraft, InkDraft,
-    MarkStyle, StampDraft, StampMark, TextSource,
+    MarkStyle, NoteDraft, StampDraft, StampMark, TextSource, NOTE_ICON_POINTS,
 };
 use pulpit_core::annotation::InkColor;
 use pulpit_core::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
@@ -80,6 +80,11 @@ const COLOR_TYPE_COLOR: std::os::raw::c_uint = 0;
 /// `FPDF_ANNOT_APPEARANCEMODE_NORMAL`: the `/AP` `/N` stream, the one every
 /// viewer draws.
 const APPEARANCE_NORMAL: std::os::raw::c_int = 0;
+
+/// `/F` bit 3, Print: the annotation appears when the page is printed. PDF
+/// 12.5.3 makes this opt-in, so a mark without it is a mark that vanishes from
+/// the paper.
+const FLAG_PRINT: std::os::raw::c_int = 4;
 
 /// One open PDF, mutated in place.
 ///
@@ -207,7 +212,71 @@ impl<'a> PdfiumDocument<'a> {
         };
         engine.info = engine.survey()?;
         engine.open_form_environment();
+        engine.note_outward_scripts();
         Ok(engine)
+    }
+
+    /// Warn when a field's own scripts try to leave the machine.
+    ///
+    /// A form that mails or submits itself is a thing the reader should be
+    /// told about *before* typing a name into it, not after. pulpit refuses
+    /// every one of these at the callback layer, so nothing is sent — but a
+    /// refusal nobody is told about is indistinguishable from the document
+    /// having asked for nothing.
+    ///
+    /// Read from the field scripts themselves, which PDFium hands over
+    /// decompressed. That is a deliberate limit and worth stating: a *button*
+    /// carrying a plain `/A << /S /SubmitForm >>` action dictionary is not
+    /// visible here. PDFium's `FPDFAction_GetType` has no value for
+    /// `/SubmitForm` — it reports `PDFACTION_UNSUPPORTED` — and the public API
+    /// offers no way to walk into an action dictionary, so the only alternative
+    /// would be a byte scan that object streams defeat. What is caught is the
+    /// common case: `this.submitForm(…)` and friends, called from a field.
+    fn note_outward_scripts(&mut self) {
+        /// What a script has to name to reach outside the document.
+        const REACHES_OUT: [&str; 7] = [
+            "submitForm",
+            "mailDoc",
+            "mailForm",
+            "launchURL",
+            "getURL",
+            "importDataObject",
+            "exportDataObject",
+        ];
+        let Some(form) = self.form_handle() else {
+            return;
+        };
+        let bindings = self.backend.bindings();
+        let mut found = false;
+        for page in 0..self.info.page_count {
+            if found {
+                break;
+            }
+            let scanned = self
+                .backend
+                .on_page(self.document, page, |handle| {
+                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+                        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+                        if annotation.is_null() {
+                            continue;
+                        }
+                        let reaches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
+                            == FPDF_ANNOT_WIDGET
+                            && field_script_reaches_out(bindings, form, annotation, &REACHES_OUT);
+                        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                        if reaches {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            found |= scanned;
+        }
+        if found {
+            self.info.warnings.push(DocumentWarning::ScriptReachesOut);
+        }
     }
 
     /// Start PDFium's form-fill environment, if this document has a form.
@@ -241,7 +310,27 @@ impl<'a> PdfiumDocument<'a> {
                     open_page: None,
                 })
             }
-            None => tracing::warn!("this document's form fields cannot be filled"),
+            None => {
+                // Said out loud, not only to the log.
+                //
+                // This used to be a `tracing::warn!` and nothing else, which
+                // meant a form that could not be initialised looked exactly
+                // like a document with no form: `fields()` answered with an
+                // empty list, the level stayed `Native`, and the only trace
+                // was a line in a worker process's log that no reader sees.
+                // A version mismatch in the form-fill struct hid a
+                // twenty-eight-field form that way. §3.4 already requires
+                // encryption, XFA, JavaScript and signatures to warn rather
+                // than degrade silently; a form that cannot be filled is the
+                // same kind of fact and is now told the same way.
+                tracing::warn!("this document's form fields cannot be filled");
+                self.info.warnings.push(DocumentWarning::FormUnavailable);
+                // "Native form semantics absent or unavailable; the page
+                // renders as a stable surface and every annotation tool
+                // works" — §3.4's definition of this level, which is exactly
+                // the situation.
+                self.info.level = CompatibilityLevel::AnnotateOnly;
+            }
         }
     }
 
@@ -710,8 +799,14 @@ impl<'a> PdfiumDocument<'a> {
     /// Where `id` sits in one page's `/Annots`, if it is on that page.
     fn locate_on(&self, id: &AnnotationId, page: PageIndex) -> Result<Option<usize>> {
         let found = self.on_annotations(page, |index, annotation, _| {
-            let name = self.string_value(annotation, "NM")?;
-            (AnnotationId::imported(&name).as_ref() == Some(id)).then_some(index)
+            match self.string_value(annotation, "NM") {
+                Some(name) => (AnnotationId::imported(&name).as_ref() == Some(id)).then_some(index),
+                // No `/NM`: this is somebody else's annotation, and its
+                // identity is where it sits. Matched only against a session
+                // identity for this very page and index, so a named mark and
+                // an unnamed one can never answer to each other's id.
+                None => (session_id(page, index) == *id).then_some(index),
+            }
         })?;
         Ok(found.first().copied())
     }
@@ -867,6 +962,7 @@ impl<'a> PdfiumDocument<'a> {
     /// (§8.6).
     fn summarise(
         &self,
+        index: usize,
         annotation: FPDF_ANNOTATION,
         page: PageIndex,
         geometry: &PageGeometry,
@@ -890,12 +986,12 @@ impl<'a> PdfiumDocument<'a> {
             .and_then(AnnotationId::imported)
             // A missing or unusable `/NM` gets a session identity, and the
             // annotation is written a real one the first time it is modified
-            // or saved (A3). The session identity is derived from where it
-            // sits, which is stable for as long as nothing renumbers.
-            .unwrap_or_else(|| {
-                AnnotationId::imported(&format!("session-{}-{:p}", page.get(), annotation))
-                    .expect("a derived name is well formed")
-            });
+            // (A3). The identity is its place in `/Annots` — the page and the
+            // index — and never the PDFium handle: a handle does not survive
+            // the event-loop turn it was resolved in (rule 2), so an identity
+            // derived from one can never be looked up again, and every edit
+            // of a mark another reader wrote failed to find it.
+            .unwrap_or_else(|| session_id(page, index));
 
         let text = self
             .string_value(annotation, "Contents")
@@ -995,22 +1091,174 @@ impl<'a> PdfiumDocument<'a> {
             unsafe { bindings.FPDFAnnot_SetRect(annotation, &rect) };
         }
 
+        // The border width is what a viewer regenerating an appearance uses,
+        // so it is written even though pulpit supplies its own `/AP`.
+        unsafe { bindings.FPDFAnnot_SetBorder(annotation, 0.0, 0.0, style.width) };
+        // `/F`. A mark with no flags is a mark that does not print: PDF 12.5.3
+        // makes Print opt-in, and a reader who annotates a page and then
+        // prints it expects the annotations on the paper. Hidden and NoView
+        // are deliberately not set — a mark pulpit cannot see is a mark the
+        // reader cannot erase.
+        unsafe { bindings.FPDFAnnot_SetFlags(annotation, FLAG_PRINT) };
+        // `/M`, the modification date, in the format PDF 7.9.4 asks for.
+        // Comment panels sort by it, and an annotation without one sorts
+        // arbitrarily among the ones that have it.
+        //
+        // All three are written *before* the kind-specific part, because that
+        // part ends by handing PDFium an appearance and every dictionary
+        // write after it is one more chance to disturb it.
+        set_string(bindings, annotation, "M", &pdf_date_now())?;
+
         match draft {
             AnnotationDraft::Ink(ink) => self.write_ink(annotation, ink, geometry)?,
             AnnotationDraft::Highlight(highlight) => {
                 self.write_highlight(annotation, highlight, geometry)?
             }
             AnnotationDraft::FreeText(free) => self.write_free_text(annotation, free, geometry)?,
-            AnnotationDraft::Note(note) => {
-                set_string(bindings, annotation, "Contents", &note.text)?;
-            }
+            AnnotationDraft::Note(note) => self.write_note(annotation, note, geometry)?,
             AnnotationDraft::Stamp(stamp) => {
                 self.write_stamp(page_handle, annotation, stamp, geometry)?
             }
         }
-        // The border width is what a viewer regenerating an appearance uses,
-        // so it is written even though pulpit supplies its own `/AP`.
-        unsafe { bindings.FPDFAnnot_SetBorder(annotation, 0.0, 0.0, style.width) };
+        Ok(())
+    }
+
+    /// Write a sticky note: what it says, who said it, and what it looks like.
+    ///
+    /// `/Contents` alone is what pulpit used to write, and it is why other
+    /// readers made so little of pulpit's notes. A `/Text` annotation is a
+    /// small pile of conventions rather than one key: `/Name` chooses the
+    /// icon, `/T` is the author every comment panel groups by, `/Subj` is the
+    /// heading it shows above the text, and `/AP` is the only thing PDF 2.0
+    /// lets a viewer draw. Left out, each one degrades differently in each
+    /// viewer, which is exactly the behaviour that was reported.
+    fn write_note(
+        &self,
+        annotation: FPDF_ANNOTATION,
+        note: &NoteDraft,
+        geometry: &PageGeometry,
+    ) -> Result<()> {
+        let bindings = self.backend.bindings();
+        set_string(bindings, annotation, "Contents", &note.text)?;
+        // `/Name` names one of the standard icons of PDF 12.5.6.4. Without it
+        // the icon is the viewer's default, which is `/Note` in some and
+        // nothing at all in others. `/Comment` is the speech bubble, and it is
+        // what the appearance below draws, so the mark looks the same whether
+        // a viewer honours the appearance or falls back to the name.
+        //
+        // Written as a string where the spec asks for a name object, because
+        // PDFium's annotation API offers no way to write one. It is a hint
+        // rather than the mark: the appearance below is what every viewer
+        // actually draws, and a viewer that reads this leniently gets the same
+        // speech bubble the appearance draws anyway.
+        set_string(bindings, annotation, "Name", "Comment")?;
+        set_string(bindings, annotation, "T", &author())?;
+        // `/CreationDate` is a note's alone: `/M` says when it was last
+        // touched, and a comment panel wants to know when it was written.
+        set_string(bindings, annotation, "CreationDate", &pdf_date_now())?;
+        // The heading a comment panel puts above the text. "Note" rather than
+        // the text's first line: a heading that repeated the note would show
+        // the same words twice in every panel that draws both.
+        set_string(bindings, annotation, "Subj", "Note")?;
+        self.write_note_appearance(annotation, note, geometry)
+    }
+
+    /// Draw the note's icon, so every viewer shows the same mark.
+    ///
+    /// PDFium does generate an appearance for a `/Text` annotation, but it is
+    /// generated from `/C` and the viewer's own idea of the icon — which is
+    /// how a note ended up as a black tab. A speech bubble drawn here is the
+    /// same speech bubble everywhere, and it is drawn for the same reason a
+    /// Typst mark carries a picture: what the reader sees when they place a
+    /// mark is what every other viewer sees (§7.4).
+    ///
+    /// Written as a content stream rather than as page objects, which is how
+    /// the other appearances in this file are built: `FPDFAnnot_AppendObject`
+    /// refuses every subtype but `/Ink` and `/Stamp`, so a note's appearance
+    /// has to be handed over as the operators themselves. The coordinates are
+    /// the annotation's own, in page user space, because PDFium gives the form
+    /// it generates a `/BBox` equal to `/Rect` and no `/Matrix`.
+    fn write_note_appearance(
+        &self,
+        annotation: FPDF_ANNOTATION,
+        note: &NoteDraft,
+        geometry: &PageGeometry,
+    ) -> Result<()> {
+        let bindings = self.backend.bindings();
+        let rect = geometry.rect_to_user_space(
+            AnnotationDraft::Note(note.clone())
+                .bounds()
+                .expect("a note always has bounds"),
+        );
+        let (left, bottom) = (rect[0], rect[1]);
+        // The icon is designed on a 20-point square — the size a `/Text`
+        // annotation is drawn at everywhere — and scaled to whatever the
+        // rectangle turned out to be, so a rotated or cropped page does not
+        // stretch it.
+        let scale_x = (rect[2] - rect[0]) / NOTE_ICON_POINTS;
+        let scale_y = (rect[3] - rect[1]) / NOTE_ICON_POINTS;
+        let at = |x: f32, y: f32| (left + x * scale_x, bottom + y * scale_y);
+
+        let (r, g, b) = note.style.color.rgb();
+        let mut stream = String::new();
+        stream.push_str("q\n");
+        stream.push_str(&format!("{r:.3} {g:.3} {b:.3} rg\n"));
+        // Outlined in the ink the rest of pulpit's marks are drawn in, so a
+        // pale note is still a shape on a white page.
+        stream.push_str("0.157 0.157 0.157 RG\n");
+        stream.push_str(&format!("{:.3} w\n", 0.75 * scale_x));
+
+        // The bubble: a rounded box with a tail at the bottom left, drawn as
+        // one closed path so the tail is part of the outline rather than a
+        // second shape sitting on top of it. The corners are cut rather than
+        // curved — four short chamfers read as a rounded box at icon size and
+        // cost no control points.
+        let outline = [
+            (5.0, 2.0),
+            (4.0, 6.0),
+            (2.0, 6.0),
+            (2.0, 16.0),
+            (4.0, 18.0),
+            (16.0, 18.0),
+            (18.0, 16.0),
+            (18.0, 8.0),
+            (16.0, 6.0),
+            (7.0, 6.0),
+        ];
+        for (index, (x, y)) in outline.into_iter().enumerate() {
+            let (x, y) = at(x, y);
+            let operator = if index == 0 { "m" } else { "l" };
+            stream.push_str(&format!("{x:.3} {y:.3} {operator}\n"));
+        }
+        // `b` closes the path, then fills and strokes it.
+        stream.push_str("b\n");
+
+        // Three rules inside the bubble: the convention that says the icon is
+        // something written rather than something drawn. The last is short,
+        // the way a last line of writing is.
+        stream.push_str(&format!("{:.3} w\n", 0.9 * scale_y));
+        for row in 0..3 {
+            let y = 14.5 - row as f32 * 3.0;
+            let (from_x, from_y) = at(5.5, y);
+            let (to_x, to_y) = at(if row == 2 { 11.0 } else { 14.5 }, y);
+            stream.push_str(&format!("{from_x:.3} {from_y:.3} m\n"));
+            stream.push_str(&format!("{to_x:.3} {to_y:.3} l\nS\n"));
+        }
+        stream.push_str("Q\n");
+
+        let rc = unsafe { bindings.FPDFAnnot_SetAP_str(annotation, APPEARANCE_NORMAL, &stream) };
+        let back = unsafe {
+            bindings.FPDFAnnot_GetAP(annotation, APPEARANCE_NORMAL, std::ptr::null_mut(), 0)
+        };
+        eprintln!(
+            "DEBUG setap rc={rc} readback_len={back} stream_len={}",
+            stream.len()
+        );
+        if rc == 0 {
+            return Err(DocumentError::Backend(
+                "PDFium refused the note's appearance".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1140,9 +1388,16 @@ impl<'a> PdfiumDocument<'a> {
     /// reader sees when they place a mark is what every other viewer sees
     /// (§7.4).
     ///
-    /// One text object per line, from the top of the box down. No background
-    /// is drawn, and none is wanted: a comment written over a page must not
-    /// hide the page.
+    /// Written as a content stream rather than as page objects, because
+    /// `FPDFAnnot_AppendObject` accepts only `/Ink` and `/Stamp`: hung off a
+    /// `/FreeText` it refuses every object it is handed, which took the whole
+    /// mark down with it and left the text tool unable to place anything at
+    /// all. The font is named the way `/DA` names it, so a viewer that draws
+    /// this appearance and one that regenerates from `/DA` agree.
+    ///
+    /// One line of text per line typed, from the top of the box down. No
+    /// background is drawn, and none is wanted: a comment written over a page
+    /// must not hide the page.
     fn write_free_text_appearance(
         &self,
         annotation: FPDF_ANNOTATION,
@@ -1150,80 +1405,38 @@ impl<'a> PdfiumDocument<'a> {
         geometry: &PageGeometry,
     ) -> Result<()> {
         let bindings = self.backend.bindings();
-        let document = self
-            .backend
-            .document_handle(self.document)
-            .map_err(to_document_error)?;
-
         let size = free.style.font_size.max(1.0);
         // The leading the editor's own box was sized for, so the line spacing
         // on the page matches the line spacing that was typed into.
         let leading = size * 1.2;
         let (r, g, b) = free.style.color.rgb();
-        let alpha = (free.style.opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
         let rect = geometry.rect_to_user_space(free.rect);
         let (left, top) = (rect[0], rect[3]);
 
+        let mut stream = String::new();
+        stream.push_str("q\n");
+        stream.push_str(&format!("{r:.3} {g:.3} {b:.3} rg\n"));
+        stream.push_str("BT\n");
+        // Helvetica because it is one of the fourteen standard faces every
+        // conforming viewer has without embedding, and the same face `/DA`
+        // names.
+        stream.push_str(&format!("/Helv {size:.3} Tf\n"));
         for (index, line) in free.text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            // Helvetica because it is one of the fourteen standard faces every
-            // conforming viewer has without embedding, and the same face
-            // `/DA` names: a viewer that regenerates the appearance from `/DA`
-            // and one that draws this one agree about what the mark looks
-            // like.
-            let text = unsafe { bindings.FPDFPageObj_NewTextObj(document, "Helvetica", size) };
-            if text.is_null() {
-                return Err(DocumentError::Backend(
-                    "PDFium refused to make a text object".into(),
-                ));
-            }
-            let placed = (|| {
-                if unsafe { bindings.FPDFText_SetText_str(text, line) } == 0 {
-                    return Err(DocumentError::Backend(
-                        "PDFium refused the mark's text".into(),
-                    ));
-                }
-                unsafe {
-                    bindings.FPDFPageObj_SetFillColor(
-                        text,
-                        (r * 255.0).round().clamp(0.0, 255.0) as u32,
-                        (g * 255.0).round().clamp(0.0, 255.0) as u32,
-                        (b * 255.0).round().clamp(0.0, 255.0) as u32,
-                        alpha,
-                    )
-                };
-                // A text object sits at the origin until it is moved, and the
-                // baseline of the first line is one line down from the top of
-                // the box. In PDF user space, which is where a page object
-                // lives and where y grows upwards.
-                let baseline = top - leading * (index as f32 + 1.0);
-                if unsafe {
-                    bindings.FPDFPageObj_Transform(
-                        text,
-                        1.0,
-                        0.0,
-                        0.0,
-                        1.0,
-                        f64::from(left),
-                        f64::from(baseline),
-                    );
-                    bindings.FPDFAnnot_AppendObject(annotation, text)
-                } == 0
-                {
-                    return Err(DocumentError::Backend(
-                        "PDFium refused to put the text in the annotation".into(),
-                    ));
-                }
-                Ok(())
-            })();
-            // The annotation owns the object once it has been appended; before
-            // that it is this function's to destroy.
-            if placed.is_err() {
-                unsafe { bindings.FPDFPageObj_Destroy(text) };
-                return placed;
-            }
+            // The baseline of the first line is one line down from the top of
+            // the box, in PDF user space, where y grows upwards.
+            let baseline = top - leading * (index as f32 + 1.0);
+            stream.push_str(&format!("1 0 0 1 {left:.3} {baseline:.3} Tm\n"));
+            stream.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
+        }
+        stream.push_str("ET\nQ\n");
+
+        if unsafe { bindings.FPDFAnnot_SetAP_str(annotation, APPEARANCE_NORMAL, &stream) } == 0 {
+            return Err(DocumentError::Backend(
+                "PDFium refused the mark's appearance".into(),
+            ));
         }
         Ok(())
     }
@@ -1398,6 +1611,46 @@ impl<'a> PdfiumDocument<'a> {
 /// engine does not otherwise need. It errs towards saying yes: a false warning
 /// costs the user one dismissal, and a missed one costs them the belief that a
 /// signature survived their edits, which A9 exists to prevent.
+/// Whether any of one field's four scripts names something outward-facing.
+///
+/// The four `/AA` events PDFium exposes — keystroke, format, validate,
+/// calculate — are the whole of what a text field can run, so a form that
+/// submits itself from a field is caught here whichever of them it hides in.
+fn field_script_reaches_out(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    form: FPDF_FORMHANDLE,
+    annotation: pdfium_render::prelude::FPDF_ANNOTATION,
+    reaches_out: &[&str],
+) -> bool {
+    /// `FPDF_ANNOT_AACTION_*`, from `fpdf_annot.h`.
+    const EVENTS: [i32; 4] = [12, 13, 14, 15];
+    for event in EVENTS {
+        let length =
+            unsafe { bindings.FPDFAnnot_GetFormAdditionalActionJavaScript(form, annotation, event, std::ptr::null_mut(), 0) };
+        // 2 is the null terminator alone: no script for this event.
+        if length <= 2 || length as usize > limits::MAX_METADATA_BYTES {
+            continue;
+        }
+        let mut buffer = vec![0u16; length as usize / 2];
+        unsafe {
+            bindings.FPDFAnnot_GetFormAdditionalActionJavaScript(
+                form,
+                annotation,
+                event,
+                buffer.as_mut_ptr().cast(),
+                length,
+            )
+        };
+        let script: String = String::from_utf16_lossy(&buffer)
+            .trim_end_matches('\0')
+            .to_owned();
+        if reaches_out.iter().any(|name| script.contains(name)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn carries_a_signature(source: &Path) -> bool {
     /// Signature dictionaries live in the trailer's neighbourhood, but an
     /// incrementally updated file can carry them anywhere; 32 MiB covers every
@@ -1471,6 +1724,81 @@ fn capture_appearance(
         )
     };
     buffer
+}
+
+/// One line of text, escaped for a PDF literal string.
+///
+/// The three characters PDF 7.3.4.2 gives meaning to inside parentheses, and
+/// nothing else: an appearance stream carrying an unescaped bracket is a
+/// stream that ends in the middle of the reader's own words.
+fn escape_pdf_string(line: &str) -> String {
+    let mut escaped = String::with_capacity(line.len());
+    for character in line.chars() {
+        if matches!(character, '(' | ')' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// The identity an annotation with no `/NM` answers to: where it sits.
+///
+/// Never derived from a PDFium handle. Handles do not survive the event-loop
+/// turn they were resolved in (rule 2), so an identity built from one is an
+/// identity nothing can ever look up again.
+fn session_id(page: PageIndex, index: usize) -> AnnotationId {
+    AnnotationId::imported(&format!("session-{}-{}", page.get(), index))
+        .expect("a derived name is well formed")
+}
+
+/// Who a mark says wrote it, for `/T`.
+///
+/// The account name, because that is the only name the process has that a
+/// reader would recognise in another viewer's comment panel, and pulpit asks
+/// for no identity of its own. "pulpit" when there is none — an author key
+/// that is present and dull beats one that is absent, which is what makes a
+/// comment panel drop the note into an unnamed group.
+fn author() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "pulpit".into())
+}
+
+/// Now, in the format PDF 7.9.4 asks a date string to be written in.
+///
+/// UTC, so no local time zone database is consulted and the string is the same
+/// wherever the deck is annotated. Hand-rolled rather than pulled from a date
+/// library: this is the one clock read in the crate, and it wants a formatter
+/// rather than a calendar.
+fn pdf_date_now() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    let (hour, minute, second) = (rest / 3_600, (rest % 3_600) / 60, rest % 60);
+
+    // Howard Hinnant's civil-from-days, shifted to an era beginning in March
+    // so the leap day is the last day of the year and needs no special case.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!("D:{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}Z00'00'")
 }
 
 fn set_string(
@@ -1778,8 +2106,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn annotations(&self, page: PageIndex) -> Result<Vec<AnnotationSummary>> {
-        self.on_annotations(page, |_, annotation, geometry| {
-            self.summarise(annotation, page, geometry)
+        self.on_annotations(page, |index, annotation, geometry| {
+            self.summarise(index, annotation, page, geometry)
         })
     }
 
@@ -1844,7 +2172,9 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // Content generation is what commits the new annotation's
                 // appearance into the page; without it the mark is in
                 // `/Annots` and invisible.
-                unsafe { bindings.FPDFPage_GenerateContent(handle) };
+                if std::env::var("PULPIT_DEBUG_NOGEN").is_err() {
+                    unsafe { bindings.FPDFPage_GenerateContent(handle) };
+                }
                 Ok(())
             })
             .map_err(to_document_error)?;
@@ -1869,7 +2199,18 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 if annotation.is_null() {
                     return Err(PdfError::Render("the annotation went away".into()));
                 }
-                let outcome = self.write_draft(handle, annotation, draft, &geometry);
+                // An annotation another reader wrote has no `/NM`, and has
+                // been answering to the session identity of its place in
+                // `/Annots`. Editing it is the moment that identity has to
+                // become durable: written here, the mark keeps the same name
+                // across the save, so an undo of this very edit still finds
+                // it after the file has been reopened (A3).
+                let outcome = (|| {
+                    if self.string_value(annotation, "NM").is_none() {
+                        set_string(bindings, annotation, "NM", id.as_str())?;
+                    }
+                    self.write_draft(handle, annotation, draft, &geometry)
+                })();
                 unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
                 unsafe { bindings.FPDFPage_GenerateContent(handle) };
                 outcome.map_err(|error| PdfError::Render(error.to_string()))
@@ -2185,6 +2526,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
             })
             .collect();
         let changed = form.environment.take_changed();
+        // What the document's own JavaScript asked for while its field scripts
+        // ran. Drained here, with the rest of what the event left behind, so a
+        // request is reported exactly once (§8.6).
+        let requests = form.environment.take_requests();
+        let text_focus = form.environment.has_text_focus();
 
         // Which field changed is read back from the document rather than
         // guessed from the event: PDFium knows what it committed and the
@@ -2204,6 +2550,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
         Ok(FormEventResult {
             invalidated,
             committed,
+            requests,
+            text_focus,
         })
     }
 

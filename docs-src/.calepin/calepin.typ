@@ -43,7 +43,6 @@
   it,
   fallback: _fenced-source-fallback,
 )
-#let code-block = code.code-block
 #let elements = elementmod
 
 // A reference to a panel reports both numbers: `@fig-x-2` reads "Figure 1b",
@@ -100,7 +99,7 @@
 
 #let document(body) = _document(none, body)
 
-#let bind(config) = {
+#let _bind(config) = {
   let config = runtimeconfig._runtime-config(bound: config)
   (
     pages: pagesmod.pages,
@@ -115,8 +114,7 @@
       body,
       fallback: _fenced-source-fallback,
     ),
-    code-block: code.code-block,
-    elements: elementmod.bind(config),
+    elements: elementmod._bind(config),
     _resolve-asset-href: (path) => assets._resolve-asset-href(path, config: config),
     _resolve-asset-path: (path) => assets._resolve-asset-path(path, config: config),
     document: body => _document(config, body),

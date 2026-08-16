@@ -8,6 +8,7 @@ pub mod annotate;
 pub mod annotation;
 pub mod document;
 pub mod generation;
+pub mod history;
 pub mod navigation;
 pub mod notes;
 pub mod overlay;
@@ -23,6 +24,7 @@ pub use annotation::{
 };
 pub use document::{DocumentId, DocumentInfo, LinkTarget, PageLink, PageSize};
 pub use generation::RenderGeneration;
+pub use history::{NavHistory, Place};
 pub use navigation::{DocumentNavigation, Outline, OutlineEntry};
 pub use notes::{NotesMapping, PageSource, PairedRule, Region};
 pub use overlay::{

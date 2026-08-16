@@ -131,6 +131,19 @@ impl MarkStyle {
         }
     }
 
+    /// The style a sticky note is born with: opaque yellow.
+    ///
+    /// A note is an icon on the page rather than a stroke over it, and `/C` is
+    /// what every viewer paints that icon with. The pen's black would put a
+    /// black tab on the page in one viewer and pulpit's own drawing in
+    /// another; yellow is the colour a sticky note is everywhere else.
+    pub fn note() -> MarkStyle {
+        MarkStyle {
+            color: InkColor::Yellow,
+            ..MarkStyle::default()
+        }
+    }
+
     pub fn sanitised(mut self) -> MarkStyle {
         let repair = |value: f32, range: (f32, f32), fallback: f32| {
             if value.is_finite() {
@@ -249,7 +262,6 @@ pub struct NoteDraft {
     /// `/Text` annotation is drawn at a fixed size whatever its `/Rect` says.
     pub at: PagePoint,
     pub text: String,
-    pub open: bool,
     pub style: MarkStyle,
 }
 
@@ -707,7 +719,6 @@ mod tests {
             page: PageIndex(0),
             at: PagePoint::new(0.0, 0.0),
             text: "a note".into(),
-            open: false,
             style: MarkStyle::default(),
         });
         assert!(note.resized(from, to).is_none());
@@ -861,7 +872,6 @@ mod tests {
             page: PageIndex(0),
             at: PagePoint::new(100.0, 100.0),
             text: String::new(),
-            open: false,
             style: MarkStyle::default(),
         };
         assert_eq!(

@@ -48,6 +48,15 @@ pub enum Gesture {
         at: PagePoint,
         touched: Vec<AnnotationId>,
     },
+    /// A rubber band being dragged over the page. Selects rather than marks:
+    /// the release gathers up what the band encloses and commits nothing, so
+    /// this is the one gesture that can end without the document hearing
+    /// about it (§8.4).
+    Marquee {
+        page: PageIndex,
+        anchor: PagePoint,
+        head: PagePoint,
+    },
     /// A selected annotation being dragged or resized. The document is
     /// untouched until release (§8.4).
     Transforming {
@@ -164,6 +173,7 @@ impl Gesture {
             Gesture::Ink { page, .. }
             | Gesture::Selecting { page, .. }
             | Gesture::Erasing { page, .. }
+            | Gesture::Marquee { page, .. }
             | Gesture::Transforming { page, .. } => *page,
         }
     }
@@ -174,6 +184,9 @@ impl Gesture {
             Gesture::Ink { points, .. } => points.is_empty(),
             Gesture::Selecting { quads, .. } => quads.is_empty(),
             Gesture::Erasing { touched, .. } => touched.is_empty(),
+            // A band that never left the point it started from is a click,
+            // and a click selects nothing but clears what was held.
+            Gesture::Marquee { anchor, head, .. } => anchor == head,
             Gesture::Transforming {
                 original, current, ..
             } => original == current,
@@ -215,9 +228,13 @@ pub struct AnnotationInteraction {
     /// transient painting path and never reach the PDF API (§3.2).
     pub pointer: Option<(f32, f32)>,
     pub spotlight: Option<(f32, f32)>,
-    /// The annotation the user has selected, for move, resize and delete.
+    /// The annotations the user has selected, for move, resize and delete.
     /// Application state, not document state (§8.4).
-    selected: Option<AnnotationId>,
+    ///
+    /// A list because the rubber band takes several at once. In `/Annots`
+    /// order, and without repeats: the same mark held twice would be deleted
+    /// twice by one press.
+    selected: Vec<AnnotationId>,
     /// The style the next mark will be made in, per tool.
     ink_style: MarkStyle,
     highlight_style: MarkStyle,
@@ -242,7 +259,7 @@ impl AnnotationInteraction {
             gesture: None,
             pointer: None,
             spotlight: None,
-            selected: None,
+            selected: Vec::new(),
             ink_style: MarkStyle::default(),
             highlight_style: MarkStyle::highlighter(),
             text_style: MarkStyle::default(),
@@ -270,12 +287,42 @@ impl AnnotationInteraction {
         self.gesture.is_some()
     }
 
+    /// Everything the reader is holding, in paint order.
+    pub fn selection(&self) -> &[AnnotationId] {
+        &self.selected
+    }
+
+    /// The one mark the reader is holding, when they are holding exactly one.
+    ///
+    /// `None` for a band's worth of marks rather than the first of them: the
+    /// things this answers — where to put the resize grips, what to reopen for
+    /// rewriting — are questions about a single mark, and picking one out of
+    /// several would act on a mark the reader did not point at.
     pub fn selected(&self) -> Option<&AnnotationId> {
-        self.selected.as_ref()
+        match self.selected.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    pub fn is_selected(&self, id: &AnnotationId) -> bool {
+        self.selected.contains(id)
     }
 
     pub fn select(&mut self, id: Option<AnnotationId>) {
-        self.selected = id;
+        self.selected = id.into_iter().collect();
+    }
+
+    /// Hold everything the band gathered up. Deduplicated, because the caller
+    /// assembles it from page geometry and a repeat would be one mark deleted
+    /// twice.
+    pub fn select_many(&mut self, ids: Vec<AnnotationId>) {
+        self.selected = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !self.selected.contains(&id) {
+                self.selected.push(id);
+            }
+        }
     }
 
     pub fn ink_style(&self) -> MarkStyle {
@@ -345,12 +392,18 @@ impl AnnotationInteraction {
                 at,
                 touched: Vec::new(),
             }),
+            // The band, and the only thing this tool does: picking one mark up
+            // needs no tool at all (§8.4).
+            AnnotationTool::Select => Some(Gesture::Marquee {
+                page,
+                anchor: at,
+                head: at,
+            }),
             AnnotationTool::Pointer
             | AnnotationTool::Spotlight
             | AnnotationTool::Text
             | AnnotationTool::Note
-            | AnnotationTool::Stamp
-            | AnnotationTool::Select => None,
+            | AnnotationTool::Stamp => None,
         };
         self.gesture.is_some()
     }
@@ -378,6 +431,13 @@ impl AnnotationInteraction {
             }
             Some(Gesture::Erasing { at: current_at, .. }) => {
                 *current_at = at;
+                true
+            }
+            Some(Gesture::Marquee { head, .. }) => {
+                if *head == at {
+                    return false;
+                }
+                *head = at;
                 true
             }
             Some(Gesture::Transforming { .. }) | None => false,
@@ -408,6 +468,27 @@ impl AnnotationInteraction {
         {
             *current = quads;
             *current_text = text;
+        }
+    }
+
+    /// The rectangle the open rubber band covers, normalised so a band dragged
+    /// up and to the left is the same rectangle as one dragged down and to the
+    /// right.
+    ///
+    /// `None` unless a band is open. What the caller tests annotations against
+    /// on release, and what the view draws while the drag lasts.
+    pub fn marquee(&self) -> Option<(PageIndex, PageRect)> {
+        match &self.gesture {
+            Some(Gesture::Marquee { page, anchor, head }) => Some((
+                *page,
+                PageRect::new(
+                    anchor.x.min(head.x),
+                    anchor.y.min(head.y),
+                    anchor.x.max(head.x),
+                    anchor.y.max(head.y),
+                ),
+            )),
+            _ => None,
         }
     }
 
@@ -498,6 +579,10 @@ impl AnnotationInteraction {
             // moving silently deleted, and losing a mark is far worse than
             // losing a move (A3).
             Gesture::Transforming { .. } => return GestureOutcome::Nothing,
+            // Nor is a band. It changes what is *held*, which is application
+            // state, and the caller has the page's annotations to test it
+            // against; nothing about it reaches the document.
+            Gesture::Marquee { .. } => return GestureOutcome::Nothing,
         };
 
         let ok = commands.iter().all(|command| {
@@ -534,12 +619,15 @@ impl AnnotationInteraction {
                     style: self.text_style,
                 })
             }
-            PlacedMark::Note { text, open } => AnnotationDraft::Note(NoteDraft {
+            PlacedMark::Note { text } => AnnotationDraft::Note(NoteDraft {
                 page,
                 at,
                 text,
-                open,
-                style: self.text_style,
+                // A note wears the sticky-note colour rather than the text
+                // tool's: `/C` on a `/Text` annotation paints the icon, not
+                // the words, and the words are drawn from `/Contents` by
+                // whatever viewer opens the popup.
+                style: MarkStyle::note(),
             }),
             PlacedMark::Stamp { mark, size } => AnnotationDraft::Stamp(StampDraft {
                 page,
@@ -567,7 +655,6 @@ pub enum PlacedMark {
     },
     Note {
         text: String,
-        open: bool,
     },
     Stamp {
         mark: StampMark,
@@ -846,7 +933,6 @@ mod tests {
             PagePoint::new(99_000.0, 10.0),
             PlacedMark::Note {
                 text: "hello".into(),
-                open: false,
             },
             &page(),
         );
@@ -861,7 +947,6 @@ mod tests {
             PagePoint::new(100.0, 100.0),
             PlacedMark::Note {
                 text: "remember this".into(),
-                open: false,
             },
             &page(),
         );

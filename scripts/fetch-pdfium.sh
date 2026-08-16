@@ -41,20 +41,26 @@ host_platform() {
 
 # The pinned artifact and its hash, per platform. One table, so a pin moves in
 # one place and a target with no entry is an error rather than a guess.
+#
+# These are the `-v8` builds: PDFium compiled with V8, which is what makes a
+# form's own JavaScript — field formatting, keystroke validation, calculated
+# fields — run at all. The plain builds omit V8 and silently degrade every one
+# of those to "the value you typed, unformatted". The cost is size: ~45 MB of
+# shared library against ~8 MB. See `SPEC-document.md` §8.6.
 pin_for() {
   case "$1" in
-    linux-x64)   ARTIFACT="pdfium-linux-x64.tgz"
-                 SHA256="c3af580f9df0fef9545b44115bc5ea440f286956b5f231df69fb373b8efc4f69" ;;
-    linux-arm64) ARTIFACT="pdfium-linux-arm64.tgz"
-                 SHA256="a19862a36e2b2da3c3fb43f0deef45fbbc331f58cd47943782ae4bd9db4c66d9" ;;
-    mac-arm64)   ARTIFACT="pdfium-mac-arm64.tgz"
-                 SHA256="e214ee33f22b2204daa765a545aee1e425d88448e6154dac95c6a06206b7437f" ;;
-    mac-x64)     ARTIFACT="pdfium-mac-x64.tgz"
-                 SHA256="4b924d948d2ec4863435d375a94541b4003c59f8adc28cc5e4236b0ab81a355d" ;;
-    win-x64)     ARTIFACT="pdfium-win-x64.tgz"
-                 SHA256="55329d5cb5de8a379a2fc563106492d7f385a1f795d18970922c71f708f9fbb4" ;;
-    win-arm64)   ARTIFACT="pdfium-win-arm64.tgz"
-                 SHA256="ccc39582f8d9ac0bd57b8e279e8cfc5067cc0f0b4db9bc179ddf7cd3636c0bd6" ;;
+    linux-x64)   ARTIFACT="pdfium-v8-linux-x64.tgz"
+                 SHA256="b1098d069e9bc05ba4f2c83156133c82e6eeeb1c979d6e314db60a2582145994" ;;
+    linux-arm64) ARTIFACT="pdfium-v8-linux-arm64.tgz"
+                 SHA256="5552d54a8647baa5efd08f34953aa6095469b5f5296b2cf6e4f3dc9b7afb50a1" ;;
+    mac-arm64)   ARTIFACT="pdfium-v8-mac-arm64.tgz"
+                 SHA256="100edc96d7bf7f97d381edad64df336783533bbf4e0095d939e41b825c24a77e" ;;
+    mac-x64)     ARTIFACT="pdfium-v8-mac-x64.tgz"
+                 SHA256="a86a1a2845e55fe7a07c200e51f7fe87480a78b6219b4be85649b74679d42209" ;;
+    win-x64)     ARTIFACT="pdfium-v8-win-x64.tgz"
+                 SHA256="7c7aeeacd436ad9e4a4c0047a0b5f4cef6623491b9f0412a02d6b2ce1fa74e60" ;;
+    win-arm64)   ARTIFACT="pdfium-v8-win-arm64.tgz"
+                 SHA256="f89aace8c750f92bde361e054d8c0c3b3faa8d53dc0326511f3f1ce33e421dbe" ;;
     *) echo "no pinned PDFium artifact for platform: $1" >&2; usage; exit 1 ;;
   esac
 }

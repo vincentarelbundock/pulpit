@@ -320,6 +320,72 @@ pub struct FormEventResult {
     /// selection change, a focus loss. One committed change is one revision
     /// and one undo entry, in the same history as the annotations (§8.6).
     pub committed: Option<CommittedField>,
+    /// What the document's own JavaScript asked the host to do while this
+    /// event was being handled. Empty for almost every event, because almost
+    /// no field script calls out to the viewer.
+    ///
+    /// Reported rather than performed. See [`HostRequest`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<HostRequest>,
+    /// Whether a text field holds the caret now that this event has been
+    /// handled.
+    ///
+    /// The application cannot work this out for itself, and getting it wrong
+    /// is the difference between typing a name into a field and turning the
+    /// page: every letter is also a shortcut. So it travels back with every
+    /// event, including the ones that changed nothing — a click on bare page
+    /// takes the caret *out* of a field, and that answer matters as much as
+    /// the one that put it there.
+    #[serde(default)]
+    pub text_focus: bool,
+}
+
+/// Something a document's JavaScript asked the host to do (§8.6).
+///
+/// PDFium's JS platform is a set of callbacks a viewer is expected to answer
+/// *synchronously*, from inside the form event that triggered them —
+/// `app.alert` blocks until its dialog is dismissed. pulpit cannot do that: the
+/// callback runs on the worker process, which has no UI and must not block the
+/// application waiting for one.
+///
+/// So a request is recorded and returned with the event. The script sees the
+/// answer a dismissed dialog would have given and runs to completion; the
+/// application, which is the layer with a user in front of it, decides what to
+/// show and what to allow.
+///
+/// Nothing in the worker performs any of these. Egress especially is a decision
+/// for a user, not for a sandboxed process holding a hostile document (A8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostRequest {
+    /// `app.alert(…)`.
+    Alert { message: String, title: String },
+    /// `app.beep(…)`.
+    Beep,
+    /// `app.response(…)` — a question with an entry field. Answered with
+    /// nothing, because there is no one on the worker process to ask.
+    Response { question: String, title: String },
+    /// The document asked for its own path. Refused: a form does not need to
+    /// know where on disk it is, and telling it puts the user's home directory
+    /// into a string a script could then try to submit somewhere.
+    FilePath,
+    /// `doc.mailDoc(…)`, recorded with its recipients so the application can
+    /// say what was attempted. Never sent from the worker.
+    Mail { to: String, subject: String },
+    /// `doc.print(…)`.
+    Print,
+    /// `doc.submitForm(url)`. The field data is deliberately not carried — only
+    /// its size and the destination, which is what a user needs in order to
+    /// decide. The application can re-serialise the form itself if the answer
+    /// is yes.
+    SubmitForm { url: String, bytes: usize },
+    /// The document asked to jump to a page. The application may honour this:
+    /// it is navigation inside the document and reaches nothing outside it.
+    GotoPage { page: usize },
+    /// A file-picker for a file-selection field. Refused, as `FFI_OpenFile` is.
+    Browse,
+    /// A named viewer action — `NextPage`, `Print`, `SaveAs` and friends.
+    NamedAction { name: String },
 }
 
 /// A field value the engine committed, and the revision that carries it.
@@ -708,6 +774,10 @@ mod tests {
                 value: "Ada".into(),
                 revision: DocumentRevision(4),
             }),
+            requests: vec![HostRequest::Alert {
+                message: "filled".into(),
+                title: "pulpit".into(),
+            }],
         });
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(

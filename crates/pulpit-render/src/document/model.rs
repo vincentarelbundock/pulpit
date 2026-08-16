@@ -103,6 +103,14 @@ pub enum DocumentWarning {
     Signed,
     /// The document sets permissions that forbid annotation or form filling.
     MutationForbidden,
+    /// The document has a form, and PDFium would not give pulpit an
+    /// environment to fill it through. The pages still render and every
+    /// annotation tool still works; the fields are read-only.
+    FormUnavailable,
+    /// A field script calls out of the document — submitting, mailing or
+    /// opening a URL. pulpit refuses every one of those, and says so here
+    /// rather than refusing silently.
+    ScriptReachesOut,
 }
 
 impl DocumentWarning {
@@ -116,8 +124,8 @@ impl DocumentWarning {
                  any ordinary AcroForm fields it also carries can still be filled."
             }
             DocumentWarning::JavaScript => {
-                "This document contains JavaScript, which pulpit does not run. \
-                 Calculated and validated field values will not update."
+                "This document contains JavaScript. Its field formatting, validation \
+                 and calculations run; anything it asks to send, open or print does not."
             }
             DocumentWarning::Signed => {
                 "This document is signed. Saving a modified copy will not carry the \
@@ -125,6 +133,14 @@ impl DocumentWarning {
             }
             DocumentWarning::MutationForbidden => {
                 "This document's permissions do not allow it to be changed."
+            }
+            DocumentWarning::FormUnavailable => {
+                "This document's form fields cannot be filled. The pages still render \
+                 and every annotation tool still works."
+            }
+            DocumentWarning::ScriptReachesOut => {
+                "This form tries to send itself somewhere. pulpit fills it and saves it \
+                 locally; nothing is submitted, mailed or opened over the network."
             }
         }
     }
@@ -246,7 +262,6 @@ impl AnnotationSummary {
                 page: self.page,
                 at: PagePoint::new(self.bounds.left, self.bounds.top),
                 text: self.contents.text.clone(),
-                open: false,
                 style,
             })),
             AnnotationKind::Stamp => Some(AnnotationDraft::Stamp(StampDraft {
@@ -797,6 +812,8 @@ mod tests {
             DocumentWarning::JavaScript,
             DocumentWarning::Signed,
             DocumentWarning::MutationForbidden,
+            DocumentWarning::FormUnavailable,
+            DocumentWarning::ScriptReachesOut,
         ] {
             assert!(warning.message().len() > 30, "{warning:?}");
         }

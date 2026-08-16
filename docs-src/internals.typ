@@ -505,13 +505,46 @@ Three consequences are easy to get wrong and are worth writing down:
   `FORM_OnKeyDown` for the keys that move the caret. Backspace sent as a key
   down is accepted and does nothing at all — no error, no deletion.
 
-The environment is also the security boundary. A PDF can carry JavaScript, ask
-to open a URL, email itself, upload itself or read a file, and every one of
-those is a callback pulpit leaves null: no `m_pJsPlatform`, no `FFI_DoURIAction`,
-no `FFI_EmailTo`, `FFI_UploadTo`, `FFI_OpenFile`, `FFI_PopupMenu` or any of the
-network ones. `FFI_GetLocalTime` returns a fixed value rather than the wall
-clock, for the same reason the Typst compiler is closed-world. The tests assert
-each of those is absent, because they are a posture and not an omission.
+The environment is also the security boundary, and the line it draws is between
+a form computing its own values and a form reaching outside the process.
+
+A form's own field scripts — format, keystroke, validate, calculate — run.
+Real-world forms are built out of them, and a viewer that skips them shows
+different numbers from the ones the file describes. Two things are required and
+neither works alone: the pinned library must be a `-v8` build, and
+`m_pJsPlatform` must be non-null, because PDFium's header says a null one
+prevents JavaScript from executing at all. Both were once the other way round,
+so the regression this guards against is silent in both directions — a
+`pdfium_form_javascript` test types into one field and reads the answer out of
+another that only a calculation could have written.
+
+Two constraints come with that build and are not negotiable. The published
+`-v8` artifacts are also XFA builds, and `FPDFDOC_InitFormFillEnvironment`
+answers a version-1 `FPDF_FORMFILLINFO` with a null handle — which reads
+downstream as "this document has no form", with no error anywhere. The struct
+is therefore version 2, with `xfa_disabled` set. And PDFium's V8 isolate
+belongs to the thread that created it; using it from a second thread is a
+segmentation fault inside V8 rather than an error return. The document worker's
+`serve` loop is single-threaded, so a running pulpit satisfies this for free,
+but tests do not — libtest gives every test its own thread, which is what
+`pulpit_testkit::on_the_pdfium_thread` exists to undo.
+
+What does not run is anything that leaves the process. Opening a URL, emailing
+itself, uploading itself, reading a file: every one of those is a callback
+pulpit leaves null — `FFI_DoURIAction`, `FFI_EmailTo`, `FFI_UploadTo`,
+`FFI_OpenFile`, `FFI_PopupMenu` and the network ones. The JS platform's own
+callbacks are all implemented, because a null one is a crash rather than a
+refusal; each records a `HostRequest` and returns the answer a dismissed dialog
+gives, so the script finishes and the application — the layer with a user in
+front of it — decides what to honour. `FFI_GetLocalTime` returns a fixed value
+rather than the wall clock, for the same reason the Typst compiler is
+closed-world. The tests assert each null is still null, because they are a
+posture and not an omission.
+
+One gap worth naming: `doc.submitForm` is refused through the null
+`FFI_UploadTo`/`FFI_PostRequestURL` rather than through the JS platform, so an
+attempted submission is stopped but *not* reported, and the user is not told it
+happened.
 
 Measured on the development machines, in a debug build: one keystroke through
 the environment costs about 12 µs, and a full-page redraw with the compositing
@@ -1041,16 +1074,50 @@ what the checks say.
   stroke: none,
   inset: 0.55em,
   [*Layout*], [*For*],
-  [*Slide + Next + Notes*], [The slide-first default: current slide at 72% width, with next slide, notes and navigation in a rail.],
-  [*Slide + Notes Beside*], [A 75/25 split that fits a 4:3 slide without padding on a 16:9 presenter display.],
-  [*Slide + Time Below*], [A 90/10 split that fits a 16:9 slide above the natural spare strip on a 16:10 display; time and a draggable slider share the strip.],
-  [*Slide + Time Beside*], [A 75/25 split for a full-height 4:3 slide, with time and navigation in the side rail.],
+  [*Presenter Default*], [What a presentation opens with: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
+  [*Reader*], [What a document opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail.],
 )
 
-The names describe fixed geometry. Pulpit does not choose or rearrange a
+There are two and no more, one per mode, and neither is a variant of the
+other. Pulpit does not choose or rearrange a
 layout based on the deck or display aspect ratio. Built-ins cannot be renamed,
 overwritten or deleted. *Duplicate to Customize* makes an editable copy and
 opens it.
+
+== Which layout a file opens into
+
+A deck and a report are the same file format, so the only honest signal at
+open is the shape of the first page. `layout/detect.rs` reads it, in this
+order:
+
++ a *known paper size* --- A4, A3, A5, B5, Letter, Legal or Tabloid, within
+  three points, in either orientation --- is a document. Size is checked
+  before shape because US Letter landscape is 1.294:1, close enough to 4:3
+  that a shape-only test would open every landscape handout as a talk;
++ a *known slide ratio* --- 4:3, 16:9, 16:10, 5:4 or 3:2, within a percent ---
+  is a presentation;
++ *twice* a known slide ratio is a presentation too, which is a beamer deck
+  built with `show notes on second screen`: the slide and its notes side by
+  side on one double-wide page;
++ anything else is a document. The Reader shows a deck perfectly well, whereas
+  the presenter screen shows a report as a slide that does not fit, so the
+  fallback goes the way that degrades gracefully.
+
+The function is pure and every case above is a unit test. It chooses the
+*mode*, not the layout: which layout that mode opens into is the one the user
+was last in, so somebody who works in their own presenter layout gets theirs
+rather than the built-in.
+
+It is a guess, and it gives way to an answer. A layout chosen by hand while a
+document is open is recorded in `layout.per_document` against the BLAKE3 of
+that file's bytes, and that choice wins on every later open of the same file.
+By contents rather than by path, so moving or renaming a document keeps the
+choice and two copies of one document agree; `session::fingerprint`, which
+deliberately notices an edit in place, answers a different question and is
+right for crash recovery rather than for this. Saving copies the entry onto
+the file just written, which has the same document in it and different bytes
+around it; the source keeps its own, because pulpit never writes over the file
+it opened. The list holds 200 files and drops the least recently chosen.
 
 
 = PDFium

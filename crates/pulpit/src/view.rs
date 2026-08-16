@@ -221,7 +221,12 @@ fn presenter(app: &App) -> Element<'_, Message> {
         &frame,
         crate::widgets::sample::NOTES,
     );
-    let body = crate::layout_renderer::layout(&app.active_layout, &context, interaction);
+    let body = crate::layout_renderer::layout(
+        &app.active_layout,
+        &context,
+        app.compose_buffer(),
+        interaction,
+    );
 
     // Anything the layout does not carry gets a strip of its own. Floating it
     // over the layout would cover whatever the presenter put top-left.
@@ -1108,8 +1113,13 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
     use pulpit_core::Command as Nav;
     match interaction {
         crate::widgets::WidgetEvent::Ignored => Message::Ignore,
-        crate::widgets::WidgetEvent::Next => Message::Nav(Nav::Next),
-        crate::widgets::WidgetEvent::Previous => Message::Nav(Nav::Previous),
+        // The two navigation buttons are the only source of these events, and
+        // they follow the history: back returns to where a jump was made
+        // from, and falls back to stepping when there is nothing to unwind.
+        // The keys are bound straight to `Nav::Next`/`Nav::Previous` and stay
+        // sequential.
+        crate::widgets::WidgetEvent::Next => Message::NavForward,
+        crate::widgets::WidgetEvent::Previous => Message::NavBack,
         // Scrubbing moves the presenter's preview only; the audience follows
         // when the slider is released.
         crate::widgets::WidgetEvent::ScrubTo(slide) => Message::Nav(Nav::PreviewGoTo(slide)),

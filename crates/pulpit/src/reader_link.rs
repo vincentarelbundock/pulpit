@@ -74,6 +74,24 @@ pub enum Ask {
         from_page: usize,
         to_page: usize,
     },
+    /// One raw input event for the document's own form fields (§8.6).
+    ///
+    /// Deliberately *not* a "set this field to that value" request. Field
+    /// values are edited in place by PDFium's form-fill environment, under the
+    /// field's own `/DA`, so what travels is the press or the keystroke and
+    /// never a value pulpit composed. That is what keeps one editing surface
+    /// rather than two.
+    ///
+    /// No optimistic revision check rides along, unlike [`Ask::Apply`]. Most
+    /// of these events commit nothing — a caret move, a key the field ignores
+    /// — and the ones that do commit are answered with the revision they
+    /// produced. A keystroke that had to name the revision it expected would
+    /// be a keystroke that could be refused for arriving in the wrong order,
+    /// which is not how typing behaves anywhere.
+    FormEvent {
+        page: pulpit_core::page::PageIndex,
+        event: pulpit_render::document::protocol::FormInputEvent,
+    },
     Apply {
         expected_revision: DocumentRevision,
         transaction: DocumentTransaction,
@@ -142,7 +160,23 @@ pub enum Told {
         generation: pulpit_core::search::SearchGeneration,
         message: String,
     },
+    /// What a form event changed: rectangles to redraw, a value it committed,
+    /// and anything the document's own JavaScript asked the host to do.
+    FormChanged {
+        page: pulpit_core::page::PageIndex,
+        result: Box<pulpit_render::document::protocol::FormEventResult>,
+    },
     Applied(Box<Applied>),
+    /// A mutation — a transaction, an undo or a redo — was not applied.
+    ///
+    /// Its own case rather than a bare `Failed`, for the same reason a refused
+    /// snapshot has one: the reader is keeping a record per mutation in flight,
+    /// and it must know *which* request a failure answered rather than guess.
+    /// A refused undo also has an operation to put back on its stack.
+    EditFailed {
+        message: String,
+        fatal: bool,
+    },
     /// The rectangle an edit changed, drawn from the worker's document. Held
     /// over the page's frame until a full frame containing the same revision
     /// arrives (§9.2, §9.4).
@@ -367,6 +401,24 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             },
             other => unexpected(other, "search results"),
         }],
+        Ask::FormEvent { page, event } => {
+            match session.request(DocumentRequest::FormEvent { page, event }) {
+                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged {
+                    page,
+                    result: Box::new(result),
+                }],
+                // A refused keystroke is not a lost worker and not a lost
+                // edit: the field simply did not take it. Reported at debug
+                // level rather than as a failure banner, because a document
+                // with no fillable form answers this way for every stray
+                // click on the page, and a banner per click would be noise.
+                Err(error) if !error.is_worker_loss() => {
+                    tracing::debug!(%error, "a form event was refused");
+                    Vec::new()
+                }
+                other => vec![unexpected(other, "a form event result")],
+            }
+        }
         Ask::Apply {
             expected_revision,
             transaction,
@@ -375,7 +427,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             transaction,
         }) {
             Ok(DocumentResponse::Applied(applied)) => Told::Applied(applied),
-            other => unexpected(other, "an applied transaction"),
+            other => mutation_failed(unexpected(other, "an applied transaction")),
         }],
         Ask::Undo {
             expected_revision,
@@ -385,7 +437,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             operation,
         }) {
             Ok(DocumentResponse::Applied(applied)) => Told::Applied(applied),
-            other => unexpected(other, "an applied transaction"),
+            other => mutation_failed(unexpected(other, "an undone action")),
         }],
         Ask::SaveAs {
             destination,
@@ -454,6 +506,15 @@ fn describe(session: &mut DocumentSession, pages: usize) -> Vec<Told> {
 }
 
 /// Turn anything that is not the expected answer into a report.
+/// Say that a failure answered a mutation, so the reader can match it to the
+/// request it left waiting instead of clearing everything in flight.
+fn mutation_failed(told: Told) -> Told {
+    match told {
+        Told::Failed { message, fatal } => Told::EditFailed { message, fatal },
+        other => other,
+    }
+}
+
 fn unexpected(response: Result<DocumentResponse, SessionError>, wanted: &str) -> Told {
     match response {
         Err(error) => Told::Failed {

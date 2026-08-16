@@ -348,6 +348,13 @@ pub struct ReaderData<'a> {
     pub page_entry: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Is there a jump to unwind, or one to redo? Filled in by the
+    /// application: navigation history spans both modes and outlives any one
+    /// reader session, so it is not the session's to know. The band's back
+    /// and forward controls light on these *or* on there being a page to step
+    /// to, since they fall back to stepping.
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
     /// Has the reader picked a mark up? What the delete control asks before it
     /// lights: a control that looked live and did nothing would be worse than
     /// a dim one.

@@ -24,11 +24,40 @@
 //! implements the ones that are required and refuses the ones that would let a
 //! document reach outside itself.
 //!
-//! That refusal is the interesting half. A PDF can carry JavaScript, can ask to
-//! navigate to a URL, email itself, upload itself, or download from a URL. This
-//! environment answers *no* to all of it: no JS platform, no URI actions, no
-//! file access, no network. A form is a thing you type values into, and none of
-//! those capabilities is needed to type a value into one (A8).
+//! # JavaScript, and where it stops
+//!
+//! A form's own scripts run. That is what the field formatting, keystroke
+//! validation and calculated fields of a real-world form are made of, and
+//! without them a document that says "24" in a total field is pulpit failing to
+//! do arithmetic the file already knows how to do. Two things are needed and
+//! neither works alone: the pinned library must be a `-v8` build (see
+//! `scripts/fetch-pdfium.sh`), and `m_pJsPlatform` must be non-null, because
+//! PDFium's own header says a null one means "JavaScript will be prevented from
+//! executing".
+//!
+//! What does *not* run is anything that leaves the process. A PDF can ask to
+//! navigate to a URL, email itself, upload itself, print itself or download
+//! from a URL. Every one of those callbacks is either null — `FFI_DoURIAction`,
+//! `FFI_EmailTo`, `FFI_UploadTo`, `FFI_PostRequestURL`, `FFI_PutRequestURL`,
+//! `FFI_DownloadFromURL`, `FFI_OpenFile`, `FFI_PopupMenu` — or implemented here
+//! to record a [`crate::document::protocol::HostRequest`] and return the answer
+//! a dismissed dialog gives. The script runs to completion; the application,
+//! which is the layer with a user in front of it, decides what to honour (A8).
+//!
+//! # Two constraints the V8 build imposes
+//!
+//! **The interface version is not a choice.** `FPDFDOC_InitFormFillEnvironment`
+//! returns null on a version mismatch, and the published `-v8` builds are also
+//! XFA builds, which demand exactly version 2. Setting 1 there makes every
+//! document report no fillable form — silently, because a null handle is
+//! indistinguishable from a document with no form. XFA itself stays off through
+//! `xfa_disabled`.
+//!
+//! **The isolate is thread-bound.** PDFium creates its V8 isolate lazily, on
+//! whichever thread first runs a script, and using it from a second thread is a
+//! segfault inside V8 rather than an error. The document worker's `serve` loop
+//! is a synchronous read-handle-write on one thread, which satisfies this; any
+//! future attempt to hand PDFium work to a pool would not.
 //!
 //! # How the callbacks find their state
 //!
@@ -42,9 +71,10 @@
 //! after PDFium has been handed its address. It also must outlive the form
 //! handle, because PDFium keeps the pointer.
 
-use std::os::raw::{c_char, c_int, c_ulong, c_ushort};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_ushort, c_void};
 
 use crate::document::limits;
+use crate::document::protocol::HostRequest;
 use pdfium_render::prelude::{
     PdfiumLibraryBindings, FPDF_BOOL, FPDF_DOCUMENT, FPDF_FORMFILLINFO, FPDF_FORMHANDLE, FPDF_PAGE,
     FPDF_WIDESTRING,
@@ -115,6 +145,81 @@ impl DirtyRect {
     }
 }
 
+/// PDFium's `IPDF_JSPLATFORM`, mirrored.
+///
+/// Mirrored for the same reason [`SystemTime`] is: `pdfium-render` keeps the
+/// generated binding behind a private module, so the struct that has to be
+/// filled in cannot be named from here. The field order is `fpdf_formfill.h`'s
+/// and is load-bearing — this is a C vtable in all but name.
+#[repr(C)]
+struct JsPlatform {
+    version: c_int,
+    app_alert: Option<
+        unsafe extern "C" fn(
+            *mut JsPlatform,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            c_int,
+            c_int,
+        ) -> c_int,
+    >,
+    app_beep: Option<unsafe extern "C" fn(*mut JsPlatform, c_int)>,
+    #[allow(clippy::type_complexity, reason = "the shape is PDFium's, not ours")]
+    app_response: Option<
+        unsafe extern "C" fn(
+            *mut JsPlatform,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_BOOL,
+            *mut c_void,
+            c_int,
+        ) -> c_int,
+    >,
+    doc_get_file_path: Option<unsafe extern "C" fn(*mut JsPlatform, *mut c_void, c_int) -> c_int>,
+    #[allow(clippy::type_complexity, reason = "the shape is PDFium's, not ours")]
+    doc_mail: Option<
+        unsafe extern "C" fn(
+            *mut JsPlatform,
+            *mut c_void,
+            c_int,
+            FPDF_BOOL,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+            FPDF_WIDESTRING,
+        ),
+    >,
+    #[allow(clippy::type_complexity, reason = "the shape is PDFium's, not ours")]
+    doc_print: Option<
+        unsafe extern "C" fn(
+            *mut JsPlatform,
+            FPDF_BOOL,
+            c_int,
+            c_int,
+            FPDF_BOOL,
+            FPDF_BOOL,
+            FPDF_BOOL,
+            FPDF_BOOL,
+            FPDF_BOOL,
+        ),
+    >,
+    doc_submit_form:
+        Option<unsafe extern "C" fn(*mut JsPlatform, *mut c_void, c_int, FPDF_WIDESTRING)>,
+    doc_goto_page: Option<unsafe extern "C" fn(*mut JsPlatform, c_int)>,
+    field_browse: Option<unsafe extern "C" fn(*mut JsPlatform, *mut c_void, c_int) -> c_int>,
+    /// PDFium never reads this; it is the embedder's to use, and pulpit uses it
+    /// the way the header suggests — as the way back to the form-fill info, and
+    /// therefore to the [`FormEnvironment`] it begins.
+    form_fill_info: *mut c_void,
+    /// Unused in v3, retained for layout.
+    isolate: *mut c_void,
+    /// Unused in v3, retained for layout.
+    v8_embedder_slot: c_uint,
+}
+
 /// The host side of PDFium's form-fill environment.
 ///
 /// `info` MUST stay the first field: PDFium hands each callback the address it
@@ -122,6 +227,12 @@ impl DirtyRect {
 #[repr(C)]
 pub struct FormEnvironment {
     info: FPDF_FORMFILLINFO,
+    /// The JS platform PDFium reaches the host through. Owned here so it lives
+    /// exactly as long as the environment that points at it.
+    js: JsPlatform,
+    /// What a document's JavaScript has asked the host to do, bounded by
+    /// [`limits::MAX_HOST_REQUESTS`].
+    requests: Vec<HostRequest>,
     /// What PDFium has asked to have redrawn since the last look.
     dirty: Vec<DirtyRect>,
     /// Whether a field's value changed since the last look.
@@ -139,10 +250,26 @@ pub struct FormEnvironment {
 }
 
 impl FormEnvironment {
-    /// Version 1 of the interface: the stable one. Version 2 additionally
-    /// enables the experimental XFA interfaces, which pulpit does not
-    /// implement and does not want called.
-    const INTERFACE_VERSION: c_int = 1;
+    /// Version 2 of the interface, which the pinned library requires.
+    ///
+    /// This is not a free choice. `FPDFDOC_InitFormFillEnvironment` checks the
+    /// version against how the library was built and returns null on a
+    /// mismatch: a plain build demands exactly 1, and an XFA-enabled build
+    /// demands exactly 2. The pinned artifact is bblanchon's `-v8` build, whose
+    /// `args.gn` carries `pdf_enable_v8 = true` *and* `pdf_enable_xfa = true` —
+    /// there is no V8-without-XFA build published — so 1 here means every
+    /// document silently reports no fillable form at all.
+    ///
+    /// Version 2 does not turn XFA on. It makes the XFA fields of the struct
+    /// *readable*, and the first of them is `xfa_disabled`, which is set below.
+    /// The XFA-only callbacks stay null and are never reached.
+    const INTERFACE_VERSION: c_int = 2;
+
+    /// `IPDF_JSPLATFORM`'s own version, which `fpdf_formfill.h` documents as
+    /// "currently must be 2". It is independent of [`Self::INTERFACE_VERSION`]:
+    /// `m_pJsPlatform` is a version-1 field of `FPDF_FORMFILLINFO`, so running
+    /// a form's JavaScript needs no XFA interfaces and does not enable any.
+    const JS_PLATFORM_VERSION: c_int = 2;
 
     /// Build the environment. It is boxed because PDFium keeps the address.
     pub fn new() -> Box<FormEnvironment> {
@@ -157,6 +284,10 @@ impl FormEnvironment {
         // of them, and is what PDFium's own samples start from.
         let mut environment = Box::new(FormEnvironment {
             info: unsafe { std::mem::zeroed() },
+            // Safety: `JsPlatform` is a struct of integers, pointers and
+            // nullable function pointers; all-zero is valid for every field.
+            js: unsafe { std::mem::zeroed() },
+            requests: Vec::new(),
             dirty: Vec::new(),
             changed: false,
             text_focus: false,
@@ -202,12 +333,42 @@ impl FormEnvironment {
         environment.info.FFI_OnChange = Some(on_change);
         environment.info.FFI_SetTextFieldFocus = Some(set_text_field_focus);
 
-        // Everything else stays null, and that is the security posture rather
-        // than an omission (§8.6, A8):
+        // The JavaScript platform. Installing it is what lets a form's own
+        // scripts run at all: PDFium documents `m_pJsPlatform` as "if NULL,
+        // then JavaScript will be prevented from executing", and with it null
+        // every field format, keystroke validation and calculated field in
+        // every form silently does nothing (§8.6).
         //
-        // - `m_pJsPlatform` null means a document's JavaScript has no platform
-        //   to run against — no alerts, no `app.launchURL`, no field scripts
-        //   reaching the host.
+        // Every callback is implemented, because a null one is a call through a
+        // null pointer rather than a refusal. What each of them *does* is
+        // record a [`HostRequest`] and return the answer a dismissed dialog
+        // would have produced. The document's script therefore runs to
+        // completion, and nothing it asked for happens without the application
+        // — which is the layer with a user in front of it — deciding to do it.
+        environment.js.version = Self::JS_PLATFORM_VERSION;
+        environment.js.app_alert = Some(app_alert);
+        environment.js.app_beep = Some(app_beep);
+        environment.js.app_response = Some(app_response);
+        environment.js.doc_get_file_path = Some(doc_get_file_path);
+        environment.js.doc_mail = Some(doc_mail);
+        environment.js.doc_print = Some(doc_print);
+        environment.js.doc_submit_form = Some(doc_submit_form);
+        environment.js.doc_goto_page = Some(doc_goto_page);
+        environment.js.field_browse = Some(field_browse);
+        // The way back from a JS callback to this environment. PDFium never
+        // reads it; the header names `FPDF_FORMFILLINFO` as the traditional
+        // value, and that is the address of this environment's first field and
+        // therefore of the environment.
+        environment.js.form_fill_info = (&mut environment.info as *mut FPDF_FORMFILLINFO).cast();
+        // The target type names a struct in a private module of
+        // `pdfium-render`, so it is inferred from the field being assigned —
+        // the one place that knows it.
+        environment.info.m_pJsPlatform = (&mut environment.js as *mut JsPlatform).cast();
+
+        // Everything else stays null, and that is the security posture rather
+        // than an omission (§8.6, A8). JavaScript now runs, but the paths that
+        // leave the process do not exist for it to run down:
+        //
         // - `FFI_DoURIAction`, `FFI_GotoURL`, `FFI_DoURIActionWithKeyboardModifier`
         //   null means a form cannot navigate anywhere.
         // - `FFI_EmailTo`, `FFI_UploadTo`, `FFI_PostRequestURL`,
@@ -216,8 +377,8 @@ impl FormEnvironment {
         // - `FFI_OpenFile` null means a form cannot read from the filesystem.
         // - `FFI_PopupMenu` null means a document cannot raise UI of its own.
         //
-        // A form is a thing you type values into. None of the above is needed
-        // to type a value into one.
+        // A script that wants any of those gets a recorded request and a
+        // refusal, not a socket.
         environment.info.xfa_disabled = 1;
 
         environment
@@ -270,6 +431,27 @@ impl FormEnvironment {
     /// Whether a text field currently holds the caret.
     pub fn has_text_focus(&self) -> bool {
         self.text_focus
+    }
+
+    /// Take what a document's JavaScript asked the host to do, and reset.
+    ///
+    /// Drained rather than read, for the same reason [`Self::take_dirty`] is: a
+    /// request answered twice is a dialog shown twice for one `app.alert`.
+    pub fn take_requests(&mut self) -> Vec<HostRequest> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Record one request, if there is room for it.
+    fn request(&mut self, request: HostRequest) {
+        if self.requests.len() < limits::MAX_HOST_REQUESTS {
+            self.requests.push(request);
+        } else {
+            tracing::debug!(
+                "a document's JavaScript made more than {} host requests in one event; \
+                 the rest are dropped",
+                limits::MAX_HOST_REQUESTS
+            );
+        }
     }
 }
 
@@ -383,10 +565,201 @@ unsafe extern "C" fn get_rotation(_this: *mut FPDF_FORMFILLINFO, _page: FPDF_PAG
     0
 }
 
-unsafe extern "C" fn execute_named_action(_this: *mut FPDF_FORMFILLINFO, _name: *const c_char) {
+unsafe extern "C" fn execute_named_action(this: *mut FPDF_FORMFILLINFO, name: *const c_char) {
     // `NextPage`, `Print`, `SaveAs` and friends, from a document that wants to
-    // drive the viewer. Accepted and ignored: a document does not get to turn
-    // pulpit's pages, open its printer or save its file (A8).
+    // drive the viewer. Recorded, never performed here: a document does not get
+    // to turn pulpit's pages, open its printer or save its file on its own say
+    // so, but the application may choose to honour a navigation (A8).
+    let Some(environment) = (unsafe { environment(this) }) else {
+        return;
+    };
+    if name.is_null() {
+        return;
+    }
+    // Bounded, and not assumed to be UTF-8: this is a byte string out of a
+    // hostile document.
+    let mut bytes = Vec::new();
+    for offset in 0..limits::MAX_JS_STRING_UNITS {
+        let byte = unsafe { *name.add(offset) } as u8;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    environment.request(HostRequest::NamedAction {
+        name: String::from_utf8_lossy(&bytes).into_owned(),
+    });
+}
+
+/// Read one of PDFium's null-terminated UTF-16 strings, bounded.
+///
+/// `FPDF_WIDESTRING` carries no length, so [`limits::MAX_JS_STRING_UNITS`] is
+/// both a size bound and the thing that stops a missing terminator in a hostile
+/// document from being read past the end of its allocation (A8).
+unsafe fn widestring(text: FPDF_WIDESTRING) -> String {
+    if text.is_null() {
+        return String::new();
+    }
+    let mut units = Vec::new();
+    for offset in 0..limits::MAX_JS_STRING_UNITS {
+        let unit = unsafe { *text.add(offset) };
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// Recover the host state from the pointer PDFium hands a JS callback.
+///
+/// # Safety
+///
+/// `this` must be the `JsPlatform` pulpit installed, whose `form_fill_info` is
+/// the address of the owning [`FormEnvironment`].
+unsafe fn js_environment<'a>(this: *mut JsPlatform) -> Option<&'a mut FormEnvironment> {
+    if this.is_null() {
+        return None;
+    }
+    let info = unsafe { (*this).form_fill_info };
+    unsafe { environment(info.cast()) }
+}
+
+unsafe extern "C" fn app_alert(
+    this: *mut JsPlatform,
+    message: FPDF_WIDESTRING,
+    title: FPDF_WIDESTRING,
+    _buttons: c_int,
+    _icon: c_int,
+) -> c_int {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        let message = unsafe { widestring(message) };
+        let title = unsafe { widestring(title) };
+        environment.request(HostRequest::Alert { message, title });
+    }
+    // `JSPLATFORM_ALERT_RETURN_OK`. The script continues as though the dialog
+    // it never saw was acknowledged, which is what a viewer whose user pressed
+    // OK would report.
+    0
+}
+
+unsafe extern "C" fn app_beep(this: *mut JsPlatform, _kind: c_int) {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        environment.request(HostRequest::Beep);
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "the signature is PDFium's")]
+unsafe extern "C" fn app_response(
+    this: *mut JsPlatform,
+    question: FPDF_WIDESTRING,
+    title: FPDF_WIDESTRING,
+    _default: FPDF_WIDESTRING,
+    _label: FPDF_WIDESTRING,
+    _password: FPDF_BOOL,
+    _response: *mut c_void,
+    _length: c_int,
+) -> c_int {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        let question = unsafe { widestring(question) };
+        let title = unsafe { widestring(title) };
+        environment.request(HostRequest::Response { question, title });
+    }
+    // No bytes written into the response buffer, and zero of them: an empty
+    // answer, which is what a cancelled prompt gives. The buffer is left
+    // untouched rather than zeroed, because PDFium owns it and the documented
+    // contract is that a short answer writes only what it has.
+    0
+}
+
+unsafe extern "C" fn doc_get_file_path(
+    this: *mut JsPlatform,
+    _path: *mut c_void,
+    _length: c_int,
+) -> c_int {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        environment.request(HostRequest::FilePath);
+    }
+    // Zero bytes, which is a document with no path as far as its script is
+    // concerned. Answering honestly would put the user's home directory inside
+    // a string a hostile form could then submit somewhere.
+    0
+}
+
+#[allow(clippy::too_many_arguments, reason = "the signature is PDFium's")]
+unsafe extern "C" fn doc_mail(
+    this: *mut JsPlatform,
+    _data: *mut c_void,
+    _length: c_int,
+    _ui: FPDF_BOOL,
+    to: FPDF_WIDESTRING,
+    subject: FPDF_WIDESTRING,
+    _cc: FPDF_WIDESTRING,
+    _bcc: FPDF_WIDESTRING,
+    _message: FPDF_WIDESTRING,
+) {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        let to = unsafe { widestring(to) };
+        let subject = unsafe { widestring(subject) };
+        environment.request(HostRequest::Mail { to, subject });
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "the signature is PDFium's")]
+unsafe extern "C" fn doc_print(
+    this: *mut JsPlatform,
+    _ui: FPDF_BOOL,
+    _start: c_int,
+    _end: c_int,
+    _silent: FPDF_BOOL,
+    _shrink_to_fit: FPDF_BOOL,
+    _print_as_image: FPDF_BOOL,
+    _reverse: FPDF_BOOL,
+    _annotations: FPDF_BOOL,
+) {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        environment.request(HostRequest::Print);
+    }
+}
+
+unsafe extern "C" fn doc_submit_form(
+    this: *mut JsPlatform,
+    _data: *mut c_void,
+    length: c_int,
+    url: FPDF_WIDESTRING,
+) {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        let url = unsafe { widestring(url) };
+        environment.request(HostRequest::SubmitForm {
+            url,
+            bytes: length.max(0) as usize,
+        });
+    }
+    // The data is deliberately not retained. A submission is a decision the
+    // application makes with a user present, and it can re-serialise the form
+    // itself if the answer is yes; keeping a copy of every field value in this
+    // queue would put it one logging mistake away from being written somewhere.
+}
+
+unsafe extern "C" fn doc_goto_page(this: *mut JsPlatform, page: c_int) {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        environment.request(HostRequest::GotoPage {
+            page: page.max(0) as usize,
+        });
+    }
+}
+
+unsafe extern "C" fn field_browse(
+    this: *mut JsPlatform,
+    _path: *mut c_void,
+    _length: c_int,
+) -> c_int {
+    if let Some(environment) = unsafe { js_environment(this) } {
+        environment.request(HostRequest::Browse);
+    }
+    // No path, which is a cancelled file picker. `FFI_OpenFile` is null for the
+    // same reason: a form does not get to read the filesystem.
+    0
 }
 
 unsafe extern "C" fn set_text_field_focus(
@@ -441,11 +814,11 @@ mod tests {
     #[test]
     fn the_environment_refuses_everything_a_document_could_reach_out_with() {
         // A8, as an assertion rather than a comment. Each of these being null
-        // is what stops a form from running scripts, opening URLs, reading
-        // files or talking to a network.
+        // is what stops a form from opening URLs, reading files or talking to
+        // a network — the paths that leave the process, which stay shut even
+        // though scripts now run.
         let environment = FormEnvironment::new();
         let info = &environment.info;
-        assert!(info.m_pJsPlatform.is_null(), "a document has a JS platform");
         assert!(info.FFI_DoURIAction.is_none());
         assert!(info.FFI_DoURIActionWithKeyboardModifier.is_none());
         assert!(info.FFI_GotoURL.is_none());
@@ -466,7 +839,31 @@ mod tests {
         // a missing feature.
         let environment = FormEnvironment::new();
         let info = &environment.info;
-        assert_eq!(info.version, 1);
+        // 2, not 1: the pinned `-v8` build is an XFA build, and
+        // `FPDFDOC_InitFormFillEnvironment` answers a version-1 struct with a
+        // null handle — which reads downstream as "this document has no form".
+        assert_eq!(info.version, 2);
+        // Installed, and required to be: PDFium's header says a null one
+        // prevents JavaScript from executing at all, which would silently turn
+        // off every field format and calculation in every form.
+        assert!(
+            !info.m_pJsPlatform.is_null(),
+            "a form's own scripts have no platform to run against"
+        );
+        assert_eq!(environment.js.version, FormEnvironment::JS_PLATFORM_VERSION);
+        assert!(environment.js.app_alert.is_some());
+        assert!(environment.js.app_beep.is_some());
+        assert!(environment.js.app_response.is_some());
+        assert!(environment.js.doc_get_file_path.is_some());
+        assert!(environment.js.doc_mail.is_some());
+        assert!(environment.js.doc_print.is_some());
+        assert!(environment.js.doc_submit_form.is_some());
+        assert!(environment.js.doc_goto_page.is_some());
+        assert!(environment.js.field_browse.is_some());
+        assert_eq!(
+            environment.js.form_fill_info as usize, info as *const _ as usize,
+            "a JS callback finds its environment through this and nothing else"
+        );
         assert!(info.FFI_Invalidate.is_some());
         assert!(info.FFI_SetCursor.is_some());
         assert!(info.FFI_SetTimer.is_some());

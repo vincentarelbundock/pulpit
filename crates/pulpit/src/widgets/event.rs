@@ -124,7 +124,17 @@ pub enum ReadCommand {
     /// the window is at — which is the session's to know, not the key's.
     ScrollByWindows(i32),
     /// Put a page's top at the top of the window.
+    ///
+    /// This is a *jump*, and the application records it in the navigation
+    /// history. Moving one page at a time is [`ReadCommand::HistoryBack`] and
+    /// [`ReadCommand::HistoryForward`], which fall back to stepping.
     GoToPage(pulpit_core::page::PageIndex),
+    /// The reader band's back button: return to where the last jump was made
+    /// from, or step back one page when there is nothing to unwind.
+    HistoryBack,
+    /// The reader band's forward button: the inverse of
+    /// [`ReadCommand::HistoryBack`].
+    HistoryForward,
     /// Fit the width, fit the page or set a scale.
     SetZoom(crate::widgets::document::model::Zoom),
     ZoomIn,
@@ -174,10 +184,15 @@ pub enum ReadCommand {
     // That is what makes one editing surface rather than two, and removes the
     // whole class of bugs where an inspector and a widget disagree about what
     // a field holds. The events above are what carry the typing.
-    /// What has been typed into the mark being written on the page (§8.5),
-    /// as typed. The editor is drawn on the sheet at the spot the mark will
-    /// land, so these come from the page surface and not from a dialog.
-    ComposeMark(String),
+    /// What the reader did to the mark being written on the page (§8.5): a
+    /// keystroke, a click in the text, a selection, a line break. The editor
+    /// is drawn on the sheet at the spot the mark will land, so these come
+    /// from the page surface and not from a dialog.
+    ///
+    /// An action rather than the finished string, because a mark's text runs
+    /// to more than one line: a note is a paragraph of commentary as often as
+    /// it is a phrase, and a box that swallowed Return could not write one.
+    ComposeMark(iced::widget::text_editor::Action),
     /// Typeset the text being written with Typst, or write it plain.
     ComposeAsTypst(bool),
     /// Place what was written, or abandon it. Empty text places nothing, and

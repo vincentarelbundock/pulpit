@@ -72,8 +72,66 @@ pub struct LayoutSettings {
     /// presenter layout must never change what a PDF opens into, and the
     /// reverse. One field would make each choice quietly overwrite the other.
     pub active_document: Option<String>,
+    /// The layout a specific file was last put into by hand, keyed by the
+    /// hash of its contents.
+    ///
+    /// Only a deliberate choice is recorded here. What the shape of the first
+    /// page suggested is a guess and is re-made every time the file is opened;
+    /// what the user chose while reading that file is an answer, and an answer
+    /// outranks a guess for as long as the file is the same bytes.
+    ///
+    /// By content rather than by path so that moving or renaming a file does
+    /// not lose the choice, and so that two copies of the same document agree.
+    pub per_document: VecDeque<DocumentLayout>,
     /// The one-time "review this layout at your screen ratio" notice.
     pub ratio_notice_dismissed: bool,
+}
+
+/// One file's remembered layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentLayout {
+    /// Lowercase hex BLAKE3 of the file's bytes.
+    pub hash: String,
+    /// The layout's identifier, as in [`LayoutSettings::active`].
+    pub layout: String,
+}
+
+/// How many files remember a layout. Beyond this the least recently chosen
+/// is dropped: the list is a convenience, and an unbounded one would grow
+/// with every document ever opened for no benefit anybody would notice.
+const MAX_REMEMBERED_LAYOUTS: usize = 200;
+
+impl LayoutSettings {
+    /// The layout this exact file was last put into by hand, if any.
+    pub fn layout_for_document(&self, hash: &str) -> Option<&str> {
+        self.per_document
+            .iter()
+            .find(|entry| entry.hash == hash)
+            .map(|entry| entry.layout.as_str())
+    }
+
+    /// Record a deliberate choice for this file, most recent first.
+    pub fn remember_layout_for_document(&mut self, hash: String, layout: String) {
+        self.per_document.retain(|entry| entry.hash != hash);
+        self.per_document
+            .push_front(DocumentLayout { hash, layout });
+        while self.per_document.len() > MAX_REMEMBERED_LAYOUTS {
+            self.per_document.pop_back();
+        }
+    }
+
+    /// Carry a file's choice onto the copy just written from it.
+    ///
+    /// Saving produces a second file with the same content in it and different
+    /// bytes around it, so it hashes differently and would otherwise open as
+    /// if it had never been seen. The source keeps its own entry: pulpit never
+    /// writes over the file it opened (A6), so that file still exists and is
+    /// still what its entry describes.
+    pub fn carry_layout_to_saved_copy(&mut self, from: &str, to: String) {
+        if let Some(layout) = self.layout_for_document(from).map(str::to_string) {
+            self.remember_layout_for_document(to, layout);
+        }
+    }
 }
 
 impl Default for Settings {
@@ -497,6 +555,63 @@ impl Default for DiagnosticsSettings {
 mod tests {
     use super::*;
     use crate::theme::ColorRole;
+
+    #[test]
+    fn a_files_remembered_layout_is_found_by_its_contents_and_replaced_in_place() {
+        let mut layout = LayoutSettings::default();
+        assert_eq!(layout.layout_for_document("abc"), None);
+
+        layout.remember_layout_for_document("abc".into(), "presenter-default".into());
+        assert_eq!(layout.layout_for_document("abc"), Some("presenter-default"));
+
+        // Changing one's mind replaces the answer rather than adding a second.
+        layout.remember_layout_for_document("abc".into(), "reader-default".into());
+        assert_eq!(layout.layout_for_document("abc"), Some("reader-default"));
+        assert_eq!(layout.per_document.len(), 1);
+    }
+
+    #[test]
+    fn the_remembered_layouts_are_bounded_and_drop_the_least_recent_first() {
+        let mut layout = LayoutSettings::default();
+        for i in 0..MAX_REMEMBERED_LAYOUTS + 10 {
+            layout.remember_layout_for_document(format!("hash-{i}"), "reader-default".into());
+        }
+        assert_eq!(layout.per_document.len(), MAX_REMEMBERED_LAYOUTS);
+        // The first ten are gone and the most recent is at the front.
+        assert_eq!(layout.layout_for_document("hash-0"), None);
+        assert_eq!(
+            layout.per_document.front().unwrap().hash,
+            format!("hash-{}", MAX_REMEMBERED_LAYOUTS + 9)
+        );
+    }
+
+    /// Saving writes a second file, which hashes differently. The copy should
+    /// open the way the original did — and the original, which pulpit never
+    /// overwrites, should keep its own answer.
+    #[test]
+    fn a_saved_copy_inherits_the_choice_and_the_original_keeps_it() {
+        let mut layout = LayoutSettings::default();
+        layout.remember_layout_for_document("source".into(), "presenter-default".into());
+        layout.carry_layout_to_saved_copy("source", "annotated".into());
+
+        assert_eq!(
+            layout.layout_for_document("annotated"),
+            Some("presenter-default")
+        );
+        assert_eq!(
+            layout.layout_for_document("source"),
+            Some("presenter-default")
+        );
+    }
+
+    /// A file nobody chose a layout for hands its copy nothing, so the copy is
+    /// detected on its own shape like any other file opened for the first time.
+    #[test]
+    fn a_copy_of_an_unremembered_file_stays_unremembered() {
+        let mut layout = LayoutSettings::default();
+        layout.carry_layout_to_saved_copy("source", "annotated".into());
+        assert!(layout.per_document.is_empty());
+    }
 
     #[test]
     fn recent_documents_are_deduplicated_and_bounded() {

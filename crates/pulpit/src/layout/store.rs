@@ -148,7 +148,7 @@ fn migrate(mut value: serde_json::Value, from: u32) -> Result<serde_json::Value,
     Ok(value)
 }
 
-/// The layout library: four built-ins plus the user's own.
+/// The layout library: the two built-ins plus the user's own.
 #[derive(Debug, Clone)]
 pub struct LayoutStore {
     directory: PathBuf,
@@ -380,7 +380,7 @@ impl LayoutStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::builtin::slide_next_notes;
+    use crate::layout::builtin::presenter_default;
     use crate::layout::tree::Direction;
     use crate::widgets::{Widget, WidgetKind};
 
@@ -407,9 +407,9 @@ mod tests {
     #[test]
     fn a_fresh_store_offers_the_built_ins_and_nothing_else() {
         let (_directory, store) = store();
-        assert_eq!(store.built_in().len(), 6);
+        assert_eq!(store.built_in().len(), 2);
         assert!(store.custom().is_empty());
-        assert!(store.get(&LayoutId("slide-next-notes".into())).is_some());
+        assert!(store.get(&LayoutId("presenter-default".into())).is_some());
     }
 
     #[test]
@@ -428,9 +428,9 @@ mod tests {
     #[test]
     fn built_in_layouts_cannot_be_overwritten_renamed_or_deleted() {
         let (_directory, mut store) = store();
-        let id = LayoutId("slide-next-notes".into());
+        let id = LayoutId("presenter-default".into());
         assert!(matches!(
-            store.save(&slide_next_notes()),
+            store.save(&presenter_default()),
             Err(StoreError::BuiltIn("overwritten"))
         ));
         assert!(matches!(
@@ -447,23 +447,20 @@ mod tests {
     fn duplicating_a_built_in_produces_an_editable_copy() {
         let (_directory, mut store) = store();
         let id = store
-            .duplicate(&LayoutId("slide-next-notes".into()))
+            .duplicate(&LayoutId("presenter-default".into()))
             .unwrap();
         let copy = store.get(&id).unwrap();
         assert_eq!(copy.origin, Origin::Custom);
         assert!(copy.is_editable());
-        assert_eq!(copy.name, "Slide + Next + Notes copy");
-        assert_eq!(copy.widgets().len(), slide_next_notes().widgets().len());
+        assert_eq!(copy.name, "Presenter Default copy");
+        assert_eq!(copy.widgets().len(), presenter_default().widgets().len());
 
         // Duplicating again does not collide.
         let second = store
-            .duplicate(&LayoutId("slide-next-notes".into()))
+            .duplicate(&LayoutId("presenter-default".into()))
             .unwrap();
         assert_ne!(id, second);
-        assert_eq!(
-            store.get(&second).unwrap().name,
-            "Slide + Next + Notes copy 2"
-        );
+        assert_eq!(store.get(&second).unwrap().name, "Presenter Default copy 2");
     }
 
     #[test]
@@ -509,12 +506,10 @@ mod tests {
     #[test]
     fn exporting_a_built_in_and_importing_it_yields_a_custom_layout() {
         let (_directory, mut store) = store();
-        let text = store
-            .export(&LayoutId("slide-notes-beside".into()))
-            .unwrap();
+        let text = store.export(&LayoutId("reader-default".into())).unwrap();
         let (id, _) = store.import(&text).unwrap();
         assert_eq!(store.get(&id).unwrap().origin, Origin::Custom);
-        assert_eq!(store.built_in().len(), 6, "the built-in is untouched");
+        assert_eq!(store.built_in().len(), 2, "the built-in is untouched");
     }
 
     #[test]
@@ -600,7 +595,7 @@ mod tests {
     #[test]
     fn imported_ids_are_renumbered_so_they_cannot_collide() {
         let (_directory, mut store) = store();
-        let text = store.export(&LayoutId("slide-next-notes".into())).unwrap();
+        let text = store.export(&LayoutId("presenter-default".into())).unwrap();
         let (id, _) = store.import(&text).unwrap();
         let layout = store.get(&id).unwrap();
         let ids = layout.root.ids();
@@ -620,26 +615,14 @@ mod fixtures {
     /// Several, because one layout cannot hold every widget: instance limits
     /// and compound occupancy would make it invalid. Between them they cover
     /// every kind, which the test below proves.
-    const FIXTURES: [(&str, &str); 6] = [
+    const FIXTURES: [(&str, &str); 3] = [
+        (
+            "presenter-default.json",
+            include_str!("fixtures/presenter-default.json"),
+        ),
         (
             "reader-default.json",
             include_str!("fixtures/reader-default.json"),
-        ),
-        (
-            "slide-next-notes.json",
-            include_str!("fixtures/slide-next-notes.json"),
-        ),
-        (
-            "slide-notes-beside.json",
-            include_str!("fixtures/slide-notes-beside.json"),
-        ),
-        (
-            "slide-time-below.json",
-            include_str!("fixtures/slide-time-below.json"),
-        ),
-        (
-            "slide-time-beside.json",
-            include_str!("fixtures/slide-time-beside.json"),
         ),
         (
             "every-other-widget.json",
@@ -709,20 +692,8 @@ mod fixtures {
         std::fs::create_dir_all(&directory).unwrap();
         let layouts = [
             (
-                "slide-next-notes.json",
-                crate::layout::builtin::slide_next_notes(),
-            ),
-            (
-                "slide-notes-beside.json",
-                crate::layout::builtin::slide_notes_beside(),
-            ),
-            (
-                "slide-time-below.json",
-                crate::layout::builtin::slide_time_below(),
-            ),
-            (
-                "slide-time-beside.json",
-                crate::layout::builtin::slide_time_beside(),
+                "presenter-default.json",
+                crate::layout::builtin::presenter_default(),
             ),
             ("every-other-widget.json", every_other_widget()),
             (

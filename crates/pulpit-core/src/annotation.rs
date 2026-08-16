@@ -56,7 +56,11 @@ pub enum AnnotationTool {
     /// Document mode only, and never described as a cryptographic signature
     /// (§1 of `SPEC-document.md`).
     Stamp,
-    /// Picks an existing annotation up, to move, resize, restyle or delete it.
+    /// Drags a rubber band over the page, and holds everything it encloses.
+    ///
+    /// Picking up *one* mark needs no tool: the hand does that with nothing
+    /// armed at all. This is the tool for the thing the hand cannot do —
+    /// taking several marks at once, to delete them in one press (§8.4).
     ///
     /// Document mode only: presenter marks last as long as the slide does, so
     /// there is nothing to come back to and edit.

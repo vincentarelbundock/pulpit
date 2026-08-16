@@ -93,9 +93,8 @@ empty behavior, as today.
 
 ### 2.1 Two defaults: Presenter and Reader
 
-`built_in_layouts()` currently returns five presentation layouts led by
-**Presenter Default**, the one a first run opens with. Document mode makes that
-list bimodal. There are now two roots, and neither is a variant of the other:
+`built_in_layouts()` returns exactly two layouts, one per mode, and neither is
+a variant of the other:
 
 | Layout | Id | Mode | Role |
 |---|---|---|---|
@@ -289,7 +288,9 @@ cancelled per §8.5 and is never snapshotted mid-composition.
   pages awaiting OCR;
 - pressure-sensitive ink unless the PDF mapping is first specified;
 - partial erasing of a stroke, unless whole-stroke erasing proves inadequate;
-- dynamic XFA execution and arbitrary PDF JavaScript;
+- dynamic XFA execution, and PDF JavaScript outside a form's own field scripts
+  (§4): document-level scripts, open actions, and any script effect that would
+  leave the process;
 - OCR-driven field recognition;
 - in-place save over the source file (A6, §11.3).
 
@@ -809,10 +810,32 @@ undo step.
 
 ### 8.4 Selection, move and resize
 
-Selection is application state. A completed move or resize issues one replace
-command and creates one undo entry. The existing annotation is unchanged during
+Selection is application state, and is a set: the reader may hold one mark or
+several. A completed move or resize issues one replace command and creates one
+undo entry. The existing annotation is unchanged during
 a drag; the UI MAY show a transformed preview. Cancellation restores the
 unmodified rendered annotation with no worker mutation.
+
+Picking a mark up is not a tool. With no tool armed — the hand — a press
+selects the topmost mark under the pointer and begins a move; a press on a
+corner handle of the current selection begins a resize instead; a press on
+bare page clears the selection and pans. A mark that overlaps a link or a form
+field therefore takes the press, and a press that selects a mark the document
+only preserves (§8.2) selects it without moving it. Double-clicking a mark
+opens what it says for rewriting (§8.5) rather than being a second way to
+select it, so the three verbs — move or resize, rewrite, delete — are reached
+by three gestures and no armed tool. The application MUST NOT require a mode
+to be entered before an existing mark can be edited.
+
+Several marks at once is what the selection tool is for, and its only job. It
+drags a rubber band, and on release holds every editable annotation the band
+*encloses* — not those it merely clips, which would make the selection
+unaimable, and not those the document only preserves, which can be neither
+moved nor deleted. A band that gathered nothing puts down what was held, as a
+press on bare page does. Deleting a held set is one transaction and one undo
+entry however many marks it takes (§9.1); a preserved mark inside the set is
+passed over rather than refusing the press. Resize grips are offered only when
+exactly one mark is held.
 
 Text-markup annotations are excluded from free move and resize; see §8.2.
 
@@ -822,6 +845,12 @@ Text composition uses a native text editor so IME, clipboard, selection and
 dead keys behave correctly. Committing new text creates one annotation;
 committing an edit replaces one. Escape cancels without mutation. Focus loss
 follows one documented commit-or-cancel policy.
+
+An edit is opened by double-clicking a mark that carries text — a free text
+box, a note, or a stamp typeset from markup, which reopens its source rather
+than its picture (§7.4). Double-click is honoured whatever tool is armed:
+opening what a mark says is what double-clicking text means everywhere else,
+not a mode. A mark with no text of its own is not opened by it.
 
 ### 8.6 Form filling
 
@@ -1114,9 +1143,16 @@ is not.
 - Raw annotation dictionaries and appearance streams are hostile input.
 - Typst annotation compilation is closed-world: no file, package, environment
   or network access.
-- URI, launch, JavaScript, media, submission and file-attachment actions are
-  never executed as a consequence of selecting an annotation or focusing a
-  field.
+- URI, launch, media, submission and file-attachment actions are never executed
+  as a consequence of selecting an annotation or focusing a field.
+- A form's own JavaScript — field format, keystroke, validate and calculate
+  scripts — MAY run, because those are how a form computes the values it
+  displays. It runs against a host that answers no to everything leaving the
+  process: no network, no filesystem, no navigation, no printing, no clock. A
+  script's request for any of those is reported to the application as a
+  `HostRequest` and performed only if the application, with a user present,
+  chooses to. Document-level and open-action JavaScript is not run at all, and
+  dynamic XFA remains disabled.
 - Annotation `/Contents` is text, not executable markup, unless explicitly
   recognized as namespaced Typst source and passed to the closed-world
   compiler.

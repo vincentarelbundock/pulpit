@@ -199,7 +199,7 @@ pub fn is_blocked(issues: &[Issue]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::builtin::slide_next_notes;
+    use crate::layout::builtin::presenter_default;
     use crate::layout::model::Layout;
     use crate::layout::tree::Direction;
     use crate::widgets::{Widget, WidgetKind, WidgetPatch};
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_built_in_layout_is_clean() {
-        let issues = validate(&slide_next_notes(), area());
+        let issues = validate(&presenter_default(), area());
         assert!(issues.is_empty(), "{issues:?}");
         assert!(!is_blocked(&issues));
     }

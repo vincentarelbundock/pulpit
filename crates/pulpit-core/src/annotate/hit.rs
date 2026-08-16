@@ -155,6 +155,27 @@ pub fn erasable(
     taken
 }
 
+/// The annotations a rubber band gathered up (§8.4).
+///
+/// Wholly inside the band, not merely touched by it: a band dragged across a
+/// page clips the edge of everything it passes, and a selection that took
+/// those would be a selection nobody could aim. Enclosure is the rule every
+/// drawing program uses for the same reason, and it is the one that makes the
+/// band's own outline an honest picture of what will be taken.
+///
+/// Only the editable ones. The band is how several marks are picked up at
+/// once, and picking up a mark pulpit only preserves (§10.1) offers a move and
+/// a delete it would then have to refuse.
+///
+/// In `/Annots` order, which is paint order: the marks come back in the order
+/// the page draws them rather than the order the band happened to reach them.
+pub fn enclosed(candidates: &[AnnotationHit], band: PageRect) -> Vec<&AnnotationHit> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.editable && band.contains_rect(&candidate.bounds))
+        .collect()
+}
+
 fn distance_to_segment(point: PagePoint, start: PagePoint, end: PagePoint) -> f32 {
     let (dx, dy) = (end.x - start.x, end.y - start.y);
     let length_squared = dx * dx + dy * dy;
@@ -194,6 +215,31 @@ mod tests {
         assert!(
             !diagonal.contains(PagePoint::new(190.0, 10.0), 2.0),
             "the empty corner of the box is not the stroke"
+        );
+    }
+
+    #[test]
+    fn a_band_takes_what_it_encloses_and_not_what_it_merely_clips() {
+        let mut generator = IdGenerator::new(9);
+        let inside = stroke(
+            generator.next_id(),
+            vec![PagePoint::new(20.0, 20.0), PagePoint::new(80.0, 40.0)],
+        );
+        let clipped = stroke(
+            generator.next_id(),
+            vec![PagePoint::new(50.0, 60.0), PagePoint::new(400.0, 60.0)],
+        );
+        let held = generator.next_id();
+        let mut preserved = stroke(held, vec![PagePoint::new(30.0, 30.0)]);
+        preserved.editable = false;
+
+        let candidates = [inside.clone(), clipped, preserved];
+        let taken = enclosed(&candidates, PageRect::new(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(
+            taken.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>(),
+            vec![inside.id],
+            "the stroke running out of the band is left, and so is the one \
+             pulpit only preserves"
         );
     }
 

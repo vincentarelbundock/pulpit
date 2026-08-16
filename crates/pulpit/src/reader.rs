@@ -167,14 +167,26 @@ pub struct ReaderSession {
     outline: Vec<OutlineRow>,
     level: CompatibilityLevel,
     warnings: Vec<DocumentWarning>,
+    /// Whether this document has fields that can be filled at all (§8.6).
+    ///
+    /// False for a deck of slides, which is most of what pulpit opens, and
+    /// false for a document whose form-fill environment could not be started.
+    /// Nothing forwards a press to the worker's form when this is false: a
+    /// click on a slide is not a click on a field, and a round trip per click
+    /// on a serial worker queues ahead of the page renders.
+    has_form: bool,
+    /// Whether a field currently holds the caret, as the *worker* last said.
+    ///
+    /// Never guessed here. PDFium owns the caret — it decides whether a click
+    /// landed in a field — so this is only ever set from a `FormEventResult`.
+    /// It is what routes a letter to the field instead of to the shortcut that
+    /// letter is bound to, which is the difference between typing a name and
+    /// turning the page.
+    form_typing: bool,
     /// What is being typed into the page box, while it is being typed.
     page_entry: Option<String>,
     dirty: bool,
     revision: DocumentRevision,
-    /// How many actions are behind and ahead of the present, for the two
-    /// history controls. The operations themselves live in the worker.
-    undo_depth: usize,
-    redo_depth: usize,
     /// Annotation lists asked for and not yet answered, so a page whose
     /// answer is in flight is not asked for again on every tick. Before this
     /// set existed a fast scroll posted one duplicate `ListAnnotations` per
@@ -189,6 +201,13 @@ pub struct ReaderSession {
     /// and field edits, in user action order (§8.6).
     undo_stack: Vec<pulpit_render::document::DocumentUndo>,
     redo_stack: Vec<pulpit_render::document::DocumentUndo>,
+    /// Which history the two stacks belong to. Bumped whenever an ordinary
+    /// edit makes a new future, which is what discards the redo stack. An
+    /// undo or a redo that was refused may only be put back if this is still
+    /// the epoch it was taken from; otherwise it belongs to a history the
+    /// reader has left, and pushing it back would offer an action whose
+    /// inverse no longer matches the document.
+    history_epoch: u64,
     /// What the pointer is doing to the page: the armed tool and any open
     /// gesture, and nothing that has been committed (§5.3, A2).
     interaction: AnnotationInteraction,
@@ -307,15 +326,42 @@ impl ReaderSession {
         pages: Vec<PageGeometry>,
         level: CompatibilityLevel,
         warnings: Vec<DocumentWarning>,
+        has_form: bool,
     ) {
         *self = ReaderSession {
             open: true,
             pages,
             level,
             warnings,
+            has_form,
             ..ReaderSession::new()
         };
         self.relayout();
+    }
+
+    /// Whether this document has fields worth forwarding a press to.
+    pub fn has_form(&self) -> bool {
+        self.has_form
+    }
+
+    /// Whether a field is holding the caret, so a letter is text and not a
+    /// shortcut.
+    pub fn form_is_typing(&self) -> bool {
+        self.has_form && self.form_typing
+    }
+
+    /// Take the worker's word for where the caret is.
+    pub fn set_form_typing(&mut self, typing: bool) {
+        self.form_typing = typing;
+    }
+
+    /// Whether a press on the page belongs to the document's own fields.
+    ///
+    /// Only with nothing armed. An armed tool draws on top of a form exactly
+    /// as it draws on top of anything else — a reader who picked up the pen
+    /// means to write on the page, not into a field (§8.4).
+    pub fn press_belongs_to_the_form(&self) -> bool {
+        self.has_form && self.controls.tool.is_none()
     }
 
     pub fn closed(&mut self) {
@@ -344,12 +390,11 @@ impl ReaderSession {
             AppliedKind::Edit => {
                 self.undo_stack.push(applied.undo.clone());
                 self.redo_stack.clear();
+                self.history_epoch = self.history_epoch.wrapping_add(1);
             }
             AppliedKind::Undo => self.redo_stack.push(applied.undo.clone()),
             AppliedKind::Redo => self.undo_stack.push(applied.undo.clone()),
         }
-        self.undo_depth = self.undo_stack.len();
-        self.redo_depth = self.redo_stack.len();
 
         // Every page the transaction touched is out of date — the frames the
         // application holds for it keep showing until ones rendered from a
@@ -1511,11 +1556,16 @@ impl ReaderSession {
     /// Whether the two history controls have anything to do, without paying
     /// for a whole facet.
     pub fn can_undo(&self) -> bool {
-        self.undo_depth > 0
+        !self.undo_stack.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
-        self.redo_depth > 0
+        !self.redo_stack.is_empty()
+    }
+
+    /// Which history the stacks currently belong to (see `history_epoch`).
+    pub fn history_epoch(&self) -> u64 {
+        self.history_epoch
     }
 
     /// The operation that undoes the last edit, if there is one.
@@ -1526,6 +1576,29 @@ impl ReaderSession {
     /// …and the one that redoes it.
     pub fn redo_operation(&mut self) -> Option<pulpit_render::document::DocumentUndo> {
         self.redo_stack.pop()
+    }
+
+    /// Put back an undo or a redo the worker refused.
+    ///
+    /// The operation was taken off its stack when the request was sent, so a
+    /// refusal that left it there would lose one step of history for good.
+    /// `epoch` is the one the operation was taken in: if an ordinary edit has
+    /// landed since, it made a new future and this operation belongs to the
+    /// history that edit replaced, so it is dropped rather than put back.
+    pub fn restore_operation(
+        &mut self,
+        kind: AppliedKind,
+        epoch: u64,
+        operation: pulpit_render::document::DocumentUndo,
+    ) {
+        if epoch != self.history_epoch {
+            return;
+        }
+        match kind {
+            AppliedKind::Undo => self.undo_stack.push(operation),
+            AppliedKind::Redo => self.redo_stack.push(operation),
+            AppliedKind::Edit => {}
+        }
     }
 
     /// The pages worth drawing right now, nearest first, at the size and
@@ -1925,6 +1998,11 @@ impl ReaderSession {
             | ReadCommand::Undo
             | ReadCommand::Redo
             | ReadCommand::SaveAs
+            // Back and forward are resolved against the application's
+            // navigation history and arrive here, if at all, as the
+            // `GoToPage` they turned into.
+            | ReadCommand::HistoryBack
+            | ReadCommand::HistoryForward
             // Writing a mark is the application's too: the text lives with the
             // half-written mark, and placing it is a document mutation.
             | ReadCommand::ComposeMark(_)
@@ -2035,8 +2113,12 @@ impl ReaderSession {
             warnings: &self.warnings,
             dirty: self.dirty,
             page_entry: self.page_entry.clone(),
-            can_undo: self.undo_depth > 0,
-            can_redo: self.redo_depth > 0,
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+            // Filled in by the application, for the same reason as
+            // `composing`: the history is not this session's.
+            can_go_back: false,
+            can_go_forward: false,
             selected: !self.interaction.selection().is_empty(),
             panning: self.pan.is_some(),
             // Filled in by the application, which is where the half-written
@@ -2810,6 +2892,40 @@ mod tests {
             !session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
                 .can_redo
+        );
+    }
+
+    #[test]
+    fn a_refused_undo_puts_its_operation_back() {
+        // The operation comes off the stack when the request is sent, so a
+        // worker that refuses it must not cost the reader a step of history.
+        let mut session = open(2);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let epoch = session.history_epoch();
+        let operation = session.undo_operation().expect("something to undo");
+        assert!(!session.can_undo(), "it is in flight, not on the stack");
+
+        session.restore_operation(AppliedKind::Undo, epoch, operation);
+        assert!(session.can_undo(), "a refusal leaves the history as it was");
+        assert!(!session.can_redo(), "and nothing was undone to redo");
+    }
+
+    #[test]
+    fn a_refused_redo_from_a_history_the_reader_left_is_not_put_back() {
+        // An edit landed while the redo was in flight, which makes a new
+        // future; the refused operation belongs to the one it replaced.
+        let mut session = open(2);
+        let _ = session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        session.undo_operation();
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
+
+        let epoch = session.history_epoch();
+        let operation = session.redo_operation().expect("something to redo");
+        let _ = session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
+        session.restore_operation(AppliedKind::Redo, epoch, operation);
+        assert!(
+            !session.can_redo(),
+            "the taken-back future stays unreachable"
         );
     }
 
