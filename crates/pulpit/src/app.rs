@@ -214,6 +214,13 @@ pub enum Message {
     FollowFormNavigation,
     /// Decline it, and stay where the reader is.
     DeclineFormNavigation,
+    /// Write the copy anyway, with the empty required fields seen and
+    /// accepted. Sent only by the review's confirming button.
+    SaveWithoutFilling,
+    /// Decline the save and go to the first required field still empty.
+    ReviewRequiredFields,
+    /// Decline the save and change nothing else.
+    CancelSaveReview,
     /// Put the interrupted session back. Sent only by the restore dialog's
     /// confirming button: nothing else in the application may reach it.
     RestoreSession,
@@ -592,6 +599,63 @@ pub struct FormNavigation {
     pub what: String,
 }
 
+/// The required-and-empty fields a save found, and what the offer says about
+/// them (§6.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveReview {
+    /// Their names as the file gives them, in file order. Never empty: with
+    /// nothing to review there is no offer, only the save.
+    pub fields: Vec<String>,
+}
+
+impl SaveReview {
+    /// How many fields, in the words the offer shows.
+    pub fn headline(&self) -> String {
+        match self.fields.len() {
+            1 => "One field this form marks required is still empty.".to_string(),
+            many => format!("{many} fields this form marks required are still empty."),
+        }
+    }
+
+    /// The names, at most [`Self::SHOWN`] of them.
+    ///
+    /// A list long enough to scroll is not a thing anyone reads under a
+    /// dialog, and the rest are all in the Fields rail anyway — so the offer
+    /// says how many it is not naming rather than naming them all.
+    pub fn listing(&self) -> String {
+        let named: Vec<&str> = self
+            .fields
+            .iter()
+            .take(Self::SHOWN)
+            .map(|name| {
+                if name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    name.as_str()
+                }
+            })
+            .collect();
+        let rest = self.fields.len().saturating_sub(named.len());
+        if rest == 0 {
+            named.join(", ")
+        } else {
+            format!("{}, and {rest} more", named.join(", "))
+        }
+    }
+
+    /// The first one worth jumping to: a field with no name cannot be
+    /// focused, so the jump skips it rather than landing nowhere.
+    pub fn first_named(&self) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|name| !name.is_empty())
+            .map(String::as_str)
+    }
+
+    /// How many names the offer prints before counting the rest.
+    const SHOWN: usize = 6;
+}
+
 pub struct App {
     pub state: PresentationState,
     /// Where the presenter has been, for the two navigation buttons. Only
@@ -703,6 +767,18 @@ pub struct App {
     /// A field's selection, copied and waiting for a tick to write it out.
     /// The worker pump that receives it has no `Task` to hand back.
     pub form_clipboard_text: Option<String>,
+    /// The required-and-empty fields found when a save was asked for, while
+    /// the reader decides what to do about them.
+    ///
+    /// A decision taken *before* the copy is written rather than a report
+    /// after it: the reader can still fill the field, and cannot once the file
+    /// exists. Still never enforcement — "Save anyway" is one of the two
+    /// answers, and pulpit only writes copies.
+    pub pending_save_review: Option<SaveReview>,
+    /// Whether the save now in flight was already reviewed, so the notice the
+    /// worker's answer carries is not read back to a reader who just
+    /// acknowledged it.
+    save_reviewed: bool,
     /// Which role's colour wheel is open, if any. One at a time: two wheels
     /// over one another would be a puzzle about which one is being dragged.
     pub color_picker_open: Option<crate::theme::ColorRole>,
@@ -1230,6 +1306,8 @@ impl App {
             pending_form_goto: None,
             form_clipboard: None,
             form_clipboard_text: None,
+            pending_save_review: None,
+            save_reviewed: false,
             color_picker_open: None,
             session,
             pending_restore,
@@ -1959,6 +2037,12 @@ impl App {
                 // reader exactly where they already are.
                 if key.as_deref() == Some("Escape") && self.pending_form_goto.is_some() {
                     self.pending_form_goto = None;
+                    return Task::none();
+                }
+                // And Escape declines the save under review, for the same
+                // reason: writing no file leaves everything as it was.
+                if key.as_deref() == Some("Escape") && self.pending_save_review.is_some() {
+                    self.pending_save_review = None;
                     return Task::none();
                 }
                 // A cue going off is acknowledged by Escape as well as by the
@@ -2705,6 +2789,48 @@ impl App {
             }
             Message::DeclineFormNavigation => {
                 self.pending_form_goto = None;
+                Task::none()
+            }
+            Message::SaveWithoutFilling => {
+                if self.pending_save_review.take().is_none() {
+                    return Task::none();
+                }
+                // Seen and accepted, so the copy's own answer says it again to
+                // nobody: the notice after the save exists for the saves that
+                // never came through here.
+                self.save_reviewed = true;
+                self.pick_where_to_save_document()
+            }
+            Message::ReviewRequiredFields => {
+                let Some(review) = self.pending_save_review.take() else {
+                    return Task::none();
+                };
+                let Some(name) = review.first_named() else {
+                    return Task::none();
+                };
+                let Some(page) = self.reader.field_page(name) else {
+                    return Task::none();
+                };
+                let name = name.to_string();
+                // The rail first: the reader asked to review, and the list of
+                // what is left is the review. Switching it is one command the
+                // navigator already takes.
+                let mut tasks =
+                    vec![
+                        self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineView(
+                            crate::widgets::document::model::OutlineView::Fields,
+                        )),
+                    ];
+                tasks.push(
+                    self.on_read_command(crate::widgets::event::ReadCommand::GoToField {
+                        page,
+                        name,
+                    }),
+                );
+                Task::batch(tasks)
+            }
+            Message::CancelSaveReview => {
+                self.pending_save_review = None;
                 Task::none()
             }
             Message::ResetColors => {
@@ -4739,7 +4865,15 @@ impl App {
                     // Said once, at the moment the copy exists, and never
                     // enforced: the document names these fields required for
                     // *its* submit button, and pulpit only writes copies.
-                    if !unfilled_required.is_empty() {
+                    //
+                    // Not said at all when the reader already answered for
+                    // these fields before the save (§6.4). Repeating an
+                    // acknowledged warning teaches the reader to ignore it,
+                    // and this one is kept for the saves the review could not
+                    // cover — a field list the application has not been given
+                    // yet, where the worker's own count is all there is.
+                    let reviewed = std::mem::take(&mut self.save_reviewed);
+                    if !unfilled_required.is_empty() && !reviewed {
                         self.notify(format!(
                             "The form marks {} required and still empty: {}",
                             if unfilled_required.len() == 1 {
@@ -6919,7 +7053,28 @@ impl App {
     /// the source with `-annotated` on it, which the chooser will refuse to
     /// let the user reduce back to the source's own name only by accident; the
     /// engine refuses it outright either way.
+    /// Ask for a place to write the copy — after the reader has answered for
+    /// any required field still empty (§6.4).
+    ///
+    /// The check happens here, before the file picker, because that is the
+    /// last moment at which the answer can still change anything: once the
+    /// copy exists, saying which fields are empty is a report about a file
+    /// that is already written. It is still a question and not a rule —
+    /// "Save anyway" is one of its answers — because the document names these
+    /// fields required for *its* submit button, and pulpit only writes copies.
     fn ask_where_to_save_document(&mut self) -> Task<Message> {
+        let fields = self.reader.unfilled_required_fields();
+        if fields.is_empty() {
+            self.save_reviewed = false;
+            return self.pick_where_to_save_document();
+        }
+        self.pending_save_review = Some(SaveReview { fields });
+        Task::none()
+    }
+
+    /// The file picker itself, reached either straight away or through the
+    /// review above.
+    fn pick_where_to_save_document(&mut self) -> Task<Message> {
         let Some(document) = self.documents.active() else {
             return Task::none();
         };
@@ -10330,6 +10485,48 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
         Physical::Unidentified(NativeCode::Windows(code)) => Some(*code as u32),
         Physical::Unidentified(NativeCode::MacOS(code)) => Some(*code as u32),
         Physical::Unidentified(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod save_review_tests {
+    use super::SaveReview;
+
+    fn review(names: &[&str]) -> SaveReview {
+        SaveReview {
+            fields: names.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn one_field_is_said_in_the_singular() {
+        assert_eq!(
+            review(&["name"]).headline(),
+            "One field this form marks required is still empty."
+        );
+        assert_eq!(
+            review(&["name", "date"]).headline(),
+            "2 fields this form marks required are still empty."
+        );
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_counted() {
+        let many = review(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        assert_eq!(many.listing(), "a, b, c, d, e, f, and 2 more");
+        assert_eq!(review(&["a", "b"]).listing(), "a, b");
+    }
+
+    #[test]
+    fn a_field_with_no_name_is_shown_but_not_jumped_to() {
+        let anonymous = review(&["", "date"]);
+        assert_eq!(anonymous.listing(), "(unnamed), date");
+        assert_eq!(
+            anonymous.first_named(),
+            Some("date"),
+            "the jump goes to the first field that can be focused"
+        );
+        assert_eq!(review(&[""]).first_named(), None);
     }
 }
 
