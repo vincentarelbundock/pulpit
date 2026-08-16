@@ -206,6 +206,59 @@ impl AnnotationSummary {
         self.support.is_editable()
     }
 
+    /// The modelled content, when pulpit understands this annotation well
+    /// enough to describe it.
+    ///
+    /// `None` for a kind that is preserved rather than modelled (§10.2) —
+    /// which is also a kind the editor never offers to change, so nothing can
+    /// build a replacement out of one by accident.
+    pub fn to_draft(&self) -> Option<AnnotationDraft> {
+        use pulpit_core::annotate::{
+            FreeTextDraft, HighlightDraft, InkDraft, InkPoint, NoteDraft, StampDraft, StampMark,
+            TextSource,
+        };
+
+        let style = self.style;
+        match self.kind {
+            AnnotationKind::Ink => Some(AnnotationDraft::Ink(InkDraft {
+                page: self.page,
+                points: self.path.iter().map(|at| InkPoint { at: *at }).collect(),
+                style,
+            })),
+            AnnotationKind::Highlight => Some(AnnotationDraft::Highlight(HighlightDraft {
+                page: self.page,
+                quads: self.quads.clone(),
+                text: self.contents.text.clone(),
+                style,
+            })),
+            AnnotationKind::FreeText => Some(AnnotationDraft::FreeText(FreeTextDraft {
+                page: self.page,
+                rect: self.bounds,
+                text: self.contents.text.clone(),
+                source: if self.contents.pulpit_source.is_some() {
+                    TextSource::Typst
+                } else {
+                    TextSource::Plain
+                },
+                style,
+            })),
+            AnnotationKind::Note => Some(AnnotationDraft::Note(NoteDraft {
+                page: self.page,
+                at: PagePoint::new(self.bounds.left, self.bounds.top),
+                text: self.contents.text.clone(),
+                open: false,
+                style,
+            })),
+            AnnotationKind::Stamp => Some(AnnotationDraft::Stamp(StampDraft {
+                page: self.page,
+                rect: self.bounds,
+                mark: StampMark::Check,
+                style,
+            })),
+            AnnotationKind::Other => None,
+        }
+    }
+
     /// The shape [`pulpit_core::annotate::hit`] tests against.
     pub fn to_hit(&self) -> pulpit_core::annotate::AnnotationHit {
         pulpit_core::annotate::AnnotationHit {

@@ -113,6 +113,11 @@ pub struct ReaderSession {
     /// marks (A1): it holds geometry and identity and nothing else, and it is
     /// dropped for a page the moment that page is edited.
     annotations: HashMap<PageIndex, Vec<pulpit_core::annotate::AnnotationHit>>,
+    /// The same answer in full, for the one thing a hit-test cannot do: build
+    /// the replacement a move commits. Dropped with the hit list.
+    summaries: HashMap<PageIndex, Vec<pulpit_render::document::AnnotationSummary>>,
+    /// Where a transform started, so movement can be measured from it.
+    transform_origin: Option<PagePoint>,
     /// Does the document carry an AcroForm at all?
     ///
     /// Separate from whether any fields were listed, because the two differ
@@ -231,6 +236,7 @@ impl ReaderSession {
             // against. Keeping a stale list would let a second sweep try to
             // erase a mark that is already gone.
             self.annotations.remove(page);
+            self.summaries.remove(page);
         }
     }
 
@@ -245,6 +251,15 @@ impl ReaderSession {
             page,
             summaries.iter().map(|summary| summary.to_hit()).collect(),
         );
+        self.summaries.insert(page, summaries.to_vec());
+    }
+
+    /// The annotation the reader has picked up, if any (§8.4).
+    ///
+    /// Selection is application state: nothing about it is in the document,
+    /// and it survives no restart.
+    pub fn selected(&self) -> Option<&pulpit_core::annotate::AnnotationId> {
+        self.interaction.selected()
     }
 
     /// The pages whose annotations are not known and are worth asking for:
@@ -270,6 +285,21 @@ impl ReaderSession {
             .map(|(_, at)| at);
         self.cursor = Some((page, at));
         self.interaction.extend(at);
+
+        // A held mark follows the pointer. The document is untouched until
+        // the release: what moves until then is a preview (§8.4).
+        if let (Some(origin), Some(pulpit_core::annotate::Gesture::Transforming { original, .. })) =
+            (self.transform_origin, self.interaction.gesture().cloned())
+        {
+            let (dx, dy) = (at.x - origin.x, at.y - origin.y);
+            self.interaction
+                .set_transform(pulpit_core::page::PageRect::new(
+                    original.left + dx,
+                    original.top + dy,
+                    original.right + dx,
+                    original.bottom + dy,
+                ));
+        }
 
         // An eraser sweep takes what it passes over, and what it passed over
         // is the segment between two samples rather than the samples
@@ -400,7 +430,40 @@ impl ReaderSession {
         let Some((page, at)) = self.cursor else {
             return false;
         };
+        // The selection tool has no gesture of its own: it picks a mark up
+        // and then drags it, which is a transform rather than a stroke (§8.4).
+        if self.controls.tool == Some(AnnotationTool::Select) {
+            return self.pick_up(page, at);
+        }
         self.interaction.begin(page, at)
+    }
+
+    /// Pick up the topmost mark under `at`, and start moving it.
+    ///
+    /// A press on bare page puts down whatever was held: clicking away from a
+    /// selection is how a selection is dismissed everywhere else.
+    fn pick_up(&mut self, page: PageIndex, at: PagePoint) -> bool {
+        let tolerance = self.eraser_tolerance();
+        let Some(candidates) = self.annotations.get(&page) else {
+            self.interaction.select(None);
+            return false;
+        };
+        let Some(hit) = pulpit_core::annotate::hit::topmost(candidates, at, tolerance) else {
+            self.interaction.select(None);
+            return false;
+        };
+        if !hit.editable || !hit.kind.is_freely_movable() {
+            // Still selected, so the reader can see what they hit and why it
+            // will not move — text markup describes real text runs and cannot
+            // be dragged off them (§8.4).
+            self.interaction.select(Some(hit.id.clone()));
+            return false;
+        }
+        let (id, bounds) = (hit.id.clone(), hit.bounds);
+        self.interaction.select(Some(id.clone()));
+        self.interaction.begin_transform(id, page, bounds);
+        self.transform_origin = Some(at);
+        true
     }
 
     /// What the open gesture wants the engine to resolve, if anything.
@@ -466,6 +529,44 @@ impl ReaderSession {
 
     /// Close the open gesture and turn it into a transaction, if it made one.
     fn finish_gesture(&mut self) -> Option<DocumentTransaction> {
+        // A move is a *replacement*, not a delete and a create: the mark keeps
+        // its identity, which is what lets undo put back the same annotation
+        // rather than a copy of it (A3, §8.4).
+        if let Some(pulpit_core::annotate::Gesture::Transforming {
+            id,
+            page,
+            original,
+            current,
+        }) = self.interaction.gesture().cloned()
+        {
+            self.interaction.cancel();
+            self.transform_origin = None;
+            if original == current {
+                return None;
+            }
+            let geometry = self.pages.get(page.get()).copied()?;
+            let summary = self
+                .summaries
+                .get(&page)?
+                .iter()
+                .find(|summary| summary.id == id)?;
+            let moved = summary
+                .to_draft()?
+                .translated(current.left - original.left, current.top - original.top)?;
+            // Refused here rather than by the worker: a mark dragged off the
+            // sheet is a drag the reader can take back by letting go, and
+            // committing it would be a mark they cannot see.
+            if moved.validate(&geometry).is_err() {
+                return None;
+            }
+            return Some(DocumentTransaction::from_annotations([
+                pulpit_core::annotate::AnnotationCommand::Replace {
+                    id,
+                    replacement: moved,
+                },
+            ]));
+        }
+
         let page = self.interaction.gesture()?.page();
         let geometry = self.pages.get(page.get()).copied()?;
         let outcome = self.interaction.finish(&geometry);
@@ -481,6 +582,7 @@ impl ReaderSession {
     pub fn pointer_cancelled(&mut self) {
         self.interaction.cancel();
         self.cursor = None;
+        self.transform_origin = None;
     }
 
     /// Is a gesture open? The page surface draws its own preview while one is.
@@ -1461,6 +1563,91 @@ mod tests {
         session.pointer_moved(PageIndex(0), 99_000.0, 40.0);
         let (page, at, tool) = session.placement().unwrap();
         assert!(session.place_text(page, at, tool, "hello".into()).is_none());
+    }
+
+    #[test]
+    fn a_selected_mark_moves_as_one_replacement_that_keeps_its_identity() {
+        // §8.4 and A3: a move is a replacement, not a delete and a create, so
+        // undo puts back the same annotation rather than a copy of it.
+        let mut session = open(2);
+        let mark = stroke_at(200.0);
+        let id = mark.id.clone();
+        session.set_annotations(PageIndex(0), &[mark]);
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        assert!(session.pointer_pressed(), "the mark was picked up");
+        assert_eq!(session.selected(), Some(&id));
+
+        session.pointer_moved(PageIndex(0), 260.0, 240.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("a move commits")
+        };
+        assert_eq!(transaction.len(), 1);
+        assert_eq!(transaction.label(), "Edit Ink");
+    }
+
+    #[test]
+    fn a_drag_that_returned_to_where_it_started_is_not_an_edit() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 300.0, 260.0);
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+    }
+
+    #[test]
+    fn pressing_bare_page_puts_down_whatever_was_held() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        session.pointer_pressed();
+        assert!(session.selected().is_some());
+
+        session.pointer_released();
+        session.pointer_moved(PageIndex(0), 200.0, 600.0);
+        assert!(!session.pointer_pressed(), "there is nothing there");
+        assert!(session.selected().is_none());
+    }
+
+    #[test]
+    fn text_markup_can_be_selected_but_not_dragged_off_its_text() {
+        // §8.4: /QuadPoints describe real text runs, and a highlight dragged
+        // elsewhere would describe text no longer under it.
+        let mut session = open(2);
+        let mut highlight = stroke_at(200.0);
+        highlight.kind = pulpit_core::annotate::AnnotationKind::Highlight;
+        highlight.path = Vec::new();
+        highlight.quads = vec![pulpit_core::page::PageQuad::from_rect(
+            pulpit_core::page::PageRect::new(50.0, 192.0, 400.0, 208.0),
+        )];
+        let id = highlight.id.clone();
+        session.set_annotations(PageIndex(0), &[highlight]);
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        assert!(!session.pointer_pressed(), "it must not start a move");
+        assert_eq!(
+            session.selected(),
+            Some(&id),
+            "it is still selected, so the reader can see what they hit"
+        );
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+    }
+
+    #[test]
+    fn a_mark_dragged_off_the_sheet_is_not_committed() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 200.0, 200.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 99_000.0, 200.0);
+        assert!(matches!(session.pointer_released(), Released::Nothing));
     }
 
     #[test]

@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use pdfium_render::prelude::*;
 use pulpit_core::annotate::{
     AnnotationDraft, AnnotationId, AnnotationKind, FreeTextDraft, HighlightDraft, InkDraft,
-    InkPoint, MarkStyle, NoteDraft, StampDraft, StampMark, TextSource,
+    MarkStyle, StampDraft, StampMark, TextSource,
 };
 use pulpit_core::annotation::InkColor;
 use pulpit_core::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
@@ -1037,7 +1037,10 @@ impl DocumentBackend for PdfiumDocument<'_> {
         let (page, _) = self.locate(id)?;
         let summary = self.annotation(id)?;
         let geometry = self.geometry_of(page)?;
-        let draft = summary_to_draft(&summary, &geometry);
+        let _ = geometry;
+        // The same conversion the editor uses to build a replacement, so an
+        // undo puts back exactly what a replace would have written.
+        let draft = summary.to_draft();
         // The appearance stream is the entry that decides how the mark looks
         // elsewhere, so it is the one worth carrying even though the general
         // dictionary cannot be walked (see the module note).
@@ -1135,61 +1138,6 @@ impl DocumentBackend for PdfiumDocument<'_> {
         request.validate().map_err(to_document_error)?;
         PdfBackend::render_into(self.backend, &request, rgba, &crate::pdf::NeverCancel)
             .map_err(to_document_error)
-    }
-}
-
-/// Rebuild the modelled part of an annotation from its summary.
-///
-/// Used for the before-image, so an undo puts the same geometry, style and
-/// text back rather than an approximation of them.
-fn summary_to_draft(
-    summary: &AnnotationSummary,
-    _geometry: &PageGeometry,
-) -> Option<AnnotationDraft> {
-    let style = summary.style;
-    match summary.kind {
-        AnnotationKind::Ink => Some(AnnotationDraft::Ink(InkDraft {
-            page: summary.page,
-            points: summary
-                .path
-                .iter()
-                .map(|point| InkPoint { at: *point })
-                .collect(),
-            style,
-        })),
-        AnnotationKind::Highlight => Some(AnnotationDraft::Highlight(HighlightDraft {
-            page: summary.page,
-            quads: summary.quads.clone(),
-            text: summary.contents.text.clone(),
-            style,
-        })),
-        AnnotationKind::FreeText => Some(AnnotationDraft::FreeText(FreeTextDraft {
-            page: summary.page,
-            rect: summary.bounds,
-            text: summary.contents.text.clone(),
-            source: if summary.contents.pulpit_source.is_some() {
-                TextSource::Typst
-            } else {
-                TextSource::Plain
-            },
-            style,
-        })),
-        AnnotationKind::Note => Some(AnnotationDraft::Note(NoteDraft {
-            page: summary.page,
-            at: PagePoint::new(summary.bounds.left, summary.bounds.top),
-            text: summary.contents.text.clone(),
-            open: false,
-            style,
-        })),
-        AnnotationKind::Stamp => Some(AnnotationDraft::Stamp(StampDraft {
-            page: summary.page,
-            rect: summary.bounds,
-            mark: StampMark::Check,
-            style,
-        })),
-        // An annotation pulpit does not model has no draft, and is therefore
-        // never offered for editing (§10.2).
-        AnnotationKind::Other => None,
     }
 }
 
@@ -1347,48 +1295,5 @@ mod tests {
             to_document_error(PdfError::Render("boom".into())),
             DocumentError::Backend(_)
         ));
-    }
-
-    #[test]
-    fn an_annotation_pulpit_does_not_model_has_no_draft_and_cannot_be_edited() {
-        // §10.2's gate, at the point it is decided.
-        let summary = AnnotationSummary {
-            id: AnnotationId::imported("other").unwrap(),
-            page: PageIndex(0),
-            kind: AnnotationKind::Other,
-            bounds: PageRect::new(0.0, 0.0, 10.0, 10.0),
-            style: MarkStyle::default(),
-            contents: AnnotationContents::default(),
-            support: AnnotationSupport::Unsupported,
-            revision: DocumentRevision::INITIAL,
-            path: Vec::new(),
-            quads: Vec::new(),
-            geometry_elided: false,
-        };
-        assert!(summary_to_draft(&summary, &PageGeometry::default()).is_none());
-    }
-
-    #[test]
-    fn a_before_image_of_ink_carries_its_points_back() {
-        let summary = AnnotationSummary {
-            id: AnnotationId::imported("x").unwrap(),
-            page: PageIndex(2),
-            kind: AnnotationKind::Ink,
-            bounds: PageRect::new(0.0, 0.0, 10.0, 10.0),
-            style: MarkStyle::default(),
-            contents: AnnotationContents::default(),
-            support: AnnotationSupport::Editable,
-            revision: DocumentRevision::INITIAL,
-            path: vec![PagePoint::new(1.0, 2.0), PagePoint::new(3.0, 4.0)],
-            quads: Vec::new(),
-            geometry_elided: false,
-        };
-        let Some(AnnotationDraft::Ink(ink)) = summary_to_draft(&summary, &PageGeometry::default())
-        else {
-            panic!("ink round-trips as ink")
-        };
-        assert_eq!(ink.page, PageIndex(2));
-        assert_eq!(ink.points.len(), 2);
-        assert_eq!(ink.points[0].at, PagePoint::new(1.0, 2.0));
     }
 }

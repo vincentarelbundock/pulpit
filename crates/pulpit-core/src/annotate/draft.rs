@@ -358,6 +358,47 @@ impl AnnotationDraft {
         }
     }
 
+    /// The same mark, moved by `dx` and `dy` page points.
+    ///
+    /// `None` for a kind that cannot be moved freely: `/Highlight`'s
+    /// `/QuadPoints` describe real text runs, and dragging them elsewhere
+    /// would leave them describing text that is no longer under them (§8.4).
+    pub fn translated(&self, dx: f32, dy: f32) -> Option<AnnotationDraft> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return None;
+        }
+        let shift = |rect: PageRect| {
+            PageRect::new(
+                rect.left + dx,
+                rect.top + dy,
+                rect.right + dx,
+                rect.bottom + dy,
+            )
+        };
+        match self {
+            AnnotationDraft::Ink(ink) => {
+                let mut moved = ink.clone();
+                for point in &mut moved.points {
+                    point.at = PagePoint::new(point.at.x + dx, point.at.y + dy);
+                }
+                Some(AnnotationDraft::Ink(moved))
+            }
+            AnnotationDraft::FreeText(free) => Some(AnnotationDraft::FreeText(FreeTextDraft {
+                rect: shift(free.rect),
+                ..free.clone()
+            })),
+            AnnotationDraft::Note(note) => Some(AnnotationDraft::Note(NoteDraft {
+                at: PagePoint::new(note.at.x + dx, note.at.y + dy),
+                ..note.clone()
+            })),
+            AnnotationDraft::Stamp(stamp) => Some(AnnotationDraft::Stamp(StampDraft {
+                rect: shift(stamp.rect),
+                ..stamp.clone()
+            })),
+            AnnotationDraft::Highlight(_) => None,
+        }
+    }
+
     /// Is this something that can be written to `page`?
     pub fn validate(&self, page: &PageGeometry) -> Result<(), DraftError> {
         match self {
