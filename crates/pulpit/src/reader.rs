@@ -188,12 +188,36 @@ pub struct ChoiceList {
     /// field rather than in the middle of the page.
     pub bounds: pulpit_core::page::PageRect,
     pub options: Vec<String>,
-    /// What the field holds now, as the worker last reported it.
+    /// What the field holds now, as the worker last reported it. The first of
+    /// [`Self::selections`] when several are chosen.
     pub selected: Option<u32>,
+    /// Every option the field holds now, by index. One at most for a combo
+    /// box; any number for a multi-select list box, whose rows are each ticked
+    /// or not from this.
+    pub selections: Vec<u32>,
+    /// Whether the field takes several options at once (`/Ff` bit 22).
+    ///
+    /// It changes what a click means, which is why the list has to know: on a
+    /// single-select field a click chooses and the list closes, and on a
+    /// multi-select one a click toggles a row and the list stays open, because
+    /// a list that shut after every tick could not be used to choose three
+    /// things.
+    pub multiple: bool,
     /// The row the arrow keys are on. Not a selection: nothing is committed
     /// until Enter or a click, so an arrow key cannot change the document by
     /// passing over an option.
     pub highlighted: u32,
+}
+
+impl ChoiceList {
+    /// Whether the row at `index` is chosen in the document as it stands.
+    pub fn is_selected(&self, index: u32) -> bool {
+        if self.multiple {
+            self.selections.contains(&index)
+        } else {
+            self.selected == Some(index)
+        }
+    }
 }
 
 /// What the reader is looking at.
@@ -641,6 +665,8 @@ impl ReaderSession {
                 open.bounds = choice.bounds;
                 open.options = choice.labels.clone();
                 open.selected = choice.selected;
+                open.selections = choice.selections.clone();
+                open.multiple = choice.multiple_selection;
                 open.highlighted = open
                     .highlighted
                     .min(open.options.len().saturating_sub(1) as u32);
@@ -676,6 +702,8 @@ impl ReaderSession {
             bounds: choice.bounds,
             options: choice.labels.clone(),
             selected: choice.selected,
+            selections: choice.selections.clone(),
+            multiple: choice.multiple_selection,
             // Opens on what the field holds, so Enter on a list nobody moved
             // chooses what was already chosen rather than the first row.
             highlighted: choice.selected.unwrap_or(0),
@@ -710,11 +738,50 @@ impl ReaderSession {
         changed
     }
 
+    /// Whether the open list belongs to a field that takes several options.
+    pub fn choice_list_is_multiple(&self) -> bool {
+        self.choice_list.as_ref().is_some_and(|open| open.multiple)
+    }
+
     /// The row an open list would commit, and close it. `None` when no list is
     /// open or it has no rows.
     pub fn take_highlighted_option(&mut self) -> Option<u32> {
         let open = self.choice_list.take()?;
         (open.highlighted < open.options.len() as u32).then_some(open.highlighted)
+    }
+
+    /// What toggling one row of a multi-select list box asks the engine for:
+    /// the index, and whether it should end up chosen.
+    ///
+    /// The list is deliberately *not* closed and the local selection is
+    /// deliberately *not* changed here. The worker's answer re-reports the
+    /// field, and [`ReaderSession::set_focused_choice`] takes the new
+    /// selection from it, so what the rows show is always what PDFium holds
+    /// rather than what this layer hoped it would hold — the same rule the
+    /// single-select path follows (§8.6).
+    ///
+    /// `None` when there is no open list, when the row is not one of its rows,
+    /// or when the field is single-select — where a row is chosen, not
+    /// toggled, and the caller wants [`ReaderSession::pick_option`] instead.
+    pub fn toggle_option(&mut self, index: u32) -> Option<(u32, bool)> {
+        let open = self.choice_list.as_ref()?;
+        if !open.multiple || index >= open.options.len() as u32 {
+            return None;
+        }
+        let wanted = !open.selections.contains(&index);
+        // The highlight follows the row that was pressed, so a click and then
+        // Space carries on from where the pointer left off rather than jumping
+        // back to wherever the arrow keys had been.
+        if let Some(open) = self.choice_list.as_mut() {
+            open.highlighted = index;
+        }
+        Some((index, wanted))
+    }
+
+    /// The same, for the row the highlight is on — what Space does.
+    pub fn toggle_highlighted_option(&mut self) -> Option<(u32, bool)> {
+        let index = self.choice_list.as_ref()?.highlighted;
+        self.toggle_option(index)
     }
 
     /// Which option an arrow key should move a focused combo box to.
@@ -2627,7 +2694,9 @@ impl ReaderSession {
             // The pick itself is a document edit and belongs to the layer that
             // can post one; nothing about the viewport changes here. So is
             // choosing an option, which crosses to PDFium as a `SelectOption`.
-            ReadCommand::PickDate(_) | ReadCommand::PickOption(_) => false,
+            ReadCommand::PickDate(_)
+            | ReadCommand::PickOption(_)
+            | ReadCommand::ToggleOption(_) => false,
             ReadCommand::CloseChoiceList => {
                 self.close_choice_list();
                 false
@@ -4293,6 +4362,7 @@ mod tests {
         pulpit_render::document::protocol::FocusedChoice {
             field: "country".into(),
             selected,
+            selections: selected.into_iter().collect(),
             options,
             labels: (0..options)
                 .map(|index| format!("option {index}"))
@@ -4423,6 +4493,105 @@ mod tests {
 
         session.set_focused_choice(None);
         assert!(session.choice_list().is_none());
+    }
+
+    /// A multi-select list box, from the state machine's side (§8.6).
+    ///
+    /// The three things that differ from a single-select list: a tick does not
+    /// close it, the tick asked for is the *opposite* of what the row holds,
+    /// and nothing is written here — the rows follow the engine's answer.
+    #[test]
+    fn ticking_a_row_of_a_multi_select_list_leaves_it_open() {
+        let mut session = open_with_form(1);
+        let mut many = choice(Some(0), 3);
+        many.multiple_selection = true;
+        many.list_box = true;
+        many.selections = vec![0];
+        session.set_focused_choice(Some(many.clone()));
+        session.open_choice_list();
+
+        let open = session.choice_list().expect("the list is open");
+        assert!(open.multiple);
+        assert!(open.is_selected(0));
+        assert!(!open.is_selected(2));
+
+        // Ticking an unticked row asks for it to be turned on…
+        assert_eq!(session.toggle_option(2), Some((2, true)));
+        assert!(
+            session.choice_list().is_some(),
+            "a list that shut after one tick could not choose three things"
+        );
+        assert_eq!(
+            session.choice_list().map(|open| open.selections.clone()),
+            Some(vec![0]),
+            "and nothing is ticked here: the engine's answer does that"
+        );
+        assert_eq!(
+            session.choice_list().map(|open| open.highlighted),
+            Some(2),
+            "the highlight follows the row that was pressed"
+        );
+
+        // …and the engine's answer is what actually ticks it.
+        let mut both = many.clone();
+        both.selections = vec![0, 2];
+        session.set_focused_choice(Some(both.clone()));
+        let open = session.choice_list().expect("the list is still open");
+        assert!(open.is_selected(0) && open.is_selected(2));
+        assert!(!open.is_selected(1));
+
+        // Ticking a row that is on asks for it to be turned off.
+        assert_eq!(session.toggle_option(0), Some((0, false)));
+
+        // Space is the keyboard's half of the same thing, on whichever row
+        // the highlight is on — which the press above left on row 0.
+        assert_eq!(session.toggle_highlighted_option(), Some((0, false)));
+        assert!(session.step_choice_list(true));
+        assert_eq!(
+            session.toggle_highlighted_option(),
+            Some((1, true)),
+            "and an arrow key moved it to a row that is not chosen"
+        );
+
+        // A row that is not one of the rows is not a row.
+        assert_eq!(session.toggle_option(9), None);
+    }
+
+    #[test]
+    fn a_single_select_list_is_chosen_from_rather_than_ticked() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(1), 3)));
+        session.open_choice_list();
+        assert!(!session.choice_list_is_multiple());
+        assert_eq!(
+            session.toggle_option(2),
+            None,
+            "a single-select row is chosen, not toggled"
+        );
+        assert_eq!(session.toggle_highlighted_option(), None);
+        // …and choosing still closes it, exactly as it did before.
+        assert_eq!(session.take_highlighted_option(), Some(1));
+        assert!(session.choice_list().is_none());
+    }
+
+    #[test]
+    fn a_multi_select_list_closes_without_choosing_a_row() {
+        // Enter on a multi-select list means "done", and closing it is all it
+        // does: every tick was committed as it was made, so treating Enter as
+        // a choice would toggle whichever row the highlight was resting on.
+        let mut session = open_with_form(1);
+        let mut many = choice(Some(0), 3);
+        many.multiple_selection = true;
+        many.selections = vec![0];
+        session.set_focused_choice(Some(many));
+        session.open_choice_list();
+        assert!(session.choice_list_is_multiple());
+        session.close_choice_list();
+        assert!(session.choice_list().is_none());
+        assert!(
+            !session.choice_list_is_multiple(),
+            "a closed list is no kind of list"
+        );
     }
 
     #[test]

@@ -772,27 +772,50 @@ fn choice_list_layer<Message: Clone + 'static>(
         // field holds, and where the arrow keys are. Nothing is committed by
         // moving the highlight, so a list whose highlight looked like a
         // selection would say the value had already changed.
-        let style = if Some(index) == choice.selected || index == choice.highlighted {
+        let chosen = choice.is_selected(index);
+        let style = if chosen || index == choice.highlighted {
             theme::ambient::selected_button
         } else {
             theme::ambient::tool_button
         };
+        // A multi-select list box says what it is by showing a box per row.
+        // The style alone cannot: it is already carrying the highlight, and a
+        // reader cannot be asked to tell "the arrow keys are here" from "this
+        // one is chosen" by shade. The single-select list keeps no marks —
+        // there is only ever one chosen row and closing the list is the
+        // acknowledgement.
+        let label = if choice.multiple {
+            format!("{} {option}", if chosen { "[x]" } else { "[ ]" })
+        } else {
+            option.clone()
+        };
+        let command = if choice.multiple {
+            ReadCommand::ToggleOption(index)
+        } else {
+            ReadCommand::PickOption(index)
+        };
         rows = rows.push(
-            button(text(option.clone()).size(theme::type_scale::LABEL))
+            button(text(label).size(theme::type_scale::LABEL))
                 .width(Length::Fill)
                 .padding(theme::space::XS)
                 .style(style)
-                .on_press(send(ReadCommand::PickOption(index))),
+                .on_press(send(command)),
         );
     }
 
     let panel = container(
         column![
             iced::widget::scrollable(rows).height(Length::Shrink),
-            button(text("Close").size(theme::type_scale::CAPTION))
-                .padding(theme::space::XS)
-                .style(theme::ambient::tool_button)
-                .on_press(send(ReadCommand::CloseChoiceList)),
+            // "Done" rather than "Close" for a multi-select list: every tick
+            // was already committed on its own, so there is nothing left to
+            // confirm and nothing a "Cancel" could take back.
+            button(
+                text(if choice.multiple { "Done" } else { "Close" })
+                    .size(theme::type_scale::CAPTION),
+            )
+            .padding(theme::space::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(send(ReadCommand::CloseChoiceList)),
         ]
         .spacing(theme::space::XS),
     )

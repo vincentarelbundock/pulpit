@@ -256,6 +256,16 @@ pub enum ReadCommand {
     /// `SelectOption` — `FORM_SetIndexSelected` — so the engine performs it and
     /// generates the appearance, as it does for a list it drew itself.
     PickOption(u32),
+    /// Turn one option of a *multi-select* list box on or off, leaving the
+    /// others alone and leaving the list open (§8.6).
+    ///
+    /// The same `SelectOption` event as `PickOption`, and the difference is
+    /// PDFium's rather than this layer's: on a multi-select field
+    /// `FORM_SetIndexSelected` sets one index without clearing the rest. What
+    /// this variant carries that the other does not is the intent to *stay
+    /// open*, because a list that closed after each tick could not be used to
+    /// choose three things.
+    ToggleOption(u32),
     /// Put the option list away without choosing anything. The field keeps the
     /// caret, as a closed dropdown does.
     CloseChoiceList,

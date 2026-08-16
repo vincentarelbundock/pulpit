@@ -20,7 +20,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 3;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 4;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +101,16 @@ pub enum FormInputEvent {
     /// selection, generates the appearance and reports the change, exactly as
     /// it does for a keystroke. There is still one implementation, and it is
     /// still PDFium's.
+    ///
+    /// One event shape covers both kinds of choice field, because
+    /// `FORM_SetIndexSelected` already does. On a single-select combo box or
+    /// list box the engine clears whatever else was chosen, so
+    /// `{ index, selected: true }` means "choose only this". On a
+    /// *multi-select* list box it sets the state of that index and leaves the
+    /// others alone, so the same event is a toggle: send `selected: true` to
+    /// add a row and `selected: false` to take one away. Nothing here has to
+    /// say which kind of field it is talking to — the field's own `/Ff` bit 22
+    /// decides, inside PDFium, which is where that decision belongs.
     SelectOption {
         index: u32,
         selected: bool,
@@ -470,7 +480,19 @@ pub struct FocusedChoice {
     pub field: String,
     /// Which option is chosen, if any. `None` for a combo box holding a value
     /// that is not in its own `/Opt` list, which is a case the corpus carries.
+    ///
+    /// The *first* of [`Self::selections`] when several are chosen. A single
+    /// index cannot describe a multi-select list box, which is what the field
+    /// below is for; this one stays because everything that steps a combo box
+    /// asks "which one is on", and for a combo box there is only ever one.
     pub selected: Option<u32>,
+    /// Every chosen option, by index, in ascending order. One entry at most
+    /// for a combo box or a single-select list box; any number for a
+    /// multi-select list box, which is the whole reason it exists — the drawn
+    /// list ticks its rows from this, and `selected` alone would tick one row
+    /// of three. (No `serde` attribute: bincode is positional, so a default
+    /// would silently mis-frame the rest of the struct.)
+    pub selections: Vec<u32>,
     /// How many options there are, so a caller can step within them without
     /// asking for the list.
     pub options: u32,
@@ -802,6 +824,14 @@ impl DocumentResponse {
                             limits::MAX_FIELD_VALUE_BYTES,
                         )?;
                     }
+                    // A multi-select list box can have as many selections as
+                    // it has options and no more, so this is bounded by the
+                    // same limit rather than by a second one.
+                    limits::within(
+                        "chosen options in a focused choice field",
+                        choice.selections.len(),
+                        limits::MAX_FIELD_OPTIONS,
+                    )?;
                 }
                 Ok(())
             }
@@ -1027,6 +1057,7 @@ mod tests {
             focused_choice: Some(FocusedChoice {
                 field: "country".into(),
                 selected: Some(1),
+                selections: vec![1],
                 options: 2,
                 labels: vec!["France".into(), "Japan".into()],
                 editable: false,
@@ -1058,6 +1089,7 @@ mod tests {
                 focused_choice: Some(FocusedChoice {
                     field: "country".into(),
                     selected: None,
+                    selections: Vec::new(),
                     options: labels.len() as u32,
                     labels,
                     editable: false,

@@ -3147,7 +3147,52 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 }
                 FormInputEvent::Focus { gained: true } => {}
                 FormInputEvent::SelectOption { index, selected } => {
+                    // Per-index, which is what makes one event enough for both
+                    // kinds of field: PDFium clears the other options itself
+                    // on a single-select field and leaves them alone on a
+                    // multi-select one, so this is "choose only this" or
+                    // "toggle this" without the caller having to know which.
                     bindings.FORM_SetIndexSelected(form, handle, index as i32, i32::from(selected));
+
+                    // A multi-select list box's selection is held in the
+                    // form-fill widget until the field loses focus, and only
+                    // then written to `/V` and `/I`. That is fine for a list
+                    // PDFium is drawing — it draws the pending state — and no
+                    // use at all for one the application draws, which can only
+                    // read the committed field: every tick would come back
+                    // unticked and the rows would show the selection as it was
+                    // one press ago.
+                    //
+                    // So the focus is dropped and put straight back on the
+                    // same widget, which is what makes PDFium commit. The
+                    // price is one commit — and therefore one undo entry — per
+                    // tick rather than one per visit to the field, which is
+                    // the honest record anyway: each tick is a change a person
+                    // made and may want back on its own (§8.6).
+                    //
+                    // Only for the multi-select case. A single-select field
+                    // commits on the selection itself, and killing its focus
+                    // would cost a round of appearance generation for nothing.
+                    let mut focused = std::ptr::null_mut();
+                    let mut focused_page = 0;
+                    let refocus =
+                        (bindings.FORM_GetFocusedAnnot(form, &mut focused_page, &mut focused) != 0
+                            && !focused.is_null())
+                        .then_some(focused)
+                        .filter(|annotation| {
+                            let flags = bindings.FPDFAnnot_GetFormFieldFlags(form, *annotation);
+                            flags >= 0
+                                && flags
+                                    & (FPDF_FORMFLAG_CHOICE_MULTI_SELECT as std::os::raw::c_int)
+                                    != 0
+                        });
+                    if let Some(annotation) = refocus {
+                        bindings.FORM_ForceToKillFocus(form);
+                        bindings.FORM_SetFocusedAnnot(form, annotation);
+                    }
+                    if !focused.is_null() {
+                        bindings.FPDFPage_CloseAnnot(focused);
+                    }
                 }
                 FormInputEvent::FocusField { ref name } => {
                     // Find the widget by name and hand it to PDFium to focus.
@@ -3258,6 +3303,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
             Some(crate::document::protocol::FocusedChoice {
                 field: field.name.clone(),
                 selected: field.selected.first().copied(),
+                // Every chosen row, not just the first. A multi-select list
+                // box reports three of these and the drawn list ticks three
+                // rows; anything else reports one or none and this is the same
+                // answer `selected` gives.
+                selections: field.selected.clone(),
                 options: field.options.len().min(u32::MAX as usize) as u32,
                 labels: field.options.clone(),
                 editable: field.allows_custom_value,
@@ -3296,6 +3346,26 @@ impl DocumentBackend for PdfiumDocument<'_> {
                     ));
                 }
             }
+        }
+        // Coalesced rather than truncated when the widening above tips the
+        // list past what the wire carries. `take_dirty` bounds what PDFium
+        // reported, and this adds one more to it, so a form event that
+        // dirtied exactly the maximum came out one over — which was an error
+        // rather than a redraw, and the event was lost. A multi-select tick
+        // reaches that: the refocus that commits it invalidates the list's
+        // rows twice over. One rectangle covering them all repaints the same
+        // pixels in a single patch, which is what the caller would have
+        // composited anyway.
+        if invalidated.len() > limits::MAX_DIRTY_RECTS {
+            let whole = invalidated[1..].iter().fold(invalidated[0], |all, one| {
+                PageRect::new(
+                    all.left.min(one.left),
+                    all.top.min(one.top),
+                    all.right.max(one.right),
+                    all.bottom.max(one.bottom),
+                )
+            });
+            invalidated = vec![whole];
         }
 
         // Which field changed is read back from the document rather than
