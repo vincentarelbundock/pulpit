@@ -32,10 +32,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same designer, over the same store, and a PDF opening into one never
   changes which presenter layout is selected.
 
-  This is the first part of `SPEC-document.md`. The reader's controls are in
-  place and the engine behind them is tested, but the worker plumbing that
-  joins the two is not written yet, so document mode is not reachable from
-  the application in this state.
+  Document mode is reachable: press **r** to move between reading a document
+  and presenting it. Mode is which layout is mounted, not which document is
+  loaded — nothing is closed and no revision changes — and the two modes
+  remember their layouts apart, so choosing a presenter variant never changes
+  what a PDF opens into. The reader scrolls continuously, zooms freely, and
+  asks the document worker only for the pages in front of you.
+
+  Behind it, an open PDF is held by a document worker: one document, one
+  execution context, one process, which is another role of this same binary
+  rather than a second one to install. Pages are rendered by the process that
+  holds the mutated document, so a frame drawn after a commit contains the
+  commit. A worker that goes leaves presentation mode alone.
+
+  This is `SPEC-document.md` up to and including its ink milestone.
+  Deliberately not here yet: form filling, which the specification now routes
+  through PDFium's own form-fill environment and which is gated behind a spike;
+  the live stroke preview, so a mark appears when its frame does rather than
+  while it is being drawn; and crash recovery for unsaved annotations.
 
 ### Changed
 
