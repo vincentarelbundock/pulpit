@@ -7,8 +7,8 @@
 //! without a window.
 
 use iced::widget::{
-    button, column, container, image, mouse_area, row, scrollable, slider, space, text, text_input,
-    tooltip, Row,
+    button, column, container, image, mouse_area, row, scrollable, slider, space, text,
+    text_editor, text_input, tooltip, Row,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -24,14 +24,15 @@ use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 use super::model::{OutlineView, PageSpread, Zoom};
 
 /// Hand one reader widget its part of the document.
-pub fn view<Message: Clone + 'static>(
+pub fn view<'a, Message: Clone + 'static>(
     widget: &Widget,
     reader: &ReaderData<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
     mode: Mode,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     match widget.kind() {
-        WidgetKind::DocumentPage => page_surface(reader, mode, on_event),
+        WidgetKind::DocumentPage => page_surface(reader, compose, mode, on_event),
         WidgetKind::DocumentNav => navigation(reader, mode, on_event),
         WidgetKind::DocumentOutline => outline(reader, mode, on_event),
         WidgetKind::AnnotationTools => tools(widget, reader, mode, on_event),
@@ -88,11 +89,12 @@ fn hint<'a, Message: 'a>(
 /// Only the visible pages are built. Everything else in a thousand-page
 /// document costs a rectangle in [`super::model::Column`] and nothing here,
 /// which is what makes continuous scroll over a long document affordable.
-fn page_surface<Message: Clone + 'static>(
+fn page_surface<'a, Message: Clone + 'static>(
     reader: &ReaderData<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
     mode: Mode,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     if !reader.open {
         return nothing("No document open.");
     }
@@ -145,7 +147,9 @@ fn page_surface<Message: Clone + 'static>(
                 .composing
                 .as_ref()
                 .filter(|composing| composing.page == page.placed.page);
-            facing = facing.push(sheet(page, mode, armed, panning, composing, on_event));
+            facing = facing.push(sheet(
+                page, mode, armed, panning, composing, compose, on_event,
+            ));
         }
         sheets = sheets.push(facing);
     }
@@ -288,14 +292,15 @@ pub fn page_surface_id() -> iced::advanced::widget::Id {
 /// A page with no frame yet is still drawn, at its full size, as a blank
 /// sheet: the alternative is a column that changes height as frames arrive,
 /// which moves the text under the reader's eye.
-fn sheet<Message: Clone + 'static>(
+fn sheet<'a, Message: Clone + 'static>(
     page: &crate::widgets::context::ReaderPage,
     mode: Mode,
     armed: Option<AnnotationTool>,
     panning: bool,
     composing: Option<&crate::widgets::context::ComposingMark>,
+    buffer: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     let inner: Element<'static, Message> = match &page.frame {
         Some(handle) => image(handle.clone())
             .width(Length::Fixed(page.placed.width))
@@ -324,7 +329,7 @@ fn sheet<Message: Clone + 'static>(
     let sheet: Element<'static, Message> = if page.preview.is_some()
         || !page.retained.is_empty()
         || searched
-        || page.selection.is_some()
+        || !page.selection.is_empty()
     {
         let mut layers = iced::widget::stack![sheet];
         // Search hits go under the marks: they are a way of finding the page,
@@ -361,7 +366,7 @@ fn sheet<Message: Clone + 'static>(
         // The selection goes on top of everything: it is chrome describing
         // what the reader is holding, and chrome that something else can
         // cover is chrome nobody can trust.
-        if let Some(selection) = page.selection.clone() {
+        for selection in page.selection.clone() {
             layers = layers.push(super::preview::selection_layer(
                 selection,
                 theme::ambient::accent(),
@@ -384,6 +389,7 @@ fn sheet<Message: Clone + 'static>(
     let writing = composing.map(|composing| {
         compose_layer(
             composing,
+            buffer,
             (page.placed.width, page.placed.height),
             page.canonical,
             on_event,
@@ -467,12 +473,13 @@ fn sheet<Message: Clone + 'static>(
 /// Positioned with spacers because the sheet is a fixed-size box and the spot
 /// is a canonical page point (A4): the same conversion the pointer takes, the
 /// other way round.
-fn compose_layer<Message: Clone + 'static>(
+fn compose_layer<'a, Message: Clone + 'static>(
     composing: &crate::widgets::context::ComposingMark,
+    buffer: Option<&'a iced::widget::text_editor::Content>,
     drawn: (f32, f32),
     canonical: (f32, f32),
     on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
     /// How wide the writing box is on screen, in layout points.
     const EDITOR_WIDTH: f32 = 260.0;
 
@@ -489,17 +496,66 @@ fn compose_layer<Message: Clone + 'static>(
     // Clamped to the sheet: a mark placed near the right or bottom edge is
     // still written in a box the reader can see all of.
     let width = EDITOR_WIDTH.min(drawn.0.max(0.0));
+    // The box grows with what has been written, up to a point: a note is a
+    // paragraph often enough that a one-line slot would hide most of it, and
+    // past a handful of lines a box that kept growing would cover the page it
+    // is a comment on. After that the editor scrolls, as it should.
+    let lines = buffer.map_or(1, |buffer| buffer.line_count()).clamp(1, 6);
+    let height = (COMPOSE_HEIGHT + (lines - 1) as f32 * theme::type_scale::BODY * 1.3)
+        .min(drawn.1.max(COMPOSE_HEIGHT));
     let left = (composing.at.x * scale_x).clamp(0.0, (drawn.0 - width).max(0.0));
-    let top = (composing.at.y * scale_y).clamp(0.0, (drawn.1 - COMPOSE_HEIGHT).max(0.0));
+    let top = (composing.at.y * scale_y).clamp(0.0, (drawn.1 - height).max(0.0));
 
-    let mut controls = row![text_input("", &composing.text)
-        .id(compose_input_id())
-        .size(theme::type_scale::BODY)
-        .width(Length::Fixed(width))
-        .on_input(move |typed| on_event(WidgetEvent::Read(ReadCommand::ComposeMark(typed))))
-        .on_submit(on_event(WidgetEvent::Read(ReadCommand::CommitMark))),]
-    .spacing(theme::space::XS)
-    .align_y(Alignment::Center);
+    // A real multi-line editor, so a note can be a paragraph. Return breaks
+    // the line, the way it does in every other box that holds prose; the mark
+    // is placed with the tick, with Ctrl+Return, or by pressing Escape's
+    // opposite — never by the key that is also how a second line is written.
+    let editor: Element<'a, Message> = match buffer {
+        Some(buffer) => text_editor(buffer)
+            .id(compose_input_id())
+            .size(theme::type_scale::BODY)
+            .height(Length::Fixed(height))
+            .padding(theme::space::XS)
+            .key_binding(move |press| {
+                use iced::widget::text_editor::{Binding, KeyPress};
+                let KeyPress { key, modifiers, .. } = &press;
+                let is_enter = matches!(
+                    key,
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                );
+                if is_enter && (modifiers.command() || modifiers.control()) {
+                    return Some(Binding::Custom(on_event(WidgetEvent::Read(
+                        ReadCommand::CommitMark,
+                    ))));
+                }
+                if matches!(
+                    key,
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                ) {
+                    return Some(Binding::Custom(on_event(WidgetEvent::Read(
+                        ReadCommand::CancelMark,
+                    ))));
+                }
+                Binding::from_key_press(press)
+            })
+            .on_action(move |action| on_event(WidgetEvent::Read(ReadCommand::ComposeMark(action))))
+            .into(),
+        // The buffer belongs to the application; without one there is nothing
+        // to type into, and an empty box would take the click anyway.
+        None => space::horizontal().width(Length::Fixed(width)).into(),
+    };
+    let mut controls = row![container(editor).width(Length::Fixed(width))]
+        .spacing(theme::space::XS)
+        .align_y(Alignment::Center);
+
+    // Placing the mark. The tick is the visible way to do it, because Return
+    // now means what it means in prose.
+    controls = controls.push(
+        button(text("✓").size(theme::type_scale::LABEL))
+            .padding(theme::space::XS)
+            .style(theme::ambient::selected_button)
+            .on_press(on_event(WidgetEvent::Read(ReadCommand::CommitMark))),
+    );
 
     // A sticky note is read in a viewer's own popup, which draws `/Contents`
     // and not an appearance, so a typeset note would be a mark whose text
@@ -536,7 +592,8 @@ fn compose_layer<Message: Clone + 'static>(
         .into()
 }
 
-/// How tall the writing box is on screen, so it can be kept on the sheet.
+/// How tall the writing box is with one line in it. It grows from here as
+/// lines are written, and this is the floor used to keep it on the sheet.
 const COMPOSE_HEIGHT: f32 = 34.0;
 
 /// The writing box's input, so the application can put the caret in it the
@@ -566,21 +623,33 @@ fn navigation<Message: Clone + 'static>(
         hint(control, label)
     };
 
+    // Only the page number is typed into. The total is a fact about the
+    // document, not a thing a reader can decide, so it sits beside the box as
+    // text rather than inside it where a stray keystroke could eat it.
     let entry = {
         let value = reader
             .page_entry
             .clone()
-            .unwrap_or_else(|| reader.counter());
+            .unwrap_or_else(|| reader.page_label());
         let field = text_input("", &value)
             .size(theme::type_scale::LABEL)
-            .width(Length::Fixed(96.0));
-        if live {
+            .width(Length::Fixed(48.0))
+            .align_x(Alignment::Center);
+        let field = if live {
             field
                 .on_input(move |typed| send(ReadCommand::TypePage(typed)))
                 .on_submit(send(ReadCommand::CommitPage))
         } else {
             field
-        }
+        };
+        row![
+            field,
+            text(reader.page_total())
+                .size(theme::type_scale::LABEL)
+                .color(theme::ambient::muted()),
+        ]
+        .spacing(theme::space::XS)
+        .align_y(Alignment::Center)
     };
 
     let previous = reader.controls.page.get() > 0;
@@ -593,7 +662,24 @@ fn navigation<Message: Clone + 'static>(
         .size(theme::type_scale::LABEL)
         .color(theme::ambient::muted());
 
-    let band = row![
+    // Where you are and how big the page is are two different questions, so
+    // the band answers them in two groups with a rule between them rather
+    // than as one undifferentiated run of controls.
+    let group = |controls: Row<'static, Message>| {
+        container(
+            controls
+                .spacing(theme::space::XS)
+                .align_y(Alignment::Center),
+        )
+    };
+    let rule = || {
+        container(space::horizontal())
+            .width(Length::Fixed(1.0))
+            .height(Length::Fixed(theme::space::M))
+            .style(theme::ambient::separator)
+    };
+
+    let pages = group(row![
         step(
             theme::Icon::ChevronLeft,
             "Previous page",
@@ -607,7 +693,9 @@ fn navigation<Message: Clone + 'static>(
             ReadCommand::GoToPage(PageIndex(reader.controls.page.get() + 1)),
             next
         ),
-        space::horizontal().width(Length::Fixed(theme::space::M)),
+    ]);
+
+    let sizing = group(row![
         step(theme::Icon::ZoomOut, "Zoom out", ReadCommand::ZoomOut, true),
         zoom_label,
         step(theme::Icon::ZoomIn, "Zoom in", ReadCommand::ZoomIn, true),
@@ -629,22 +717,24 @@ fn navigation<Message: Clone + 'static>(
             ReadCommand::SetZoom(Zoom::FitPage),
             true
         ),
-        space::horizontal().width(Length::Fixed(theme::space::M)),
-        // One control, not two: the spread has exactly two states, and a
-        // button that shows the one you are not in is a press rather than a
-        // choice between a pressed and an unpressed twin.
-        step(
-            match reader.controls.spread.other() {
-                PageSpread::Single => theme::Icon::SinglePage,
-                PageSpread::Double => theme::Icon::TwoPages,
-            },
-            reader.controls.spread.other().label(),
-            ReadCommand::SetSpread(reader.controls.spread.other()),
-            true
-        ),
-    ]
-    .spacing(theme::space::XS)
-    .align_y(Alignment::Center);
+    ]);
+
+    // One control, not two: the spread has exactly two states, and a button
+    // that shows the one you are not in is a press rather than a choice
+    // between a pressed and an unpressed twin.
+    let spread = group(row![step(
+        match reader.controls.spread.other() {
+            PageSpread::Single => theme::Icon::SinglePage,
+            PageSpread::Double => theme::Icon::TwoPages,
+        },
+        reader.controls.spread.other().label(),
+        ReadCommand::SetSpread(reader.controls.spread.other()),
+        true
+    )]);
+
+    let band = row![pages, rule(), sizing, rule(), spread]
+        .spacing(theme::space::M)
+        .align_y(Alignment::Center);
 
     // The compatibility level and the dirty mark are the two things a reader
     // should not have to go looking for: one says what pulpit can honour in
@@ -967,16 +1057,11 @@ fn tools<Message: Clone + 'static>(
         };
         hint(control, label)
     };
-    // What to do with the mark that is held. Both are dim until something is,
-    // which is also how the toolbar says that the Select tool has picked
-    // nothing up — the outline on the page says the same thing from the other
-    // side (§8.4).
-    bar = bar.push(history(
-        theme::Icon::Pencil,
-        "Edit the selected mark",
-        ReadCommand::EditSelected,
-        reader.selected_editable,
-    ));
+    // What to do with the mark that is held. Dim until something is, which is
+    // also how the toolbar says that nothing has been picked up — the outline
+    // on the page says the same thing from the other side (§8.4). There is no
+    // button for editing what a mark says: that is what double-clicking it
+    // does, the same as double-clicking text anywhere else.
     bar = bar.push(history(
         theme::Icon::Trash,
         "Delete the selected mark",
@@ -1058,7 +1143,7 @@ fn tool_options_panel<Message: Clone + 'static>(
                 slider(0.5..=12.0, width, move |value| {
                     send(ReadCommand::SetInkWidth(value))
                 })
-                .step(0.5),
+                .step(0.5_f32),
             );
     }
 
@@ -1073,7 +1158,7 @@ fn tool_options_panel<Message: Clone + 'static>(
                 slider(6.0..=48.0, size, move |value| {
                     send(ReadCommand::SetTextSize(value))
                 })
-                .step(1.0),
+                .step(1.0_f32),
             );
     }
 

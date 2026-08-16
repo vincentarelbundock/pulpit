@@ -655,6 +655,12 @@ impl ReaderSession {
         self.interaction.selected()
     }
 
+    /// Everything the reader is holding — a band's worth of marks, or the one
+    /// the hand picked up, or nothing.
+    pub fn selection(&self) -> &[pulpit_core::annotate::AnnotationId] {
+        self.interaction.selection()
+    }
+
     /// The pages whose annotations are not known and are worth asking for:
     /// the ones in the window.
     pub fn annotations_wanted(&mut self) -> Vec<PageIndex> {
@@ -798,7 +804,12 @@ impl ReaderSession {
                 *style,
             ),
             Gesture::Selecting { quads, style, .. } => (Vec::new(), quads.clone(), *style),
-            Gesture::Erasing { .. } | Gesture::Transforming { .. } => return None,
+            // The band is chrome and is drawn with the selection, not here:
+            // this layer paints marks in their own colour, and the band is
+            // not a mark.
+            Gesture::Erasing { .. } | Gesture::Transforming { .. } | Gesture::Marquee { .. } => {
+                return None
+            }
         };
         let preview = crate::widgets::document::preview::GesturePreview {
             points,
@@ -1012,7 +1023,7 @@ impl ReaderSession {
     ) -> Option<DocumentTransaction> {
         let geometry = self.pages.get(page.get()).copied()?;
         let content = match tool {
-            AnnotationTool::Note => pulpit_core::annotate::PlacedMark::Note { text, open: false },
+            AnnotationTool::Note => pulpit_core::annotate::PlacedMark::Note { text },
             _ => pulpit_core::annotate::PlacedMark::FreeText {
                 text,
                 source: pulpit_core::annotate::TextSource::Plain,
@@ -1080,17 +1091,17 @@ impl ReaderSession {
         let Some((page, at)) = self.cursor else {
             return false;
         };
-        // Nothing armed is the hand, and the hand grabs the page: the press
-        // starts a pan rather than a mark, and there is nothing to commit
-        // when it ends.
+        // Nothing armed is the hand, and the hand takes hold of whatever is
+        // under it: a mark, which it picks up to move or resize, or else the
+        // page, which it pans. A mark that overlaps a link therefore wins the
+        // press — the mark is the nearer thing and the one the reader put
+        // there (§8.4).
         if self.controls.tool.is_none() {
+            if self.pick_up(page, at) {
+                return true;
+            }
             self.pan = self.document_point(page, at.x, at.y);
             return false;
-        }
-        // The selection tool has no gesture of its own: it picks a mark up
-        // and then drags it, which is a transform rather than a stroke (§8.4).
-        if self.controls.tool == Some(AnnotationTool::Select) {
-            return self.pick_up(page, at);
         }
         self.interaction.begin(page, at)
     }
@@ -1202,12 +1213,14 @@ impl ReaderSession {
             .map(|_| summary.bounds)
     }
 
-    /// The selected mark on `page`, as the page surface draws it (§8.4).
+    /// The selected marks on `page`, as the page surface draws them (§8.4).
     ///
     /// While a drag is open this is where the mark *would* land rather than
     /// where the document still has it: the outline is the proposal the
-    /// release will commit, which is the whole point of drawing it.
-    fn selection_for(&self, page: PageIndex) -> Option<crate::widgets::context::SelectedMark> {
+    /// release will commit, which is the whole point of drawing it. The open
+    /// rubber band is drawn the same way, because it is the same kind of
+    /// thing — a rectangle proposing what the release will do.
+    fn selection_for(&self, page: PageIndex) -> Vec<crate::widgets::context::SelectedMark> {
         use pulpit_core::annotate::Gesture;
 
         if let Some(Gesture::Transforming {
@@ -1218,26 +1231,49 @@ impl ReaderSession {
         }) = self.interaction.gesture()
         {
             if *held != page {
-                return None;
+                return Vec::new();
             }
-            return Some(crate::widgets::context::SelectedMark {
+            return vec![crate::widgets::context::SelectedMark {
                 bounds: *current,
                 dragging: true,
                 handles: self.handles_for(page, id),
-            });
+            }];
         }
 
-        let id = self.interaction.selected()?;
-        let hit = self
-            .annotations
-            .get(&page)?
+        // The band, while it is open, and nothing else: what it has gathered
+        // is not decided until the pointer comes up, so outlining marks under
+        // it would promise a selection the release might not make.
+        if let Some((banded, band)) = self.interaction.marquee() {
+            if banded != page {
+                return Vec::new();
+            }
+            return vec![crate::widgets::context::SelectedMark {
+                bounds: band,
+                dragging: true,
+                handles: Vec::new(),
+            }];
+        }
+
+        let Some(candidates) = self.annotations.get(&page) else {
+            return Vec::new();
+        };
+        // In paint order rather than selection order, so a stack of marks is
+        // outlined the way the page draws it.
+        candidates
             .iter()
-            .find(|candidate| &candidate.id == id)?;
-        Some(crate::widgets::context::SelectedMark {
-            bounds: hit.bounds,
-            dragging: false,
-            handles: self.handles_for(page, id),
-        })
+            .filter(|candidate| self.interaction.is_selected(&candidate.id))
+            .map(|hit| crate::widgets::context::SelectedMark {
+                bounds: hit.bounds,
+                dragging: false,
+                // Grips only when one mark is held: a corner belongs to the
+                // mark it is on, and four sets of them over a band's worth of
+                // marks would be four sets nobody could aim at.
+                handles: match self.interaction.selected() {
+                    Some(only) if only == &hit.id => self.handles_for(page, only),
+                    _ => Vec::new(),
+                },
+            })
+            .collect()
     }
 
     /// The corners that can be grabbed on the mark `id`.
@@ -1252,37 +1288,49 @@ impl ReaderSession {
         }
     }
 
-    /// Take the selected mark out of the document (§8.4).
+    /// Take the selected marks out of the document (§8.4).
     ///
     /// The eraser is a sweep and takes whatever it passes over; this is the
-    /// other way to remove a mark — pick exactly one and press Delete — and it
-    /// is one transaction and one undo entry like any other edit.
+    /// other way to remove marks — pick them out and press Delete — and a
+    /// band's worth of them is one transaction and one undo entry, because
+    /// one press of Delete is one thing the reader did (§9.1).
     pub fn delete_selected(&mut self) -> Option<DocumentTransaction> {
-        let id = self.interaction.selected()?.clone();
-        // Refused for a mark this document only preserves: pulpit does not
-        // rewrite what it does not model (A5), and deleting is a rewrite.
-        let known = self
-            .summaries
-            .values()
-            .flatten()
-            .find(|summary| summary.id == id)?;
-        if !known.editable() {
+        // Marks this document only preserves are passed over rather than
+        // refusing the whole press: pulpit does not rewrite what it does not
+        // model (A5), and deleting is a rewrite, but one such mark inside a
+        // band must not save the rest.
+        let doomed: Vec<_> = self
+            .interaction
+            .selection()
+            .iter()
+            .filter(|id| {
+                self.summaries
+                    .values()
+                    .flatten()
+                    .find(|summary| &&summary.id == id)
+                    .is_some_and(|summary| summary.editable())
+            })
+            .cloned()
+            .collect();
+        if doomed.is_empty() {
             return None;
         }
-        // The gesture goes with it: a mark being dragged when Delete arrives
+        // The gesture goes with them: a mark being dragged when Delete arrives
         // must not come back on the release.
         self.interaction.cancel();
         self.transform_origin = None;
         self.interaction.select(None);
-        Some(DocumentTransaction::from_annotations([
-            pulpit_core::annotate::AnnotationCommand::Delete { id },
-        ]))
+        Some(DocumentTransaction::from_annotations(
+            doomed
+                .into_iter()
+                .map(|id| pulpit_core::annotate::AnnotationCommand::Delete { id }),
+        ))
     }
 
     /// Put down whatever is held, without committing anything. What Escape
     /// does when there is a selection but no open gesture.
     pub fn clear_selection(&mut self) -> bool {
-        let had = self.interaction.selected().is_some();
+        let had = !self.interaction.selection().is_empty();
         self.interaction.select(None);
         had
     }
@@ -1355,6 +1403,29 @@ impl ReaderSession {
 
     /// Close the open gesture and turn it into a transaction, if it made one.
     fn finish_gesture(&mut self) -> Option<DocumentTransaction> {
+        // A band commits nothing: what it changes is what the reader is
+        // holding. Intercepted here for the same reason a transform is — the
+        // annotations it has to be tested against live with this session and
+        // not in the gesture (§8.4).
+        if let Some((page, band)) = self.interaction.marquee() {
+            self.interaction.cancel();
+            let gathered = self
+                .annotations
+                .get(&page)
+                .map(|candidates| {
+                    pulpit_core::annotate::hit::enclosed(candidates, band)
+                        .into_iter()
+                        .map(|hit| hit.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            // An empty band puts down what was held rather than leaving it:
+            // dragging over blank page is how a reader says "none of these",
+            // and it reads the same as clicking away from a selection.
+            self.interaction.select_many(gathered);
+            return None;
+        }
+
         // A move is a *replacement*, not a delete and a create: the mark keeps
         // its identity, which is what lets undo put back the same annotation
         // rather than a copy of it (A3, §8.4).
@@ -1608,6 +1679,13 @@ impl ReaderSession {
         if current.height > self.cell.1 + VIEWPORT_EPSILON {
             return None;
         }
+        // Only from the top of the page. A reader parked half way down a page
+        // is reading the seam between two pages, and stepping to the top of
+        // the next one there would scroll them backwards over lines they have
+        // not read yet: from an unaligned offset a page key is a screenful.
+        if (self.controls.offset - current.top).abs() > VIEWPORT_EPSILON {
+            return None;
+        }
         // A page key means a rowful: in a two-page spread the page beside the
         // one being read is already on screen, and stepping to it would be a
         // press that moved nothing.
@@ -1726,8 +1804,9 @@ impl ReaderSession {
                 let Some(entry) = self.page_entry.take() else {
                     return false;
                 };
-                // "12 / 40" is what the box shows when nobody is typing in it,
-                // so the leading number is what a reader would have edited.
+                // The box holds the page number alone, but a pasted "12 / 40"
+                // means page twelve to whoever pasted it, so the leading
+                // number is what counts.
                 let number = entry
                     .split(['/', ' '])
                     .find(|part| !part.trim().is_empty())
@@ -1958,8 +2037,7 @@ impl ReaderSession {
             page_entry: self.page_entry.clone(),
             can_undo: self.undo_depth > 0,
             can_redo: self.redo_depth > 0,
-            selected: self.interaction.selected().is_some(),
-            selected_editable: self.selected_editable().is_some(),
+            selected: !self.interaction.selection().is_empty(),
             panning: self.pan.is_some(),
             // Filled in by the application, which is where the half-written
             // mark lives: this session knows geometry, not editors.
@@ -2155,7 +2233,8 @@ mod tests {
         assert!(!session.is_open());
         let facet = session.facet(true, &no_frames, &pulpit_core::search::SearchState::new());
         assert!(!facet.open);
-        assert_eq!(facet.counter(), "—");
+        assert_eq!(facet.page_label(), "—");
+        assert_eq!(facet.page_total(), "");
         assert!(!facet.annotatable());
     }
 
@@ -2170,8 +2249,14 @@ mod tests {
         assert_eq!(
             session
                 .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
-                .counter(),
-            "1 / 5"
+                .page_label(),
+            "1"
+        );
+        assert_eq!(
+            session
+                .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
+                .page_total(),
+            "/ 5"
         );
     }
 
@@ -2289,6 +2374,25 @@ mod tests {
     }
 
     #[test]
+    fn a_page_key_from_half_way_down_a_page_moves_a_windowful_forward() {
+        let mut session = open(6);
+        session.apply(&ReadCommand::SetZoom(Zoom::FitHeight));
+        // Half way down the first page, the way a scroll wheel leaves it.
+        let half = session.column.pages[1].top / 2.0;
+        session.apply(&ReadCommand::DragScrollHandle(half));
+        assert!((session.controls().offset - half).abs() < 1e-3);
+
+        session.apply(&ReadCommand::ScrollByWindows(1));
+        // A windowful on from where the reader was, not back up to a page top.
+        let expected = half + (400.0 - WINDOW_OVERLAP);
+        assert!(
+            (session.controls().offset - expected).abs() < 1e-3,
+            "a page key from mid-page scrolls a window: {}",
+            session.controls().offset
+        );
+    }
+
+    #[test]
     fn the_surface_is_the_authority_on_how_tall_the_window_is() {
         let mut session = open(4);
         // The layout said 400; the surface says it is really 300, and a fit
@@ -2396,9 +2500,9 @@ mod tests {
     }
 
     #[test]
-    fn the_page_box_is_edited_from_what_it_was_showing() {
-        // The box shows "12 / 40"; a reader who edits the first number and
-        // presses return means that page, not a parse failure.
+    fn the_page_box_takes_the_leading_number_of_a_pasted_counter() {
+        // The box holds the page number alone, but "7 / 40" pasted into it
+        // means page seven, not a parse failure.
         let mut session = open(40);
         session.apply(&ReadCommand::TypePage("7 / 40".into()));
         session.apply(&ReadCommand::CommitPage);
@@ -2914,11 +3018,19 @@ mod tests {
         }
     }
 
-    /// Arm Select and pick up the one mark on the page.
+    /// Pick a mark up with the hand — nothing armed, which is how a mark is
+    /// picked up (§8.4).
     fn holding(session: &mut ReaderSession, at: (f32, f32)) -> bool {
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), at.0, at.1);
         session.pointer_pressed()
+    }
+
+    /// The one mark drawn as selected on the first page.
+    fn drawn_selection(session: &ReaderSession) -> crate::widgets::context::SelectedMark {
+        let mut marks = session.selection_for(PageIndex(0));
+        assert_eq!(marks.len(), 1, "exactly one mark is drawn as selected");
+        marks.remove(0)
     }
 
     #[test]
@@ -2929,14 +3041,12 @@ mod tests {
         session.set_annotations(PageIndex(0), &[text_box()]);
         assert!(holding(&mut session, (200.0, 120.0)));
 
-        let selected = session
-            .selection_for(PageIndex(0))
-            .expect("a held mark is drawn");
+        let selected = drawn_selection(&session);
         assert!(selected.dragging);
         assert_eq!(selected.bounds.left, 100.0, "it has not moved yet");
 
         session.pointer_moved(PageIndex(0), 240.0, 130.0);
-        let selected = session.selection_for(PageIndex(0)).unwrap();
+        let selected = drawn_selection(&session);
         assert_eq!(selected.bounds.left, 140.0, "the ghost follows the pointer");
         assert_eq!(selected.bounds.top, 110.0);
         assert_eq!(
@@ -2956,7 +3066,7 @@ mod tests {
         };
         session.set_annotations(PageIndex(0), &[note]);
         assert!(holding(&mut session, (200.0, 120.0)));
-        let selected = session.selection_for(PageIndex(0)).unwrap();
+        let selected = drawn_selection(&session);
         assert!(
             selected.handles.is_empty(),
             "a note is drawn at a fixed size whatever its rect says"
@@ -2965,10 +3075,7 @@ mod tests {
         let mut session = open(2);
         session.set_annotations(PageIndex(0), &[text_box()]);
         assert!(holding(&mut session, (200.0, 120.0)));
-        assert_eq!(
-            session.selection_for(PageIndex(0)).unwrap().handles.len(),
-            4
-        );
+        assert_eq!(drawn_selection(&session).handles.len(), 4);
     }
 
     #[test]
@@ -2981,7 +3088,7 @@ mod tests {
         assert!(holding(&mut session, (300.0, 140.0)));
 
         session.pointer_moved(PageIndex(0), 360.0, 190.0);
-        let held = session.selection_for(PageIndex(0)).unwrap();
+        let held = drawn_selection(&session);
         assert_eq!(held.bounds.left, 100.0, "the anchored corner moved");
         assert_eq!(held.bounds.top, 100.0, "the anchored corner moved");
         assert_eq!(held.bounds.right, 360.0);
@@ -3677,7 +3784,7 @@ mod tests {
         let id = mark.id.clone();
         session.set_annotations(PageIndex(0), &[mark]);
 
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), 200.0, 200.0);
         assert!(session.pointer_pressed(), "the mark was picked up");
         assert_eq!(session.selected(), Some(&id));
@@ -3694,7 +3801,7 @@ mod tests {
     fn a_drag_that_returned_to_where_it_started_is_not_an_edit() {
         let mut session = open(2);
         session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), 200.0, 200.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 300.0, 260.0);
@@ -3706,7 +3813,7 @@ mod tests {
     fn pressing_bare_page_puts_down_whatever_was_held() {
         let mut session = open(2);
         session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), 200.0, 200.0);
         session.pointer_pressed();
         assert!(session.selected().is_some());
@@ -3731,7 +3838,7 @@ mod tests {
         let id = highlight.id.clone();
         session.set_annotations(PageIndex(0), &[highlight]);
 
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), 200.0, 200.0);
         assert!(!session.pointer_pressed(), "it must not start a move");
         assert_eq!(
@@ -3742,11 +3849,101 @@ mod tests {
         assert!(matches!(session.pointer_released(), Released::Nothing));
     }
 
+    /// Drag a band over page zero, from one corner to the other.
+    fn band(session: &mut ReaderSession, from: (f32, f32), to: (f32, f32)) {
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), from.0, from.1);
+        assert!(session.pointer_pressed(), "the band opened");
+        session.pointer_moved(PageIndex(0), to.0, to.1);
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+    }
+
+    #[test]
+    fn a_band_gathers_up_every_mark_it_encloses_and_leaves_the_rest() {
+        // The whole point of the tool: one mark at a time is what the hand
+        // does, and several at a time is what a band is for (§8.4).
+        let mut session = open(2);
+        session.set_annotations(
+            PageIndex(0),
+            &[stroke_at(100.0), stroke_at(200.0), stroke_at(600.0)],
+        );
+
+        band(&mut session, (20.0, 40.0), (500.0, 300.0));
+        assert_eq!(
+            session.selection().len(),
+            2,
+            "the two strokes inside it, and not the one below"
+        );
+    }
+
+    #[test]
+    fn a_band_that_only_clips_a_mark_does_not_take_it() {
+        // Enclosure, not intersection: a band dragged across a page clips the
+        // edge of everything it passes, and a selection made of those is one
+        // nobody could aim.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        band(&mut session, (20.0, 40.0), (200.0, 300.0));
+        assert!(
+            session.selection().is_empty(),
+            "the stroke runs out of the right-hand side of the band"
+        );
+    }
+
+    #[test]
+    fn a_band_over_bare_page_puts_down_what_was_held() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        band(&mut session, (20.0, 40.0), (500.0, 300.0));
+        assert_eq!(session.selection().len(), 1);
+
+        band(&mut session, (20.0, 500.0), (500.0, 700.0));
+        assert!(
+            session.selection().is_empty(),
+            "dragging over nothing says 'none of these'"
+        );
+    }
+
+    #[test]
+    fn deleting_a_band_of_marks_is_one_undo_entry() {
+        // §9.1: one press of Delete is one thing the reader did, however many
+        // marks it took.
+        let mut session = open(2);
+        session.set_annotations(
+            PageIndex(0),
+            &[stroke_at(100.0), stroke_at(200.0), stroke_at(600.0)],
+        );
+        band(&mut session, (20.0, 40.0), (500.0, 300.0));
+
+        let transaction = session.delete_selected().expect("two marks were held");
+        assert_eq!(transaction.len(), 2, "both of them, in one transaction");
+        assert!(
+            session.selection().is_empty(),
+            "nothing is still held afterwards"
+        );
+    }
+
+    #[test]
+    fn a_band_holding_several_marks_offers_no_resize_grips() {
+        // A corner belongs to the mark it is on; four sets of grips over a
+        // band's worth of marks is four sets nobody could aim at.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[text_box(), stroke_at(300.0)]);
+        band(&mut session, (20.0, 40.0), (500.0, 400.0));
+
+        let drawn = session.selection_for(PageIndex(0));
+        assert_eq!(drawn.len(), 2, "both are outlined");
+        assert!(
+            drawn.iter().all(|mark| mark.handles.is_empty()),
+            "and neither is offered a grip"
+        );
+    }
+
     #[test]
     fn a_mark_dragged_off_the_sheet_is_not_committed() {
         let mut session = open(2);
         session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::Arm(None));
         session.pointer_moved(PageIndex(0), 200.0, 200.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 99_000.0, 200.0);

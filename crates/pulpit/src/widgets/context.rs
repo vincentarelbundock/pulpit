@@ -258,8 +258,9 @@ pub struct ReaderPage {
     /// reach a saved file.
     pub found: Vec<pulpit_core::page::PageQuad>,
     pub found_current: Vec<pulpit_core::page::PageQuad>,
-    /// The mark the reader has picked up, when it is on this page (§8.4).
-    pub selection: Option<SelectedMark>,
+    /// The marks the reader has picked up, when they are on this page, or the
+    /// open rubber band while one is being dragged over it (§8.4).
+    pub selection: Vec<SelectedMark>,
 }
 
 /// The selected annotation, as the page surface draws it.
@@ -347,12 +348,10 @@ pub struct ReaderData<'a> {
     pub page_entry: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
-    /// Has the reader picked a mark up, and does that mark say something that
-    /// can be rewritten? Two questions rather than one: a highlight can be
-    /// selected and deleted but has no text of its own to open, and a control
-    /// that looked live and did nothing would be worse than a dim one.
+    /// Has the reader picked a mark up? What the delete control asks before it
+    /// lights: a control that looked live and did nothing would be worse than
+    /// a dim one.
     pub selected: bool,
-    pub selected_editable: bool,
     /// Is the hand dragging the page about? The cursor closes while it is.
     pub panning: bool,
     /// The mark being written, when one is (§8.5). Drawn on the sheet at the
@@ -361,12 +360,23 @@ pub struct ReaderData<'a> {
 }
 
 impl ReaderData<'_> {
-    /// "12 / 40", or an em dash when nothing is open.
-    pub fn counter(&self) -> String {
+    /// The page the reader is on, alone: what the editable half of the page
+    /// box shows. An em dash when nothing is open.
+    pub fn page_label(&self) -> String {
         if !self.open || self.page_count == 0 {
             "—".to_string()
         } else {
-            format!("{} / {}", self.controls.page.get() + 1, self.page_count)
+            (self.controls.page.get() + 1).to_string()
+        }
+    }
+
+    /// How many pages there are, as the box's fixed half reads it. Empty when
+    /// nothing is open, so the box shows a lone em dash rather than "— / 0".
+    pub fn page_total(&self) -> String {
+        if !self.open || self.page_count == 0 {
+            String::new()
+        } else {
+            format!("/ {}", self.page_count)
         }
     }
 
