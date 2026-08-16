@@ -9,6 +9,7 @@ use iced::{window, Size, Subscription, Task};
 use crate::doc::manager::{Action as DocAction, RealFileProbe};
 use crate::doc::{DocumentManager, DocumentWatcher, ReloadPolicy};
 use crate::layout::{AspectRatio, Layout, LayoutId, LayoutStore};
+use crate::reader::AppliedKind;
 use crate::settings::diagnostics::describe_warning;
 use crate::settings::{Action, DiagnosticsBundle, KeyBinding, Settings, SettingsStore};
 use pulpit_core::annotation::AnnotationTool;
@@ -630,6 +631,15 @@ pub struct App {
     /// state rather than replacing it, because mode is which layout is
     /// mounted, not which document is loaded (§2.3 of `SPEC-document.md`).
     pub reader: crate::reader::ReaderSession,
+    /// The thread talking to this document's worker, when document mode is
+    /// available for it. `None` when nothing is open, or when the worker
+    /// could not be started — presentation mode does not depend on it.
+    reader_link: Option<crate::reader_link::ReaderLink>,
+    /// Which stack each in-flight mutation's answer belongs on.
+    ///
+    /// The worker answers in order and says nothing about why it was asked,
+    /// so the intent is remembered here rather than guessed from the answer.
+    reader_pending: std::collections::VecDeque<AppliedKind>,
     /// Live tool choices for the annotation palette. These are session
     /// controls, not mutations to a built-in layout.
     pub annotation_controls: crate::widgets::AnnotationControls,
@@ -900,6 +910,8 @@ impl App {
             pending_pointer_move: None,
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
+            reader_link: None,
+            reader_pending: std::collections::VecDeque::new(),
             annotation_controls,
             alarm_controls,
             timer_controls,
@@ -1833,16 +1845,7 @@ impl App {
                 self.on_annotation_command(command);
                 Task::none()
             }
-            Message::Read(command) => {
-                // The viewport is the session's; the commands that mutate the
-                // document are routed to the worker from here once the
-                // document-mode worker protocol lands. Until then an armed
-                // tool changes what a press *would* do and nothing else, which
-                // is honest: a mark that cannot be committed must not be
-                // drawn as though it had been (A1, §9.2).
-                let _needs_render = self.reader.apply(&command);
-                Task::none()
-            }
+            Message::Read(command) => self.on_read_command(command),
             Message::ExportAnnotatedTo(Some(path)) => {
                 self.export_annotations(path);
                 Task::none()
@@ -2987,6 +2990,11 @@ impl App {
         // 1. Expire routine toasts. Failures stay until dismissed.
         self.toasts.tick(now);
 
+        // 1b. Collect what the document worker has said and ask for whatever
+        //     the reader now needs drawn. On the tick rather than in a view
+        //     pass: a page render must not happen inside a draw.
+        self.pump_reader();
+
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
         //     Return would then jump back to a slide nobody can see.
@@ -3628,8 +3636,252 @@ impl App {
         // Slide 7 of one deck has nothing to do with slide 7 of another, so
         // opening a document starts with a clean sheet.
         self.ink.clear_all(&mut self.annotations);
+        self.open_for_reading(&path);
         let actions = self.documents.open_initial(self.now);
         self.run_document_actions(actions)
+    }
+
+    /// Open the same file for the reader: a document worker of its own,
+    /// holding one open PDF it can annotate (§5.1, §6).
+    ///
+    /// Separate from the render workers on purpose. Those hold the document
+    /// read-only for the projector and are interchangeable; this one is the
+    /// single execution context that owns the mutations, and a frame it draws
+    /// contains the commit that was just made (A7).
+    ///
+    /// A failure here is not a failure to open the deck: presentation mode
+    /// works whether or not document mode does, so the reader stays closed and
+    /// says why rather than taking the presentation down with it.
+    fn open_for_reading(&mut self, path: &std::path::Path) {
+        self.reader.closed();
+        self.reader_link = None;
+        match crate::reader_link::ReaderLink::open(path) {
+            Ok(mut link) => {
+                // Ask for the shape of it straight away: the reader can lay
+                // out nothing until it knows how many pages there are and how
+                // big they are.
+                link.ask(crate::reader_link::Ask::Describe { pages: 0 });
+                self.reader_link = Some(link);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "document mode is unavailable for this file");
+            }
+        }
+    }
+
+    /// Collect whatever the document worker has said, and ask for whatever the
+    /// reader now needs drawn.
+    ///
+    /// Called from the tick rather than from a view pass: a render and, later,
+    /// a keystroke round trip must not happen inside a draw.
+    fn pump_reader(&mut self) {
+        // Collected first, then handled: the answers are drained from the link
+        // and the link is put down, so handling one can notify, close the
+        // reader, or ask for the next thing without the borrow in the way.
+        let Some(told) = self
+            .reader_link
+            .as_mut()
+            .map(crate::reader_link::ReaderLink::collect)
+        else {
+            return;
+        };
+        for told in told {
+            match told {
+                crate::reader_link::Told::Described { info, geometry } => {
+                    self.reader
+                        .opened(geometry, info.level, info.warnings.clone());
+                    // Every warning is said once, before the first edit, which
+                    // is what A9 requires of the signature one in particular.
+                    for warning in &info.warnings {
+                        self.notify(warning.message().to_string());
+                    }
+                }
+                crate::reader_link::Told::Frame(frame) => {
+                    self.reader.frame_arrived(
+                        frame.page,
+                        frame.width,
+                        frame.height,
+                        frame.revision,
+                        frame.pixels,
+                    );
+                }
+                crate::reader_link::Told::Applied(applied) => {
+                    let kind = self.reader_pending.pop_front().unwrap_or(AppliedKind::Edit);
+                    self.reader.applied(&applied, kind);
+                }
+                crate::reader_link::Told::Saved(saved) => {
+                    self.notify(format!("Saved {}", saved.path.display()));
+                }
+                crate::reader_link::Told::Failed { message, fatal } => {
+                    // A refusal is reported and the reader carries on; a lost
+                    // worker closes document mode, because nothing more will
+                    // be answered and a mutation in flight must not be
+                    // assumed committed (§11.5).
+                    self.notify(message);
+                    if fatal {
+                        self.reader.closed();
+                        self.reader_link = None;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // How big the page surface actually is, which is what a fit is fitted
+        // to. Taken from the layout rather than reported by the view: a view
+        // pass draws, and asking it to send a message about its own size is
+        // how a layout loop starts.
+        if let Some(cell) = self.page_surface_size() {
+            self.reader.set_cell(cell.0, cell.1);
+        }
+
+        // Whatever is on screen and out of date. Bounded by the window: a
+        // thousand-page document asks for the two or three pages in front of
+        // the reader and nothing else.
+        let scale = self.presenter_scale_factor();
+        let revision = self.reader.revision();
+        let wanted = self.reader.renders_wanted(scale);
+        let mut abandoned = Vec::new();
+        if let Some(link) = self.reader_link.as_mut() {
+            for (page, width, height) in wanted {
+                let sent = link.ask(crate::reader_link::Ask::Render(
+                    pulpit_render::document::protocol::DocumentRenderRequest {
+                        page,
+                        width,
+                        height,
+                        expected_revision: revision,
+                    },
+                ));
+                if !sent {
+                    abandoned.push(page);
+                }
+            }
+        } else {
+            abandoned.extend(wanted.into_iter().map(|(page, _, _)| page));
+        }
+        // Nothing took those requests, so nothing will answer them. Leaving
+        // the pages marked in flight would leave them blank forever.
+        for page in abandoned {
+            self.reader.render_abandoned(page);
+        }
+    }
+
+    /// The inside of the page-surface cell in the mounted layout, if there is
+    /// one.
+    ///
+    /// The layout tree already knows: it is the same computation the renderer
+    /// does to draw the cell, run here so the reader can fit a page to a cell
+    /// whose size the view never has to report back.
+    fn page_surface_size(&self) -> Option<(f32, f32)> {
+        let frame = crate::layout::Frame::new(
+            0.0,
+            0.0,
+            self.presenter_size.width,
+            self.presenter_size.height,
+        );
+        let (placements, _) = self.active_layout.compute(frame, true);
+        let cell = self.active_layout.cells().into_iter().find(|cell| {
+            cell.widget.as_ref().map(|widget| widget.kind())
+                == Some(crate::widgets::WidgetKind::DocumentPage)
+        })?;
+        let placed = placements
+            .iter()
+            .find(|placement| placement.id == cell.id)?
+            .frame;
+        Some((
+            (placed.width - cell.padding * 2.0).max(0.0),
+            (placed.height - cell.padding * 2.0).max(0.0),
+        ))
+    }
+
+    /// Something the reader's widgets asked for.
+    ///
+    /// The split is the one §5.3 draws: the viewport belongs to the session
+    /// and is answered here and now, and anything that changes the document
+    /// belongs to the worker and is posted to it. Nothing is applied locally
+    /// on the way — a mark that has not been committed must not be drawn as
+    /// though it had been (A1, §9.2).
+    fn on_read_command(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
+        use crate::widgets::event::ReadCommand;
+
+        match &command {
+            ReadCommand::Undo | ReadCommand::Redo => {
+                let redoing = matches!(command, ReadCommand::Redo);
+                let operation = if redoing {
+                    self.reader.redo_operation()
+                } else {
+                    self.reader.undo_operation()
+                };
+                let Some(operation) = operation else {
+                    return Task::none();
+                };
+                // An undo is itself a mutation and takes the same optimistic
+                // revision check as any other (§6.2).
+                let expected = self.reader.revision();
+                self.reader_pending.push_back(if redoing {
+                    AppliedKind::Redo
+                } else {
+                    AppliedKind::Undo
+                });
+                if let Some(link) = self.reader_link.as_mut() {
+                    link.ask(crate::reader_link::Ask::Undo {
+                        expected_revision: expected,
+                        operation,
+                    });
+                } else {
+                    self.reader_pending.pop_back();
+                }
+                Task::none()
+            }
+            ReadCommand::SaveAs => {
+                // Save As, always: the source is never a destination (A6), so
+                // there is no "Save" that could quietly become one.
+                Task::none()
+            }
+            _ => {
+                let _needs_render = self.reader.apply(&command);
+                Task::none()
+            }
+        }
+    }
+
+    /// Post one atomic user action to the document worker.
+    ///
+    /// One transaction is one revision and one undo entry, whatever it
+    /// contains (§9.1) — an eraser sweep that took eleven marks included.
+    #[allow(dead_code)] // the page-gesture path calls this; see §14.3
+    fn commit_to_document(
+        &mut self,
+        transaction: pulpit_render::document::DocumentTransaction,
+    ) -> bool {
+        if transaction.is_empty() {
+            return false;
+        }
+        let expected = self.reader.revision();
+        self.reader_pending.push_back(AppliedKind::Edit);
+        match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::Apply {
+                expected_revision: expected,
+                transaction,
+            }),
+            None => {
+                self.reader_pending.pop_back();
+                false
+            }
+        }
+    }
+
+    /// The scale a rendered page is drawn at, so a frame is made at the
+    /// resolution it is shown at rather than upscaled.
+    fn presenter_scale_factor(&self) -> f32 {
+        // The presenter window's own scale, which the application already
+        // tracks for slide frames. A page drawn at logical size on a 2×
+        // display is soft, and a reader looks at one for an hour.
+        if self.presenter_scale.is_finite() && self.presenter_scale > 0.0 {
+            self.presenter_scale
+        } else {
+            1.0
+        }
     }
 
     /// Reconcile displays and perform the resulting actions.

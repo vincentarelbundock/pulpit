@@ -9,6 +9,8 @@
 //! answers the worker last gave, and turns a [`ReadCommand`] into a new
 //! viewport — which is why it is testable without a window or a PDF.
 
+use std::collections::{HashMap, HashSet};
+
 use pulpit_core::annotation::AnnotationTool;
 use pulpit_core::page::{PageGeometry, PageIndex};
 use pulpit_render::document::{CompatibilityLevel, DocumentRevision, DocumentWarning, FormField};
@@ -16,6 +18,18 @@ use pulpit_render::document::{CompatibilityLevel, DocumentRevision, DocumentWarn
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
 use crate::widgets::document::model::{Column, ReaderControls, Zoom};
 use crate::widgets::event::ReadCommand;
+
+/// Which stack an applied transaction's undo operation belongs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppliedKind {
+    /// An ordinary edit. Its inverse can be undone, and whatever had been
+    /// undone before is no longer reachable.
+    Edit,
+    /// An undo. Its inverse redoes the thing that was undone.
+    Undo,
+    /// A redo, whose inverse undoes it again.
+    Redo,
+}
 
 /// What the reader is looking at.
 #[derive(Debug, Default)]
@@ -44,6 +58,37 @@ pub struct ReaderSession {
     /// history controls. The operations themselves live in the worker.
     undo_depth: usize,
     redo_depth: usize,
+    /// The pages that have been drawn, by page and by the width they were
+    /// drawn at.
+    ///
+    /// Keyed by width because a frame rendered for a narrower column is the
+    /// wrong picture for a wider one — sharp at the size it was made and soft
+    /// at any other. A frame at the wrong width is still shown while the right
+    /// one is rendered, because a blank sheet is worse than a soft one.
+    frames: HashMap<PageIndex, RenderedPage>,
+    /// Renders that have been asked for and not yet answered, so the same page
+    /// is not asked for again on every tick while the first answer is in
+    /// flight.
+    in_flight: HashSet<PageIndex>,
+    /// The undo operations the worker handed back, newest last.
+    ///
+    /// Held here rather than in the worker because the worker answers one
+    /// request at a time and has no opinion about history; this is the stack
+    /// the two history controls read, and it is the same stack for annotation
+    /// and field edits, in user action order (§8.6).
+    undo_stack: Vec<pulpit_render::document::DocumentUndo>,
+    redo_stack: Vec<pulpit_render::document::DocumentUndo>,
+}
+
+/// One page as it was last drawn.
+#[derive(Debug, Clone)]
+struct RenderedPage {
+    handle: iced::widget::image::Handle,
+    /// The width it was drawn at, in physical pixels.
+    width: u32,
+    /// The revision it contains. A frame older than the document is shown
+    /// until a newer one arrives, and never painted over a newer one (A7).
+    revision: DocumentRevision,
 }
 
 // The reader session is complete; the parts of it the application has not
@@ -114,13 +159,111 @@ impl ReaderSession {
         self.fields = fields;
     }
 
-    /// The worker applied something. The revision is what a frame is matched
-    /// against (A7), and the depths are what the two history controls read.
-    pub fn applied(&mut self, revision: DocumentRevision, undo_depth: usize, redo_depth: usize) {
-        self.revision = revision;
-        self.undo_depth = undo_depth;
-        self.redo_depth = redo_depth;
+    /// The worker applied something.
+    ///
+    /// `redoing` says which stack the operation it handed back belongs on: an
+    /// ordinary edit pushes onto undo and clears the redo stack, because the
+    /// future the user had taken back is no longer reachable from where they
+    /// now are; an undo pushes onto redo, and a redo back onto undo.
+    pub fn applied(&mut self, applied: &pulpit_render::document::Applied, kind: AppliedKind) {
+        self.revision = applied.document_revision;
         self.dirty = true;
+        match kind {
+            AppliedKind::Edit => {
+                self.undo_stack.push(applied.undo.clone());
+                self.redo_stack.clear();
+            }
+            AppliedKind::Undo => self.redo_stack.push(applied.undo.clone()),
+            AppliedKind::Redo => self.undo_stack.push(applied.undo.clone()),
+        }
+        self.undo_depth = self.undo_stack.len();
+        self.redo_depth = self.redo_stack.len();
+
+        // Every page the transaction touched is out of date. Dropping the
+        // frames rather than repainting them here is what makes A7 hold: the
+        // page keeps its old picture until one carrying the new revision
+        // arrives, and never shows a half-drawn state in between.
+        for page in &applied.dirty_pages {
+            self.in_flight.remove(page);
+        }
+    }
+
+    /// The operation that undoes the last edit, if there is one.
+    pub fn undo_operation(&mut self) -> Option<pulpit_render::document::DocumentUndo> {
+        self.undo_stack.pop()
+    }
+
+    /// …and the one that redoes it.
+    pub fn redo_operation(&mut self) -> Option<pulpit_render::document::DocumentUndo> {
+        self.redo_stack.pop()
+    }
+
+    /// A frame arrived. Ignored when it is older than one already held, so a
+    /// late answer cannot repaint a page with a picture from before the last
+    /// edit (A7).
+    pub fn frame_arrived(
+        &mut self,
+        page: PageIndex,
+        width: u32,
+        height: u32,
+        revision: DocumentRevision,
+        pixels: Vec<u8>,
+    ) {
+        self.in_flight.remove(&page);
+        if let Some(existing) = self.frames.get(&page) {
+            if existing.revision > revision {
+                return;
+            }
+        }
+        self.frames.insert(
+            page,
+            RenderedPage {
+                handle: iced::widget::image::Handle::from_rgba(width, height, pixels),
+                width,
+                revision,
+            },
+        );
+    }
+
+    /// The pages in the window that need drawing, at the size to draw them.
+    ///
+    /// A page is asked for when there is no frame for it, when the frame it
+    /// has was drawn at a different width, or when the document has moved on
+    /// since the frame was made. Nothing is asked for twice while an answer is
+    /// in flight, which is what stops a tick loop from queueing one render per
+    /// frame for the same page.
+    pub fn renders_wanted(&mut self, scale_factor: f32) -> Vec<(PageIndex, u32, u32)> {
+        if !self.open {
+            return Vec::new();
+        }
+        let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        let mut wanted = Vec::new();
+        for placed in self.column.visible(self.controls.offset, self.cell.1) {
+            let width = (placed.width * scale).round().max(1.0) as u32;
+            let height = (placed.height * scale).round().max(1.0) as u32;
+            if self.in_flight.contains(&placed.page) {
+                continue;
+            }
+            let current = self.frames.get(&placed.page);
+            let stale = match current {
+                None => true,
+                Some(frame) => frame.width != width || frame.revision < self.revision,
+            };
+            if stale {
+                self.in_flight.insert(placed.page);
+                wanted.push((placed.page, width, height));
+            }
+        }
+        wanted
+    }
+
+    /// Forget a render that was asked for and will not be answered.
+    pub fn render_abandoned(&mut self, page: PageIndex) {
+        self.in_flight.remove(&page);
     }
 
     /// The page surface was drawn at this size. Recomputes the column, because
@@ -257,11 +400,16 @@ impl ReaderSession {
                 .visible(self.controls.offset, self.cell.1)
                 .into_iter()
                 .map(|placed| ReaderPage {
+                    // Whatever frame this page has, even one drawn at another
+                    // width or before the last edit: it is replaced when a
+                    // newer one arrives (A7). Until the first one does, the
+                    // sheet is drawn blank at its full size, so the column
+                    // does not move under the reader when it lands.
+                    frame: self
+                        .frames
+                        .get(&placed.page)
+                        .map(|frame| frame.handle.clone()),
                     placed,
-                    // Frames arrive from the worker; until one does, the sheet
-                    // is drawn blank at its full size so the column does not
-                    // move when it lands.
-                    frame: None,
                 })
                 .collect()
         } else {
@@ -289,6 +437,22 @@ impl ReaderSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal `Applied`, for the tests that only care what the session
+    /// does with one.
+    fn applied(revision: DocumentRevision) -> pulpit_render::document::Applied {
+        pulpit_render::document::Applied {
+            effects: Vec::new(),
+            document_revision: revision,
+            dirty_region: None,
+            dirty_pages: vec![PageIndex(0)],
+            undo: pulpit_render::document::DocumentUndo {
+                operations: Vec::new(),
+                restores: DocumentRevision(revision.0.saturating_sub(1)),
+                label: "Add Ink".into(),
+            },
+        }
+    }
 
     fn open(pages: usize) -> ReaderSession {
         let mut session = ReaderSession::new();
@@ -326,7 +490,7 @@ mod tests {
     fn opening_a_second_document_forgets_the_first() {
         let mut session = open(5);
         session.apply(&ReadCommand::GoToPage(PageIndex(4)));
-        session.applied(DocumentRevision(3), 1, 0);
+        session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
         session.opened(
             vec![PageGeometry::upright(612.0, 792.0); 2],
             CompatibilityLevel::AnnotateOnly,
@@ -495,11 +659,135 @@ mod tests {
         let mut session = open(2);
         let facet = session.facet(true);
         assert!(!facet.can_undo && !facet.can_redo);
-        session.applied(DocumentRevision(1), 1, 0);
+        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
         let facet = session.facet(true);
         assert!(facet.can_undo && !facet.can_redo);
         assert!(facet.dirty);
         assert_eq!(session.revision(), DocumentRevision(1));
+    }
+
+    #[test]
+    fn only_the_visible_pages_are_asked_for_and_only_once() {
+        let mut session = open(20);
+        let wanted = session.renders_wanted(1.0);
+        assert!(!wanted.is_empty());
+        assert!(
+            wanted.len() <= 3,
+            "a twenty-page document asked for {} renders",
+            wanted.len()
+        );
+        assert_eq!(wanted[0].0, PageIndex(0));
+        // The width asked for is the width the column placed the page at.
+        assert_eq!(wanted[0].1, 612);
+
+        // Asking again while the first answers are in flight asks for nothing:
+        // a tick loop must not queue one render per frame for one page.
+        assert!(session.renders_wanted(1.0).is_empty());
+    }
+
+    #[test]
+    fn a_page_is_asked_for_again_when_it_is_drawn_at_a_different_size() {
+        let mut session = open(3);
+        let wanted = session.renders_wanted(1.0);
+        let (page, width, height) = wanted[0];
+        session.frame_arrived(page, width, height, DocumentRevision::INITIAL, vec![0; 4]);
+        assert!(session.renders_wanted(1.0).is_empty(), "nothing changed");
+
+        // A wider cell is a different picture, not the same one stretched.
+        session.set_cell(1_224.0, 400.0);
+        let again = session.renders_wanted(1.0);
+        assert!(again.iter().any(|(p, _, _)| *p == page));
+        assert!(again[0].1 > width);
+    }
+
+    #[test]
+    fn a_frame_older_than_one_already_held_is_not_painted_over_it() {
+        // A7, at the point a late answer arrives: a frame from before the last
+        // edit must not replace the one that contains it.
+        let mut session = open(2);
+        let (page, width, height) = session.renders_wanted(1.0)[0];
+        session.frame_arrived(page, width, height, DocumentRevision(3), vec![1; 4]);
+        session.frame_arrived(page, width, height, DocumentRevision(1), vec![2; 4]);
+        let facet = session.facet(true);
+        let drawn = facet
+            .visible
+            .iter()
+            .find(|candidate| candidate.placed.page == page)
+            .unwrap();
+        assert!(drawn.frame.is_some());
+        // The newer frame is still the one held: asking again wants nothing,
+        // because the held revision is not behind the document's.
+        assert!(session.renders_wanted(1.0).is_empty());
+    }
+
+    #[test]
+    fn an_edit_makes_the_pages_it_touched_stale() {
+        let mut session = open(3);
+        let (page, width, height) = session.renders_wanted(1.0)[0];
+        session.frame_arrived(page, width, height, DocumentRevision::INITIAL, vec![0; 4]);
+        assert!(session.renders_wanted(1.0).is_empty());
+
+        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        let wanted = session.renders_wanted(1.0);
+        assert!(
+            wanted.iter().any(|(p, _, _)| *p == page),
+            "the edited page was not re-rendered"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_move_operations_between_the_two_stacks() {
+        let mut session = open(2);
+        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        assert!(session.facet(true).can_undo);
+        assert!(!session.facet(true).can_redo);
+
+        let operation = session.undo_operation().expect("something to undo");
+        session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
+        assert!(!session.facet(true).can_undo);
+        assert!(session.facet(true).can_redo);
+        let _ = operation;
+
+        session.redo_operation().expect("something to redo");
+        session.applied(&applied(DocumentRevision(3)), AppliedKind::Redo);
+        assert!(session.facet(true).can_undo);
+        assert!(!session.facet(true).can_redo);
+    }
+
+    #[test]
+    fn a_new_edit_makes_the_taken_back_future_unreachable() {
+        // Standard undo semantics, stated because getting it wrong leaves a
+        // redo control that puts back an edit from a history the user left.
+        let mut session = open(2);
+        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        session.undo_operation();
+        session.applied(&applied(DocumentRevision(2)), AppliedKind::Undo);
+        assert!(session.facet(true).can_redo);
+
+        session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
+        assert!(!session.facet(true).can_redo);
+        assert!(session.facet(true).can_undo);
+    }
+
+    #[test]
+    fn a_closed_reader_asks_for_nothing() {
+        let mut session = ReaderSession::new();
+        assert!(session.renders_wanted(1.0).is_empty());
+    }
+
+    #[test]
+    fn a_render_that_will_never_be_answered_is_forgotten_rather_than_leaked() {
+        let mut session = open(3);
+        let (page, _, _) = session.renders_wanted(1.0)[0];
+        assert!(session.renders_wanted(1.0).is_empty());
+        session.render_abandoned(page);
+        assert!(
+            session
+                .renders_wanted(1.0)
+                .iter()
+                .any(|(p, _, _)| *p == page),
+            "an abandoned render left the page unaskable"
+        );
     }
 
     #[test]

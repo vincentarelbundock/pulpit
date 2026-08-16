@@ -20,6 +20,7 @@ mod media;
 mod panel;
 mod platform;
 mod reader;
+mod reader_link;
 mod residency;
 mod session;
 mod settings;
