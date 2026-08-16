@@ -3754,6 +3754,9 @@ impl App {
                     let kind = self.reader_pending.pop_front().unwrap_or(AppliedKind::Edit);
                     self.reader.applied(&applied, kind);
                 }
+                crate::reader_link::Told::Annotations { page, summaries } => {
+                    self.reader.set_annotations(page, &summaries);
+                }
                 crate::reader_link::Told::Selection { result, finalising } => {
                     if let Some(transaction) =
                         self.reader
@@ -3800,6 +3803,16 @@ impl App {
         // Whatever is on screen and out of date. Bounded by the window: a
         // thousand-page document asks for the two or three pages in front of
         // the reader and nothing else.
+        // What is on the pages in the window, which is what the eraser and
+        // the selection tool hit-test against. Asked for once per page and
+        // dropped again the moment that page is edited.
+        let pages = self.reader.annotations_wanted();
+        if let Some(link) = self.reader_link.as_mut() {
+            for page in pages {
+                link.ask(crate::reader_link::Ask::ListAnnotations { page });
+            }
+        }
+
         let scale = self.presenter_scale_factor();
         let revision = self.reader.revision();
         let wanted = self.reader.renders_wanted(scale);

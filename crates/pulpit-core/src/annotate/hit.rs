@@ -112,22 +112,47 @@ pub fn topmost(
         .find(|candidate| candidate.contains(point, tolerance))
 }
 
-/// The annotations one eraser step takes: the topmost editable one crossed by
-/// the pointer's travel (§8.3).
+/// The annotations one eraser step takes (§8.3).
 ///
-/// One per step, not all of them: an eraser that took the whole stack under
-/// one flick would remove marks the user could not see.
+/// At every point along the pointer's travel, the *topmost* editable
+/// annotation and no other. Those are two rules doing two different jobs, and
+/// both are needed:
+///
+/// * topmost *at a point*, so an eraser passing over a stack of overlapping
+///   marks takes the one on top rather than everything beneath it, which the
+///   user cannot see and did not aim at;
+/// * *along the travel*, so a flick that crosses three marks in the gap
+///   between two pointer samples takes all three rather than whichever
+///   happened to be under the last one.
+///
+/// The result is in the order they were met, without repeats.
 pub fn erasable(
     candidates: &[AnnotationHit],
     from: PagePoint,
     to: PagePoint,
     tolerance: f32,
-) -> Option<&AnnotationHit> {
-    candidates
-        .iter()
-        .rev()
-        .filter(|candidate| candidate.editable)
-        .find(|candidate| candidate.crossed_by(from, to, tolerance))
+) -> Vec<&AnnotationHit> {
+    let distance = from.distance_to(to);
+    let step = tolerance.max(1.0) / 2.0;
+    let steps = ((distance / step).ceil() as usize).clamp(1, 512);
+
+    let mut taken: Vec<&AnnotationHit> = Vec::new();
+    for index in 0..=steps {
+        let t = index as f32 / steps as f32;
+        let at = PagePoint::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+        let Some(hit) = candidates
+            .iter()
+            .rev()
+            .filter(|candidate| candidate.editable)
+            .find(|candidate| candidate.contains(at, tolerance))
+        else {
+            continue;
+        };
+        if !taken.iter().any(|already| already.id == hit.id) {
+            taken.push(hit);
+        }
+    }
+    taken
 }
 
 fn distance_to_segment(point: PagePoint, start: PagePoint, end: PagePoint) -> f32 {
@@ -220,7 +245,11 @@ mod tests {
             PagePoint::new(100.0, 60.0),
             3.0,
         );
-        assert_eq!(taken.map(|hit| hit.id.clone()), Some(expected));
+        assert_eq!(
+            taken.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>(),
+            vec![expected],
+            "the eraser took something it may not edit"
+        );
     }
 
     #[test]
@@ -233,20 +262,75 @@ mod tests {
         let stack = vec![vertical];
         // Two samples 120 points apart, one on each side of the stroke: only a
         // swept test finds it.
-        assert!(erasable(
-            &stack,
-            PagePoint::new(40.0, 100.0),
-            PagePoint::new(160.0, 100.0),
-            3.0
-        )
-        .is_some());
+        assert_eq!(
+            erasable(
+                &stack,
+                PagePoint::new(40.0, 100.0),
+                PagePoint::new(160.0, 100.0),
+                3.0
+            )
+            .len(),
+            1
+        );
         assert!(erasable(
             &stack,
             PagePoint::new(40.0, 400.0),
             PagePoint::new(160.0, 400.0),
             3.0
         )
-        .is_none());
+        .is_empty());
+    }
+
+    #[test]
+    fn a_flick_across_several_marks_takes_all_of_them_in_the_order_it_met_them() {
+        let mut generator = IdGenerator::new(9);
+        let marks: Vec<AnnotationHit> = [100.0f32, 200.0, 300.0]
+            .into_iter()
+            .map(|y| {
+                stroke(
+                    generator.next_id(),
+                    vec![PagePoint::new(0.0, y), PagePoint::new(400.0, y)],
+                )
+            })
+            .collect();
+        let expected: Vec<AnnotationId> = marks.iter().map(|mark| mark.id.clone()).collect();
+
+        // One movement, crossing all three: a pointer sampled at 60 Hz does
+        // exactly this when the hand moves quickly.
+        let taken: Vec<AnnotationId> = erasable(
+            &marks,
+            PagePoint::new(200.0, 50.0),
+            PagePoint::new(200.0, 350.0),
+            3.0,
+        )
+        .into_iter()
+        .map(|hit| hit.id.clone())
+        .collect();
+        assert_eq!(taken, expected, "a flick left marks standing");
+    }
+
+    #[test]
+    fn an_eraser_over_a_stack_takes_the_one_on_top_and_not_what_is_under_it() {
+        let mut generator = IdGenerator::new(10);
+        // Three strokes in the same place, painted in order.
+        let stack: Vec<AnnotationHit> = (0..3)
+            .map(|_| {
+                stroke(
+                    generator.next_id(),
+                    vec![PagePoint::new(0.0, 100.0), PagePoint::new(400.0, 100.0)],
+                )
+            })
+            .collect();
+        let top = stack.last().unwrap().id.clone();
+
+        let taken = erasable(
+            &stack,
+            PagePoint::new(180.0, 100.0),
+            PagePoint::new(220.0, 100.0),
+            3.0,
+        );
+        assert_eq!(taken.len(), 1, "the whole stack went at once");
+        assert_eq!(taken[0].id, top, "the mark taken was not the visible one");
     }
 
     #[test]

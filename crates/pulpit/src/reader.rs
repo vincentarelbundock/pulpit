@@ -107,6 +107,12 @@ pub struct ReaderSession {
     /// True between a release that needed a selection resolved and the answer
     /// that resolved it.
     awaiting_selection: bool,
+    /// What is on each page that has been looked at, for hit-testing.
+    ///
+    /// A cache of the document's answer rather than a second store of the
+    /// marks (A1): it holds geometry and identity and nothing else, and it is
+    /// dropped for a page the moment that page is edited.
+    annotations: HashMap<PageIndex, Vec<pulpit_core::annotate::AnnotationHit>>,
     /// Does the document carry an AcroForm at all?
     ///
     /// Separate from whether any fields were listed, because the two differ
@@ -221,14 +227,87 @@ impl ReaderSession {
         // arrives, and never shows a half-drawn state in between.
         for page in &applied.dirty_pages {
             self.in_flight.remove(page);
+            // …and so is what was on it, which is what the eraser hit-tests
+            // against. Keeping a stale list would let a second sweep try to
+            // erase a mark that is already gone.
+            self.annotations.remove(page);
         }
+    }
+
+    /// What is on a page, for hit-testing. Replaced wholesale, because the
+    /// list *is* the document's `/Annots` order and a merge would invent one.
+    pub fn set_annotations(
+        &mut self,
+        page: PageIndex,
+        summaries: &[pulpit_render::document::AnnotationSummary],
+    ) {
+        self.annotations.insert(
+            page,
+            summaries.iter().map(|summary| summary.to_hit()).collect(),
+        );
+    }
+
+    /// The pages whose annotations are not known and are worth asking for:
+    /// the ones in the window.
+    pub fn annotations_wanted(&mut self) -> Vec<PageIndex> {
+        if !self.open {
+            return Vec::new();
+        }
+        self.column
+            .visible(self.controls.offset, self.cell.1)
+            .into_iter()
+            .map(|placed| placed.page)
+            .filter(|page| !self.annotations.contains_key(page))
+            .collect()
     }
 
     /// The pointer moved over a page, at a canonical page point (A4).
     pub fn pointer_moved(&mut self, page: PageIndex, x: f32, y: f32) {
         let at = PagePoint::new(x, y);
+        let from = self
+            .cursor
+            .filter(|(was, _)| *was == page)
+            .map(|(_, at)| at);
         self.cursor = Some((page, at));
         self.interaction.extend(at);
+
+        // An eraser sweep takes what it passes over, and what it passed over
+        // is the segment between two samples rather than the samples
+        // themselves: at speed those are tens of points apart, and testing
+        // only the positions leaves marks standing in the gaps (§8.3).
+        if matches!(
+            self.interaction.gesture(),
+            Some(pulpit_core::annotate::Gesture::Erasing { .. })
+        ) {
+            let tolerance = self.eraser_tolerance();
+            let from = from.unwrap_or(at);
+            if let Some(candidates) = self.annotations.get(&page) {
+                let taken: Vec<_> =
+                    pulpit_core::annotate::hit::erasable(candidates, from, at, tolerance)
+                        .into_iter()
+                        .map(|hit| hit.id.clone())
+                        .collect();
+                for id in taken {
+                    self.interaction.touch_for_erase(id);
+                }
+            }
+        }
+    }
+
+    /// How far from a mark the eraser still takes it, in page points.
+    ///
+    /// Scaled by the zoom, because the eraser is aimed with a pointer on
+    /// screen: at a small zoom a fixed page-point tolerance is a hair's
+    /// breadth on the display, and at a large one it swallows neighbouring
+    /// marks.
+    fn eraser_tolerance(&self) -> f32 {
+        /// Roughly a fingertip's worth of slack on screen.
+        const ON_SCREEN_POINTS: f32 = 6.0;
+        if self.scale > 0.0 {
+            ON_SCREEN_POINTS / self.scale
+        } else {
+            ON_SCREEN_POINTS
+        }
     }
 
     /// The pointer went down on the page it was last over.
@@ -1061,6 +1140,85 @@ mod tests {
         assert!(
             session.pending_selection().is_none(),
             "ink selects no text and must not query for it"
+        );
+    }
+
+    /// A summary of one ink stroke on page zero, for the eraser tests.
+    fn stroke_at(y: f32) -> pulpit_render::document::AnnotationSummary {
+        use pulpit_core::page::{PagePoint, PageRect};
+        pulpit_render::document::AnnotationSummary {
+            id: pulpit_core::annotate::IdGenerator::new(y as u64).next_id(),
+            page: PageIndex(0),
+            kind: pulpit_core::annotate::AnnotationKind::Ink,
+            bounds: PageRect::new(50.0, y - 2.0, 400.0, y + 2.0),
+            style: pulpit_core::annotate::MarkStyle::default(),
+            contents: Default::default(),
+            support: pulpit_render::document::AnnotationSupport::Editable,
+            revision: DocumentRevision::INITIAL,
+            path: vec![PagePoint::new(50.0, y), PagePoint::new(400.0, y)],
+            quads: Vec::new(),
+            geometry_elided: false,
+        }
+    }
+
+    #[test]
+    fn an_eraser_sweep_takes_what_it_passes_over_and_commits_once() {
+        let mut session = open(2);
+        let marks = [stroke_at(100.0), stroke_at(300.0)];
+        session.set_annotations(PageIndex(0), &marks);
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
+        session.pointer_moved(PageIndex(0), 200.0, 100.0);
+        assert!(session.pointer_pressed());
+        // Across the first stroke, then across the second.
+        session.pointer_moved(PageIndex(0), 210.0, 300.0);
+
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("a sweep that took marks commits")
+        };
+        assert_eq!(
+            transaction.len(),
+            2,
+            "one sweep, one transaction, both marks"
+        );
+        assert_eq!(transaction.label(), "Erase");
+    }
+
+    #[test]
+    fn an_eraser_sweep_over_empty_page_commits_nothing() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(100.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
+        session.pointer_moved(PageIndex(0), 200.0, 500.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 260.0, 520.0);
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+    }
+
+    #[test]
+    fn a_fast_sweep_does_not_jump_over_a_mark() {
+        // The samples are far apart; only testing the segment between them
+        // finds the stroke that lies across it (§8.3).
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
+        session.pointer_moved(PageIndex(0), 200.0, 60.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 400.0);
+        assert!(matches!(session.pointer_released(), Released::Commit(_)));
+    }
+
+    #[test]
+    fn editing_a_page_drops_what_was_known_about_it() {
+        // A stale hit-test list would let a second sweep try to erase a mark
+        // that is already gone.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(100.0)]);
+        assert!(session.annotations_wanted().is_empty());
+        session.applied(&applied(DocumentRevision(1)), AppliedKind::Edit);
+        assert!(
+            session.annotations_wanted().contains(&PageIndex(0)),
+            "the edited page's marks were not re-read"
         );
     }
 

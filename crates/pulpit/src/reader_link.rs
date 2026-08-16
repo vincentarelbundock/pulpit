@@ -49,6 +49,11 @@ pub enum Ask {
         pages: usize,
     },
     Render(DocumentRenderRequest),
+    /// What is on a page, for hit-testing. The eraser and the selection tool
+    /// need to know what is under the pointer, and only the document does.
+    ListAnnotations {
+        page: pulpit_core::page::PageIndex,
+    },
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -83,6 +88,10 @@ pub enum Told {
         fields: Vec<pulpit_render::document::FormField>,
     },
     Frame(Box<DocumentFrame>),
+    Annotations {
+        page: pulpit_core::page::PageIndex,
+        summaries: Vec<pulpit_render::document::AnnotationSummary>,
+    },
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
@@ -223,6 +232,12 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
         Ask::Render(request) => vec![match session.request(DocumentRequest::Render(request)) {
             Ok(DocumentResponse::Frame(frame)) => Told::Frame(frame),
             other => unexpected(other, "a frame"),
+        }],
+        Ask::ListAnnotations { page } => vec![match session
+            .request(DocumentRequest::ListAnnotations { page })
+        {
+            Ok(DocumentResponse::Annotations(summaries)) => Told::Annotations { page, summaries },
+            other => unexpected(other, "an annotation list"),
         }],
         Ask::SelectText {
             page,
