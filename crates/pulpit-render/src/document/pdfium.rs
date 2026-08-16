@@ -606,6 +606,7 @@ impl<'a> PdfiumDocument<'a> {
     /// Write a draft's content into a freshly created or existing annotation.
     fn write_draft(
         &self,
+        page_handle: FPDF_PAGE,
         annotation: FPDF_ANNOTATION,
         draft: &AnnotationDraft,
         geometry: &PageGeometry,
@@ -645,7 +646,9 @@ impl<'a> PdfiumDocument<'a> {
             AnnotationDraft::Note(note) => {
                 set_string(bindings, annotation, "Contents", &note.text)?;
             }
-            AnnotationDraft::Stamp(stamp) => self.write_stamp(annotation, stamp)?,
+            AnnotationDraft::Stamp(stamp) => {
+                self.write_stamp(page_handle, annotation, stamp, geometry)?
+            }
         }
         // The border width is what a viewer regenerating an appearance uses,
         // so it is written even though pulpit supplies its own `/AP`.
@@ -764,18 +767,154 @@ impl<'a> PdfiumDocument<'a> {
         Ok(())
     }
 
-    fn write_stamp(&self, annotation: FPDF_ANNOTATION, stamp: &StampDraft) -> Result<()> {
+    fn write_stamp(
+        &self,
+        page_handle: FPDF_PAGE,
+        annotation: FPDF_ANNOTATION,
+        stamp: &StampDraft,
+        geometry: &PageGeometry,
+    ) -> Result<()> {
         let bindings = self.backend.bindings();
         // The `/Contents` of a stamp is its description, which is what a
         // screen reader announces; §7.6 says these are called marks and never
         // cryptographic signatures.
         set_string(bindings, annotation, "Contents", stamp.mark.label())?;
-        if let StampMark::Image { .. } = stamp.mark {
-            return Err(DocumentError::Backend(
-                "image stamps are not written by this build".into(),
-            ));
+
+        if let StampMark::Image {
+            pixel_width,
+            pixel_height,
+            rgba,
+        } = &stamp.mark
+        {
+            self.write_stamp_image(
+                page_handle,
+                annotation,
+                Picture {
+                    rect: stamp.rect,
+                    pixel_width: *pixel_width,
+                    pixel_height: *pixel_height,
+                    rgba,
+                },
+                geometry,
+            )?;
         }
         Ok(())
+    }
+
+    /// Put a decoded picture into a `/Stamp` as an image XObject.
+    ///
+    /// The bytes are carried in and embedded; no path to the source file goes
+    /// into the annotation (§7.6, §12). An annotation that pointed at a file
+    /// on disk would either break when the file moved or read a file the
+    /// *document* chose, and neither is something a signature should do.
+    fn write_stamp_image(
+        &self,
+        page_handle: FPDF_PAGE,
+        annotation: FPDF_ANNOTATION,
+        picture: Picture<'_>,
+        geometry: &PageGeometry,
+    ) -> Result<()> {
+        let Picture {
+            rect,
+            pixel_width,
+            pixel_height,
+            rgba,
+        } = picture;
+        let bindings = self.backend.bindings();
+        let document = self
+            .backend
+            .document_handle(self.document)
+            .map_err(to_document_error)?;
+
+        // Bounded before anything is allocated (A8). The draft's own
+        // validation has already checked this; checking again here is the
+        // rule that a value crossing into a C library is checked at the
+        // boundary it crosses.
+        let pixels = u64::from(pixel_width) * u64::from(pixel_height);
+        if pixel_width == 0
+            || pixel_height == 0
+            || pixels > StampMark::MAX_PIXELS
+            || rgba.len() != pixel_width as usize * pixel_height as usize * 4
+        {
+            return Err(DocumentError::Backend("a malformed stamp picture".into()));
+        }
+
+        // PDFium reads BGRA for `FPDFBitmap_BGRA`, and the caller hands over
+        // RGBA, so the channels are swapped into a buffer this function owns
+        // for as long as PDFium is looking at it.
+        let mut bgra = Vec::with_capacity(rgba.len());
+        for chunk in rgba.chunks_exact(4) {
+            bgra.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+        }
+
+        /// `FPDFBitmap_BGRA`.
+        const BGRA: std::os::raw::c_int = 4;
+        let bitmap = unsafe {
+            bindings.FPDFBitmap_CreateEx(
+                pixel_width as i32,
+                pixel_height as i32,
+                BGRA,
+                bgra.as_mut_ptr() as *mut std::ffi::c_void,
+                pixel_width as i32 * 4,
+            )
+        };
+        if bitmap.is_null() {
+            return Err(DocumentError::Backend(
+                "PDFium refused the stamp picture".into(),
+            ));
+        }
+
+        let image = unsafe { bindings.FPDFPageObj_NewImageObj(document) };
+        if image.is_null() {
+            unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+            return Err(DocumentError::Backend(
+                "PDFium refused to make an image object".into(),
+            ));
+        }
+
+        let outcome = (|| {
+            // The page the object will live on: PDFium wants it while the
+            // bitmap is attached, and passing nothing here is what made this
+            // fall over rather than fail.
+            let mut pages = [page_handle];
+            if unsafe { bindings.FPDFImageObj_SetBitmap(pages.as_mut_ptr(), 1, image, bitmap) } == 0
+            {
+                return Err(DocumentError::Backend(
+                    "PDFium refused the stamp's bitmap".into(),
+                ));
+            }
+            // An image object is a unit square until it is told otherwise, so
+            // the matrix is what places and sizes it. In PDF user space, which
+            // is where a page object lives.
+            let rect = geometry.rect_to_user_space(rect);
+            let matrix = FS_MATRIX {
+                a: rect[2] - rect[0],
+                b: 0.0,
+                c: 0.0,
+                d: rect[3] - rect[1],
+                e: rect[0],
+                f: rect[1],
+            };
+            if unsafe { bindings.FPDFPageObj_SetMatrix(image, &matrix) } == 0 {
+                return Err(DocumentError::Backend(
+                    "PDFium refused the stamp's placement".into(),
+                ));
+            }
+            if unsafe { bindings.FPDFAnnot_AppendObject(annotation, image) } == 0 {
+                return Err(DocumentError::Backend(
+                    "PDFium refused to put the picture in the annotation".into(),
+                ));
+            }
+            Ok(())
+        })();
+
+        // The annotation owns the object once it has been appended; before
+        // that it is this function's to destroy.
+        if outcome.is_err() {
+            unsafe { bindings.FPDFPageObj_Destroy(image) };
+        }
+        unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+        outcome
     }
 }
 
@@ -827,6 +966,15 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// A decoded picture and where it goes, so the call that embeds one takes a
+/// subject rather than a list of loose measurements.
+struct Picture<'a> {
+    rect: PageRect,
+    pixel_width: u32,
+    pixel_height: u32,
+    rgba: &'a [u8],
 }
 
 /// Enough of the annotation to put it back, as far as PDFium can be asked.
@@ -944,8 +1092,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
         };
         let bindings = self.backend.bindings();
         let document = self.document;
-        let created = self
-            .backend
+        // All of it inside one loaded page: creating the annotation, writing
+        // it and generating the page's content. A stamp's picture is a page
+        // object and PDFium wants the page it belongs to while it is being
+        // attached, so the handle has to be in scope for the whole of it.
+        self.backend
             .on_page(document, page.get(), |handle| {
                 let annotation = unsafe { bindings.FPDFPage_CreateAnnot(handle, subtype) };
                 if annotation.is_null() {
@@ -953,21 +1104,16 @@ impl DocumentBackend for PdfiumDocument<'_> {
                         "PDFium refused to create the annotation".into(),
                     ));
                 }
-                Ok(annotation)
-            })
-            .map_err(to_document_error)?;
+                let outcome = (|| {
+                    set_string(bindings, annotation, "NM", id.as_str())?;
+                    self.write_draft(handle, annotation, draft, &geometry)
+                })();
+                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                outcome.map_err(|error| PdfError::Render(error.to_string()))?;
 
-        let outcome = (|| {
-            set_string(bindings, created, "NM", id.as_str())?;
-            self.write_draft(created, draft, &geometry)
-        })();
-        unsafe { bindings.FPDFPage_CloseAnnot(created) };
-        outcome?;
-
-        // Content generation is what commits the new annotation's appearance
-        // into the page; without it the mark is in `/Annots` and invisible.
-        self.backend
-            .on_page(document, page.get(), |handle| {
+                // Content generation is what commits the new annotation's
+                // appearance into the page; without it the mark is in
+                // `/Annots` and invisible.
                 unsafe { bindings.FPDFPage_GenerateContent(handle) };
                 Ok(())
             })
@@ -993,7 +1139,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 if annotation.is_null() {
                     return Err(PdfError::Render("the annotation went away".into()));
                 }
-                let outcome = self.write_draft(annotation, draft, &geometry);
+                let outcome = self.write_draft(handle, annotation, draft, &geometry);
                 unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
                 unsafe { bindings.FPDFPage_GenerateContent(handle) };
                 outcome.map_err(|error| PdfError::Render(error.to_string()))

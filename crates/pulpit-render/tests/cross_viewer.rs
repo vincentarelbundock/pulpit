@@ -241,6 +241,91 @@ fn a_highlights_quads_land_on_the_text_another_reader_extracts() {
     }
 }
 
+/// §7.6: a visible signature is a picture in a `/Stamp`, with the bytes
+/// embedded and no path to a source file left in the annotation.
+#[test]
+fn a_picture_stamp_is_embedded_and_visible_to_another_renderer() {
+    let Some(mut guard) = binding() else { return };
+    let engines = Engines::detect();
+    if !engines.can_render("the picture stamp check") {
+        return;
+    }
+    let directory = temp_dir("stamp");
+    let path = source(&directory);
+    let clean = directory.join("clean.pdf");
+    {
+        let engine = PdfiumDocument::open(&mut guard, &path).unwrap();
+        let mut document = PdfDocument::new(Box::new(engine), 2);
+        document.save_as(&clean, SaveOptions::verified()).unwrap();
+    }
+
+    // A solid black square: a picture whose presence is unmistakable when the
+    // question is whether another renderer drew it at all.
+    let (pixel_width, pixel_height) = (32u32, 32u32);
+    let rgba = vec![0u8; pixel_width as usize * pixel_height as usize * 4]
+        .chunks(4)
+        .flat_map(|_| [0u8, 0, 0, 255])
+        .collect::<Vec<u8>>();
+
+    let destination = directory.join("stamped.pdf");
+    {
+        let engine = PdfiumDocument::open(&mut guard, &path).unwrap();
+        let mut document = PdfDocument::new(Box::new(engine), 3);
+        let transaction = DocumentTransaction::from_annotations([AnnotationCommand::Create(
+            AnnotationDraft::Stamp(pulpit_core::annotate::StampDraft {
+                page: PageIndex(0),
+                rect: pulpit_core::page::PageRect::new(60.0, 60.0, 180.0, 180.0),
+                mark: pulpit_core::annotate::StampMark::Image {
+                    pixel_width,
+                    pixel_height,
+                    rgba,
+                },
+                style: MarkStyle::default(),
+            }),
+        )]);
+        document
+            .apply(DocumentRevision::INITIAL, transaction)
+            .expect("the picture stamp commits");
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .unwrap();
+    }
+
+    if let Some(objects) = engines.objects(&destination) {
+        assert!(
+            objects
+                .iter()
+                .any(|line| line.contains("/Subtype") && line.contains("/Stamp")),
+            "the mark is not a /Stamp to another reader"
+        );
+        // The picture is *in* the file. A stamp naming a path on disk would
+        // break when the file moved and would read whatever the document
+        // pointed at (§12).
+        assert!(
+            objects
+                .iter()
+                .any(|line| line.contains("/Subtype") && line.contains("/Image")),
+            "no image XObject: the picture was not embedded"
+        );
+        assert!(
+            !objects
+                .iter()
+                .any(|line| line.contains("/F ") && line.contains("/FileSpec")),
+            "the stamp refers to a file outside the document"
+        );
+    }
+
+    let before = engines.render(&clean, 0, 72).expect("a rendered page");
+    let after = engines
+        .render(&destination, 0, 72)
+        .expect("a rendered stamped page");
+    let added = after.dark_total(200).saturating_sub(before.dark_total(200));
+    assert!(
+        added > 100,
+        "another renderer drew {added} more dark pixels; the picture is not visible"
+    );
+}
+
 #[test]
 fn saving_and_reopening_does_not_shift_geometry_on_a_rotated_page() {
     // §13.4's rotation check, done where it can be seen: the mark is drawn on
