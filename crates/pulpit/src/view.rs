@@ -46,7 +46,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     };
 
     // A ringing cue washes the presenter window, under everything else so it
-    // tints the page rather than covering any control â including the Snooze
+    // tints the page rather than covering any control — including the Snooze
     // and Dismiss buttons that answer it. Never on the audience window: the
     // room must not learn that the speaker is out of time.
     // Running past the target washes it the same way, from the same helper:
@@ -96,10 +96,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if let Some(journal) = app.reader_recovery.as_ref() {
         page = stack![page, restore_edits_dialog(journal)].into();
     }
-    if let Some(composing) = app.composing_mark.as_ref() {
-        page = stack![page, compose_mark_dialog(composing)].into();
-    }
-    // Its own renderer, its own atlas, its own residency â exactly as the
+    // Its own renderer, its own atlas, its own residency — exactly as the
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
     // this a panel draws nothing on the pass a new frame first reaches it.
@@ -121,7 +118,7 @@ fn audience(app: &App) -> Element<'_, Message> {
         frame.is_some() && app.annotations.audience_visible && !app.annotations.is_empty();
     // The audience sees the same overlay frames the presenter does: one
     // authoritative session feeds both windows, which is the whole point of
-    // the media architecture. What it never sees is the chrome â no focus
+    // the media architecture. What it never sees is the chrome — no focus
     // rings, no warnings, no runtime names.
     let overlays = app.audience_overlays();
     let content: Element<'_, Message> = match frame {
@@ -168,8 +165,8 @@ fn audience(app: &App) -> Element<'_, Message> {
                     .unwrap_or(Region::FULL);
                 // Always a stack, empty or not, for the reason given in
                 // `widgets::slides::view::composite`: the projector's picture
-                // must not change depth in the widget tree â and so lose a
-                // frame â because a stroke was drawn or rubbed out.
+                // must not change depth in the widget tree — and so lose a
+                // frame — because a stroke was drawn or rubbed out.
                 match crate::widgets::annotations::view::marks(
                     app.annotations_snapshot(),
                     app.audience_marks_cache(),
@@ -226,16 +223,16 @@ fn presenter(app: &App) -> Element<'_, Message> {
     );
     let body = crate::layout_renderer::layout(&app.active_layout, &context, interaction);
 
-    // Window lifecycle and the menu get a strip of their own. Floating them
+    // Anything the layout does not carry gets a strip of its own. Floating it
     // over the layout would cover whatever the presenter put top-left.
-    let mut page: Element<'_, Message> = column![
-        presenter_toolbar(app),
-        container(body)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(gap::S)
-    ]
-    .into();
+    let framed = container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(gap::S);
+    let mut page: Element<'_, Message> = match presenter_toolbar(app) {
+        Some(toolbar) => column![toolbar, framed].into(),
+        None => framed.into(),
+    };
 
     if app.menu_open {
         page = stack![page, menu(app)].into();
@@ -281,7 +278,7 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
     // slider produces a new slide every few milliseconds; asking the renderer
     // for each one would queue work faster than it could be done, and arrive
     // after the presenter had moved on. The warmed picture is already there,
-    // and shown a little larger than it was rendered â slightly soft, and
+    // and shown a little larger than it was rendered — slightly soft, and
     // instant, which is the right trade for something you look at for a
     // second while your hand is moving.
     let Some(handle) = app.thumbnails.get(slide) else {
@@ -291,14 +288,14 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
     let label = format!("{} / {}", slide + 1, app.state.slide_count());
     let aspect = app.slide_aspect();
     // The pane is found now; where it lands is a question of pixels, and the
-    // pixels are only known inside the closure. `compute` works in points â
-    // split gaps are subtracted in points â so it must be given the real
+    // pixels are only known inside the closure. `compute` works in points —
+    // split gaps are subtracted in points — so it must be given the real
     // size, not a unit square.
     let slider = slider_cell(app);
     // Borrowed, and memoised by panel size: the slider's pane only moves
     // when the window resizes or the layout changes, and re-solving the
-    // whole layout per pass â while the presenter is dragging, exactly when
-    // the frame budget matters â was the scrub layer's entire cost.
+    // whole layout per pass — while the presenter is dragging, exactly when
+    // the frame budget matters — was the scrub layer's entire cost.
     let root = &app.active_layout.root;
     let anchor_cache = &app.scrub_anchor_cache;
 
@@ -320,8 +317,8 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
             frame
         });
         let width = (SCRUB_PREVIEW_WIDTH as f32).min(size.width * 0.6).max(1.0);
-        // Estimated rather than measured â the picture, the reading beneath
-        // it, and the card's own padding â and used only to place the card,
+        // Estimated rather than measured — the picture, the reading beneath
+        // it, and the card's own padding — and used only to place the card,
         // where being a few pixels out cannot be seen.
         let height = width / aspect + type_scale::BODY * 1.4 + gap::S * 3.0;
 
@@ -344,7 +341,7 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
         .style(theme::ambient::dialog);
 
         // Beside the control that summoned it: centred over the slider's
-        // pane, sitting just above it â or just below when the slider lives
+        // pane, sitting just above it — or just below when the slider lives
         // at the top of the screen. Only without a slider in the layout
         // (scrubbing by keyboard, say) does it fall back to the centre.
         let (left, top) = match anchor {
@@ -606,7 +603,7 @@ pub struct GridPlan {
 /// A dozen slides in a wide window should fill it, not sit in a corner at
 /// postage-stamp size; two hundred should stop shrinking at the point they
 /// become unreadable and scroll instead. So: try one column, then two, then
-/// three â each is smaller than the last â and take the first arrangement
+/// three — each is smaller than the last — and take the first arrangement
 /// whose rows fit the height. If none does, use the floor and let it scroll.
 fn grid_plan(count: usize, size: iced::Size, aspect: f32) -> GridPlan {
     let count = count.max(1);
@@ -648,12 +645,49 @@ fn grid_plan(count: usize, size: iced::Size, aspect: f32) -> GridPlan {
     plan_for(columns, width.min(MAX_CELL_WIDTH))
 }
 
-/// The hamburger: one always-available entry point, top-left, out of the way
-/// of the layout beneath it.
-fn presenter_toolbar(app: &App) -> Element<'_, Message> {
-    row![menu_button(app), audience_lifecycle_controls(app)]
-        .align_y(Alignment::Center)
-        .into()
+/// Whatever the layout does not carry itself.
+///
+/// The menu button and the audience lifecycle controls are widgets now, to be
+/// placed where the presenter wants them. A layout that places neither — every
+/// layout written before they existed — still has to be able to open a menu
+/// and start a projector, so the strip stays for exactly the halves that are
+/// missing and disappears as they are placed.
+fn presenter_toolbar(app: &App) -> Option<Element<'_, Message>> {
+    let mut strip = Row::new().align_y(Alignment::Center);
+    let mut anything = false;
+    if !placed(app, crate::widgets::WidgetKind::MainMenu) {
+        strip = strip.push(menu_button(app));
+        anything = true;
+    }
+    // A document layout gets no Start and Stop unless it asks for them. The
+    // reader is a window onto a file, not a talk: a projector control there is
+    // a control for something that is not happening, and it costs the page the
+    // height of a button.
+    let presenting = crate::layout::builtin::LayoutMode::of(&app.active_layout)
+        == crate::layout::builtin::LayoutMode::Presentation;
+    if presenting && !placed(app, crate::widgets::WidgetKind::AudienceControls) {
+        strip = strip.push(audience_lifecycle_controls(app));
+        anything = true;
+    }
+    anything.then(|| strip.into())
+}
+
+/// Does the layout carry this widget itself?
+fn placed(app: &App, kind: crate::widgets::WidgetKind) -> bool {
+    app.active_layout
+        .widgets()
+        .iter()
+        .any(|widget| widget.kind() == kind)
+}
+
+/// How far down a flyout hangs: below the strip when there is one, and from
+/// the top of the window when the layout carries the control instead.
+fn flyout_top(app: &App, kind: crate::widgets::WidgetKind) -> f32 {
+    if placed(app, kind) {
+        gap::S
+    } else {
+        theme::controls::BUTTON_HEIGHT + gap::S * 2.0
+    }
 }
 
 fn menu_button(app: &App) -> Element<'_, Message> {
@@ -784,10 +818,18 @@ fn audience_start_menu(app: &App) -> Element<'_, Message> {
         .style(theme::controls::menu_surface(palette));
 
     let dismiss = |element| mouse_area(element).on_press(Message::CloseMenu);
-    let toolbar_height = theme::controls::BUTTON_HEIGHT + gap::S * 2.0;
+    let toolbar_height = flyout_top(app, crate::widgets::WidgetKind::AudienceControls);
     // Hamburger button and its two-sided padding, plus the Start control's
-    // left padding.
-    let left = theme::controls::BUTTON_HEIGHT + gap::S * 3.0;
+    // left padding — unless the layout carries one or both itself, in which
+    // case the panel hangs from the corner rather than from a strip that is
+    // not there.
+    let left = if placed(app, crate::widgets::WidgetKind::AudienceControls) {
+        gap::S
+    } else if placed(app, crate::widgets::WidgetKind::MainMenu) {
+        gap::S * 2.0
+    } else {
+        theme::controls::BUTTON_HEIGHT + gap::S * 3.0
+    };
     column![
         space::vertical().height(Length::Fixed(toolbar_height)),
         row![
@@ -843,7 +885,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         )
         .height(Length::Fixed(MENU_HEADER)),
     );
-    items = items.push(entry("Openâ¦", shortcut("o"), Message::OpenDialog));
+    items = items.push(entry("Open…", shortcut("o"), Message::OpenDialog));
     items = items.push(entry(
         "Reload",
         shortcut("F5"),
@@ -854,13 +896,13 @@ fn menu(app: &App) -> Element<'_, Message> {
     }
     if app.state.document().is_some() {
         items = items.push(entry(
-            "Jump to slideâ¦",
+            "Jump to slide…",
             shortcut("j"),
             Message::Do(Action::ShowOverview),
         ));
     }
-    items = items.push(entry("Layoutsâ¦", None, Message::ShowLibrary));
-    items = items.push(entry("Settingsâ¦", None, Message::ShowSettings));
+    items = items.push(entry("Layouts…", shortcut("l"), Message::ShowLibrary));
+    items = items.push(entry("Settings…", None, Message::ShowSettings));
 
     items = items.push(entry(
         "Swap displays",
@@ -937,7 +979,7 @@ fn menu(app: &App) -> Element<'_, Message> {
     );
 
     // The menu hangs below the button's strip.
-    let above = theme::controls::BUTTON_HEIGHT + gap::S * 2.0;
+    let above = flyout_top(app, crate::widgets::WidgetKind::MainMenu);
     Row::new()
         .push(
             column![spacer(above), panel, rest()]
@@ -1062,11 +1104,21 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
         crate::widgets::WidgetEvent::SlidePressed => Message::SlidePressed,
         crate::widgets::WidgetEvent::Annotate(command) => Message::Annotate(command),
         crate::widgets::WidgetEvent::Read(command) => Message::Read(command),
+        crate::widgets::WidgetEvent::Find(command) => Message::Find(command),
         crate::widgets::WidgetEvent::Alarm(command) => Message::Alarm(command),
         crate::widgets::WidgetEvent::Timer(command) => Message::Timer(command),
         crate::widgets::WidgetEvent::ToggleTimer => Message::Nav(Nav::ToggleTimer),
         crate::widgets::WidgetEvent::Transport(request) => Message::Transport(request),
         crate::widgets::WidgetEvent::EndPresentation => Message::Do(Action::Quit),
+        crate::widgets::WidgetEvent::Chrome(command) => {
+            use crate::widgets::event::ChromeCommand;
+            match command {
+                ChromeCommand::ToggleMenu => Message::ToggleMenu,
+                ChromeCommand::StartAudience => Message::StartAudience,
+                ChromeCommand::StopAudience => Message::StopAudience,
+                ChromeCommand::ToggleStartMenu => Message::ToggleAudienceStartMenu,
+            }
+        }
     }
 }
 
@@ -1077,7 +1129,7 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
 /// around.
 fn settings_page(app: &App) -> Element<'_, Message> {
     // The way out sits above the title, not beside it: one is navigation, the
-    // other is where you are. Just the title, too â the desktop, the backend
+    // other is where you are. Just the title, too — the desktop, the backend
     // and the palette in use are facts about this session, and they are in
     // "This session" below with the rest of the capability report.
     let header = column![
@@ -1219,8 +1271,8 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     // and building it per view pass re-shaped it twenty times a second for
     // the whole time the page was open.
     let report = app.diagnostics_report();
-    // The report scrolls against its own right edge â padding goes on the
-    // text, not the container, so there is no dead strip beside the bar â and
+    // The report scrolls against its own right edge — padding goes on the
+    // text, not the container, so there is no dead strip beside the bar — and
     // the copy button sits in the corner of the box rather than above it.
     let copy = container(
         button(text("Copy").size(type_scale::CAPTION))
@@ -1261,7 +1313,7 @@ fn color_editor(app: &App) -> Element<'_, Message> {
 
     // An ordinary control, drawn like the ordinary controls around it: the
     // press only opens a question, and the red belongs on the answer to it.
-    let reset = button(text("Reset to Pulpit defaultsâ¦").size(type_scale::CAPTION))
+    let reset = button(text("Reset to Pulpit defaults…").size(type_scale::CAPTION))
         .padding(gap::S)
         .style(theme::ambient::tool_button)
         .on_press_maybe(
@@ -1293,8 +1345,8 @@ fn color_editor(app: &App) -> Element<'_, Message> {
             // and field read as part of the row, not pinned to the far edge.
             .width(Length::Fixed(360.0)),
             // The swatch is the wheel's handle. Typing `#RRGGBB` stays the
-            // way to reproduce a colour exactly â a brand hex out of a style
-            // guide is *given*, not chosen â and the wheel is the way to
+            // way to reproduce a colour exactly — a brand hex out of a style
+            // guide is *given*, not chosen — and the wheel is the way to
             // choose one, which a hex field is a poor instrument for.
             role_swatch(app, role, swatch),
             field,
@@ -1404,7 +1456,7 @@ fn role_swatch(
         trigger,
         Message::OpenColorPicker(None),
         // Back out as the text the field holds, so both ways of setting a
-        // colour go down the same path â including the contrast check.
+        // colour go down the same path — including the contrast check.
         move |color| Message::SetColor(role, crate::settings::format_hex_color(color)),
     )
     .into()
@@ -1648,7 +1700,7 @@ fn rule<'a>() -> Element<'a, Message> {
 /// There is no Done here. The close glyph in the corner and Escape already say
 /// it, in the same place for every panel, and a third way out only adds a
 /// button that has to be found. So the bar holds the actions that *do*
-/// something â a clearing or destructive press, left-aligned, away from the
+/// something — a clearing or destructive press, left-aligned, away from the
 /// corner the finger goes to when it means "close".
 fn dialog_footer<'a>(action: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![
@@ -1676,7 +1728,7 @@ fn snooze_row<'a>(minutes: u32, less: Message, more: Message) -> Element<'a, Mes
             .size(type_scale::BODY)
             .color(theme::ambient::muted()),
         space::horizontal(),
-        step("â1m", less),
+        step("−1m", less),
         step("+1m", more),
     ]
     .align_y(iced::Alignment::Center)
@@ -1768,8 +1820,8 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
                         .size(type_scale::BODY)
                         .color(theme::ambient::muted()),
                     space::horizontal(),
-                    step("â5m", -5),
-                    step("â1m", -1),
+                    step("−5m", -5),
+                    step("−1m", -1),
                     step("+1m", 1),
                     step("+5m", 5),
                 ]
@@ -1844,7 +1896,7 @@ fn restore_session_dialog(plan: &crate::session::RestorePlan) -> Element<'static
     let body = column![
         text("Restore the interrupted session?").size(type_scale::TITLE),
         text(match plan.saved_ago_now() {
-            Some(ago) => format!("Pulpit did not shut down cleanly â {ago}."),
+            Some(ago) => format!("Pulpit did not shut down cleanly — {ago}."),
             None => "Pulpit did not shut down cleanly last time.".to_string(),
         })
         .size(type_scale::BODY),
@@ -1870,74 +1922,7 @@ fn restore_session_dialog(plan: &crate::session::RestorePlan) -> Element<'static
     panel(body, None)
 }
 
-/// Write the note or text mark that was just placed (Â§8.5).
-///
-/// A real text input rather than something hand-rolled, so an input method, a
-/// clipboard, a selection and dead keys all behave the way they do everywhere
-/// else on the machine. Escape cancels without mutation; Return commits.
-/// Offer to typeset the text, for the tool where typesetting shows.
-///
-/// A sticky note is read in a viewer's own popup, which draws `/Contents` and
-/// not an appearance, so a typeset note would be a mark whose text nobody
-/// sees. The choice is therefore only offered for the text tool.
-fn typst_choice(composing: &crate::app::ComposingMark) -> Element<'static, Message> {
-    use pulpit_core::annotation::AnnotationTool;
-
-    if composing.tool == AnnotationTool::Note {
-        return space::horizontal().width(Length::Shrink).into();
-    }
-    let typst = composing.typst;
-    button(
-        text(if typst {
-            "Typeset with Typst ✓"
-        } else {
-            "Typeset with Typst"
-        })
-        .size(type_scale::LABEL),
-    )
-    .padding(gap::S)
-    .style(if typst {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    })
-    .on_press(Message::ComposeAsTypst(!typst))
-    .into()
-}
-
-fn compose_mark_dialog(composing: &crate::app::ComposingMark) -> Element<'static, Message> {
-    use pulpit_core::annotation::AnnotationTool;
-
-    let title = match composing.tool {
-        AnnotationTool::Note => "Write the note",
-        _ => "Write the text",
-    };
-    let body = column![
-        text(title).size(type_scale::TITLE),
-        text(format!("On page {}.", composing.page)).size(type_scale::LABEL),
-        text_input("", &composing.text)
-            .size(type_scale::BODY)
-            .on_input(Message::ComposeMark)
-            .on_submit(Message::CommitMark),
-        typst_choice(composing),
-        row![
-            button(text("Cancel").size(type_scale::LABEL))
-                .padding(gap::S)
-                .style(theme::ambient::tool_button)
-                .on_press(Message::CancelMark),
-            button(text("Place it").size(type_scale::LABEL))
-                .padding(gap::S)
-                .style(theme::ambient::alert_button)
-                .on_press(Message::CommitMark),
-        ]
-        .spacing(gap::S),
-    ]
-    .spacing(gap::M);
-
-    panel(body, Some(Message::CancelMark))
-}
-
-/// Offer back the edits a previous run did not save (Â§11.4).
+/// Offer back the edits a previous run did not save (§11.4).
 ///
 /// The wording is deliberately careful about what pulpit does not know: the
 /// journal records what was edited, not whether the user saved a copy
@@ -2028,7 +2013,7 @@ fn mappings(app: &App) -> Element<'_, Message> {
 fn unbound_key(app: &App) -> Option<Element<'_, Message>> {
     let (name, code) = app.unbound_key.as_ref()?;
     let described = match name {
-        Some(name) if name != "unidentified" => format!("â{name}â (scancode {code})"),
+        Some(name) if name != "unidentified" => format!("“{name}” (scancode {code})"),
         _ => format!("an unidentified key (scancode {code})"),
     };
     let bindable = [
@@ -2087,7 +2072,7 @@ fn library_page(app: &App) -> Element<'_, Message> {
 fn layout_dialog(dialog: &LayoutDialog) -> Element<'_, Message> {
     let body: Element<'_, Message> = match dialog {
         LayoutDialog::ConfirmDelete { name, .. } => column![
-            text(format!("Delete â{name}â?")).size(16),
+            text(format!("Delete “{name}”?")).size(16),
             text("This cannot be undone.")
                 .size(12)
                 .color(theme::ambient::muted()),

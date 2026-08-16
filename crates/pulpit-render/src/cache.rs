@@ -22,6 +22,9 @@ use crate::protocol::Quality;
 pub enum FrameKind {
     Slide,
     Notes,
+    /// A reader page, drawn with the document's own annotations in the
+    /// pixels. `FrameKey::slide` carries the page index for this kind.
+    Page,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

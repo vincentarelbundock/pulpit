@@ -142,9 +142,19 @@ fn panel<Message: Clone + 'static>(
                 })
                 .on_press(on(WidgetEvent::SlidePressed));
             // An armed tool takes the pointer away from the links, and the
-            // cursor says so before the presenter finds out by pressing.
+            // cursor says so before the presenter finds out by pressing. The
+            // highlighter wears the I-beam rather than the crosshair, because
+            // it sweeps the page's own text rather than drawing where the hand
+            // goes — the same cursor it has in document mode, for the same
+            // reason (§8.1).
             if armed {
-                area.interaction(iced::mouse::Interaction::Crosshair).into()
+                let cursor = match annotations.tool {
+                    Some(pulpit_core::annotation::AnnotationTool::Highlighter) => {
+                        iced::mouse::Interaction::Text
+                    }
+                    _ => iced::mouse::Interaction::Crosshair,
+                };
+                area.interaction(cursor).into()
             } else if has_links {
                 area.interaction(iced::mouse::Interaction::Pointer).into()
             } else {

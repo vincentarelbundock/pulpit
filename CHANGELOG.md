@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Keyboard shortcuts are vim-first, and modifiers are now real.** Navigation
+  answers to `j`/`l` and `k`/`h` as well as the arrows, space and the paging
+  keys — nothing conventional was taken away, because no presenter remote
+  emits a letter and the person driving the laptop is not always the person
+  who chose the bindings. `G` goes to the last slide.
+
+  Everything that leaves the deck takes the primary modifier the way every
+  other application does: `Ctrl+O` to open, `Ctrl+R` to reload, `Ctrl+Q` to
+  quit, `Ctrl+F` for audience fullscreen. A bare `q` next to `w` was a talk
+  ended by a typo. Undo and redo of a stroke follow the editing convention
+  rather than the vim one — `Ctrl+Z` and `Ctrl+Shift+Z`, with `u` and
+  `Ctrl+Y` alongside — because a stroke is an edit.
+
+  Displaced by the navigation keys: the slide overview moves from `j` to
+  **`o`**, and the layout library from `l` to **`Shift+L`**. The timer is `t`
+  and resets with `Shift+T`. Stepping focus through a slide's links loses its
+  default keys — it is rare enough not to earn a bare letter — and stays
+  bindable for anyone whose decks lean on internal navigation.
+
+  Underneath, a binding now carries its modifiers as data instead of gluing
+  them onto the key name as `"ShiftZ"`. That spelling could not express two
+  modifiers at once, and it could not tell a modifier that is load-bearing
+  from one that is incidental: `Shift`+`b` must still blank the screen for a
+  presenter resting a finger on shift, while `Ctrl`+`Q` must never reach a
+  binding written for a bare `q`. Stored keymaps using the old spelling are
+  migrated as they load.
+
+### Fixed
+
+- **Reader mode had no working key.** `r` was bound to the timer reset *and*
+  to reader mode, and since resolution takes the first match, the documented
+  `r` shortcut never fired. The timer reset moved to `Shift+T` and `r` now
+  means what it says.
+- **`Enter` never committed a previewed slide.** It was bound to advance, and
+  the commit was written against `"Return"` — a key name the toolkit does not
+  emit — so both bindings were dead. `Enter` now commits the preview; Next
+  keeps its six other keys.
+- A keymap check now asserts that no key is bound to two different actions,
+  and that every default binding resolves to the action it was written for.
+  Both bugs above were the same missing guard.
+
 ### Added
 
 - The foundation of document mode: pulpit can open an ordinary PDF, mark it
@@ -51,7 +94,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the live stroke preview, so a mark appears when its frame does rather than
   while it is being drawn; and crash recovery for unsaved annotations.
 
+### Added
+
+- **PDF forms can be filled, in place, by PDFium itself.** Clicking a field
+  puts the caret in it and typing puts characters in it — with the field's own
+  font, size, quadding, comb spacing and multiline wrapping, because the code
+  doing the editing is the code that generates the appearance. pulpit draws no
+  field editor of its own and never writes a value from outside the page, and
+  that is the point: a second implementation of "what a filled field looks
+  like" is a second implementation that will disagree with the first, and it
+  disagrees exactly where the person filling the form can see one thing and
+  the file will show everyone else another.
+
+  A filled form saves and reopens with its values, in pulpit and elsewhere.
+  Checkboxes and radio buttons are pressed, choice lists are chosen from,
+  backspace deletes, and a committed value is one revision and one undo entry
+  in the same history as the annotations. A read-only field is shown and
+  refuses to change. The source file is never written.
+
+  The AcroForm hazard corpus — 55 documents each wrong in one named way — now
+  checks the fill promises it has always carried and not only survival, and
+  all 23 of them are kept: comb and auto-sized fields, a field whose value is
+  outside the basic multilingual plane, a multiline field, overlapping widget
+  rectangles, export-value pairs, a multiple-selection list, and the read-only
+  fields that must be shown and must refuse to change.
+
+  Documents that carry JavaScript get none of it. The form-fill environment
+  refuses every callback through which a PDF could reach outside itself: no
+  script platform, no URL navigation, no email, no upload, no download, no
+  file access, no document-driven menus. A form is a thing you type values
+  into, and none of that is needed to type a value into one.
+
 ### Changed
+
+- **Presenter marks are now annotations in the document.** A stroke drawn
+  during a talk is committed to the open PDF when the pen comes up, as a
+  native `/Ink` annotation — the same kind of mark document mode makes, in the
+  same file, editable in both. It can be selected, moved and deleted
+  afterwards, and undo runs one history across both modes in the order things
+  were actually done.
+
+  What this replaces: marks used to live in a per-slide cache in memory and
+  were written out, if at all, by stamping them into a copy of the deck as
+  page content — a second, private representation of the same thing. Both the
+  cache and the stamping path are gone, along with the "Save an annotated
+  copy" command, which is now simply the document's Save As: the marks *are*
+  the document's annotations, so saving the document saves them.
+
+  The unfinished gesture is unchanged and still never reaches the file. The
+  pen follows the hand with no worker in the loop; the pointer, the spotlight
+  and a half-typed label stay out of the PDF entirely. What did change is that
+  a document pulpit cannot annotate can no longer keep marks at all — you are
+  told once, when the first mark is made, rather than finding out afterwards.
+
+  A mark also lands where it was drawn on a split-page deck, where the slide
+  is half a physical page: the conversion between what the projector shows and
+  where that is on the paper is one function, used in both directions, tested
+  through a real PDF at every page rotation and crop.
+
+- A mark made with one of the named ink colours comes back named after a trip
+  through a PDF, rather than as an anonymous colour that happens to have the
+  same value. A PDF stores three numbers and has no field for which swatch was
+  chosen, so every named colour used to turn "custom" the first time it was
+  read back, and the palette stopped showing which one was armed.
 
 - Choosing which display the audience window uses is no longer claimed as a
   capability on any platform, and the compositor-specific adapter that

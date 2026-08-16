@@ -355,6 +355,218 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   a polled event than a mis-sorted queue, and both of those have been the
   answer before.
 
+== One representation of a mark
+
+A completed annotation has exactly one authoritative representation: a native
+annotation in the open PDF. This is invariant A1 of `SPEC-document.md`, and it
+is the decision the whole of document mode rests on — so it is worth being
+precise about what it cost and what it removed.
+
+What it removed: the per-slide ink cache that held a presenter's marks in
+process memory, and the export assembly that stamped them into a copy of the
+deck as page content. Both are gone. A presenter's completed stroke is
+committed to the document engine when the pen comes up, and what the overlay
+draws afterwards is a *view* of the annotations the document holds for the page
+the slide is showing. Saving the document saves the marks, because the marks
+are the document's annotations; there is no separate "annotated copy".
+
+Three consequences follow, and each is load-bearing:
+
++ *Presentation and document mode edit the same annotation.* A stroke drawn at
+  the lectern can be selected, moved and deleted in document mode afterwards,
+  and a highlight made in document mode appears on the slide. There is one
+  undo history — the document's — so undo order follows user action order
+  across both.
++ *The unfinished gesture is still the overlay's alone.* A stroke under the
+  pen, the pointer, the spotlight and a label being typed never reach the file
+  (A2). Latency is unchanged: the pen follows the hand with no worker in the
+  loop, and the round trip happens once, on release.
++ *A document that cannot be annotated cannot keep marks.* This is the honest
+  cost. Where marks used to persist in memory regardless, they now depend on
+  document mode having opened the file. The presenter is told once, when the
+  first mark is made, rather than discovering it after the talk.
+
+The conversion between slide space (fractions of what the projector shows) and
+canonical page space (PDF points from the crop box's top-left corner) lives in
+`pulpit_core::annotate::presenter` and nowhere else, in both directions. A
+split-page deck is why it is not a scale factor: a slide can be half a physical
+page, and a mark two thirds of the way across the slide is one third of the way
+across the paper. The round trip is property-tested across every rotation, crop
+and region, and again through a real PDF in
+`pulpit-render/tests/presenter_ink.rs` — a mark that moves between the talk and
+the file is a bug nobody would find until afterwards.
+
+== One render pipeline for slides and pages
+
+The reader's pages are rendered by the same supervised worker pool, through
+the same byte-budgeted frame cache and the same shared-memory transport as
+the projector's slides — as `FrameKind::Page` entries whose jobs set
+`with_annotations`, because on a reader page the document's own marks are the
+point. The bespoke path this replaced — one serial document worker answering
+render requests over a pipe, pixels inline, no cache, no cancellation — is
+why paging used to lag behind stale renders and why a settling page could be
+repainted by a late coarse frame.
+
+What made the bespoke path look necessary is A7: a frame must contain the
+annotation that was just committed, and only the process holding the mutated
+document has it — the edits are not in the file on disk until the user saves.
+The resolution is a *revision snapshot*: after a debounced burst of edits the
+document worker writes an incremental `FPDF_SaveAsCopy` of its in-memory
+document to a scratch path pulpit owns (A6 holds; the destination is never
+the source), and the pool opens that snapshot as a document of its own under
+a fresh render generation. Reader generations live in a namespace far above
+the presentation's (`READER_RENDER_BASE`), are advanced once per snapshot,
+and are never fed to `cancel_older_than` — reader jobs are cancelled by id,
+by their own sweep, so neither plan can cancel the other's work.
+
+Generation order is revision order, and that equivalence is what carries A7
+into the cache: the lookup walks generations from the newest down and a
+coarse frame can never outrank a refined one at the same generation, so a
+page keeps its pre-edit picture until a complete frame containing the edit
+exists, and a late or lesser frame can never repaint a better one. Before
+the first edit no snapshot exists and none is taken: pages render from the
+presentation's own document, already open in every pool worker.
+
+What stayed in the document worker is everything that is not rendering: the
+annotation transactions, the undo history, text selection, the outline — and
+form filling entirely, because a focused field's uncommitted state lives in
+PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and exists in
+no saved copy.
+
+== The fold: what came from pdfform
+
+pdfform was a second Rust application for filling PDF forms, and it carried a
+second copy of this project's renderer, worker, theme, toast and residency
+code. `SPEC-document.md` §14 folds it in. What that specification lists as
+moving has moved, and can be checked:
+
+#table(
+  columns: (auto, auto),
+  table.header([*From pdfform*], [*Now*]),
+  [`FormValue`, `WidgetRect`], [`FormField`, `FieldWidget`, in canonical `PageRect`],
+  [AcroForm discovery, choice metadata, write-back], [the `document` module's form path],
+  [`edit/fields.rs`], [not ported: no field panel],
+  [`pdfform-testkit` entire], [`pulpit-testkit`],
+  [AcroForm, non-destruction, hostile-input tests], [beside the code they cover],
+  [`SPEC.md` compatibility levels], [`SPEC-document.md` §3.4],
+  [`SPEC-SIGNING.md`], [`SPEC-signing.md`],
+)
+
+What was *not* ported is the larger half: the whole application shell, its
+worker, its `PdfEngine` scaffolding, its normalised-coordinate geometry, and
+its `Tool`/`EditKind`/`EditItem` visual-item model — roughly 11k of pdfform's
+~18k lines. Native annotations replace the visual-item model outright, which
+is the same decision as A1 seen from the other end: an edit is not an item in
+an application's list that gets written out later, it is an annotation in the
+document from the moment it is completed.
+
+No pulpit crate depends on pdfform, and nothing in this workspace reads from
+it. `SPEC-document.md` supersedes `pdfform/SPEC-SHARED-ANNOTATIONS.md`, which
+was the negotiated boundary between the two projects and is the machinery the
+fold deletes rather than maintains.
+
+== Form filling: why the editor is PDFium's
+
+A PDF form field is not a text box. It is a text box plus a pile of rules about
+how a value is drawn into it: the font and size in its `/DA`, comb spacing that
+puts one character per cell, auto-sizing that shrinks type to fit, quadding
+that right-aligns it, multiline wrapping, and for a checkbox a glyph out of
+`/ZapfDingbats`. Every one of those rules is already implemented — in PDFium,
+in the code that generates the field's appearance stream.
+
+So pulpit does not implement them again. Raw input events over a page in form
+mode are forwarded to PDFium's interactive form-fill environment
+(`FORM_OnLButtonDown`, `FORM_OnChar`, `FORM_OnKeyDown` and the rest), which
+does the hit-testing, the focus, the caret and the editing, and answers with
+the page rectangles it wants redrawn. The application draws no field editor and
+never sets a value from outside the page; `set_field` exists and refuses.
+
+That is not fastidiousness. A second implementation of "what a filled field
+looks like" disagrees with the first somewhere, and where it disagrees is
+between what the person filling the form sees and what the file will show
+everybody else. Deleting the second implementation deletes the whole class.
+
+Three consequences are easy to get wrong and are worth writing down:
+
++ *Every render of a document with a form needs an `FPDF_FFLDraw` pass.*
+  `FPDF_RenderPageBitmap` draws the appearance stream the file was saved with.
+  A value typed a second ago lives in the form-fill environment and is in no
+  appearance yet, so without the compositing pass someone types into a box that
+  stays empty.
++ *The page stays loaded for the length of an interaction.* PDFium keys a
+  field's editing state — focus, caret, uncommitted text — to the `FPDF_PAGE`
+  it was given in `FORM_OnAfterLoadPage`. Loading the page per event hands it a
+  different pointer every time, and every keystroke lands on a form that has
+  just been told nothing is selected. This is the one place in the codebase
+  where a native page handle deliberately outlives the call that made it, and
+  what it holds is uncommitted state by definition — which is exactly what a
+  worker crash mid-fill is allowed to lose.
++ *Editing keys are characters.* PDFium edits text in `FORM_OnChar` and uses
+  `FORM_OnKeyDown` for the keys that move the caret. Backspace sent as a key
+  down is accepted and does nothing at all — no error, no deletion.
+
+The environment is also the security boundary. A PDF can carry JavaScript, ask
+to open a URL, email itself, upload itself or read a file, and every one of
+those is a callback pulpit leaves null: no `m_pJsPlatform`, no `FFI_DoURIAction`,
+no `FFI_EmailTo`, `FFI_UploadTo`, `FFI_OpenFile`, `FFI_PopupMenu` or any of the
+network ones. `FFI_GetLocalTime` returns a fixed value rather than the wall
+clock, for the same reason the Typst compiler is closed-world. The tests assert
+each of those is absent, because they are a posture and not an omission.
+
+Measured on the development machines, in a debug build: one keystroke through
+the environment costs about 12 µs, and a full-page redraw with the compositing
+pass about 240 µs. Both leave a 16 ms frame nearly untouched, which is what
+`SPEC-document.md` §14.3's gating spike had to establish — and why the
+specification's insistence that the IPC hop stay in place costs nothing worth
+having.
+
+== Document mode: the recorded budgets
+
+The six performance claims in `SPEC-document.md` §13.6 are asserted by tests
+rather than argued for, and the tests print what they measured so the baseline
+can be re-read rather than remembered:
+
+```
+cargo test -p pulpit budgets -- --nocapture
+cargo test -p pulpit-render --test document_budgets -- --nocapture
+```
+
+Two of them are *ratios* and four are absolute. The ratios — does listing a
+page's annotations cost more in a larger document, does checking a held frame
+cost more when the frame is bigger — are the honest form for a question about
+how cost grows, because a ratio reads the same on a fast machine and a slow
+one. The absolute thresholds are set an order of magnitude above the baseline
+on the development machines: a regression threshold is for catching a
+structural mistake, not for failing on a loaded runner.
+
+The baseline, on a debug build (a release build is several times faster, and
+the thresholds hold there by a wider margin):
+
+#table(
+  columns: (auto, auto, auto),
+  table.header([*What*], [*Measured*], [*Enforced as*]),
+  [1000 pointer moves during a stroke], [0.46 ms], [under 16 ms],
+  [100 strokes drawn and handed over], [1.2 ms], [under 50 ms],
+  [Committing a 200-point stroke], [67 µs], [under 20 ms],
+  [Listing one page, 4 vs 400 pages], [3.6 µs vs 3.7 µs], [under 8× the small],
+  [Render plan, 4 vs 4000 pages], [0.8 µs vs 1.0 µs], [under 8× the small],
+  [10 000 pointer samples committed], [132 points], [under 500 points],
+)
+
+The last row is the one worth reading twice. A tablet reporting at an absurd
+rate must not produce proportionally more audience traffic or a proportionally
+larger annotation, and what stops it is not a throttle but the two bounds that
+were there anyway: samples closer together than the minimum distance are
+dropped, and the committed stroke is simplified. The test draws a wave rather
+than a line, because a line simplifies to its two endpoints at any sample rate
+and would pass without proving anything.
+
+The render-plan row is what replaced the old staleness check when reader
+frames moved into the shared cache. The plan is recomputed every tick, so it
+must cost the pages in the window and their margin, never a walk of the
+document — which is also why `Column::visible` binary-searches the one
+contiguous run of visible pages rather than filtering all of them.
+
 == Definition of supported
 
 A desktop platform is *supported* only when the workspace builds from a clean
@@ -639,9 +851,9 @@ reconciliation function:
 - *Wayland*: nothing placeable from here; unfullscreening is _not_ safe, so
   the reconciler leaves a fullscreen audience window alone and says why
   (`CannotLeaveFullscreen`).
-- *Tiling WMs (i3/Sway/Niri)*: nothing is placeable; the reconciler emits
-  `PlacementUnsupported`, keeps both windows visible and tells the user what
-  to do. This is a supported configuration, not an unsupported one.
+- *Tiling WMs (i3/Sway/Niri)*: nothing is placeable; the reconciler skips
+  placement and keeps both windows visible. This is a supported
+  configuration, not an unsupported one.
 
 == Pre-map placement, suspend and resume
 
@@ -715,9 +927,32 @@ clock and navigation are deliberately _not_ compound: a layout may put the
 buttons along the bottom and the slider in a rail, or leave either out.
 
 Single-instance widgets are exactly: Speaker Notes, Slide Buttons, Slide
-Slider, Pause or Resume, End Presentation, Annotations, Media Transport.
-Everything else may repeat. A single-instance widget already in the layout
-shows *Already in Layout* on its library card and cannot be dragged.
+Slider, Pause or Resume, End Presentation, Annotations, Media Transport, Menu,
+Start and Stop. Everything else may repeat. A single-instance widget already in
+the layout shows *Already in Layout* on its library card and cannot be dragged.
+
+=== Menu, Start and Stop
+
+The hamburger and the audience window's Start and Stop are widgets like any
+other, so where they sit at the lectern is the presenter's decision rather
+than the application's. They were a fixed strip above the layout, and the
+strip is now a fallback: it draws only the half a layout has not placed
+itself, and disappears entirely once both are on the layout. That keeps every
+layout written before these widgets existed — and every layout that
+deliberately omits them — able to open a menu and start a projector.
+
+The fallback offers Start and Stop on a *presentation* layout only. The reader
+is a window onto a file rather than a talk, so a projector control there is a
+control for something that is not happening, and it would cost the page the
+height of a button. A document layout that genuinely wants one places the
+widget. Both built-in Readers carry the Menu in their control band, so the
+band is the one row of controls it looks like and the strip does not draw at
+all.
+
+Their flyouts (the menu itself, and the list of displays behind Start's
+arrow) still hang from the top-left corner. They are positioned by
+arithmetic, and that arithmetic knows only whether the strip is drawing the
+control, not where on the layout the presenter put it.
 
 === Media Transport
 

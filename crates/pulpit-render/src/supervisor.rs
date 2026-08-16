@@ -168,6 +168,16 @@ pub enum RenderEvent {
         document: u64,
         navigation: pulpit_core::navigation::DocumentNavigation,
     },
+    /// Search hits for one run of pages, under the generation that asked.
+    ///
+    /// `searchable` is false when the backend cannot read a text layer at
+    /// all, which is a different fact from finding nothing.
+    Found {
+        document: u64,
+        generation: pulpit_core::search::SearchGeneration,
+        chunk: pulpit_core::search::HitChunk,
+        searchable: bool,
+    },
     /// What one document declares that pulpit will flatten or ignore.
     Capabilities {
         document: u64,
@@ -178,18 +188,6 @@ pub enum RenderEvent {
         document: u64,
         name: String,
         bytes: Vec<u8>,
-    },
-    /// An annotated copy of the deck reached disk.
-    Exported {
-        id: RequestId,
-        destination: String,
-        pages: usize,
-    },
-    /// The annotated copy could not be written. Nothing else is affected:
-    /// the source document and the presentation are as they were.
-    ExportFailed {
-        id: RequestId,
-        reason: String,
     },
     /// An attachment that could not be delivered. The static page is
     /// unaffected.
@@ -849,6 +847,24 @@ impl RendererSupervisor {
         self.ask(Request::Navigation { document });
     }
 
+    /// Ask one worker to find a string in a run of pages. The answer arrives
+    /// as [`RenderEvent::Found`].
+    pub fn request_find_text(
+        &mut self,
+        document: u64,
+        generation: pulpit_core::search::SearchGeneration,
+        query: pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
+    ) {
+        self.ask(Request::FindText {
+            document,
+            generation,
+            query,
+            from_page: pages.start,
+            to_page: pages.end,
+        });
+    }
+
     /// Ask one worker what the document declares that pulpit will not
     /// honour. The answer arrives as [`RenderEvent::Capabilities`].
     pub fn request_capabilities(&mut self, document: u64) {
@@ -861,27 +877,6 @@ impl RendererSupervisor {
         self.ask(Request::Attachment {
             document,
             name: name.to_string(),
-        });
-    }
-
-    /// Ask one worker to write an annotated copy of a document. The answer
-    /// arrives as [`RenderEvent::Exported`] or [`RenderEvent::ExportFailed`].
-    ///
-    /// The request names the source *file*, not an open document: the worker
-    /// loads its own copy to draw on, so nothing the presentation is
-    /// currently rendering from is touched.
-    pub fn request_export(
-        &mut self,
-        id: RequestId,
-        source: &str,
-        destination: &str,
-        pages: Vec<crate::pdf::PageStamp>,
-    ) {
-        self.ask(Request::ExportAnnotated {
-            id,
-            source: source.to_string(),
-            destination: destination.to_string(),
-            pages,
         });
     }
 
@@ -1174,6 +1169,19 @@ impl RendererSupervisor {
                     navigation,
                 });
             }
+            WorkerPayload::Response(Response::Found {
+                document,
+                generation,
+                chunk,
+                searchable,
+            }) => {
+                events.push(RenderEvent::Found {
+                    document,
+                    generation,
+                    chunk,
+                    searchable,
+                });
+            }
             WorkerPayload::Response(Response::Capabilities {
                 document,
                 capabilities,
@@ -1193,20 +1201,6 @@ impl RendererSupervisor {
                     name,
                     bytes,
                 });
-            }
-            WorkerPayload::Response(Response::Exported {
-                id,
-                destination,
-                pages,
-            }) => {
-                events.push(RenderEvent::Exported {
-                    id,
-                    destination,
-                    pages,
-                });
-            }
-            WorkerPayload::Response(Response::ExportFailed { id, reason }) => {
-                events.push(RenderEvent::ExportFailed { id, reason });
             }
             WorkerPayload::Response(Response::AttachmentFailed {
                 document,

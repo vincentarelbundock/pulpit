@@ -152,6 +152,7 @@ fn warm(
                 height,
                 priority: Priority::Ancillary,
                 quality: Quality::Refined,
+                with_annotations: false,
                 region_name: String::new(),
             });
             queued += 1;

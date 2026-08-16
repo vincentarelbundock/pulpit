@@ -19,6 +19,7 @@ use pulpit_core::annotate::{
     MarkStyle, NoteDraft,
 };
 use pulpit_core::page::{PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
+use pulpit_core::search::{HitSource, Query};
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::{
     AppliedEffect, DocumentCommand, DocumentRevision, DocumentTransaction, PdfDocument,
@@ -467,3 +468,66 @@ fn a_pages_geometry_is_read_from_its_crop_box_and_rotation() {
 // engine borrowing its binding rather than owning it. `cargo test` runs these
 // as threads of one process; they serialise on the mutex and are otherwise
 // independent, so a failure names one behaviour rather than stopping a run.
+
+/// Search against a real text layer: the hits land on the right pages, carry
+/// geometry over the text they matched, and a query for something that is not
+/// there is an empty answer rather than a failure.
+#[test]
+fn finding_text_reports_hits_with_the_geometry_to_draw_them() {
+    let Some(mut guard) = binding() else { return };
+    let backend = &mut *guard;
+    let directory = temp_dir("search");
+    let path = source(&directory);
+    let document = open(backend, &path);
+
+    // The fixture writes the page's own number as its only run of text, so
+    // "2" is on page two and nowhere else.
+    let query = Query::new("2", false, false);
+    let chunk = document
+        .find_text(&query, 0..3)
+        .expect("the document has a text layer");
+    assert_eq!(chunk.from_page, 0);
+    assert_eq!(chunk.to_page, 3);
+    assert_eq!(
+        chunk.hits.len(),
+        1,
+        "expected one hit, got {:?}",
+        chunk.hits
+    );
+
+    let hit = &chunk.hits[0];
+    assert_eq!(hit.page, PageIndex(1));
+    assert_eq!(hit.source, HitSource::PageText);
+    assert!(!hit.quads.is_empty(), "a hit with no quads marks nothing");
+    assert!(
+        hit.quads.iter().all(|quad| !quad.is_degenerate()),
+        "a quad with no area marks nothing"
+    );
+    // The text is drawn at x = 300 in user space on a 720-point page.
+    let bounds = hit.quads[0].bounds();
+    assert!(
+        bounds.left > 250.0 && bounds.left < 400.0,
+        "the quad is not over the text: {bounds:?}"
+    );
+    let marked: String = hit
+        .context
+        .chars()
+        .skip(hit.highlight.offset)
+        .take(hit.highlight.len)
+        .collect();
+    assert_eq!(marked, "2");
+
+    // Nothing to find is an empty chunk, not an error and not "unsupported".
+    let nothing = document
+        .find_text(&Query::new("zzzz", false, false), 0..3)
+        .expect("a query with no matches is not a failure");
+    assert!(nothing.hits.is_empty());
+    assert!(!nothing.truncated);
+
+    // A range that walks off the end of the document stops there.
+    let clamped = document
+        .find_text(&query, 2..99)
+        .expect("clamped, not refused");
+    assert_eq!(clamped.to_page, 3);
+    assert!(clamped.hits.is_empty());
+}

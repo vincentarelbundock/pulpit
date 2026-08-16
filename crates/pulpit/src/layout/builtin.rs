@@ -78,6 +78,16 @@ impl Builder {
         Node::Leaf(cell)
     }
 
+    /// A single-button cell: a panel whose padding is the button's own
+    /// margin, so a fixed 40-point control still fits a band sized for the
+    /// controls beside it.
+    fn button(&mut self, kind: WidgetKind) -> Node {
+        let mut cell = Cell::with_widget(self.id(), Widget::new(kind));
+        cell.background = CellBackground::Panel;
+        cell.padding = 4.0;
+        Node::Leaf(cell)
+    }
+
     fn split(
         &mut self,
         name: &str,
@@ -336,22 +346,21 @@ pub fn slide_time_beside() -> Layout {
 /// the presenter's, because it holds page thumbnails and bookmark titles
 /// rather than notes set as prose, and every point past what those need is a
 /// point the page is not getting.
-///
-/// `FormFields` is deliberately absent. Most PDFs have no AcroForm, and a rail
-/// that is empty for most documents is worse than one more built-in; fields
-/// are reachable in place on the page, which is enough for the default.
-/// [`reader_fields`] is the variant for people who fill forms often.
 pub fn reader_default(ratio: AspectRatio) -> Layout {
     let mut b = Builder::new();
 
+    // The menu is in the band rather than above it: a reader's controls are
+    // one row of icons, and the way in to the application belongs on that row
+    // instead of on a strip of its own that costs the page another line.
     let band_children = vec![
+        b.button(WidgetKind::MainMenu),
         b.panel(WidgetKind::DocumentNav),
         b.panel(WidgetKind::AnnotationTools),
     ];
     let band = b.split(
         "Navigation and tools",
         Direction::Horizontal,
-        &[0.5, 0.5],
+        &[0.06, 0.47, 0.47],
         band_children,
     );
 
@@ -372,50 +381,6 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     finish("Reader", "reader-default", root, ratio)
 }
 
-/// **Reader + Fields** — the Reader with the field inspector as a right-hand
-/// rail, for people who fill forms often.
-///
-/// A built-in rather than the default for the same reason `slide-next-notes`
-/// is: the variants are where preferences live, and the default stays the one
-/// that is right for the most documents.
-pub fn reader_fields(ratio: AspectRatio) -> Layout {
-    let mut b = Builder::new();
-
-    let band_children = vec![
-        b.panel(WidgetKind::DocumentNav),
-        b.panel(WidgetKind::AnnotationTools),
-    ];
-    let band = b.split(
-        "Navigation and tools",
-        Direction::Horizontal,
-        &[0.5, 0.5],
-        band_children,
-    );
-
-    // The inspector takes a wider rail than the outline: it holds field names
-    // above their values, and a value truncated to fit is a value the person
-    // filling the form cannot check.
-    let body_children = vec![
-        b.panel(WidgetKind::DocumentOutline),
-        b.page(),
-        b.panel(WidgetKind::FormFields),
-    ];
-    let body = b.split(
-        "Document",
-        Direction::Horizontal,
-        &[0.16, 0.60, 0.24],
-        body_children,
-    );
-
-    let root = b.split(
-        "Reader",
-        Direction::Vertical,
-        &[0.07, 0.93],
-        vec![band, body],
-    );
-    finish("Reader + Fields", "reader-fields", root, ratio)
-}
-
 /// The built-ins, in the order the library shows them.
 ///
 /// The list is bimodal (§2.1): **Presenter Default** is what a presentation
@@ -431,7 +396,6 @@ pub fn built_in_layouts() -> Vec<Layout> {
         slide_time_below(),
         slide_time_beside(),
         reader_default(AspectRatio::SixteenNine),
-        reader_fields(AspectRatio::SixteenNine),
     ]
 }
 
@@ -510,7 +474,6 @@ mod tests {
                 "slide-time-below",
                 "slide-time-beside",
                 "reader-default",
-                "reader-fields",
             ]
         );
     }
@@ -545,7 +508,10 @@ mod tests {
         let root = reader.root.as_split().unwrap();
         assert_eq!(root.name.as_deref(), Some("Reader"));
         assert_eq!(root.sizes, vec![0.07, 0.93]);
-        assert_eq!(root.children[0].as_split().unwrap().sizes, vec![0.5, 0.5]);
+        assert_eq!(
+            root.children[0].as_split().unwrap().sizes,
+            vec![0.06, 0.47, 0.47]
+        );
         assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.18, 0.82]);
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();
@@ -554,36 +520,18 @@ mod tests {
             WidgetKind::DocumentNav,
             WidgetKind::DocumentOutline,
             WidgetKind::AnnotationTools,
+            // The way in to the application is on the band with the rest of
+            // the controls, not on a strip of its own above them.
+            WidgetKind::MainMenu,
         ] {
             assert!(kinds.contains(&required), "Reader is missing {required:?}");
         }
-        assert!(
-            !kinds.contains(&WidgetKind::FormFields),
-            "the field inspector is the Reader + Fields variant, not the default"
-        );
-    }
-
-    #[test]
-    fn reader_plus_fields_is_the_reader_with_the_inspector_added() {
-        let fields = reader_fields(AspectRatio::SixteenNine);
-        let kinds: Vec<WidgetKind> = fields.widgets().iter().map(|w| w.kind()).collect();
-        assert!(kinds.contains(&WidgetKind::FormFields));
-        assert!(kinds.contains(&WidgetKind::DocumentPage));
-        assert_eq!(LayoutMode::of(&fields), LayoutMode::Document);
-        // The page keeps the majority of the width even with two rails.
-        let body = fields.root.as_split().unwrap().children[1]
-            .as_split()
-            .unwrap();
-        assert!(body.sizes[1] > body.sizes[0] + body.sizes[2]);
     }
 
     /// §2.2: the page is on a mount, which is the inverse of a slide's cell.
     #[test]
     fn the_page_cell_is_a_document_on_a_canvas_rather_than_a_slide_in_the_dark() {
-        for layout in [
-            reader_default(AspectRatio::SixteenNine),
-            reader_fields(AspectRatio::SixteenNine),
-        ] {
+        for layout in [reader_default(AspectRatio::SixteenNine)] {
             let page = layout
                 .cells()
                 .into_iter()
@@ -610,10 +558,6 @@ mod tests {
             (slide_time_beside(), LayoutMode::Presentation),
             (
                 reader_default(AspectRatio::SixteenNine),
-                LayoutMode::Document,
-            ),
-            (
-                reader_fields(AspectRatio::SixteenNine),
                 LayoutMode::Document,
             ),
         ] {

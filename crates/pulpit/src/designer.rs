@@ -1,8 +1,8 @@
 //! The layout designer's state and command handling.
 //!
-//! Kept apart from the views so every editing rule Ã¢ÂÂ what a drop does to an
+//! Kept apart from the views so every editing rule — what a drop does to an
 //! occupied , what a delete confirms, what undo covers, when a name is
-//! required Ã¢ÂÂ is one readable state machine rather than something smeared
+//! required — is one readable state machine rather than something smeared
 //! across widget callbacks.
 
 use iced::Point;
@@ -543,7 +543,7 @@ impl Designer {
     /// Finish a drag on one edge of `target`: split that pane and place the
     /// widget in the new half, in one gesture.
     ///
-    /// This is the whole point of the edge zones Ã¢ÂÂ without them, adding a
+    /// This is the whole point of the edge zones — without them, adding a
     /// widget beside another means splitting first, aiming at the resulting
     /// empty pane second, and holding the tree in your head in between.
     pub fn drop_on_edge(&mut self, target: NodeId, edge: Edge) {
@@ -680,8 +680,8 @@ impl Designer {
             return;
         }
 
-        // Grabbing a gutter near one of its ends Ã¢ÂÂ where it meets the
-        // dividers of the rows above and below Ã¢ÂÂ takes hold of the whole
+        // Grabbing a gutter near one of its ends — where it meets the
+        // dividers of the rows above and below — takes hold of the whole
         // line. Grabbing it in the middle moves that segment alone. This is
         // how a column of panes is kept flush without dragging each row and
         // hoping.
@@ -962,7 +962,7 @@ impl Designer {
             .all()
             .any(|layout| layout.name.eq_ignore_ascii_case(&name) && layout.id != self.layout().id);
         if taken {
-            self.status = Some(format!("A layout named Ã¢ÂÂ{name}Ã¢ÂÂ already exists."));
+            self.status = Some(format!("A layout named “{name}” already exists."));
             return None;
         }
         self.history.edit(|layout| {
@@ -986,10 +986,10 @@ impl Designer {
                 self.history.mark_saved();
                 let warnings = self.issues.len();
                 self.status = Some(if warnings == 0 {
-                    format!("Saved Ã¢ÂÂ{}Ã¢ÂÂ.", self.layout().name)
+                    format!("Saved “{}”.", self.layout().name)
                 } else {
                     format!(
-                        "Saved Ã¢ÂÂ{}Ã¢ÂÂ with {warnings} warning{}.",
+                        "Saved “{}” with {warnings} warning{}.",
                         self.layout().name,
                         if warnings == 1 { "" } else { "s" }
                     )
@@ -1511,7 +1511,7 @@ mod tests {
         let after = designer.layout().split(split).unwrap().sizes[0];
         assert!(
             (after - (before + 0.25)).abs() < 0.02,
-            "expected roughly +25%, got {before} Ã¢ÂÂ {after}"
+            "expected roughly +25%, got {before} → {after}"
         );
     }
 
@@ -1590,7 +1590,7 @@ mod tests {
         let after = designer.layout().split(bottom).unwrap().sizes[0];
         assert!(
             (after - before).abs() < 1e-3,
-            "the other row is untouched: {before} Ã¢ÂÂ {after}"
+            "the other row is untouched: {before} → {after}"
         );
     }
 
@@ -1803,7 +1803,7 @@ pub enum Msg {
     ResolveDrop(DropChoice),
     // dividers
     /// Press on a divider: take hold of it at the current pointer position.
-    /// Nothing moves until the button is down Ã¢ÂÂ a divider must be dragged,
+    /// Nothing moves until the button is down — a divider must be dragged,
     /// not brushed past.
     DividerGrab(NodeId, usize),
     PointerMoved(Point),

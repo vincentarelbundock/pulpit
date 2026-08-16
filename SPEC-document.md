@@ -70,8 +70,6 @@ pub enum WidgetKind {
     DocumentNav,
     /// Bookmarks and page thumbnails.
     DocumentOutline,
-    /// The AcroForm field inspector and editor.
-    FormFields,
     /// Tool selection and style for ink, highlighter, text, notes and stamps.
     AnnotationTools,
 }
@@ -202,16 +200,10 @@ change through `layout/validate.rs` and the store migration (§2) for what is a
 colour decision; if `Canvas` reads wrong behind a white page, the fix is
 retuning the `Canvas` token in `theme/tokens.rs`.
 
-**`FormFields` is deliberately absent from Reader.** Most PDFs have no
-AcroForm, and a rail that is empty for most documents is worse than one more
-built-in. Fields are edited in place on the page through the form-fill
-environment (§8.6), which is complete for the default. A second built-in,
-**Reader + Fields** (`reader-fields`), adds the field navigation list as a
-right-hand rail for people who fill long forms often — jump-to-field, filled
-state, progress — not a second editor. It is a built-in rather than the
-default for the same reason `slide-next-notes` is: the variants are where
-preferences live, and the default stays the one that is right for the most
-documents.
+**There is no field panel.** Most PDFs have no AcroForm, and a rail that is
+empty for most documents is worse than none. Fields are edited in place on
+the page through the form-fill environment (§8.6), which is the whole of the
+form story: one editing surface, no inspector beside it.
 
 ### 2.3 Choosing between the defaults
 
@@ -679,10 +671,8 @@ pub struct FieldWidget {
 This is pdfform's `FormValue`/`WidgetRect` with `NormalizedRect` replaced by
 canonical `PageRect` per A4. Since editing happens in place through the
 form-fill environment (§8.6), this model exists for listing, navigation and
-verification — the `FormFields` list, jump-to-field scrolling, filled-state
-display and Save As value checks — not for hosting an editor.
-`anchor_on(page)` names a field's first widget on a page, the target
-jump-to-field scrolls to.
+verification — Save As value checks in particular — not for hosting an
+editor. `anchor_on(page)` names a field's first widget on a page.
 
 ## 7. Native PDF mappings
 
@@ -868,10 +858,9 @@ code that generates its appearance.
 - Form widgets are PDF annotations, but they are not exposed through the
   annotation editor, are classified separately, and cannot be removed with
   the eraser or the annotation delete command.
-- The `FormFields` widget is a navigation and progress list — field name,
-  kind, filled state, jump-to-field — not a second editor. Values are edited
-  in place on the page only, so there is exactly one editing surface and no
-  value-mismatch class of bugs.
+- There is no field inspector widget. Values are edited in place on the page
+  only, so there is exactly one editing surface and no value-mismatch class
+  of bugs.
 
 The engine remains in the supervised worker process. Interactive events
 travel over the existing IPC; invalidations return as dirty rectangles
@@ -1231,7 +1220,6 @@ and then enforced as regression thresholds.
 |---|---|
 | `pdfform-core` `FormValue`, `WidgetRect` | `pulpit-render` forms module, geometry converted to canonical `PageRect` |
 | `pdfform-pdf` AcroForm discovery, choice metadata, value write-back | `pulpit-render` forms module |
-| `pdfform-app/src/edit/fields.rs` | the `FormFields` widget |
 | `pdfform-testkit` entire | `pulpit-testkit` |
 | AcroForm, non-destruction and hostile-input tests | beside the code they cover |
 | `SPEC.md` compatibility levels, export contract | §3.4 and §11.3 above |
@@ -1267,8 +1255,7 @@ into it before the copy is removed.
    `FPDF_FFLDraw` compositing; measure type-to-glyph latency. This gate
    decides §8.6's viability before any form UI is built.
 7. Port the AcroForm listing module and `pulpit-testkit`; wire in-place form
-   filling per §8.6; add the `FormFields` navigation list; get the corpus
-   green.
+   filling per §8.6; get the corpus green.
 8. Implement text extraction and selection, then `/Highlight`.
 9. Implement free text, Typst text, notes and stamps.
 10. Unify the session snapshot per §11.1 and implement document recovery.
@@ -1299,8 +1286,7 @@ Save As and cross-viewer tests. Whole-object eraser and undo.
 eraser transactions. Dirty state.
 
 **M3 — Forms.** Form-fill environment spike passed (§14.3 step 6). AcroForm
-listing module, engine-driven in-place editing per §8.6, `FormFields`
-navigation list, the **Reader + Fields** built-in, compatibility levels,
+listing module, engine-driven in-place editing per §8.6, compatibility levels,
 Save As value verification, `pulpit-testkit` corpus green.
 
 **M4 — Highlighter and text.** Text extraction and selection resolution.

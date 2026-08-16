@@ -7,7 +7,6 @@
 //! a supervisor spawns what it needs without a second installed binary to
 //! ship, sign or find on `PATH`.
 
-mod annotation_export;
 mod app;
 mod designer;
 mod designer_view;

@@ -44,6 +44,47 @@ pub enum WidgetEvent {
     Timer(TimerCommand),
     /// Something the reader asked of the open document.
     Read(ReadCommand),
+    /// Something asked of the search pane.
+    ///
+    /// Its own vocabulary rather than a reader command: search is placed in a
+    /// presenter layout and a document layout alike, and a presenter looking
+    /// for a slide by what its notes say has no reader to send it to.
+    Find(FindCommand),
+    /// Something asked of the application's own chrome.
+    Chrome(ChromeCommand),
+}
+
+/// What the search pane can ask for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindCommand {
+    /// What is in the box, as typed. The model decides what of it is a query.
+    Type(String),
+    /// Move to the next or the previous hit, wrapping at either end.
+    Next,
+    Previous,
+    /// Go to one particular hit: a press in the results list.
+    Focus(usize),
+    ToggleCaseSensitive,
+    ToggleWholeWord,
+    /// Forget the query and everything found for it.
+    Clear,
+}
+
+/// What the menu button and the audience lifecycle controls can ask for.
+///
+/// These used to be a fixed strip above the layout and are now widgets, so
+/// they speak the same vocabulary every other widget does: an intent, which
+/// the application turns into a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeCommand {
+    /// Open the main menu, or close it if the press was on an open one.
+    ToggleMenu,
+    /// Open the audience window where it last went.
+    StartAudience,
+    /// Close the audience window.
+    StopAudience,
+    /// Open the list of displays the audience window could go to instead.
+    ToggleStartMenu,
 }
 
 /// What the reader's widgets can ask for.
@@ -55,7 +96,33 @@ pub enum WidgetEvent {
 #[allow(dead_code)] // see `crate::reader::ReaderSession`
 pub enum ReadCommand {
     /// Scroll the page column to an offset in layout points.
-    ScrollTo(f32),
+    ScrollTo {
+        /// Where the surface now is, in layout points from the top.
+        offset: f32,
+        /// …and from the left, which is only ever non-zero at a zoom that
+        /// makes the page wider than the window.
+        offset_x: f32,
+        /// How tall the surface's window actually is.
+        ///
+        /// Reported rather than computed: the session fits pages to this, and
+        /// a fit computed from the cell the layout *asked* for is out by
+        /// whatever chrome sits between the cell and the scrollable — which
+        /// is the difference between a page that fills the window exactly and
+        /// one whose foot is cut off.
+        viewport: f32,
+    },
+    /// The reader dragged the scroll handle to an offset.
+    ///
+    /// Told apart from [`ReadCommand::ScrollTo`], which is the surface saying
+    /// where it already is: this one has to be pushed back to the surface,
+    /// and that one must not be.
+    DragScrollHandle(f32),
+    /// Scroll by whole windows: what Page Down and Page Up do.
+    ///
+    /// In windows rather than in points because the reader means "the next
+    /// screenful", and how much of the document that is depends on the zoom
+    /// the window is at — which is the session's to know, not the key's.
+    ScrollByWindows(i32),
     /// Put a page's top at the top of the window.
     GoToPage(pulpit_core::page::PageIndex),
     /// Fit the width, fit the page or set a scale.
@@ -67,11 +134,25 @@ pub enum ReadCommand {
     TypePage(String),
     /// Take what is in the page box as the page to go to.
     CommitPage,
+    /// Read one page across the column, or two facing pages.
+    SetSpread(crate::widgets::document::model::PageSpread),
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
+    /// Collapse the outline rail to its header, or open it again.
+    SetOutlineCollapsed(bool),
     /// Arm a document tool, or hand the pointer back to the document's own
     /// links and form fields.
     Arm(Option<pulpit_core::annotation::AnnotationTool>),
+    /// Open one tool's options popover in the toolbar, or close whichever is
+    /// open.
+    ToolOptions(Option<pulpit_core::annotation::AnnotationTool>),
+    /// Set the colour a tool lays down.
+    SetToolColor(
+        pulpit_core::annotation::AnnotationTool,
+        pulpit_core::annotation::InkColor,
+    ),
+    /// Set the pen's stroke width, in page points.
+    SetInkWidth(f32),
     /// The pointer moved over the page surface, in canonical page points on
     /// the page it is over (A4).
     PageCursor {
@@ -79,6 +160,9 @@ pub enum ReadCommand {
         x: f32,
         y: f32,
     },
+    /// The page surface was double-clicked: open whatever text mark is under
+    /// the pointer, if any (§8.5).
+    PageDoubleClicked,
     /// The page surface was pressed, released, or the gesture was abandoned.
     PagePressed,
     PageReleased,
@@ -89,8 +173,29 @@ pub enum ReadCommand {
     // application never draws a field editor and never sets a value itself.
     // That is what makes one editing surface rather than two, and removes the
     // whole class of bugs where an inspector and a widget disagree about what
-    // a field holds. The `FormFields` widget navigates to a field; the events
-    // above are what carry the typing.
+    // a field holds. The events above are what carry the typing.
+    /// What has been typed into the mark being written on the page (§8.5),
+    /// as typed. The editor is drawn on the sheet at the spot the mark will
+    /// land, so these come from the page surface and not from a dialog.
+    ComposeMark(String),
+    /// Typeset the text being written with Typst, or write it plain.
+    ComposeAsTypst(bool),
+    /// Place what was written, or abandon it. Empty text places nothing, and
+    /// abandoning is not a mutation.
+    CommitMark,
+    CancelMark,
+    /// Take the mark the reader has picked up out of the document (§8.4).
+    ///
+    /// The eraser's companion, not its replacement: a sweep takes whatever it
+    /// passes over, and this takes exactly the one thing that is selected.
+    DeleteSelected,
+    /// Open what the selected mark says, for rewriting (§8.5). The same editor
+    /// a double click opens, reached from the keyboard and from the toolbar.
+    EditSelected,
+    /// Put down whatever is held, committing nothing.
+    ClearSelection,
+    /// Set the size placed text is written at, in page points.
+    SetTextSize(f32),
     /// Take back the last edit, or put it back.
     Undo,
     Redo,

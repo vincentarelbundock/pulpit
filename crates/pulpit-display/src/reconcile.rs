@@ -172,8 +172,6 @@ pub enum Warning {
     SharedDisplay,
     /// Outputs overlap without being an exact mirror; both remain targetable.
     OverlappingOutputs { a: usize, b: usize, nested: bool },
-    /// The compositor cannot place windows; the user must finish placement.
-    PlacementUnsupported { role: Role },
     /// A window was moved off a disappeared display to stay reachable.
     WindowRecovered { role: Role },
     /// The audience window is ready but has no frame yet, so it stays hidden.
@@ -198,7 +196,6 @@ impl Warning {
             Warning::SelectedDisplayMissing { .. } => "selected-display-missing",
             Warning::SharedDisplay => "shared-display",
             Warning::OverlappingOutputs { .. } => "overlapping-outputs",
-            Warning::PlacementUnsupported { .. } => "placement-unsupported",
             Warning::WindowRecovered { .. } => "window-recovered",
             Warning::AwaitingFirstFrame => "awaiting-first-frame",
             Warning::CannotLeaveFullscreen { .. } => "cannot-leave-fullscreen",
@@ -512,9 +509,6 @@ fn plan_window(
             mode,
         });
     } else if !capabilities.can_place() {
-        if !already_there {
-            warnings.push(Warning::PlacementUnsupported { role });
-        }
         // Placement is off the table, but the window's own mode is still
         // ours: the toolkit fullscreens on whatever output the window is on.
         if !mode_matches {
@@ -1283,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tiling_compositor_falls_back_and_explains_itself() {
+    fn a_tiling_compositor_falls_back_without_placing() {
         let snapshot = DisplaySnapshot::new(vec![laptop(), projector()], 1);
         let mut windows = ready_windows();
         let outcome = settle(
@@ -1293,10 +1287,10 @@ mod tests {
             &mut windows,
         );
 
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|w| matches!(w, Warning::PlacementUnsupported { .. })));
+        assert!(
+            outcome.warnings.is_empty(),
+            "an unplaceable compositor is not a warning"
+        );
         assert!(
             windows.presenter.visible && windows.audience.visible,
             "both stay usable"

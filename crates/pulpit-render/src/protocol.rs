@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the wire format changes. A worker that does not answer
 /// with the same version is shut down rather than trusted.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Hard ceiling on one encoded message.
 ///
@@ -126,6 +126,13 @@ pub struct RenderJob {
     pub height: u32,
     pub priority: Priority,
     pub quality: Quality,
+    /// Draw the document's own annotations into the frame.
+    ///
+    /// Off for every presentation frame — the presenter's marks are a vector
+    /// overlay, and the projector must not show the document's own ink twice.
+    /// On for a reader page, where the annotations are the point: the frame
+    /// is the one representation of the committed marks (A1).
+    pub with_annotations: bool,
     /// Name of the shared-memory region the worker must write into.
     pub region_name: String,
 }
@@ -199,6 +206,18 @@ pub enum Request {
     Navigation {
         document: u64,
     },
+    /// Find a string in the text layer of a run of pages.
+    ///
+    /// A run rather than the whole deck: the answer travels over the pipe
+    /// and a presenter watching a search crawl through five hundred slides
+    /// needs the first hits before the last page is read.
+    FindText {
+        document: u64,
+        generation: pulpit_core::search::SearchGeneration,
+        query: pulpit_core::search::Query,
+        from_page: usize,
+        to_page: usize,
+    },
     /// Ask what the document declares that pulpit will not honour.
     Capabilities {
         document: u64,
@@ -207,17 +226,6 @@ pub enum Request {
     Attachment {
         document: u64,
         name: String,
-    },
-    /// Write a copy of a document with the presenter's marks stamped in.
-    ///
-    /// Carries the source path rather than an open document id: the export
-    /// loads its own copy, so a save can never disturb the handle the
-    /// audience frame is being rendered from.
-    ExportAnnotated {
-        id: RequestId,
-        source: String,
-        destination: String,
-        pages: Vec<crate::pdf::PageStamp>,
     },
     /// Cancel one in-flight or queued request.
     Cancel {
@@ -318,6 +326,18 @@ pub enum Response {
         document: u64,
         navigation: pulpit_core::navigation::DocumentNavigation,
     },
+    /// The hits in one run of pages, under the generation that asked for
+    /// them, so an answer to a superseded query is recognisable as stale.
+    ///
+    /// `searchable` is false when the backend cannot read a text layer at
+    /// all: an unsearchable deck and a deck with no matches must not look the
+    /// same to the person who typed the query.
+    Found {
+        document: u64,
+        generation: pulpit_core::search::SearchGeneration,
+        chunk: pulpit_core::search::HitChunk,
+        searchable: bool,
+    },
     /// What the document declares that pulpit will flatten or ignore.
     Capabilities {
         document: u64,
@@ -327,19 +347,6 @@ pub enum Response {
         document: u64,
         name: String,
         bytes: Vec<u8>,
-    },
-    /// An annotated copy was written.
-    Exported {
-        id: RequestId,
-        destination: String,
-        /// How many pages carried marks into the file.
-        pages: usize,
-    },
-    /// The copy could not be written. Never fatal: the presentation, and the
-    /// source document, are exactly as they were.
-    ExportFailed {
-        id: RequestId,
-        reason: String,
     },
     /// A missing, oversized or unreadable attachment. Never fatal: the static
     /// PDF page is still what the audience sees.
@@ -415,6 +422,7 @@ mod tests {
             height: 2160,
             priority: Priority::Audience,
             quality: Quality::Refined,
+            with_annotations: false,
             region_name: "pulpit-shm-1".into(),
         }
     }

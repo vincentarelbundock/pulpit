@@ -114,7 +114,6 @@ fn pulpit_settings_describe(warning: &Warning) -> &'static str {
         Warning::SelectedDisplayMissing { .. } => "selected display missing",
         Warning::SharedDisplay => "shared display",
         Warning::OverlappingOutputs { .. } => "overlapping outputs",
-        Warning::PlacementUnsupported { .. } => "placement unsupported",
         Warning::WindowRecovered { .. } => "window recovered",
         Warning::AwaitingFirstFrame => "awaiting first frame",
         Warning::CannotLeaveFullscreen { .. } => "cannot leave fullscreen",

@@ -22,7 +22,7 @@ use pulpit_core::page::PageIndex;
 use super::protocol::{
     DocumentFailure, DocumentFrame, DocumentRequest, DocumentResponse, DOCUMENT_PROTOCOL_VERSION,
 };
-use super::{DocumentError, DocumentTransaction, PdfDocument};
+use super::{DocumentTransaction, PdfDocument};
 
 /// What a document worker holds while it is serving.
 ///
@@ -119,6 +119,13 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
         DocumentRequest::SelectText { page, selection } => document
             .select_text(page, selection)
             .map(DocumentResponse::Selection),
+        DocumentRequest::FindText {
+            query,
+            from_page,
+            to_page,
+        } => document
+            .find_text(&query, from_page..to_page)
+            .map(DocumentResponse::Found),
         DocumentRequest::ListFields => document.fields().map(DocumentResponse::Fields),
         DocumentRequest::Outline => document.outline().map(DocumentResponse::Outline),
         DocumentRequest::Apply {
@@ -136,13 +143,15 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
         DocumentRequest::SaveAs(save) => document
             .save_as(&save.destination, save.options)
             .map(DocumentResponse::Saved),
-        // Not yet wired: the form-fill environment is the gating spike of
-        // §14.3, and answering a form event with an empty result would look
-        // like a keystroke that did nothing rather than one that went
-        // nowhere. Refusing says which it is.
-        DocumentRequest::FormEvent { .. } => Err(DocumentError::Backend(
-            "the form-fill environment is not wired in this build".into(),
-        )),
+        // Straight through to PDFium's form-fill environment (§8.6). The
+        // worker does not interpret the event, does not know which field it
+        // lands in and does not draw a field editor: it forwards, and hands
+        // back the rectangles the engine invalidated. That is the whole point
+        // — there is one implementation of what a keystroke does to a form
+        // field, and it is the one that also generates the appearance.
+        DocumentRequest::FormEvent { page, event } => {
+            document.form_event(page, event).map(DocumentResponse::Form)
+        }
         DocumentRequest::Open(_) | DocumentRequest::Close => {
             unreachable!("handled before dispatch")
         }
@@ -461,6 +470,31 @@ mod tests {
             panic!("expected a selection")
         };
         assert!(selection.is_empty());
+    }
+
+    #[test]
+    fn a_backend_that_cannot_search_says_so_rather_than_finding_nothing() {
+        let mut worker = worker();
+        let response = worker.handle(DocumentRequest::FindText {
+            query: pulpit_core::search::Query::new("anything", false, false),
+            from_page: 0,
+            to_page: 1,
+        });
+        assert!(matches!(
+            response,
+            DocumentResponse::Failed(DocumentFailure::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_search_wider_than_the_limit_is_refused_before_it_is_run() {
+        let request = DocumentRequest::FindText {
+            query: pulpit_core::search::Query::new("pdf", false, false),
+            from_page: 0,
+            to_page: crate::document::limits::MAX_PAGES_PER_SEARCH + 1,
+        };
+        assert!(request.validate().is_err());
+        assert!(!request.is_mutation());
     }
 
     #[test]

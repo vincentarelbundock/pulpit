@@ -26,23 +26,14 @@ use pdfium_render::prelude::{
 };
 
 /// PDFium ABI constants that `pdfium-render` does not re-export.
-const FPDF_BITMAP_BGRA: i32 = 4;
+pub(crate) const FPDF_BITMAP_BGRA: i32 = 4;
 const FPDF_RENDER_TOBECONTINUED: u32 = 1;
 const FPDF_RENDER_DONE: u32 = 2;
 /// `FPDF_REVERSE_BYTE_ORDER` from `fpdfview.h`: PDFium fills the BGRA bitmap
 /// in RGBA byte order instead. The UI and the protocol only ever consume
 /// RGBA, so rendering it directly saves a full read-modify-write pass over
 /// every frame.
-const FPDF_REVERSE_BYTE_ORDER: i32 = 0x10;
-/// Path drawing constants from `fpdf_edit.h`: `FPDF_FILLMODE_NONE`, and the
-/// round cap and join the presenter panels draw their strokes with.
-const FILL_MODE_NONE: std::ffi::c_int = 0;
-const LINE_CAP_ROUND: std::ffi::c_int = 1;
-const LINE_JOIN_ROUND: std::ffi::c_int = 1;
-/// A stroke thinner than this disappears at print resolution. Nothing the
-/// palette offers is anywhere near it; the floor exists so a deck with an
-/// unusually large page cannot round a mark down to nothing.
-const MIN_STROKE_POINTS: f32 = 0.1;
+pub(crate) const FPDF_REVERSE_BYTE_ORDER: i32 = 0x10;
 /// `PDFACTION_*` action types from `fpdf_doc.h`.
 const PDFACTION_GOTO: std::ffi::c_ulong = 1;
 const PDFACTION_URI: std::ffi::c_ulong = 3;
@@ -54,6 +45,11 @@ const PDFDEST_VIEW_FITR: std::ffi::c_ulong = 5;
 const MAX_URI_BYTES: u64 = 2048;
 /// More link annotations than any real slide carries; bounds the message.
 const MAX_LINKS_PER_PAGE: usize = 512;
+/// The most hits one search request answers with, and the most runs one hit
+/// carries. The same bounds the document worker uses, for the same reason:
+/// the hits are held in memory and drawn over every visible page.
+const MAX_HITS_PER_SEARCH: usize = crate::document::limits::MAX_HITS_PER_SEARCH;
+const MAX_QUADS_PER_HIT: usize = crate::document::limits::MAX_QUADS_PER_HIT;
 /// More embedded files than any real deck carries.
 const MAX_ATTACHMENTS: i32 = 4096;
 /// An attachment name longer than this is not one a producer wrote.
@@ -104,10 +100,9 @@ use crate::pdf::capabilities::{
     FormType, PageEvidence, RestrictionEvidence,
 };
 use crate::pdf::{
-    BackendDocumentId, CancelSignal, DocumentMetadata, PageStamp, PdfBackend, PdfError,
-    RenderRequest, RenderedPage, Result, StampImage,
+    BackendDocumentId, CancelSignal, DocumentMetadata, PdfBackend, PdfError, RenderRequest,
+    RenderedPage, Result,
 };
-use pulpit_core::annotation::StrokeKind;
 
 static BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -278,206 +273,21 @@ impl PdfiumBackend {
         result
     }
 
-    /// Draw every stamp into `document`, then write it out.
-    ///
-    /// A page that cannot be loaded or measured is left exactly as it was
-    /// rather than aborting the export: a deck saves with the marks it could
-    /// place, which is strictly better than no file at all, and the pages
-    /// that failed are the ones the presenter can see are missing them.
-    fn stamp_and_save(
-        &self,
-        document: FPDF_DOCUMENT,
-        destination: &Path,
-        pages: &[PageStamp],
-    ) -> Result<()> {
-        let count = unsafe { self.bindings.FPDF_GetPageCount(document) } as usize;
-        for stamp in pages {
-            if stamp.page >= count {
-                continue;
-            }
-            if stamp.strokes.is_empty() && stamp.images.is_empty() {
-                continue;
-            }
-            let page = unsafe { self.bindings.FPDF_LoadPage(document, stamp.page as i32) };
-            if page.is_null() {
-                tracing::warn!(
-                    page = stamp.page,
-                    "cannot load page to stamp; left unmarked"
-                );
-                continue;
-            }
-            match PageFrame::measure(&*self.bindings, page) {
-                Some(frame) => {
-                    self.stamp_page(document, page, &frame, stamp);
-                    // Without this the objects exist in memory and are absent
-                    // from the saved file: content generation is what commits
-                    // them to the page's stream.
-                    if unsafe { self.bindings.FPDFPage_GenerateContent(page) } == 0 {
-                        tracing::warn!(page = stamp.page, "content generation refused the marks");
-                    }
-                }
-                None => tracing::warn!(page = stamp.page, "cannot measure page; left unmarked"),
-            }
-            unsafe { self.bindings.FPDF_ClosePage(page) };
-        }
-        let bytes = self.save_to_memory(document)?;
-        write_atomically(destination, &bytes)
-    }
-
-    /// Put one page's marks on it, as ordinary page content.
-    fn stamp_page(
-        &self,
-        document: FPDF_DOCUMENT,
-        page: FPDF_PAGE,
-        frame: &PageFrame,
-        stamp: &PageStamp,
-    ) {
-        let region = stamp.region;
-        // Marks are normalised inside the region the panel showed, so a
-        // split-page deck lands its ink on the half it was drawn over.
-        let locate = |x: f32, y: f32| {
-            frame.to_user(region.x + x * region.width, region.y + y * region.height)
-        };
-        for stroke in &stamp.strokes {
-            let Some((first, rest)) = stroke.points.split_first() else {
-                continue;
-            };
-            let (x, y) = locate(first.0, first.1);
-            let path = unsafe { self.bindings.FPDFPageObj_CreateNewPath(x, y) };
-            if path.is_null() {
-                continue;
-            }
-            for point in rest {
-                let (x, y) = locate(point.0, point.1);
-                unsafe { self.bindings.FPDFPath_LineTo(path, x, y) };
-            }
-            let (red, green, blue) = stroke.color.rgb();
-            let alpha = (stroke.kind.opacity() * 255.0).round().clamp(0.0, 255.0) as u32;
-            unsafe {
-                self.bindings.FPDFPageObj_SetStrokeColor(
-                    path,
-                    channel(red),
-                    channel(green),
-                    channel(blue),
-                    alpha,
-                );
-                self.bindings.FPDFPageObj_SetStrokeWidth(
-                    path,
-                    (stroke.width * region.width * frame.display_width).max(MIN_STROKE_POINTS),
-                );
-                // The panels draw round caps and joins; a stroke that grew
-                // mitred corners on the way into the file would not be the
-                // mark the room watched being made.
-                self.bindings.FPDFPageObj_SetLineCap(path, LINE_CAP_ROUND);
-                self.bindings.FPDFPageObj_SetLineJoin(path, LINE_JOIN_ROUND);
-                // The highlighter is translucent *and* multiplies, which is
-                // how it darkens the text under it instead of fogging it.
-                if stroke.kind == StrokeKind::Highlight {
-                    self.bindings.FPDFPageObj_SetBlendMode(path, "Multiply");
-                }
-                self.bindings.FPDFPath_SetDrawMode(path, FILL_MODE_NONE, 1);
-                let _ = self.bindings.FPDFPage_InsertObject(page, path);
-            }
-        }
-        for image in &stamp.images {
-            self.stamp_image(document, page, frame, region, image);
-        }
-    }
-
-    fn stamp_image(
-        &self,
-        document: FPDF_DOCUMENT,
-        page: FPDF_PAGE,
-        frame: &PageFrame,
-        region: Region,
-        image: &StampImage,
-    ) {
-        // The panel fits the picture into whatever is left of the page to the
-        // right of and below its corner, keeping its aspect. The same
-        // arithmetic here is what makes the file agree with the screen.
-        let left = region.x + image.x * region.width;
-        let top = region.y + image.y * region.height;
-        let available_width = (image.width * region.width * frame.display_width).max(0.0);
-        let available_height = (((region.y + region.height) - top) * frame.display_height).max(0.0);
-        let aspect = image.pixel_width as f32 / image.pixel_height as f32;
-        let (width, height) = if available_width / aspect > available_height {
-            (available_height * aspect, available_height)
-        } else {
-            (available_width, available_width / aspect)
-        };
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-
-        let bitmap = unsafe {
-            self.bindings.FPDFBitmap_CreateEx(
-                image.pixel_width as i32,
-                image.pixel_height as i32,
-                FPDF_BITMAP_BGRA,
-                std::ptr::null_mut(),
-                image.pixel_width as i32 * 4,
-            )
-        };
-        if bitmap.is_null() {
-            return;
-        }
-        // PDFium owns this buffer; `FPDFImageObj_SetBitmap` copies out of it,
-        // so it only has to be correct for the length of that call.
-        let buffer = unsafe { self.bindings.FPDFBitmap_GetBuffer(bitmap) };
-        if !buffer.is_null() {
-            let stride = unsafe { self.bindings.FPDFBitmap_GetStride(bitmap) } as usize;
-            let target = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buffer as *mut u8,
-                    stride * image.pixel_height as usize,
-                )
-            };
-            for row in 0..image.pixel_height as usize {
-                for column in 0..image.pixel_width as usize {
-                    let from = (row * image.pixel_width as usize + column) * 4;
-                    let to = row * stride + column * 4;
-                    target[to] = image.rgba[from + 2];
-                    target[to + 1] = image.rgba[from + 1];
-                    target[to + 2] = image.rgba[from];
-                    target[to + 3] = image.rgba[from + 3];
-                }
-            }
-        }
-
-        let object = unsafe { self.bindings.FPDFPageObj_NewImageObj(document) };
-        if !object.is_null() {
-            let ok = unsafe {
-                self.bindings
-                    .FPDFImageObj_SetBitmap(std::ptr::null_mut(), 0, object, bitmap)
-            };
-            if ok != 0 {
-                // A PDF image is a unit square with its origin at the
-                // bottom left, so the matrix is anchored there rather than
-                // at the corner the presenter placed.
-                let (x, y) = frame.to_user(left, top);
-                let matrix = pdfium_render::prelude::FS_MATRIX {
-                    a: frame.right.0 * width,
-                    b: frame.right.1 * width,
-                    c: -frame.down.0 * height,
-                    d: -frame.down.1 * height,
-                    e: x + frame.down.0 * height,
-                    f: y + frame.down.1 * height,
-                };
-                unsafe {
-                    self.bindings.FPDFPageObj_SetMatrix(object, &matrix);
-                    let _ = self.bindings.FPDFPage_InsertObject(page, object);
-                }
-            }
-        }
-        unsafe { self.bindings.FPDFBitmap_Destroy(bitmap) };
-    }
-
     /// Serialise the document into memory.
     ///
     /// Buffering the whole file before a byte of it reaches the destination
     /// is what makes [`write_atomically`] able to promise the presenter that
     /// a save either produced a complete PDF or produced nothing.
-    pub(crate) fn save_to_memory(&self, document: FPDF_DOCUMENT) -> Result<Vec<u8>> {
+    pub(crate) fn save_to_memory(
+        &self,
+        document: FPDF_DOCUMENT,
+        incremental: bool,
+    ) -> Result<Vec<u8>> {
+        /// `FPDF_INCREMENTAL` from `fpdf_save.h`: append the changed objects
+        /// to the original byte stream rather than re-serialising the whole
+        /// document. Cheaper to produce, and it leaves an existing
+        /// signature's byte ranges intact.
+        const FPDF_INCREMENTAL: std::os::raw::c_ulong = 1;
         // The C struct PDFium writes through; `writer` is the Rust tail this
         // module casts back to in the callback. `#[repr(C)]` and the header
         // coming first are what make that cast sound.
@@ -512,7 +322,7 @@ impl PdfiumBackend {
             self.bindings.FPDF_SaveAsCopy(
                 document,
                 &mut sink.header as *mut pdfium_render::prelude::FPDF_FILEWRITE,
-                0,
+                if incremental { FPDF_INCREMENTAL } else { 0 },
             )
         };
         if ok == 0 || sink.bytes.is_empty() {
@@ -752,125 +562,6 @@ impl PdfiumBackend {
     }
 }
 
-/// The bookmark tree, as the domain's outline walk wants to see it.
-///
-/// Nothing here bounds anything: the depth, cycle and count guards all live in
-/// [`pulpit_core::navigation::build_outline`], which is where they can be
-/// tested without a PDF. This adapter's only job is the two-call
-/// length-then-buffer dance PDFium strings require.
-/// Where a page's content lives in user space, and which way round it is
-/// drawn.
-///
-/// Everything above this module works in normalised coordinates over the
-/// picture PDFium *renders*; page objects are placed in the page's own user
-/// space, which a `/Rotate` entry turns relative to it. Resolving the two
-/// once, here, is what keeps a rotated page from receiving its ink sideways.
-struct PageFrame {
-    /// Size of the displayed page in points.
-    display_width: f32,
-    display_height: f32,
-    /// User-space direction of displayed rightwards and downwards. Unit
-    /// vectors: `/Rotate` is a rotation, never a scale.
-    right: (f32, f32),
-    down: (f32, f32),
-    /// User-space point the displayed top-left corner sits at.
-    origin: (f32, f32),
-}
-
-impl PageFrame {
-    fn measure(bindings: &dyn PdfiumLibraryBindings, page: FPDF_PAGE) -> Option<Self> {
-        // The crop box is what PDFium renders; the media box is the sheet it
-        // was imposed on, and the two differ in any deck that was trimmed.
-        let box_of = |read: BoxReader| {
-            let (mut left, mut bottom, mut right, mut top) = (0.0, 0.0, 0.0, 0.0);
-            let ok = unsafe { read(bindings, page, &mut left, &mut bottom, &mut right, &mut top) };
-            (ok != 0 && right > left && top > bottom).then_some((left, bottom, right, top))
-        };
-        let (left, bottom, right, top) =
-            box_of(read_crop_box).or_else(|| box_of(read_media_box))?;
-        let width = right - left;
-        let height = top - bottom;
-        // PDFium reports the rotation in quarter turns clockwise.
-        let quarters = unsafe { bindings.FPDFPage_GetRotation(page) }.rem_euclid(4);
-        Some(match quarters {
-            1 => Self {
-                display_width: height,
-                display_height: width,
-                right: (0.0, 1.0),
-                down: (1.0, 0.0),
-                origin: (left, bottom),
-            },
-            2 => Self {
-                display_width: width,
-                display_height: height,
-                right: (-1.0, 0.0),
-                down: (0.0, 1.0),
-                origin: (right, bottom),
-            },
-            3 => Self {
-                display_width: height,
-                display_height: width,
-                right: (0.0, -1.0),
-                down: (-1.0, 0.0),
-                origin: (right, top),
-            },
-            _ => Self {
-                display_width: width,
-                display_height: height,
-                right: (1.0, 0.0),
-                down: (0.0, -1.0),
-                origin: (left, top),
-            },
-        })
-    }
-
-    /// Normalised coordinates over the displayed page to a point in the
-    /// page's own user space.
-    fn to_user(&self, u: f32, v: f32) -> (f32, f32) {
-        let across = u * self.display_width;
-        let down = v * self.display_height;
-        (
-            self.origin.0 + self.right.0 * across + self.down.0 * down,
-            self.origin.1 + self.right.1 * across + self.down.1 * down,
-        )
-    }
-}
-
-type BoxReader = unsafe fn(
-    &dyn PdfiumLibraryBindings,
-    FPDF_PAGE,
-    &mut f32,
-    &mut f32,
-    &mut f32,
-    &mut f32,
-) -> pdfium_render::prelude::FPDF_BOOL;
-
-unsafe fn read_crop_box(
-    bindings: &dyn PdfiumLibraryBindings,
-    page: FPDF_PAGE,
-    left: &mut f32,
-    bottom: &mut f32,
-    right: &mut f32,
-    top: &mut f32,
-) -> pdfium_render::prelude::FPDF_BOOL {
-    unsafe { bindings.FPDFPage_GetCropBox(page, left, bottom, right, top) }
-}
-
-unsafe fn read_media_box(
-    bindings: &dyn PdfiumLibraryBindings,
-    page: FPDF_PAGE,
-    left: &mut f32,
-    bottom: &mut f32,
-    right: &mut f32,
-    top: &mut f32,
-) -> pdfium_render::prelude::FPDF_BOOL {
-    unsafe { bindings.FPDFPage_GetMediaBox(page, left, bottom, right, top) }
-}
-
-fn channel(value: f32) -> std::ffi::c_uint {
-    (value * 255.0).round().clamp(0.0, 255.0) as std::ffi::c_uint
-}
-
 /// Write `bytes` to `destination` through a temporary file in the same
 /// directory, so an interrupted save leaves the presenter's chosen path
 /// either untouched or holding a complete PDF — never half of one, and never
@@ -1032,33 +723,6 @@ impl PdfBackend for PdfiumBackend {
         self.documents.insert(self.next_id, handle);
         self.paths.insert(self.next_id, source.to_path_buf());
         Ok(BackendDocumentId(self.next_id))
-    }
-
-    fn export_annotated(
-        &self,
-        source: &Path,
-        destination: &Path,
-        pages: &[PageStamp],
-    ) -> Result<()> {
-        for stamp in pages {
-            stamp.validate()?;
-        }
-        // A second, independent handle on the same file. The documents this
-        // backend renders from are never stamped: mutating one would change
-        // what the audience is looking at, and a page is not re-rendered just
-        // because a save happened.
-        let path = source.to_string_lossy().to_string();
-        let document = unsafe { self.bindings.FPDF_LoadDocument(&path, None) };
-        if document.is_null() {
-            let code = unsafe { self.bindings.FPDF_GetLastError() };
-            return Err(PdfError::Open {
-                path,
-                reason: format!("PDFium error {code}"),
-            });
-        }
-        let result = self.stamp_and_save(document, destination, pages);
-        unsafe { self.bindings.FPDF_CloseDocument(document) };
-        result
     }
 
     fn close(&mut self, document: BackendDocumentId) {
@@ -1281,6 +945,46 @@ impl PdfBackend for PdfiumBackend {
             pages: self.page_evidence(document, handle),
             transition_styles: self.transition_styles(document),
         })
+    }
+
+    fn find_text(
+        &self,
+        document: BackendDocumentId,
+        query: &pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
+    ) -> Result<Vec<pulpit_core::search::Hit>> {
+        let mut hits = Vec::new();
+        if query.is_empty() {
+            return Ok(hits);
+        }
+        for page in pages {
+            let found = self.with_page(document, page, |handle| {
+                let text_page = unsafe { self.bindings.FPDFText_LoadPage(handle) };
+                if text_page.is_null() {
+                    // A slide with no text layer — a picture, a poster — is
+                    // not a failure. It simply has nothing to find.
+                    return Ok(Vec::new());
+                }
+                let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
+                let found = crate::pdf::search::find_on_page(
+                    self.bindings.as_ref(),
+                    text_page,
+                    &geometry,
+                    pulpit_core::page::PageIndex(page),
+                    query,
+                    MAX_HITS_PER_SEARCH,
+                    MAX_QUADS_PER_HIT,
+                );
+                unsafe { self.bindings.FPDFText_ClosePage(text_page) };
+                Ok(found)
+            })?;
+            hits.extend(found);
+            if hits.len() >= MAX_HITS_PER_SEARCH {
+                hits.truncate(MAX_HITS_PER_SEARCH);
+                break;
+            }
+        }
+        Ok(hits)
     }
 
     fn links(&self, document: BackendDocumentId, page: usize) -> Result<Vec<PageLink>> {

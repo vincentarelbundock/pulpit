@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "name": "Reader + Fields",
+  "name": "Reader",
   "design_ratio": "sixteen-nine",
   "root": {
     "type": "split",
@@ -18,6 +18,23 @@
             "type": "leaf",
             "id": 2,
             "widget": {
+              "kind": "main-menu",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 4.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 3,
+            "widget": {
               "kind": "document-nav",
               "style": {
                 "variant": "standard",
@@ -33,7 +50,7 @@
           },
           {
             "type": "leaf",
-            "id": 3,
+            "id": 4,
             "widget": {
               "kind": "annotation-tools",
               "style": {
@@ -66,21 +83,22 @@
           }
         ],
         "sizes": [
-          0.5,
-          0.5
+          0.06,
+          0.47,
+          0.47
         ],
         "gap": 8.0,
         "min_child": 0.05
       },
       {
         "type": "split",
-        "id": 4,
+        "id": 5,
         "name": "Document",
         "direction": "horizontal",
         "children": [
           {
             "type": "leaf",
-            "id": 5,
+            "id": 6,
             "widget": {
               "kind": "document-outline",
               "style": {
@@ -97,7 +115,7 @@
           },
           {
             "type": "leaf",
-            "id": 6,
+            "id": 7,
             "widget": {
               "kind": "document-page",
               "style": {
@@ -111,29 +129,11 @@
             "background": "canvas",
             "border": "none",
             "empty_behavior": "show-blank-panel"
-          },
-          {
-            "type": "leaf",
-            "id": 7,
-            "widget": {
-              "kind": "form-fields",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": "none"
-            },
-            "padding": 12.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
           }
         ],
         "sizes": [
-          0.16,
-          0.6,
-          0.24
+          0.18,
+          0.82
         ],
         "gap": 8.0,
         "min_child": 0.05

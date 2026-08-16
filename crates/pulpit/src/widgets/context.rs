@@ -209,6 +209,12 @@ pub struct AudienceData {
     pub blank: Blank,
     pub connected: bool,
     pub fullscreen: bool,
+    /// Whether the audience window is open at all, which is what the Start
+    /// control says and what its press means.
+    pub started: bool,
+    /// Whether the main menu is currently down, so the menu button can show
+    /// the way out of it rather than a second way in.
+    pub menu_open: bool,
 }
 
 /// The media on the current slide, as its transport needs to see it.
@@ -235,11 +241,71 @@ pub struct ReaderPage {
     /// The unfinished gesture, when one is open on this page (A2). Only ever
     /// on one page at a time, because only one gesture is open at a time.
     pub preview: Option<crate::widgets::document::preview::GesturePreview>,
+    /// Committed marks whose frames have not arrived yet, still drawn by the
+    /// UI so a stroke does not vanish at release and reappear a round trip
+    /// later (§9.2).
+    pub retained: Vec<crate::widgets::document::preview::GesturePreview>,
     /// The most recent complete frame for this page at roughly this size, or
     /// `None` while one is being rendered. A page with no frame yet draws its
     /// sheet and nothing on it, rather than nothing at all: the column must
     /// not jump when a frame arrives.
     pub frame: Option<ImageHandle>,
+    /// Search hits on this page, in canonical page space, and the one the
+    /// reader is standing on told apart from the rest.
+    ///
+    /// Drawn by the UI rather than written into the document: a search result
+    /// is not a mark, it goes when the query does, and nothing about it may
+    /// reach a saved file.
+    pub found: Vec<pulpit_core::page::PageQuad>,
+    pub found_current: Vec<pulpit_core::page::PageQuad>,
+    /// The mark the reader has picked up, when it is on this page (§8.4).
+    pub selection: Option<SelectedMark>,
+}
+
+/// The selected annotation, as the page surface draws it.
+///
+/// Application state and never document state: nothing about a selection is
+/// in the PDF, and it survives no restart. It is here so that picking a mark
+/// up *looks* like picking a mark up — without it the reader drags an
+/// invisible thing and finds out where it went when the frame comes back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedMark {
+    /// Where the mark is, in canonical page space — or where the open drag has
+    /// got it to, which is not the same thing until the pointer comes up.
+    pub bounds: pulpit_core::page::PageRect,
+    /// Is a drag open? A held mark is drawn as a ghost of where it would land,
+    /// so the outline reads as a proposal rather than as the document.
+    pub dragging: bool,
+    /// The corners that can be grabbed. Empty for a mark that cannot be
+    /// resized — a highlight, a note, anything pulpit only preserves — because
+    /// offering a grip that does nothing is worse than offering none.
+    pub handles: Vec<pulpit_core::annotate::Corner>,
+}
+
+/// A mark the reader placed and is typing into (§8.5).
+///
+/// Not a gesture: the click chose a spot, and what happens next is a text
+/// editor with a caret, a clipboard and an input method behind it. It is
+/// carried down to the page surface because the editor is drawn *on the page*,
+/// where the mark will land — a dialog over the document would hide the very
+/// spot the reader is writing at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposingMark {
+    pub page: pulpit_core::page::PageIndex,
+    pub at: pulpit_core::page::PagePoint,
+    pub tool: pulpit_core::annotation::AnnotationTool,
+    pub text: String,
+    /// The mark being rewritten, when this is an edit rather than a new mark
+    /// (§8.5). A rewrite keeps the annotation's identity (A3), so one undo
+    /// puts back what it said before rather than removing it.
+    pub editing: Option<pulpit_core::annotate::AnnotationId>,
+    /// Compile the text as Typst and place the result as a picture (§7.4),
+    /// rather than writing it as plain `/FreeText`.
+    ///
+    /// Offered for the text tool only: a sticky note is read in a viewer's own
+    /// popup, which shows `/Contents` and not an appearance, so typesetting it
+    /// would produce a mark whose text nobody sees.
+    pub typst: bool,
 }
 
 /// One entry in the outline rail.
@@ -264,17 +330,14 @@ pub struct ReaderData<'a> {
     pub page_count: usize,
     /// Where every page sits in the scrolled column at the current zoom.
     pub column: &'a crate::widgets::document::model::Column,
+    /// How tall the window onto the column is, in layout points.
+    pub viewport: f32,
     /// The pages currently in the window, with whatever frames exist.
     pub visible: Vec<ReaderPage>,
     pub controls: &'a crate::widgets::document::model::ReaderControls,
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
     pub outline: &'a [OutlineRow],
-    pub fields: &'a [pulpit_render::document::FormField],
-    /// Does the document carry an AcroForm at all? A form document whose
-    /// fields could not be listed is a different thing from one with no form,
-    /// and the inspector says which.
-    pub has_form: bool,
     /// What pulpit can honour in this document, and what it cannot (§3.4).
     pub level: pulpit_render::document::CompatibilityLevel,
     pub warnings: &'a [pulpit_render::document::DocumentWarning],
@@ -284,6 +347,17 @@ pub struct ReaderData<'a> {
     pub page_entry: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Has the reader picked a mark up, and does that mark say something that
+    /// can be rewritten? Two questions rather than one: a highlight can be
+    /// selected and deleted but has no text of its own to open, and a control
+    /// that looked live and did nothing would be worse than a dim one.
+    pub selected: bool,
+    pub selected_editable: bool,
+    /// Is the hand dragging the page about? The cursor closes while it is.
+    pub panning: bool,
+    /// The mark being written, when one is (§8.5). Drawn on the sheet at the
+    /// spot it was placed, not in a dialog over the document.
+    pub composing: Option<ComposingMark>,
 }
 
 impl ReaderData<'_> {
@@ -325,6 +399,18 @@ pub struct Context<'a> {
     /// machinery (§2); a presenter layout simply has no reader widget to hand
     /// it to.
     pub reader: ReaderData<'a>,
+    /// The one search, whatever is behind it. Present in every context for
+    /// the same reason [`Context::reader`] is: a presenter layout and a
+    /// document layout are the same machinery, and the pane is placed in
+    /// either.
+    pub search: SearchData<'a>,
+}
+
+/// What the search pane is allowed to know: the state, and nothing about
+/// where its hits came from.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchData<'a> {
+    pub state: &'a pulpit_core::search::SearchState,
 }
 
 #[cfg(test)]

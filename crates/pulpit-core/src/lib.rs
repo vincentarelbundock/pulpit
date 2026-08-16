@@ -13,6 +13,7 @@ pub mod notes;
 pub mod overlay;
 pub mod page;
 pub mod pdfpc;
+pub mod search;
 pub mod state;
 pub mod timer;
 
@@ -29,5 +30,8 @@ pub use overlay::{
 };
 pub use page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
 pub use pdfpc::TextNotes;
+pub use search::{
+    Hit, HitChunk, HitSource, Query, SearchGeneration, SearchProblem, SearchState, TextMatch,
+};
 pub use state::{Blank, Changed, Command, PresentationState, SlideIndex};
 pub use timer::Timer;

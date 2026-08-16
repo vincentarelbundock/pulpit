@@ -71,8 +71,8 @@ fn palette<Message: Clone + 'static>(
     // Undo and redo are offered when there is something to take back or put
     // back — which is not the same as there being marks on the slide, because
     // undoing an erasure puts marks back onto an empty one.
-    let has_strokes = annotations.can_undo() || mode.is_sample();
-    let has_undone = annotations.can_redo() || mode.is_sample();
+    let has_strokes = controls.can_undo || annotations.has_open_gesture() || mode.is_sample();
+    let has_undone = controls.can_redo || mode.is_sample();
     let open = controls.open;
     let wheel = if mode.interactive() {
         controls.wheel
@@ -139,12 +139,12 @@ fn palette<Message: Clone + 'static>(
             false,
             has_marks,
         ),
-        // Saving is offered whenever the talk has marks anywhere, not only on
-        // this slide: the file it writes is the whole deck, and a presenter
-        // who has just turned past the diagram they drew on should not have
-        // to go back to it to keep the drawing.
+        // Saving writes the document, marks and all: there is no separate
+        // annotated copy, because the marks are the document’s own
+        // annotations (A1). Offered whenever there is something unsaved,
+        // wherever in the deck it was made.
         (
-            "Save an annotated copy",
+            "Save the document",
             theme::Icon::Save,
             AnnotationCommand::Save,
             false,
@@ -1139,6 +1139,58 @@ impl Marks {
         }
     }
 
+    /// The text the highlighter is sweeping right now, before it is a mark.
+    ///
+    /// Invariant A2: the overlay draws the open gesture itself, because a
+    /// selection that only appeared once the page had been re-rasterised would
+    /// follow the hand a round trip late. It is only ever the open gesture —
+    /// the release clears it and the committed `/Highlight` is what remains —
+    /// so it can never outlive a commit and become a second copy of the mark
+    /// (A1).
+    ///
+    /// One path for every run, filled once with the non-zero rule, for the
+    /// same reason the committed highlights are: two runs that touch describe
+    /// one region, and a region is painted once.
+    fn draw_selection(&self, frame: &mut canvas::Frame, panel: Size) {
+        let Some(selection) = &self.annotations.selection else {
+            return;
+        };
+        let mut any = false;
+        let path = canvas::Path::new(|builder| {
+            for run in &selection.runs {
+                let corners: Option<Vec<iced::Point>> = run
+                    .iter()
+                    .map(|corner| self.point(panel, *corner))
+                    .collect();
+                let Some(corners) = corners else {
+                    continue;
+                };
+                builder.move_to(corners[0]);
+                for corner in &corners[1..] {
+                    builder.line_to(*corner);
+                }
+                builder.close();
+                any = true;
+            }
+        });
+        if !any {
+            return;
+        }
+        let (red, green, blue) = selection.color.rgb();
+        frame.fill(
+            &path,
+            canvas::Fill {
+                style: canvas::Style::Solid(iced::Color::from_rgba(
+                    red,
+                    green,
+                    blue,
+                    selection.opacity,
+                )),
+                rule: canvas::fill::Rule::NonZero,
+            },
+        );
+    }
+
     fn draw_marks(&self, frame: &mut canvas::Frame, panel: Size) {
         // The spotlight goes underneath the ink: dimming what has just been
         // circled would defeat the circle.
@@ -1169,6 +1221,7 @@ impl Marks {
         }
 
         self.draw_highlights(frame, panel);
+        self.draw_selection(frame, panel);
 
         for stroke in &self.annotations.strokes {
             if stroke.kind == StrokeKind::Highlight {
@@ -1660,7 +1713,7 @@ mod tests {
 
         let mut drawn = Annotations::default();
         drawn.begin_stroke((0.2, 0.2), 0.004, InkColor::Red);
-        drawn.end_stroke();
+        let _ = drawn.end_stroke();
         let drawn = std::sync::Arc::new(drawn);
         let layer: Option<Element<'_, ()>> = marks(
             &drawn,

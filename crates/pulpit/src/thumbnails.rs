@@ -104,6 +104,26 @@ impl ThumbnailCache {
         self.used_bytes
     }
 
+    /// Roughly how many pages of `width` this budget holds, never more than
+    /// `count`.
+    ///
+    /// Used to bound a re-sweep of pages that went missing: a window this
+    /// size around the presenter is one the cache can hold all of, so filling
+    /// it cannot evict anything else in it.
+    pub fn capacity_at(&self, width: u32, count: usize) -> usize {
+        // The aspect is not known here and does not need to be: a page is
+        // taller than it is wide often enough that assuming square is the
+        // conservative reading, and being conservative means a smaller
+        // window, which is the safe direction.
+        let per_page = (width as u64)
+            .saturating_mul(width as u64)
+            .saturating_mul(4);
+        if per_page == 0 {
+            return count;
+        }
+        ((self.budget_bytes / per_page) as usize).min(count)
+    }
+
     /// Keep a picture, making room by dropping the pages furthest from
     /// `around` — which is where the presenter is, and so where the next
     /// thing they look at almost certainly is too.

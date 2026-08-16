@@ -77,6 +77,7 @@ fn job(id: u64, generation: u64, page: usize, priority: Priority) -> RenderJob {
         height: 180,
         priority,
         quality: Quality::Refined,
+        with_annotations: false,
         // Replaced by the supervisor with the worker's own region.
         region_name: "placeholder".into(),
     }
@@ -485,4 +486,42 @@ fn dropping_the_supervisor_closes_the_doorbell() {
     assert_eq!(outcome, Wakeup::Closed);
     // And stays closed, so a loop that stops on this stops for good.
     assert_eq!(wakeup.wait(Duration::from_millis(50)), Wakeup::Closed);
+}
+
+/// A backend with no text layer says so, rather than answering "no matches".
+///
+/// The fixture backend cannot search, and that has to reach the application
+/// as a different fact from an empty result: a presenter told "no matches"
+/// stops looking, and a presenter told the deck cannot be searched does not.
+#[test]
+fn a_backend_that_cannot_search_says_so_over_the_protocol() {
+    let mut supervisor = start(1);
+    supervisor.open(1, "fixture.pdf");
+    supervisor.request_find_text(
+        1,
+        pulpit_core::search::SearchGeneration(7),
+        pulpit_core::search::Query::new("anything", false, false),
+        0..4,
+    );
+    let events = collect_until(&mut supervisor, Duration::from_secs(5), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, RenderEvent::Found { .. }))
+    });
+    let found = events
+        .iter()
+        .find_map(|event| match event {
+            RenderEvent::Found {
+                generation,
+                chunk,
+                searchable,
+                ..
+            } => Some((*generation, chunk.clone(), *searchable)),
+            _ => None,
+        })
+        .expect("the worker answered the search");
+    assert_eq!(found.0, pulpit_core::search::SearchGeneration(7));
+    assert!(found.1.hits.is_empty());
+    assert!(!found.2, "the fixture backend has no text layer to search");
+    supervisor.shutdown();
 }

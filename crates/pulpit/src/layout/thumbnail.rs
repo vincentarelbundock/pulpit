@@ -53,7 +53,10 @@ impl Content {
             WidgetKind::Timer | WidgetKind::Clock => Content::Readout,
             WidgetKind::SlideCounter => Content::Readout,
             WidgetKind::SlideButtons => Content::Buttons(2),
-            WidgetKind::PauseResume | WidgetKind::EndPresentation => Content::Buttons(1),
+            WidgetKind::PauseResume | WidgetKind::EndPresentation | WidgetKind::MainMenu => {
+                Content::Buttons(1)
+            }
+            WidgetKind::AudienceControls => Content::Buttons(2),
             // A scrub bar is the most recognisable thing about it, so the
             // thumbnail sketches the track rather than the button.
             WidgetKind::SlideSlider | WidgetKind::MediaTransport => Content::Track,
@@ -67,7 +70,8 @@ impl Content {
             WidgetKind::DocumentNav => Content::Buttons(2),
             // A rail of bookmark titles and page numbers sketches as lines.
             WidgetKind::DocumentOutline => Content::Lines(5),
-            WidgetKind::FormFields => Content::Lines(3),
+            // A query field over a short list of what it found.
+            WidgetKind::Search => Content::Lines(3),
         }
     }
 }

@@ -200,6 +200,12 @@ pub fn widget<Message: Clone + 'static>(
         Family::Document => {
             crate::widgets::document::view::view(widget, &context.reader, context.mode, on_event)
         }
+        Family::Search => {
+            crate::widgets::search::view::view(widget, &context.search, context.mode, on_event)
+        }
+        Family::Chrome => {
+            crate::widgets::chrome::view::view(widget, &context.audience, context.mode, on_event)
+        }
         Family::Status => status::view::view(
             widget,
             &context.document,
@@ -231,6 +237,9 @@ mod tests {
     fn context(mode: Mode) -> Context<'static> {
         Context {
             mode,
+            search: crate::widgets::context::SearchData {
+                state: &sample::SEARCH,
+            },
             slides: SlideData {
                 current: sample::SLIDE,
                 preview: sample::SLIDE,
@@ -276,6 +285,8 @@ mod tests {
                 blank: Blank::Off,
                 connected: true,
                 fullscreen: true,
+                started: true,
+                menu_open: false,
             },
             media: crate::widgets::context::MediaData {
                 transport: sample::transport(),

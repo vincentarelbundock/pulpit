@@ -61,6 +61,116 @@ pub fn layer<'a, Message: 'a>(
     .into()
 }
 
+/// Draw the selected mark's outline and grips over one sheet (§8.4).
+///
+/// Separate from [`layer`] because it is not a gesture and does not follow the
+/// same rules: a gesture preview is a picture of a mark that does not exist
+/// yet, and this is a picture of *where* a mark that does exist is. It is
+/// chrome, it is drawn in the accent rather than in the mark's own colour, and
+/// nothing about it is ever written to the document.
+pub fn selection_layer<'a, Message: 'a>(
+    selection: crate::widgets::context::SelectedMark,
+    accent: Color,
+    canonical: (f32, f32),
+    drawn: (f32, f32),
+) -> Element<'a, Message> {
+    canvas_widget::Canvas::new(SelectionPainter {
+        selection,
+        accent,
+        canonical,
+        drawn,
+    })
+    .width(Length::Fixed(drawn.0))
+    .height(Length::Fixed(drawn.1))
+    .into()
+}
+
+/// How big a corner grip is drawn, on screen.
+const HANDLE_SIZE: f32 = 7.0;
+
+struct SelectionPainter {
+    selection: crate::widgets::context::SelectedMark,
+    accent: Color,
+    canonical: (f32, f32),
+    drawn: (f32, f32),
+}
+
+impl<Message> canvas::Program<Message> for SelectionPainter {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        let scale_x = if self.canonical.0 > 0.0 {
+            self.drawn.0 / self.canonical.0
+        } else {
+            1.0
+        };
+        let scale_y = if self.canonical.1 > 0.0 {
+            self.drawn.1 / self.canonical.1
+        } else {
+            1.0
+        };
+        let place = |point: PagePoint| Point::new(point.x * scale_x, point.y * scale_y);
+
+        let rect = self.selection.bounds;
+        let top_left = place(PagePoint::new(rect.left, rect.top));
+        let size = Size::new(
+            (rect.width() * scale_x).max(1.0),
+            (rect.height() * scale_y).max(1.0),
+        );
+
+        // A held mark is drawn lighter than a resting one: the outline under
+        // the pointer is a proposal the release has not committed yet, and it
+        // should not read as firmly as the selection it started from.
+        let (outline, fill) = if self.selection.dragging {
+            (0.75, 0.10)
+        } else {
+            (1.0, 0.06)
+        };
+        frame.fill_rectangle(
+            top_left,
+            size,
+            Color {
+                a: fill,
+                ..self.accent
+            },
+        );
+        frame.stroke(
+            &Path::rectangle(top_left, size),
+            Stroke::default()
+                .with_color(Color {
+                    a: outline,
+                    ..self.accent
+                })
+                .with_width(1.5),
+        );
+
+        // The grips, on the corners that can actually be dragged. A mark with
+        // none — a highlight, a note — gets the outline and no grips, which is
+        // how it says "selected, but not reshapable" without a word of text.
+        for corner in &self.selection.handles {
+            let at = place(corner.of(rect));
+            let grip = Size::new(HANDLE_SIZE, HANDLE_SIZE);
+            let top_left = Point::new(at.x - HANDLE_SIZE / 2.0, at.y - HANDLE_SIZE / 2.0);
+            frame.fill_rectangle(top_left, grip, Color::WHITE);
+            frame.stroke(
+                &Path::rectangle(top_left, grip),
+                Stroke::default().with_color(self.accent).with_width(1.5),
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
 struct Painter {
     preview: GesturePreview,
     canonical: (f32, f32),

@@ -171,9 +171,17 @@ pub struct AnnotationControls {
     /// dragging inside a panel that is itself floating over the slide is one
     /// layer of floating too many.
     pub wheel: Option<AnnotationTool>,
-    /// Whether there is anything to write out: marks somewhere in the deck,
-    /// and a document on disk to write a copy of.
+    /// Whether there is anything to write out: a document open that can be
+    /// saved, with unsaved edits in it.
     pub can_save: bool,
+    /// Whether the document has an edit to take back, or one to put back.
+    ///
+    /// Read from the document rather than from the marks on the slide,
+    /// because there is one history and it is the document.s (A1): an undo at
+    /// the lectern can take back a highlight made in document mode, and a
+    /// slide with no marks on it can still have something to undo.
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 impl AnnotationControls {
@@ -184,6 +192,8 @@ impl AnnotationControls {
             overflow: false,
             wheel: None,
             can_save: false,
+            can_undo: false,
+            can_redo: false,
         }
     }
 }

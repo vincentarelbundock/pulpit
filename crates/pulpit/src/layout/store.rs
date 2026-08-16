@@ -622,8 +622,8 @@ mod fixtures {
     /// every kind, which the test below proves.
     const FIXTURES: [(&str, &str); 6] = [
         (
-            "reader-fields.json",
-            include_str!("fixtures/reader-fields.json"),
+            "reader-default.json",
+            include_str!("fixtures/reader-default.json"),
         ),
         (
             "slide-next-notes.json",
@@ -666,6 +666,9 @@ mod fixtures {
             WidgetKind::ConnectionStatus,
             WidgetKind::Annotations,
             WidgetKind::MediaTransport,
+            WidgetKind::MainMenu,
+            WidgetKind::AudienceControls,
+            WidgetKind::Search,
         ];
         let mut children = Vec::new();
         let mut sizes = Vec::new();
@@ -723,8 +726,8 @@ mod fixtures {
             ),
             ("every-other-widget.json", every_other_widget()),
             (
-                "reader-fields.json",
-                crate::layout::builtin::reader_fields(crate::layout::AspectRatio::SixteenNine),
+                "reader-default.json",
+                crate::layout::builtin::reader_default(crate::layout::AspectRatio::SixteenNine),
             ),
         ];
         for (name, layout) in layouts {

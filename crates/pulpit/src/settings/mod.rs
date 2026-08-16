@@ -16,7 +16,7 @@ pub mod keys;
 pub mod store;
 
 pub use diagnostics::DiagnosticsBundle;
-pub use keys::{Action, KeyBinding, Keymap};
+pub use keys::{Action, KeyBinding, Keymap, Mods};
 pub use store::{load_or_default, SettingsStore};
 
 use std::collections::VecDeque;

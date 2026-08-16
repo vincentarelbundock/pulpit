@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod annotations;
 pub mod catalog;
+pub mod chrome;
 pub mod common;
 pub mod context;
 pub mod document;
@@ -21,6 +22,7 @@ pub mod navigation;
 pub mod notes;
 pub mod patch;
 pub mod sample;
+pub mod search;
 pub mod slides;
 pub mod status;
 pub mod timing;
@@ -104,6 +106,11 @@ pub enum WidgetKind {
     Annotations,
     /// Play, pause and scrub whatever media is on the current slide.
     MediaTransport,
+    /// The hamburger: the way in to everything that is not on the layout.
+    MainMenu,
+    /// Start the audience window, choose which display it opens on, and stop
+    /// it again.
+    AudienceControls,
 
     // Document
     /// The page surface: continuous scroll, free zoom, annotation and form
@@ -113,14 +120,19 @@ pub enum WidgetKind {
     DocumentNav,
     /// Bookmarks and page thumbnails.
     DocumentOutline,
-    /// The AcroForm field inspector and editor.
-    FormFields,
     /// Tool selection and style for ink, highlighter, text, notes and stamps.
     AnnotationTools,
+
+    /// Find a string in the deck or the document, from any view.
+    ///
+    /// Not a document widget: a presenter searching notes mid-talk is the
+    /// case this exists for, and slides and reader ask the same question of
+    /// the same model.
+    Search,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 23] = [
+    pub const ALL: [WidgetKind; 25] = [
         WidgetKind::CurrentSlide,
         WidgetKind::PreviousSlide,
         WidgetKind::NextSlide,
@@ -139,11 +151,13 @@ impl WidgetKind {
         WidgetKind::ConnectionStatus,
         WidgetKind::Annotations,
         WidgetKind::MediaTransport,
+        WidgetKind::MainMenu,
+        WidgetKind::AudienceControls,
         WidgetKind::DocumentPage,
         WidgetKind::DocumentNav,
         WidgetKind::DocumentOutline,
-        WidgetKind::FormFields,
         WidgetKind::AnnotationTools,
+        WidgetKind::Search,
     ];
 
     /// Which family implements this kind. The dispatcher
@@ -162,6 +176,7 @@ impl WidgetKind {
             | WidgetKind::PauseResume
             | WidgetKind::EndPresentation => Family::Navigation,
             WidgetKind::Annotations => Family::Annotations,
+            WidgetKind::MainMenu | WidgetKind::AudienceControls => Family::Chrome,
             WidgetKind::MediaTransport => Family::Media,
             WidgetKind::PresentationTitle
             | WidgetKind::CurrentSection
@@ -170,8 +185,8 @@ impl WidgetKind {
             WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
-            | WidgetKind::FormFields
             | WidgetKind::AnnotationTools => Family::Document,
+            WidgetKind::Search => Family::Search,
         }
     }
 
@@ -224,6 +239,8 @@ impl WidgetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Slides,
+    /// Finding a string, in whatever view is on screen.
+    Search,
     /// The reader: the page surface and the controls around it.
     Document,
     Annotations,
@@ -232,6 +249,10 @@ pub enum Family {
     Timing,
     Navigation,
     Status,
+    /// The application's own chrome — the menu and the audience window's
+    /// lifecycle — placed on the layout like anything else, so a presenter
+    /// decides where those controls live rather than inheriting a strip.
+    Chrome,
 }
 
 /// The style properties every widget has.
@@ -293,10 +314,12 @@ impl WidgetConfig {
             | WidgetKind::AudienceScreenStatus
             | WidgetKind::ConnectionStatus
             | WidgetKind::MediaTransport
+            | WidgetKind::MainMenu
+            | WidgetKind::AudienceControls
             | WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
-            | WidgetKind::FormFields => WidgetConfig::None,
+            | WidgetKind::Search => WidgetConfig::None,
             // The document toolbar carries the same colour and size choices
             // the presenter palette does, so a mark made in one mode looks
             // the same in the other.

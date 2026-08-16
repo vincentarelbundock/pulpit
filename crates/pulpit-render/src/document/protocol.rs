@@ -8,6 +8,7 @@
 
 use pulpit_core::annotate::AnnotationId;
 use pulpit_core::page::{PageIndex, PagePoint, PageRect};
+use pulpit_core::search::{HitChunk, Query};
 use serde::{Deserialize, Serialize};
 
 use super::limits::{self, LimitExceeded};
@@ -88,6 +89,37 @@ pub enum FormInputEvent {
     Focus {
         gained: bool,
     },
+    /// Choose, or unchoose, one option of the focused choice field.
+    ///
+    /// The one event here that is not a raw input event, and it is worth
+    /// saying why it does not break §8.6's rule. A combo box's list and a list
+    /// box's rows are drawn by PDFium inside its own popup, and reaching an
+    /// option by synthesising the clicks that would open that popup and land
+    /// on the right row means knowing where PDFium decided to draw it — which
+    /// is precisely the kind of imitation that rule exists to prevent.
+    /// `FORM_SetIndexSelected` is PDFium's own answer: the engine performs the
+    /// selection, generates the appearance and reports the change, exactly as
+    /// it does for a keystroke. There is still one implementation, and it is
+    /// still PDFium's.
+    SelectOption {
+        index: u32,
+        selected: bool,
+    },
+    /// Put the caret in a named field, by name rather than by position.
+    ///
+    /// Not reachable by synthesising a click, and that is the reason it exists.
+    /// A form can put two widgets on top of each other — an overlapping stack
+    /// is one of the corpus's hazards, and a legitimate layout for a field that
+    /// spans a printed line — and a click can only ever reach whichever one
+    /// PDFium decides is on top. Naming the field is how a person reaches the
+    /// other one. PDFium still does the focusing, the caret and the editing.
+    ///
+    /// No caller in the application sends this today: the field panel that
+    /// would have was removed. It stays because reaching an occluded widget
+    /// by name is an engine capability nothing else provides.
+    FocusField {
+        name: String,
+    },
 }
 
 /// The keys a form field responds to that are not characters.
@@ -131,9 +163,13 @@ pub enum DocumentRequest {
     /// Render one page at a size the caller chose, from the document the
     /// worker holds.
     ///
-    /// Rendered *here* rather than by the render worker pool: the frame has to
-    /// contain the annotation that was just committed, and only the process
-    /// holding the mutated document can promise that (A7).
+    /// The frame contains every committed annotation, because it is drawn
+    /// from the mutated document itself. The application no longer draws
+    /// reader pages this way — it renders them in the worker pool from a
+    /// revision snapshot the `SaveAs` machinery writes, which gets it the
+    /// pool's caching, cancellation and shared-memory transport — but the
+    /// request stays: it is the ground truth a test can hold a snapshot
+    /// against, and the natural carrier for a §9.4 partial repaint.
     Render(DocumentRenderRequest),
     ListAnnotations {
         page: PageIndex,
@@ -144,6 +180,19 @@ pub enum DocumentRequest {
     SelectText {
         page: PageIndex,
         selection: TextSelection,
+    },
+    /// Find a string in the text layer of a run of pages.
+    ///
+    /// A run rather than the whole document because a five-hundred-page deck
+    /// must not be scanned inside one round trip: the caller walks the
+    /// document a chunk at a time, sees hits as they are found, and stops
+    /// asking when the query changes (§9.5).
+    FindText {
+        query: Query,
+        /// Half-open range of physical pages, bounded by
+        /// [`limits::MAX_PAGES_PER_SEARCH`].
+        from_page: usize,
+        to_page: usize,
     },
     ListFields,
     /// The document's bookmark tree, for the outline rail.
@@ -274,6 +323,9 @@ pub enum DocumentResponse {
     Annotations(Vec<AnnotationSummary>),
     Annotation(Box<AnnotationSummary>),
     Selection(TextSelectionResult),
+    /// The hits in one run of pages. A run with none answers with an empty
+    /// chunk, which is how the caller knows to move its frontier along.
+    Found(HitChunk),
     Fields(Vec<FormField>),
     Outline(pulpit_core::navigation::Outline),
     Form(FormEventResult),
@@ -302,6 +354,12 @@ pub enum DocumentFailure {
     NotFound(String),
     /// The request was refused before anything was touched.
     Refused(String),
+    /// The backend cannot do this at all.
+    ///
+    /// Distinct from a failure and from an empty answer: a document that
+    /// cannot be searched and a document with no matches must not look the
+    /// same to the person who typed the query.
+    Unsupported(String),
     /// The engine failed. Read-only requests may be retried; a mutation is
     /// not assumed committed without a response (§11.5).
     Engine(String),
@@ -327,6 +385,7 @@ impl DocumentFailure {
             DocumentFailure::NotFound(what) => format!("no {what} in this document"),
             DocumentFailure::Refused(why) => why.clone(),
             DocumentFailure::Engine(why) => why.clone(),
+            DocumentFailure::Unsupported(what) => format!("this document cannot {what}"),
         }
     }
 }
@@ -349,6 +408,7 @@ impl From<&super::DocumentError> for DocumentFailure {
             | E::Limit(_)
             | E::MutationForbidden
             | E::SourceIsDestination => DocumentFailure::Refused(error.to_string()),
+            E::Unsupported(what) => DocumentFailure::Unsupported(what.clone()),
             E::Backend(_) | E::Save(_) | E::Io(_) => DocumentFailure::Engine(error.to_string()),
         }
     }
@@ -375,6 +435,7 @@ impl DocumentRequest {
             | DocumentRequest::ListAnnotations { .. }
             | DocumentRequest::GetAnnotation { .. }
             | DocumentRequest::SelectText { .. }
+            | DocumentRequest::FindText { .. }
             | DocumentRequest::ListFields
             | DocumentRequest::Outline
             | DocumentRequest::SaveAs(_)
@@ -393,6 +454,32 @@ impl DocumentRequest {
                 limits::MAX_OPERATIONS_PER_TRANSACTION,
             ),
             DocumentRequest::Render(render) => render.validate(),
+            DocumentRequest::FindText {
+                query,
+                from_page,
+                to_page,
+            } => {
+                limits::within(
+                    "query length",
+                    query.text().chars().count(),
+                    pulpit_core::search::MAX_QUERY_CHARS,
+                )?;
+                // A backwards range is not a small allocation, it is a caller
+                // bug; refuse it here rather than let it become an empty scan
+                // that silently reports "no matches".
+                limits::within(
+                    "pages in one search",
+                    to_page.saturating_sub(*from_page),
+                    limits::MAX_PAGES_PER_SEARCH,
+                )?;
+                if to_page < from_page {
+                    return Err(LimitExceeded {
+                        what: "a backwards page range",
+                        limit: 0,
+                    });
+                }
+                Ok(())
+            }
             DocumentRequest::PageGeometries { count, .. } => {
                 limits::within("page geometries", *count, MAX_PAGE_GEOMETRIES)
             }
@@ -531,6 +618,7 @@ mod tests {
                 options: Vec::new(),
                 allows_custom_value: true,
                 multiple_selection: false,
+                selected: Vec::new(),
                 widgets: Vec::new(),
             };
             limits::MAX_FORM_FIELDS + 1

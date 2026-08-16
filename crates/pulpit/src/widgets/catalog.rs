@@ -38,7 +38,7 @@ const SLIDE_PARTS: &[WidgetKind] = &[
 const NONE: &[WidgetKind] = &[];
 
 /// The catalog. Order is the order of the library sidebar within each group.
-pub const CATALOG: [WidgetDefinition; 23] = [
+pub const CATALOG: [WidgetDefinition; 25] = [
     WidgetDefinition {
         kind: WidgetKind::CurrentSlide,
         group: WidgetGroup::Slides,
@@ -190,6 +190,30 @@ pub const CATALOG: [WidgetDefinition; 23] = [
         minimum_size: (260.0, 34.0),
     },
     WidgetDefinition {
+        kind: WidgetKind::MainMenu,
+        group: WidgetGroup::PresentationControls,
+        label: "Menu",
+        short_label: "Menu",
+        tooltip: "The way in to opening a deck, the layouts, the settings and the rest.",
+        parts: NONE,
+        // One way in. Two hamburgers would be two buttons opening the same
+        // menu, and the open one would have to be told which was pressed.
+        multi_instance: false,
+        // One square button and nothing else.
+        minimum_size: (40.0, 40.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::AudienceControls,
+        group: WidgetGroup::PresentationControls,
+        label: "Start and Stop",
+        short_label: "Start",
+        tooltip: "Open the audience window on a display, and close it again.",
+        parts: NONE,
+        multi_instance: false,
+        // Start, its display arrow, and Stop side by side.
+        minimum_size: (230.0, 40.0),
+    },
+    WidgetDefinition {
         kind: WidgetKind::PresentationTitle,
         group: WidgetGroup::OptionalInformation,
         label: "Presentation Title",
@@ -267,17 +291,6 @@ pub const CATALOG: [WidgetDefinition; 23] = [
         minimum_size: (150.0, 160.0),
     },
     WidgetDefinition {
-        kind: WidgetKind::FormFields,
-        group: WidgetGroup::Document,
-        label: "Form Fields",
-        short_label: "Fields",
-        tooltip: "Every field in the document, and what it currently holds.",
-        parts: NONE,
-        multi_instance: false,
-        // A field name above its editor, at a width a value is readable at.
-        minimum_size: (220.0, 160.0),
-    },
-    WidgetDefinition {
         kind: WidgetKind::AnnotationTools,
         group: WidgetGroup::Document,
         label: "Annotation Tools",
@@ -288,6 +301,20 @@ pub const CATALOG: [WidgetDefinition; 23] = [
         // show two armed tools and only one of them could be telling the truth.
         multi_instance: false,
         minimum_size: (300.0, 26.0),
+    },
+    WidgetDefinition {
+        kind: WidgetKind::Search,
+        group: WidgetGroup::Document,
+        label: "Search",
+        short_label: "Find",
+        tooltip: "Find a string in the pages, the speaker notes and the bookmarks.",
+        parts: NONE,
+        // One search, for the same reason as one toolbar: two boxes over one
+        // model would show two queries and only one of them would be running.
+        multi_instance: false,
+        // A query field with its stepper beside it, and room for a few results
+        // beneath: less than this and the list is a single cut-off row.
+        minimum_size: (260.0, 120.0),
     },
 ];
 
@@ -383,11 +410,13 @@ mod tests {
                 WidgetKind::EndPresentation,
                 WidgetKind::Annotations,
                 WidgetKind::MediaTransport,
+                WidgetKind::MainMenu,
+                WidgetKind::AudienceControls,
                 WidgetKind::DocumentPage,
                 WidgetKind::DocumentNav,
                 WidgetKind::DocumentOutline,
-                WidgetKind::FormFields,
                 WidgetKind::AnnotationTools,
+                WidgetKind::Search,
             ]
         );
     }

@@ -20,9 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use pulpit_core::page::{PageGeometry, PageIndex};
-use pulpit_render::document::protocol::{
-    DocumentFrame, DocumentRenderRequest, DocumentRequest, DocumentResponse,
-};
+use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse};
 use pulpit_render::document::session::{DocumentSession, DocumentWorkerCommand, SessionError};
 use pulpit_render::document::{
     Applied, DocumentRevision, DocumentTransaction, OpenDocumentInfo, SaveOptions,
@@ -45,15 +43,19 @@ pub enum Ask {
     /// Everything a freshly opened document needs, in one exchange: what it
     /// is, and how big its pages are. One message rather than three because
     /// the reader can do nothing with any of them alone.
-    Describe {
-        pages: usize,
-    },
-    Render(DocumentRenderRequest),
+    Describe { pages: usize },
+    /// Write the document as it now stands to a scratch path, so the render
+    /// worker pool can draw pages that contain every committed edit (A7).
+    ///
+    /// The same save the worker already performs for Save As, aimed at a
+    /// file pulpit owns; A6 still holds because the destination is never the
+    /// source. Verification is skipped: the snapshot is consumed by pulpit's
+    /// own renderer moments later, which is a better check than reopening it
+    /// here, and the reader is waiting on the round trip.
+    Snapshot { destination: PathBuf },
     /// What is on a page, for hit-testing. The eraser and the selection tool
     /// need to know what is under the pointer, and only the document does.
-    ListAnnotations {
-        page: pulpit_core::page::PageIndex,
-    },
+    ListAnnotations { page: pulpit_core::page::PageIndex },
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -62,6 +64,15 @@ pub enum Ask {
         page: pulpit_core::page::PageIndex,
         selection: pulpit_render::document::TextSelection,
         finalising: bool,
+    },
+    /// Find a string in a run of pages. Read-only, and carried with the
+    /// generation it belongs to: the answer to a query the user has already
+    /// typed past has to be recognisable as stale on arrival.
+    FindText {
+        generation: pulpit_core::search::SearchGeneration,
+        query: pulpit_core::search::Query,
+        from_page: usize,
+        to_page: usize,
     },
     Apply {
         expected_revision: DocumentRevision,
@@ -85,9 +96,13 @@ pub enum Told {
         info: Box<OpenDocumentInfo>,
         geometry: Vec<PageGeometry>,
         outline: pulpit_core::navigation::Outline,
-        fields: Vec<pulpit_render::document::FormField>,
     },
-    Frame(Box<DocumentFrame>),
+    /// A snapshot landed at the destination, at this revision.
+    Snapshotted(pulpit_render::document::SavedDocument),
+    /// …or it did not, and rendering carries on from the previous one.
+    SnapshotFailed {
+        message: String,
+    },
     Annotations {
         page: pulpit_core::page::PageIndex,
         summaries: Vec<pulpit_render::document::AnnotationSummary>,
@@ -95,6 +110,21 @@ pub enum Told {
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
+    },
+    /// Hits for one run of pages, or the reason there will not be any.
+    ///
+    /// The generation travels back so the model can drop what belongs to a
+    /// superseded query; the worker is not asked to cancel, because a chunk is
+    /// a handful of pages and finishing it is cheaper than coordinating.
+    Found {
+        generation: pulpit_core::search::SearchGeneration,
+        chunk: pulpit_core::search::HitChunk,
+    },
+    /// The document cannot be searched at all — no text layer the backend can
+    /// read. Not the same as finding nothing, and said differently.
+    CannotSearch {
+        generation: pulpit_core::search::SearchGeneration,
+        message: String,
     },
     Applied(Box<Applied>),
     Saved(pulpit_render::document::SavedDocument),
@@ -229,9 +259,29 @@ fn serve(mut session: DocumentSession, asks: Receiver<Ask>, told: Sender<Told>) 
 fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
     match ask {
         Ask::Describe { pages } => describe(session, pages),
-        Ask::Render(request) => vec![match session.request(DocumentRequest::Render(request)) {
-            Ok(DocumentResponse::Frame(frame)) => Told::Frame(frame),
-            other => unexpected(other, "a frame"),
+        Ask::Snapshot { destination } => vec![match session.request(DocumentRequest::SaveAs(
+            pulpit_render::document::protocol::SaveRequest {
+                destination,
+                // Incremental: PDFium appends the changed objects to the
+                // original byte stream instead of re-serialising the whole
+                // document, which is the cheap way to produce a copy that is
+                // read back by pulpit's own renderer moments later.
+                options: SaveOptions {
+                    incremental: true,
+                    verify: false,
+                },
+            },
+        )) {
+            Ok(DocumentResponse::Saved(saved)) => Told::Snapshotted(saved),
+            // A snapshot that failed is not a lost worker and not a lost
+            // edit: the document still holds the commit, and the reader
+            // keeps showing the previous picture. Reported as its own case
+            // so the caller can clear its in-flight mark rather than guess
+            // which request the failure answered.
+            Err(error) if !error.is_worker_loss() => Told::SnapshotFailed {
+                message: error.to_string(),
+            },
+            other => unexpected(other, "a snapshot"),
         }],
         Ask::ListAnnotations { page } => vec![match session
             .request(DocumentRequest::ListAnnotations { page })
@@ -249,6 +299,28 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 other => unexpected(other, "a text selection"),
             },
         ],
+        Ask::FindText {
+            generation,
+            query,
+            from_page,
+            to_page,
+        } => vec![match session.request(DocumentRequest::FindText {
+            query,
+            from_page,
+            to_page,
+        }) {
+            Ok(DocumentResponse::Found(chunk)) => Told::Found { generation, chunk },
+            // A backend with no text layer is a standing fact about this
+            // document, not a failed request: it is reported once, in the
+            // search box, rather than as a diagnostic per chunk.
+            Ok(DocumentResponse::Failed(
+                pulpit_render::document::protocol::DocumentFailure::Unsupported(message),
+            )) => Told::CannotSearch {
+                generation,
+                message,
+            },
+            other => unexpected(other, "search results"),
+        }],
         Ask::Apply {
             expected_revision,
             transaction,
@@ -322,25 +394,16 @@ fn describe(session: &mut DocumentSession, pages: usize) -> Vec<Told> {
         }
     }
 
-    // The outline and the field list are asked for in the same exchange:
-    // a rail that filled in a tick later would flicker, and neither answer
-    // is large enough to be worth a round trip of its own.
     let outline = match session.request(DocumentRequest::Outline) {
         Ok(DocumentResponse::Outline(outline)) => outline,
         // A document without bookmarks is not a failure, and neither is a
         // build that cannot read them; the rail says it has none.
         _ => Default::default(),
     };
-    let fields = match session.request(DocumentRequest::ListFields) {
-        Ok(DocumentResponse::Fields(fields)) => fields,
-        _ => Vec::new(),
-    };
-
     vec![Told::Described {
         info,
         geometry,
         outline,
-        fields,
     }]
 }
 

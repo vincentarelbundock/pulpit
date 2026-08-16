@@ -26,12 +26,15 @@ pub mod session;
 pub mod worker;
 
 #[cfg(feature = "pdfium")]
+pub mod form;
+#[cfg(feature = "pdfium")]
 pub mod pdfium;
 
 use std::path::Path;
 
 use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, AnnotationId, IdGenerator};
 use pulpit_core::page::{PageGeometry, PageIndex, PageRect};
+use pulpit_core::search::HitChunk;
 
 pub use limits::LimitExceeded;
 pub use model::{
@@ -70,6 +73,8 @@ pub enum DocumentError {
     MutationForbidden,
     #[error("the source file is not a destination; use Save As")]
     SourceIsDestination,
+    #[error("this document cannot {0}")]
+    Unsupported(String),
     #[error("the engine failed: {0}")]
     Backend(String),
     #[error("saving failed: {0}")]
@@ -136,8 +141,44 @@ pub trait DocumentBackend: Send {
 
     fn field_value(&self, name: &str) -> Result<String>;
 
+    /// Forward one raw input event to the engine's form-fill environment
+    /// (§8.6).
+    ///
+    /// A backend that has no such environment refuses, and says what is
+    /// missing rather than answering "nothing happened" — a form that silently
+    /// swallows keystrokes is worse than one that says it cannot take them.
+    ///
+    /// The `revision` in any committed field is left at
+    /// [`DocumentRevision::INITIAL`]: revisions belong to [`PdfDocument`],
+    /// which stamps the real one when it bumps it.
+    fn form_event(
+        &mut self,
+        _page: PageIndex,
+        _event: crate::document::protocol::FormInputEvent,
+    ) -> Result<crate::document::protocol::FormEventResult> {
+        Err(DocumentError::Backend(
+            "this engine has no form-fill environment".into(),
+        ))
+    }
+
     fn select_text(&self, page: PageIndex, selection: TextSelection)
         -> Result<TextSelectionResult>;
+
+    /// Find `query` in the text layer of `pages`, a half-open range.
+    ///
+    /// The default is [`DocumentError::Unsupported`] rather than an empty
+    /// answer, because a backend with no text layer at all and a document
+    /// with no matches are different facts and the person who typed the
+    /// query needs to be told which one they have.
+    fn find_text(
+        &self,
+        _query: &pulpit_core::search::Query,
+        _pages: std::ops::Range<usize>,
+    ) -> Result<pulpit_core::search::HitChunk> {
+        Err(DocumentError::Unsupported(
+            "be searched: this backend has no text layer".into(),
+        ))
+    }
 
     /// Write the document to `destination`. The caller has already checked
     /// that it is not the source (A6) and has staged a temporary path.
@@ -260,6 +301,49 @@ impl<'a> PdfDocument<'a> {
         Ok(result)
     }
 
+    /// Find a string in a run of pages.
+    ///
+    /// Read-only, so it never touches the revision (§6.3). The range is
+    /// clamped to the document rather than refused: the caller's page count
+    /// can be one reload behind, and a scan that walks off the end should
+    /// stop, not fail.
+    pub fn find_text(
+        &self,
+        query: &pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
+    ) -> Result<pulpit_core::search::HitChunk> {
+        let count = self.backend.page_count();
+        let from = pages.start.min(count);
+        let to = pages.end.clamp(from, count);
+        limits::within(
+            "pages in one search",
+            to - from,
+            limits::MAX_PAGES_PER_SEARCH,
+        )?;
+        if query.is_empty() {
+            return Ok(HitChunk {
+                from_page: from,
+                to_page: to,
+                ..HitChunk::default()
+            });
+        }
+        let mut chunk = self.backend.find_text(query, from..to)?;
+        chunk.from_page = from;
+        chunk.to_page = to;
+        // Bounded here rather than by whoever asked: the page's text layer is
+        // document-controlled input, and these hits are drawn as overlays.
+        if chunk.hits.len() > limits::MAX_HITS_PER_SEARCH {
+            chunk.hits.truncate(limits::MAX_HITS_PER_SEARCH);
+            chunk.truncated = true;
+        }
+        for hit in &mut chunk.hits {
+            if hit.quads.len() > limits::MAX_QUADS_PER_HIT {
+                hit.quads.truncate(limits::MAX_QUADS_PER_HIT);
+            }
+        }
+        Ok(chunk)
+    }
+
     /// The document's bookmark tree, for the outline rail.
     pub fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
         self.backend.outline()
@@ -269,6 +353,53 @@ impl<'a> PdfDocument<'a> {
         let fields = self.backend.fields()?;
         limits::within("form fields", fields.len(), limits::MAX_FORM_FIELDS)?;
         Ok(fields)
+    }
+
+    /// What one field holds now.
+    ///
+    /// Read from the engine on every call rather than cached: while a form is
+    /// being filled, the value in PDFium's environment is the value, and a
+    /// copy of it held anywhere else is the second source of truth §8.6 exists
+    /// to avoid.
+    pub fn field_value(&self, name: &str) -> Result<String> {
+        self.backend.field_value(name)
+    }
+
+    /// Write a field without going through the page.
+    ///
+    /// Present so the trait's surface is reachable, and refused by the engine
+    /// that has a form-fill environment (§8.6): values are typed on the page.
+    pub fn set_field(&mut self, name: &str, value: &str) -> Result<String> {
+        self.backend.set_field(name, value)
+    }
+
+    /// Forward one raw input event to the form-fill environment (§8.6).
+    ///
+    /// Most events change nothing durable — moving the pointer, pressing a
+    /// key that the field ignores, putting the caret somewhere. Those return
+    /// their invalidated rectangles and leave the revision alone.
+    ///
+    /// An event that *commits* a value is a document change like any other:
+    /// one revision, and one entry in the same undo history as the annotations
+    /// so that a field edit followed by an ink stroke undoes the stroke first.
+    /// The revision is stamped here, because this is what owns it.
+    pub fn form_event(
+        &mut self,
+        page: PageIndex,
+        event: crate::document::protocol::FormInputEvent,
+    ) -> Result<crate::document::protocol::FormEventResult> {
+        let mut result = self.backend.form_event(page, event)?;
+        limits::within(
+            "invalidated rectangles",
+            result.invalidated.len(),
+            limits::MAX_DIRTY_RECTS,
+        )?;
+        if let Some(committed) = result.committed.as_mut() {
+            self.revision = DocumentRevision(self.revision.0 + 1);
+            self.dirty = true;
+            committed.revision = self.revision;
+        }
+        Ok(result)
     }
 
     /// Apply one atomic user action.

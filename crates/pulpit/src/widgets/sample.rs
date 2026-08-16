@@ -44,7 +44,9 @@ pub static ANNOTATIONS: std::sync::LazyLock<std::sync::Arc<pulpit_core::annotati
         for point in [(0.34, 0.58), (0.46, 0.63), (0.58, 0.55)] {
             annotations.extend_stroke(point);
         }
-        annotations.end_stroke();
+        // Nothing to commit: the sample is a picture of a palette, not a
+        // session, and there is no document behind it.
+        let _ = annotations.end_stroke();
         annotations.set_spotlight(Some((0.5, 0.35)));
         std::sync::Arc::new(annotations)
     });
@@ -113,17 +115,50 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         open: false,
         page_count: 0,
         column: &EMPTY_COLUMN,
+        viewport: 600.0,
         visible: Vec::new(),
         controls: &READER_CONTROLS,
         scale: 1.0,
         outline: &[],
-        fields: &[],
-        has_form: false,
         level: pulpit_render::document::CompatibilityLevel::AnnotateOnly,
         warnings: &[],
         dirty: false,
         page_entry: None,
         can_undo: false,
         can_redo: false,
+        selected: false,
+        selected_editable: false,
+        panning: false,
+        composing: None,
     }
 }
+
+/// A search with something in it, so the editor can judge how much room the
+/// pane wants rather than sizing it against an empty box.
+///
+/// A static for the same reason [`ANNOTATIONS`] is one: the render context
+/// borrows it and has to outlive the call that builds it.
+pub static SEARCH: std::sync::LazyLock<pulpit_core::search::SearchState> =
+    std::sync::LazyLock::new(|| {
+        use pulpit_core::page::PageIndex;
+        use pulpit_core::search::{Hit, HitSource, Query, SearchState, TextMatch};
+
+        let mut state = SearchState::new();
+        state.open(SLIDE_COUNT);
+        state.set_query(Query::new("reconnect", false, false));
+        state.absorb((0..3).map(|index| {
+            Hit::from_text(
+                PageIndex(index * 4 + 1),
+                if index == 1 {
+                    HitSource::Notes
+                } else {
+                    HitSource::PageText
+                },
+                0,
+                "…the reconnect comes back at a different index…",
+                TextMatch { offset: 5, len: 9 },
+                Vec::new(),
+            )
+        }));
+        state
+    });

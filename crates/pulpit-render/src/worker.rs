@@ -7,7 +7,6 @@
 
 use std::collections::VecDeque;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -109,9 +108,9 @@ pub fn run(
                         Request::Links { .. }
                             | Request::Overlays { .. }
                             | Request::Navigation { .. }
+                            | Request::FindText { .. }
                             | Request::Capabilities { .. }
                             | Request::Attachment { .. }
-                            | Request::ExportAnnotated { .. }
                     )
                 );
                 if deferrable_control {
@@ -280,6 +279,50 @@ pub fn run(
                     },
                 )?;
             }
+            Work::Control(Request::FindText {
+                document,
+                generation,
+                from_page,
+                to_page,
+                query,
+            }) => {
+                let found = documents
+                    .iter()
+                    .find(|(id, _)| *id == document)
+                    .map(|(_, handle)| backend.find_text(*handle, &query, from_page..to_page));
+                // Three outcomes, kept apart: hits, "this backend cannot read
+                // text", and a document that is not open here. Collapsing the
+                // middle one into an empty answer would tell a presenter
+                // their deck has no matches when nothing was ever searched.
+                let (chunk, searchable) = match found {
+                    Some(Ok(hits)) => (
+                        pulpit_core::search::HitChunk {
+                            from_page,
+                            to_page,
+                            truncated: hits.len() >= crate::document::limits::MAX_HITS_PER_SEARCH,
+                            hits,
+                        },
+                        true,
+                    ),
+                    Some(Err(_)) | None => (
+                        pulpit_core::search::HitChunk {
+                            from_page,
+                            to_page,
+                            ..Default::default()
+                        },
+                        false,
+                    ),
+                };
+                write_message(
+                    &mut output,
+                    &Response::Found {
+                        document,
+                        generation,
+                        chunk,
+                        searchable,
+                    },
+                )?;
+            }
             Work::Control(Request::Capabilities { document }) => {
                 let capabilities = documents
                     .iter()
@@ -324,30 +367,6 @@ pub fn run(
                         document,
                         name,
                         reason: format!("document {document} is not open"),
-                    },
-                };
-                write_message(&mut output, &response)?;
-            }
-            Work::Control(Request::ExportAnnotated {
-                id,
-                source,
-                destination,
-                pages,
-            }) => {
-                let stamped = pages.len();
-                let response = match backend.export_annotated(
-                    Path::new(&source),
-                    Path::new(&destination),
-                    &pages,
-                ) {
-                    Ok(()) => Response::Exported {
-                        id,
-                        destination,
-                        pages: stamped,
-                    },
-                    Err(e) => Response::ExportFailed {
-                        id,
-                        reason: e.to_string(),
                     },
                 };
                 write_message(&mut output, &response)?;
@@ -457,7 +476,7 @@ fn render_one(
             region: job.region,
             width: job.width,
             height: job.height,
-            with_annotations: false,
+            with_annotations: job.with_annotations,
         };
         let mut pixels = vec![0u8; bytes as usize];
         let started = std::time::Instant::now();
@@ -519,9 +538,10 @@ fn render_one(
         region: job.region,
         width: job.width,
         height: job.height,
-        // A presentation draws the document's own annotations nowhere near
-        // the projector; the presenter's marks are a transient overlay.
-        with_annotations: false,
+        // A presentation job leaves this off — the presenter's marks are a
+        // transient overlay — and a reader page job turns it on, because
+        // there the document's own annotations are the point.
+        with_annotations: job.with_annotations,
     };
     let started = std::time::Instant::now();
     let result = backend.render_into(&request, mapped.as_mut_slice(), cancel.as_ref());
@@ -682,6 +702,7 @@ mod tests {
             height: 36,
             priority,
             quality: Quality::Refined,
+            with_annotations: false,
             region_name: region_name.to_string(),
         }
     }
@@ -911,49 +932,6 @@ mod tests {
         assert!(
             matches!(&responses[2], Response::AttachmentFailed { reason, .. } if reason.contains("not open")),
             "{responses:?}"
-        );
-    }
-
-    /// A backend that cannot write PDFs says so and keeps working. The
-    /// fixture backend is exactly that case, and it is also the shape of a
-    /// build with no PDFium: the presenter is told, the worker lives on.
-    #[test]
-    fn an_export_a_backend_cannot_perform_fails_without_killing_the_worker() {
-        let destination = std::env::temp_dir().join("pulpit-worker-export-test.pdf");
-        let _ = std::fs::remove_file(&destination);
-        let responses = run_worker(vec![
-            Request::Open {
-                document: 1,
-                path: "fixture:pages=3".into(),
-            },
-            Request::ExportAnnotated {
-                id: RequestId(4),
-                source: "fixture:pages=3".into(),
-                destination: destination.to_string_lossy().into_owned(),
-                pages: vec![crate::pdf::PageStamp {
-                    page: 0,
-                    region: pulpit_core::notes::Region::FULL,
-                    strokes: Vec::new(),
-                    images: Vec::new(),
-                }],
-            },
-            Request::Links {
-                document: 1,
-                page: 0,
-            },
-            Request::Shutdown,
-        ]);
-        assert!(
-            matches!(&responses[1], Response::ExportFailed { id, .. } if *id == RequestId(4)),
-            "{responses:?}"
-        );
-        assert!(
-            !destination.exists(),
-            "a backend that refuses the write leaves no file"
-        );
-        assert!(
-            matches!(&responses[2], Response::Links { .. }),
-            "the worker is still answering afterwards"
         );
     }
 

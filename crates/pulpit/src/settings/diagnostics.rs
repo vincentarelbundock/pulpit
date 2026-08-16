@@ -248,10 +248,6 @@ pub fn describe_warning(warning: &Warning) -> String {
                 "two outputs overlap; both remain selectable".into()
             }
         }
-        Warning::PlacementUnsupported { role } => format!(
-            "this compositor will not place the {} window; move it yourself and use fullscreen",
-            role.as_str()
-        ),
         Warning::WindowRecovered { role } => {
             format!(
                 "the {} window was recovered onto an available display",
@@ -374,9 +370,6 @@ mod tests {
                 a: 0,
                 b: 1,
                 nested: true,
-            },
-            Warning::PlacementUnsupported {
-                role: Role::Audience,
             },
             Warning::WindowRecovered {
                 role: Role::Audience,

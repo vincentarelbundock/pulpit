@@ -277,7 +277,7 @@
               "text_size": 0.025,
               "pointer_radius": 0.012,
               "spotlight_radius": 0.08,
-              "audience_visible": false
+              "audience_visible": true
             }
           }
         },
@@ -302,24 +302,60 @@
         "background": "none",
         "border": "none",
         "empty_behavior": "show-blank-panel"
+      },
+      {
+        "type": "leaf",
+        "id": 16,
+        "widget": {
+          "kind": "main-menu",
+          "style": {
+            "variant": "standard",
+            "scale": 1.0,
+            "alignment": "center"
+          },
+          "config": "none"
+        },
+        "padding": 8.0,
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel"
+      },
+      {
+        "type": "leaf",
+        "id": 17,
+        "widget": {
+          "kind": "audience-controls",
+          "style": {
+            "variant": "standard",
+            "scale": 1.0,
+            "alignment": "center"
+          },
+          "config": "none"
+        },
+        "padding": 8.0,
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel"
       }
     ],
     "sizes": [
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667,
-      0.06666667
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353,
+      0.05882353
     ],
     "gap": 8.0,
     "min_child": 0.05

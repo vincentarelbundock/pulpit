@@ -103,7 +103,10 @@ pub struct MarkStyle {
 impl Default for MarkStyle {
     fn default() -> Self {
         Self {
-            color: InkColor::Red,
+            // Black, not red: a pen's resting colour is the one a document is
+            // written in. Red is a choice, and choices are made in the
+            // toolbar's options.
+            color: InkColor::Black,
             opacity: 1.0,
             // Two points is a fine-liner on a letter page: visible at reading
             // zoom without swallowing the text it is drawn over.
@@ -407,6 +410,100 @@ impl AnnotationDraft {
         }
     }
 
+    /// The same mark scaled out of `from` and into `to`.
+    ///
+    /// The companion to [`AnnotationDraft::translated`], for the corner drags
+    /// rather than the middle one. A highlight refuses for the same reason it
+    /// refuses a move: its quads describe real text runs, and stretching them
+    /// would claim the mark covers words it does not (§8.4).
+    ///
+    /// A note refuses too, but for its own reason: a `/Text` annotation is
+    /// drawn at a fixed size whatever its `/Rect` says, so a resized note would
+    /// look exactly like an unresized one and the handles would be a lie.
+    pub fn resized(&self, from: PageRect, to: PageRect) -> Option<AnnotationDraft> {
+        let (from_width, from_height) = (from.width(), from.height());
+        if !to.left.is_finite()
+            || !to.top.is_finite()
+            || !to.right.is_finite()
+            || !to.bottom.is_finite()
+            || from_width <= f32::EPSILON
+            || from_height <= f32::EPSILON
+        {
+            return None;
+        }
+        match self {
+            AnnotationDraft::FreeText(free) => Some(AnnotationDraft::FreeText(FreeTextDraft {
+                rect: to,
+                ..free.clone()
+            })),
+            AnnotationDraft::Stamp(stamp) => Some(AnnotationDraft::Stamp(StampDraft {
+                rect: to,
+                ..stamp.clone()
+            })),
+            AnnotationDraft::Ink(ink) => {
+                // The stroke's points follow the box that held them, so a
+                // scribble stretched wider is the same scribble drawn larger
+                // and not a new one somewhere else.
+                let (scale_x, scale_y) = (to.width() / from_width, to.height() / from_height);
+                let mut moved = ink.clone();
+                for point in &mut moved.points {
+                    point.at = PagePoint::new(
+                        to.left + (point.at.x - from.left) * scale_x,
+                        to.top + (point.at.y - from.top) * scale_y,
+                    );
+                }
+                Some(AnnotationDraft::Ink(moved))
+            }
+            AnnotationDraft::Highlight(_) | AnnotationDraft::Note(_) => None,
+        }
+    }
+
+    /// Can this kind of mark be dragged by a corner at all?
+    ///
+    /// What the view asks before it draws handles: offering a grip that does
+    /// nothing is worse than offering none.
+    pub fn is_resizable(&self) -> bool {
+        matches!(
+            self,
+            AnnotationDraft::FreeText(_) | AnnotationDraft::Stamp(_) | AnnotationDraft::Ink(_)
+        )
+    }
+
+    /// What this mark says, for the kinds that say anything.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            AnnotationDraft::FreeText(free) => Some(&free.text),
+            AnnotationDraft::Note(note) => Some(&note.text),
+            AnnotationDraft::Highlight(highlight) => Some(&highlight.text),
+            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) => None,
+        }
+    }
+
+    /// The same mark, saying something else.
+    ///
+    /// Geometry is untouched: re-writing a note is not moving it, and a
+    /// highlight keeps the `/QuadPoints` that say which words it is about even
+    /// when the comment attached to them changes (§8.5).
+    pub fn with_text(&self, text: String) -> Option<AnnotationDraft> {
+        match self {
+            AnnotationDraft::FreeText(free) => Some(AnnotationDraft::FreeText(FreeTextDraft {
+                text,
+                ..free.clone()
+            })),
+            AnnotationDraft::Note(note) => Some(AnnotationDraft::Note(NoteDraft {
+                text,
+                ..note.clone()
+            })),
+            AnnotationDraft::Highlight(highlight) => {
+                Some(AnnotationDraft::Highlight(HighlightDraft {
+                    text,
+                    ..highlight.clone()
+                }))
+            }
+            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) => None,
+        }
+    }
+
     /// Is this something that can be written to `page`?
     pub fn validate(&self, page: &PageGeometry) -> Result<(), DraftError> {
         match self {
@@ -563,6 +660,98 @@ mod tests {
             points,
             style: MarkStyle::default(),
         })
+    }
+
+    fn free_text(text: &str) -> AnnotationDraft {
+        AnnotationDraft::FreeText(FreeTextDraft {
+            page: PageIndex(0),
+            rect: PageRect::new(100.0, 100.0, 300.0, 140.0),
+            text: text.into(),
+            source: TextSource::Plain,
+            style: MarkStyle::default(),
+        })
+    }
+
+    #[test]
+    fn resizing_a_stroke_carries_its_points_with_the_box() {
+        // Otherwise a stretched scribble is a new scribble somewhere else.
+        let stroke = ink(vec![InkPoint::new(10.0, 10.0), InkPoint::new(20.0, 30.0)]);
+        let from = PageRect::new(10.0, 10.0, 20.0, 30.0);
+        let AnnotationDraft::Ink(scaled) = stroke
+            .resized(from, PageRect::new(10.0, 10.0, 30.0, 50.0))
+            .expect("a stroke is resizable")
+        else {
+            panic!("a stroke resizes to a stroke")
+        };
+        assert_eq!(scaled.points[0].at, PagePoint::new(10.0, 10.0));
+        assert_eq!(scaled.points[1].at, PagePoint::new(30.0, 50.0));
+    }
+
+    #[test]
+    fn the_kinds_that_cannot_be_reshaped_refuse_rather_than_lie() {
+        // A highlight's quads describe real text runs; a note is drawn at a
+        // fixed size whatever its rect says. Stretching either would produce a
+        // mark claiming something untrue about the page (§8.4).
+        let from = PageRect::new(0.0, 0.0, 10.0, 10.0);
+        let to = PageRect::new(0.0, 0.0, 40.0, 40.0);
+        let highlight = AnnotationDraft::Highlight(HighlightDraft {
+            page: PageIndex(0),
+            quads: vec![PageQuad::from_rect(from)],
+            text: "words".into(),
+            style: MarkStyle::highlighter(),
+        });
+        assert!(highlight.resized(from, to).is_none());
+        assert!(!highlight.is_resizable());
+
+        let note = AnnotationDraft::Note(NoteDraft {
+            page: PageIndex(0),
+            at: PagePoint::new(0.0, 0.0),
+            text: "a note".into(),
+            open: false,
+            style: MarkStyle::default(),
+        });
+        assert!(note.resized(from, to).is_none());
+        assert!(!note.is_resizable());
+    }
+
+    #[test]
+    fn a_resize_out_of_a_box_with_no_area_is_refused_rather_than_dividing_by_it() {
+        // Refused for every kind rather than only for the one that divides by
+        // it: a drag that started from a mark with no area is a drag from a
+        // measurement nobody can have aimed, whatever the mark turns out to be.
+        let flat = PageRect::new(10.0, 10.0, 10.0, 10.0);
+        let to = PageRect::new(0.0, 0.0, 40.0, 40.0);
+        assert!(free_text("something").resized(flat, to).is_none());
+        assert!(ink(vec![InkPoint::new(10.0, 10.0)])
+            .resized(flat, to)
+            .is_none());
+        // …and a resize to something that is not a number, likewise.
+        let real = PageRect::new(0.0, 0.0, 10.0, 10.0);
+        let nonsense = PageRect::new(0.0, 0.0, f32::NAN, 10.0);
+        assert!(free_text("something").resized(real, nonsense).is_none());
+    }
+
+    #[test]
+    fn rewriting_a_mark_changes_what_it_says_and_nothing_else() {
+        let AnnotationDraft::FreeText(rewritten) = free_text("a first thought")
+            .with_text("a second thought".into())
+            .expect("free text says something")
+        else {
+            panic!("free text rewrites to free text")
+        };
+        assert_eq!(rewritten.text, "a second thought");
+        assert_eq!(
+            rewritten.rect,
+            PageRect::new(100.0, 100.0, 300.0, 140.0),
+            "rewriting a mark is not moving it"
+        );
+        assert_eq!(free_text("x").text(), Some("x"));
+
+        // A stroke and a stamp say nothing, and guessing at text for them
+        // would replace a mark with a different kind of mark.
+        let stroke = ink(vec![InkPoint::new(1.0, 1.0)]);
+        assert!(stroke.text().is_none());
+        assert!(stroke.with_text("hello".into()).is_none());
     }
 
     #[test]

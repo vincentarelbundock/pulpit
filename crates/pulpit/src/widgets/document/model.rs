@@ -23,6 +23,12 @@ pub enum Zoom {
     FitWidth,
     /// The whole page is visible, however much space that leaves beside it.
     FitPage,
+    /// The page.s height fills the cell, however wide that leaves it.
+    ///
+    /// The fit for reading a page at a time rather than a column of text:
+    /// one whole page in the window, and the next press of the wheel is the
+    /// next page rather than the rest of this one.
+    FitHeight,
     /// A scale the user set, as a multiple of one PDF point per layout point.
     Fixed(f32),
 }
@@ -33,11 +39,16 @@ pub enum Zoom {
 /// bottom of the range and an imperceptible one at the top; each step here is
 /// roughly a quarter more than the last near 100%, which is about the smallest
 /// change worth a press.
-pub const ZOOM_STEPS: [f32; 13] = [
-    0.25, 0.33, 0.50, 0.67, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00,
+pub const ZOOM_STEPS: [f32; 15] = [
+    0.10, 0.15, 0.25, 0.33, 0.50, 0.67, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00,
 ];
 
-pub const MIN_ZOOM: f32 = 0.05;
+/// The smallest scale the reader can reach.
+///
+/// Ten per cent: a page smaller than that is a stamp with no readable text on
+/// it, so the rungs below are range the control spends presses on without
+/// showing the reader anything.
+pub const MIN_ZOOM: f32 = 0.10;
 pub const MAX_ZOOM: f32 = 16.0;
 
 impl Zoom {
@@ -53,6 +64,7 @@ impl Zoom {
         let scale = match self {
             Zoom::FitWidth => width / page.width,
             Zoom::FitPage => (width / page.width).min(height / page.height),
+            Zoom::FitHeight => height / page.height,
             Zoom::Fixed(value) => value,
         };
         if scale.is_finite() {
@@ -86,10 +98,16 @@ impl Zoom {
     }
 
     /// "Fit width", "Fit page" or "150%".
+    ///
+    /// The band shows the resolved percentage rather than these names — the
+    /// icons say which fit is on — so this is what a zoom *menu* would put
+    /// beside each choice.
+    #[allow(dead_code)]
     pub fn label(self, resolved: f32) -> String {
         match self {
             Zoom::FitWidth => "Fit width".to_string(),
             Zoom::FitPage => "Fit page".to_string(),
+            Zoom::FitHeight => "Fit height".to_string(),
             Zoom::Fixed(_) => format!("{}%", (resolved * 100.0).round() as i32),
         }
     }
@@ -108,6 +126,49 @@ impl Zoom {
 /// text runs straight on.
 pub const PAGE_GAP: f32 = 12.0;
 
+/// How many pages stand side by side in the column.
+///
+/// A reading decision rather than a zoom: a scanned book is two facing pages
+/// whatever scale it is read at, and a report is one however wide the window
+/// is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageSpread {
+    /// One page across the column: the reading default.
+    #[default]
+    Single,
+    /// Two pages side by side, paired from the first: 1–2, 3–4, and so on.
+    ///
+    /// Paired from the first rather than offset by a cover page, because
+    /// pulpit is shown documents that were exported, not bound, and a rule a
+    /// reader can predict beats one that is right for half of them.
+    Double,
+}
+
+impl PageSpread {
+    pub fn label(self) -> &'static str {
+        match self {
+            PageSpread::Single => "Single page",
+            PageSpread::Double => "Two pages",
+        }
+    }
+
+    pub fn other(self) -> PageSpread {
+        match self {
+            PageSpread::Single => PageSpread::Double,
+            PageSpread::Double => PageSpread::Single,
+        }
+    }
+
+    /// How many pages stand in one row.
+    fn across(self) -> usize {
+        match self {
+            PageSpread::Single => 1,
+            PageSpread::Double => 2,
+        }
+    }
+}
+
 /// One page's place in the scrolled column.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlacedPage {
@@ -115,8 +176,19 @@ pub struct PlacedPage {
     /// Distance from the top of the whole column to the top of this page, in
     /// layout points.
     pub top: f32,
+    /// …and from its left edge. Pages are centred in the column, so this is
+    /// not zero even in a single-page spread, and in a two-page one it is
+    /// what tells the two sheets of a row apart.
+    pub left: f32,
     pub width: f32,
     pub height: f32,
+    /// The bottom of the *row* this page stands in, which in a single-page
+    /// spread is its own.
+    ///
+    /// Carried because two facing pages need not be the same height, so the
+    /// pages' own bottoms are not in order down the column and cannot be
+    /// binary-searched; the rows' are.
+    pub row_bottom: f32,
 }
 
 impl PlacedPage {
@@ -140,30 +212,64 @@ pub struct Column {
 
 impl Column {
     /// Lay out `pages` at `scale` into a cell `cell_width` wide.
-    pub fn lay_out(pages: &[PageGeometry], scale: f32, cell_width: f32) -> Column {
+    pub fn lay_out(
+        pages: &[PageGeometry],
+        scale: f32,
+        cell_width: f32,
+        spread: PageSpread,
+    ) -> Column {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
             1.0
         };
+        let across = spread.across();
         let mut placed = Vec::with_capacity(pages.len());
+        let mut rows: Vec<(usize, usize, f32)> = Vec::new();
         let mut top = 0.0f32;
         let mut widest = 0.0f32;
-        for (index, page) in pages.iter().enumerate() {
-            let width = page.width * scale;
-            let height = page.height * scale;
-            placed.push(PlacedPage {
-                page: PageIndex(index),
-                top,
-                width,
-                height,
-            });
-            widest = widest.max(width);
+        for (row, chunk) in pages.chunks(across).enumerate() {
+            let first = placed.len();
+            // A row is as tall as its tallest page and as wide as its pages
+            // plus the gaps between them: a landscape page beside a portrait
+            // one must not have the next row start over its foot.
+            let height = chunk
+                .iter()
+                .map(|page| page.height * scale)
+                .fold(0.0f32, f32::max);
+            let mut row_width = 0.0f32;
+            for (offset, page) in chunk.iter().enumerate() {
+                let width = page.width * scale;
+                placed.push(PlacedPage {
+                    page: PageIndex(row * across + offset),
+                    top,
+                    // Filled in below, once the column's own width is known:
+                    // a page's place across it is measured from the column,
+                    // and the column is as wide as its widest row.
+                    left: row_width,
+                    width,
+                    height: page.height * scale,
+                    row_bottom: top + height,
+                });
+                row_width += width + PAGE_GAP;
+            }
+            let row_width = (row_width - PAGE_GAP).max(0.0);
+            rows.push((first, placed.len(), row_width));
+            widest = widest.max(row_width);
             top += height + PAGE_GAP;
+        }
+        let width = widest.max(cell_width.max(0.0));
+        for (first, end, row_width) in rows {
+            // Rows are centred in the column, so a document that mixes page
+            // sizes reads down a centre line rather than flush left.
+            let margin = ((width - row_width) / 2.0).max(0.0);
+            for page in &mut placed[first..end] {
+                page.left += margin;
+            }
         }
         Column {
             height: (top - PAGE_GAP).max(0.0),
-            width: widest.max(cell_width.max(0.0)),
+            width,
             pages: placed,
         }
     }
@@ -176,10 +282,16 @@ impl Column {
     pub fn visible(&self, offset: f32, viewport: f32) -> Vec<PlacedPage> {
         let top = offset.max(0.0);
         let bottom = top + viewport.max(0.0);
-        self.pages
+        // Pages stack without overlapping, so their bottoms are as ordered as
+        // their tops and the window is one contiguous run: binary-search its
+        // start, walk to its end. This runs on every tick and every scroll,
+        // and a linear filter here made each of those cost the whole
+        // document.
+        let first = self.pages.partition_point(|placed| placed.row_bottom < top);
+        self.pages[first..]
             .iter()
             .copied()
-            .filter(|placed| placed.bottom() >= top && placed.top <= bottom)
+            .take_while(|placed| placed.top <= bottom)
             .collect()
     }
 
@@ -192,23 +304,26 @@ impl Column {
     pub fn current(&self, offset: f32, viewport: f32) -> Option<PageIndex> {
         let top = offset.max(0.0);
         let bottom = top + viewport.max(0.0);
-        self.pages
-            .iter()
+        self.visible(offset, viewport)
+            .into_iter()
             .map(|placed| {
                 let overlap = placed.bottom().min(bottom) - placed.top.max(top);
                 (placed.page, overlap)
             })
             .filter(|(_, overlap)| *overlap > 0.0)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+            // Ties go to the earlier page, which is what a two-page spread is
+            // made of: both halves show equally, and the counter says the
+            // left one.
+            .fold(None, |best: Option<(PageIndex, f32)>, next| match best {
+                Some(best) if best.1 >= next.1 => Some(best),
+                _ => Some(next),
+            })
             .map(|(page, _)| page)
             // A viewport of no height sits between pages rather than on one;
             // the page whose top is nearest above is still the answer.
             .or_else(|| {
-                self.pages
-                    .iter()
-                    .rev()
-                    .find(|placed| placed.top <= top)
-                    .map(|placed| placed.page)
+                let above = self.pages.partition_point(|placed| placed.top <= top);
+                above.checked_sub(1).map(|index| self.pages[index].page)
             })
     }
 
@@ -218,6 +333,34 @@ impl Column {
             .iter()
             .find(|placed| placed.page == page)
             .map(|placed| placed.top)
+    }
+
+    /// Where `page`'s left edge sits in the column, in layout points from the
+    /// column's own left edge.
+    ///
+    /// Pages are centred in the column, so a document whose pages are narrower
+    /// than its widest one is not flush left — and a pan that measured from the
+    /// page's own origin would drift by half that difference at every page
+    /// boundary.
+    pub fn left_of(&self, page: PageIndex) -> Option<f32> {
+        self.pages
+            .iter()
+            .find(|placed| placed.page == page)
+            .map(|placed| placed.left)
+    }
+
+    /// Keep a horizontal offset inside the column, given a window
+    /// `cell_width` wide.
+    ///
+    /// The column is never narrower than the cell, so a page that fits across
+    /// the window does not scroll sideways at all: the whole range exists only
+    /// once a zoom has made the page wider than the space it is read in.
+    pub fn clamp_offset_x(&self, offset: f32, cell_width: f32) -> f32 {
+        if !offset.is_finite() {
+            return 0.0;
+        }
+        let furthest = (self.width - cell_width.max(0.0)).max(0.0);
+        offset.clamp(0.0, furthest)
     }
 
     /// Keep `offset` inside the column, given a window `viewport` tall.
@@ -241,13 +384,37 @@ pub struct ReaderControls {
     pub zoom: Zoom,
     /// Where the column is scrolled to, in layout points.
     pub offset: f32,
+    /// …and how far across it, for a zoom that makes the page wider than the
+    /// window. Zero whenever the page fits across it.
+    pub offset_x: f32,
     /// The page the counter shows.
     pub page: PageIndex,
     /// The armed tool, or `None` when a press reaches the document's own links
     /// and form fields instead of laying down a mark.
     pub tool: Option<pulpit_core::annotation::AnnotationTool>,
+    /// Which tool's options popover is open in the toolbar, if any.
+    pub tool_options: Option<pulpit_core::annotation::AnnotationTool>,
+    /// The colour each colour-bearing tool lays down, and the pen's width.
+    /// Mirrors of the interaction's styles, held here so the toolbar can be
+    /// drawn from the controls alone.
+    pub ink_color: pulpit_core::annotation::InkColor,
+    /// Stroke width in page points.
+    pub ink_width: f32,
+    pub highlight_color: pulpit_core::annotation::InkColor,
+    pub text_color: pulpit_core::annotation::InkColor,
+    /// The size placed text and notes are written at, in page points. The
+    /// pen has a width control and type had nothing, which left the one
+    /// measure a reader most often wants to change with no way to change it.
+    pub text_size: f32,
     /// Whether the outline rail shows bookmarks or thumbnails.
     pub outline: OutlineView,
+    /// One page across the column, or two facing pages.
+    pub spread: PageSpread,
+    /// Whether the outline rail is collapsed to its header. The rail keeps the
+    /// space the layout gave it — that is the layout's to decide — but hides
+    /// everything below the header, so a reader who wants the page and not the
+    /// bookmarks can put them away without editing the layout.
+    pub outline_collapsed: bool,
 }
 
 impl Default for ReaderControls {
@@ -255,9 +422,18 @@ impl Default for ReaderControls {
         Self {
             zoom: Zoom::default(),
             offset: 0.0,
+            offset_x: 0.0,
             page: PageIndex(0),
             tool: None,
+            tool_options: None,
+            ink_color: pulpit_core::annotate::MarkStyle::default().color,
+            ink_width: pulpit_core::annotate::MarkStyle::default().width,
+            highlight_color: pulpit_core::annotate::MarkStyle::highlighter().color,
+            text_color: pulpit_core::annotate::MarkStyle::default().color,
+            text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),
+            spread: PageSpread::default(),
+            outline_collapsed: false,
         }
     }
 }
@@ -280,13 +456,6 @@ impl OutlineView {
         match self {
             OutlineView::Bookmarks => "Bookmarks",
             OutlineView::Thumbnails => "Pages",
-        }
-    }
-
-    pub fn other(self) -> OutlineView {
-        match self {
-            OutlineView::Bookmarks => OutlineView::Thumbnails,
-            OutlineView::Thumbnails => OutlineView::Bookmarks,
         }
     }
 }
@@ -350,8 +519,53 @@ mod tests {
     }
 
     #[test]
+    fn a_two_page_spread_puts_facing_pages_on_one_line() {
+        let column = Column::lay_out(&letter(5), 1.0, 2_000.0, PageSpread::Double);
+        // Three rows: 1–2, 3–4 and a last page with nothing beside it.
+        assert_eq!(column.pages[0].top, 0.0);
+        assert_eq!(column.pages[1].top, 0.0);
+        assert_eq!(column.pages[2].top, 792.0 + PAGE_GAP);
+        assert_eq!(column.height, 792.0 * 3.0 + PAGE_GAP * 2.0);
+        // Side by side, a gap apart, and the pair centred in the column.
+        assert_eq!(
+            column.pages[1].left - column.pages[0].left,
+            612.0 + PAGE_GAP
+        );
+        let pair = 612.0 * 2.0 + PAGE_GAP;
+        assert_eq!(column.pages[0].left, (2_000.0 - pair) / 2.0);
+        // The odd page at the end is centred on its own, not left where its
+        // absent neighbour would have put it.
+        assert_eq!(column.pages[4].left, (2_000.0 - 612.0) / 2.0);
+    }
+
+    #[test]
+    fn both_halves_of_a_spread_are_visible_and_the_left_one_is_the_page() {
+        let column = Column::lay_out(&letter(4), 1.0, 2_000.0, PageSpread::Double);
+        let visible = column.visible(0.0, 792.0);
+        assert_eq!(
+            visible.iter().map(|placed| placed.page).collect::<Vec<_>>(),
+            vec![PageIndex(0), PageIndex(1)]
+        );
+        assert_eq!(column.current(0.0, 792.0), Some(PageIndex(0)));
+    }
+
+    #[test]
+    fn a_row_is_as_tall_as_its_taller_half() {
+        let pages = vec![
+            PageGeometry::upright(612.0, 792.0),
+            PageGeometry::upright(612.0, 400.0),
+        ];
+        let column = Column::lay_out(&pages, 1.0, 2_000.0, PageSpread::Double);
+        assert_eq!(column.height, 792.0);
+        // The short page's row still ends where the tall one does, which is
+        // what keeps the rows' bottoms in order down the column.
+        assert_eq!(column.pages[1].row_bottom, 792.0);
+        assert_eq!(column.pages[1].bottom(), 400.0);
+    }
+
+    #[test]
     fn pages_stack_with_a_gap_between_them() {
-        let column = Column::lay_out(&letter(3), 1.0, 800.0);
+        let column = Column::lay_out(&letter(3), 1.0, 800.0, PageSpread::Single);
         assert_eq!(column.pages.len(), 3);
         assert_eq!(column.pages[0].top, 0.0);
         assert_eq!(column.pages[1].top, 792.0 + PAGE_GAP);
@@ -369,7 +583,7 @@ mod tests {
             PageGeometry::upright(792.0, 612.0),
             PageGeometry::upright(612.0, 792.0),
         ];
-        let column = Column::lay_out(&pages, 1.0, 400.0);
+        let column = Column::lay_out(&pages, 1.0, 400.0, PageSpread::Single);
         assert_eq!(column.pages[1].height, 612.0);
         assert_eq!(column.pages[2].top, 792.0 + 612.0 + PAGE_GAP * 2.0);
         assert_eq!(column.width, 792.0, "the widest page sets the column");
@@ -377,7 +591,7 @@ mod tests {
 
     #[test]
     fn an_empty_document_lays_out_to_nothing_rather_than_to_a_negative_column() {
-        let column = Column::lay_out(&[], 1.0, 500.0);
+        let column = Column::lay_out(&[], 1.0, 500.0, PageSpread::Single);
         assert_eq!(column.height, 0.0);
         assert!(column.pages.is_empty());
         assert_eq!(column.current(0.0, 100.0), None);
@@ -386,7 +600,7 @@ mod tests {
 
     #[test]
     fn only_the_pages_in_the_window_are_visible() {
-        let column = Column::lay_out(&letter(20), 1.0, 800.0);
+        let column = Column::lay_out(&letter(20), 1.0, 800.0, PageSpread::Single);
         let visible = column.visible(0.0, 900.0);
         assert_eq!(visible.len(), 2, "a page and the top of the next");
         assert_eq!(visible[0].page, PageIndex(0));
@@ -398,7 +612,7 @@ mod tests {
 
     #[test]
     fn the_page_counter_names_the_page_you_are_mostly_looking_at() {
-        let column = Column::lay_out(&letter(5), 1.0, 800.0);
+        let column = Column::lay_out(&letter(5), 1.0, 800.0, PageSpread::Single);
         // A sliver of page two at the bottom does not make it the page you are
         // on.
         assert_eq!(column.current(0.0, 800.0), Some(PageIndex(0)));
@@ -409,7 +623,7 @@ mod tests {
 
     #[test]
     fn scrolling_to_a_page_puts_its_top_at_the_top() {
-        let column = Column::lay_out(&letter(5), 0.5, 400.0);
+        let column = Column::lay_out(&letter(5), 0.5, 400.0, PageSpread::Single);
         let offset = column.offset_of(PageIndex(3)).unwrap();
         assert_eq!(offset, column.pages[3].top);
         assert_eq!(column.current(offset, 400.0), Some(PageIndex(3)));
@@ -418,29 +632,30 @@ mod tests {
 
     #[test]
     fn the_scroll_offset_stays_inside_the_document() {
-        let column = Column::lay_out(&letter(3), 1.0, 800.0);
+        let column = Column::lay_out(&letter(3), 1.0, 800.0, PageSpread::Single);
         assert_eq!(column.clamp_offset(-500.0, 600.0), 0.0);
         assert_eq!(column.clamp_offset(f32::NAN, 600.0), 0.0);
         assert_eq!(column.clamp_offset(1e9, 600.0), column.height - 600.0);
         // A document shorter than the window does not scroll at all.
-        let short = Column::lay_out(&letter(1), 0.1, 800.0);
+        let short = Column::lay_out(&letter(1), 0.1, 800.0, PageSpread::Single);
         assert_eq!(short.clamp_offset(400.0, 2_000.0), 0.0);
     }
 
     #[test]
     fn a_nonsense_scale_lays_out_at_one_rather_than_collapsing_the_column() {
         for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            let column = Column::lay_out(&letter(2), scale, 500.0);
+            let column = Column::lay_out(&letter(2), scale, 500.0, PageSpread::Single);
             assert!(column.height > 0.0, "scale {scale} collapsed the column");
         }
     }
 
     #[test]
-    fn the_outline_rail_has_two_views_and_toggles_between_them() {
+    fn the_outline_rail_has_two_views_and_opens_on_the_bookmarks() {
         assert_eq!(OutlineView::default(), OutlineView::Bookmarks);
-        assert_eq!(OutlineView::Bookmarks.other(), OutlineView::Thumbnails);
-        assert_eq!(OutlineView::Thumbnails.other(), OutlineView::Bookmarks);
+        assert_eq!(OutlineView::Bookmarks.label(), "Bookmarks");
         assert_eq!(OutlineView::Thumbnails.label(), "Pages");
+        // Each tab names itself, so a view that is in front is still labelled.
+        assert!(!ReaderControls::default().outline_collapsed);
     }
 
     #[test]

@@ -83,6 +83,7 @@ impl MemoryDocument {
             options: Vec::new(),
             allows_custom_value: true,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 100.0, 400.0, 124.0),
@@ -97,6 +98,7 @@ impl MemoryDocument {
             options: vec!["Yes".into(), "Off".into()],
             allows_custom_value: false,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 160.0, 116.0, 176.0),
@@ -111,6 +113,7 @@ impl MemoryDocument {
             options: vec!["red".into(), "green".into()],
             allows_custom_value: false,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: vec![
                 FieldWidget {
                     page: PageIndex(0),
@@ -132,6 +135,7 @@ impl MemoryDocument {
             options: Vec::new(),
             allows_custom_value: false,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: Vec::new(),
         });
         document

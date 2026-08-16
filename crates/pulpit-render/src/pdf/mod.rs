@@ -12,6 +12,7 @@ pub mod synth;
 
 #[cfg(feature = "pdfium")]
 pub mod pdfium;
+pub(crate) mod search;
 
 use std::path::Path;
 
@@ -191,82 +192,6 @@ pub fn collect_page_sizes(
     (sizes, page_count > tracked)
 }
 
-/// One page's presenter marks, ready to be stamped into a copy of a document.
-///
-/// The marks arrive in the normalised coordinates the domain keeps them in —
-/// top-left origin, sizes as fractions of the *region*'s width — and are
-/// mapped onto the page by whoever stamps them. Carrying the region rather
-/// than pre-multiplying it is what lets a split-page deck, where a slide is
-/// half of a physical page, export its marks over the half they were drawn
-/// on rather than smeared across the sheet.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PageStamp {
-    /// Physical PDF page index.
-    pub page: usize,
-    /// The part of that page the marks were drawn over.
-    pub region: Region,
-    pub strokes: Vec<pulpit_core::annotation::InkStroke>,
-    pub images: Vec<StampImage>,
-}
-
-/// A picture stamped onto a page: a text annotation, already rasterised.
-///
-/// Text marks are Typst, and Typst's glyphs are not PDFium's — the only way
-/// the exported file says what the projector said is to carry the pixels that
-/// were on it. Vector strokes take the other path and stay vector.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StampImage {
-    /// Top-left corner, normalised within the region.
-    pub x: f32,
-    pub y: f32,
-    /// Fraction of the region's width the picture spans, before it is scaled
-    /// down to fit whatever height is left below it.
-    pub width: f32,
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    /// Tightly packed RGBA8, `pixel_width * pixel_height * 4` bytes.
-    pub rgba: Vec<u8>,
-}
-
-impl StampImage {
-    /// The largest picture worth stamping: 4096² is well past the resolution
-    /// any projector shows a text annotation at, and bounds one message.
-    pub const MAX_PIXELS: u64 = 4096 * 4096;
-
-    pub fn is_consistent(&self) -> bool {
-        self.pixel_width > 0
-            && self.pixel_height > 0
-            && u64::from(self.pixel_width) * u64::from(self.pixel_height) <= Self::MAX_PIXELS
-            && self.rgba.len() == self.pixel_width as usize * self.pixel_height as usize * 4
-    }
-}
-
-impl PageStamp {
-    /// More marks than a slide a presenter drew on by hand ever carries;
-    /// bounds what one export message can be asked to hold.
-    pub const MAX_STROKES: usize = pulpit_core::annotation::Annotations::MAX_STROKES * 4;
-    pub const MAX_IMAGES: usize = 256;
-
-    pub fn validate(&self) -> Result<()> {
-        if !self.region.is_valid() {
-            return Err(PdfError::Invalid("stamp region outside the page".into()));
-        }
-        if self.strokes.len() > Self::MAX_STROKES || self.images.len() > Self::MAX_IMAGES {
-            return Err(PdfError::Invalid(format!(
-                "page {} carries more marks than an export accepts",
-                self.page
-            )));
-        }
-        if !self.images.iter().all(StampImage::is_consistent) {
-            return Err(PdfError::Invalid(format!(
-                "page {} carries a malformed picture",
-                self.page
-            )));
-        }
-        Ok(())
-    }
-}
-
 /// A cancellation flag shared with the caller. The PDFium progressive API
 /// polls it through its pause callback, so obsolete work yields promptly
 /// instead of holding a worker hostage.
@@ -337,6 +262,25 @@ pub trait PdfBackend: Send {
         Ok(Vec::new())
     }
 
+    /// Find a string in the text layer of a half-open run of pages.
+    ///
+    /// The presenter searches through this and the reader searches through
+    /// the document engine, because they are separate processes holding
+    /// separate handles; both run the same matcher over the same text layer,
+    /// so a hit found in one view is the hit found in the other.
+    ///
+    /// A backend with no text layer says so rather than answering with an
+    /// empty list: "this cannot be searched" and "there are no matches" are
+    /// different facts about a document.
+    fn find_text(
+        &self,
+        _document: BackendDocumentId,
+        _query: &pulpit_core::search::Query,
+        _pages: std::ops::Range<usize>,
+    ) -> Result<Vec<pulpit_core::search::Hit>> {
+        Err(PdfError::Invalid("search unsupported".into()))
+    }
+
     /// The bytes of one entry in the embedded-files name tree. A backend
     /// without attachment support says so rather than pretending the deck
     /// has none: an overlay whose asset is missing must fall back visibly.
@@ -367,20 +311,6 @@ pub trait PdfBackend: Send {
     }
 
     /// Write a copy of `source` to `destination` with `pages`' marks stamped
-    /// into the page content.
-    ///
-    /// Never touches `source`, and never touches a document this backend has
-    /// open for rendering: the copy is loaded, drawn on and closed on its own.
-    /// The audience frame is unaffected by an export, including a failed one.
-    fn export_annotated(
-        &self,
-        _source: &Path,
-        _destination: &Path,
-        _pages: &[PageStamp],
-    ) -> Result<()> {
-        Err(PdfError::Unsupported("write an annotated PDF"))
-    }
-
     /// Evidence of features pulpit will flatten or ignore. A backend that
     /// cannot inspect a document reports none rather than guessing; the
     /// analysis in [`capabilities`] never invents a finding without evidence.

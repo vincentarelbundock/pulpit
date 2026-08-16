@@ -41,6 +41,21 @@ pub const MAX_QUADS_PER_ANNOTATION: usize = 4_096;
 /// the UI has to be able to say "that is more than a highlight can hold".
 pub const MAX_QUADS_PER_SELECTION: usize = 8_192;
 
+/// The most pages one search request may cover.
+///
+/// Twice the chunk the application asks for, so a caller that batches two
+/// chunks together is not refused, and small enough that a superseded query
+/// wastes at most this much scanning before the cancellation is noticed.
+pub const MAX_PAGES_PER_SEARCH: usize = 2 * pulpit_core::search::PAGES_PER_CHUNK;
+
+/// The most hits one search request may answer with. Past this the answer is
+/// "narrow the query": hits are held in memory and drawn on every page.
+pub const MAX_HITS_PER_SEARCH: usize = 512;
+
+/// The most quadrilaterals one search hit may carry. A match is a word or a
+/// phrase, so a handful of runs is already a hyphenated line break.
+pub const MAX_QUADS_PER_HIT: usize = 16;
+
 /// The most characters a selection query returns, or an annotation carries.
 pub const MAX_TEXT_BYTES: usize = MAX_ANNOTATION_TEXT;
 
@@ -114,6 +129,15 @@ const _: () = {
     assert!(MAX_POINTS_PER_INK == MAX_INK_POINTS);
     assert!(MAX_TEXT_BYTES == MAX_ANNOTATION_TEXT);
 };
+
+/// How many separate rectangles one form event may ask to have redrawn before
+/// they collapse into one covering rectangle.
+///
+/// A keystroke in a text field genuinely invalidates a few areas — the caret,
+/// the text run, sometimes the field background. A document that invalidates
+/// hundreds is either broken or hostile, and either way one large redraw is
+/// cheaper than hundreds of small ones (§8.6, A8).
+pub const MAX_DIRTY_RECTS: usize = 16;
 
 #[cfg(test)]
 mod tests {

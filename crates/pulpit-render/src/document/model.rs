@@ -341,6 +341,15 @@ pub struct FormField {
     pub name: String,
     pub kind: FieldKind,
     pub value: String,
+    /// Which of [`Self::options`] are chosen, by index, in the order the file
+    /// lists them.
+    ///
+    /// A choice field that takes several selections has no single value, and
+    /// [`Self::value`] can only ever name one of them — so what was chosen is
+    /// said here, where a list of three things can be a list of three things.
+    /// Empty for every other kind, and for a choice field with nothing chosen.
+    #[serde(default)]
+    pub selected: Vec<u32>,
     pub read_only: bool,
     pub options: Vec<String>,
     pub allows_custom_value: bool,
@@ -711,6 +720,7 @@ mod tests {
             options: vec!["a".into(), "b".into()],
             allows_custom_value: false,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: vec![
                 FieldWidget {
                     page: PageIndex(1),
@@ -748,6 +758,7 @@ mod tests {
             options: Vec::new(),
             allows_custom_value: false,
             multiple_selection: false,
+            selected: Vec::new(),
             widgets: Vec::new(),
         };
         assert!(!field.is_editable());

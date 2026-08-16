@@ -55,7 +55,107 @@ pub enum Gesture {
         page: PageIndex,
         original: PageRect,
         current: PageRect,
+        /// Whether the pointer is carrying the whole mark or one of its
+        /// corners. The release builds a different replacement for each — a
+        /// translation or a scaling — so the drag has to remember which it is.
+        handle: TransformHandle,
     },
+}
+
+/// Which corner of a selected mark the pointer is holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    /// Every corner, in the order a view draws the handles.
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ];
+
+    /// Where this corner of `rect` is.
+    pub fn of(self, rect: PageRect) -> PagePoint {
+        match self {
+            Corner::TopLeft => PagePoint::new(rect.left, rect.top),
+            Corner::TopRight => PagePoint::new(rect.right, rect.top),
+            Corner::BottomLeft => PagePoint::new(rect.left, rect.bottom),
+            Corner::BottomRight => PagePoint::new(rect.right, rect.bottom),
+        }
+    }
+}
+
+/// What a transform drag is doing to the mark it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformHandle {
+    /// The whole mark follows the pointer.
+    Move,
+    /// This corner follows the pointer; the opposite one stays where it is.
+    Resize(Corner),
+}
+
+/// The smallest a mark may be dragged down to, in page points.
+///
+/// A rectangle dragged through zero comes out inside-out, and one dragged to
+/// nothing is a mark the reader can no longer find in order to undo it.
+pub const MIN_MARK_SIZE: f32 = 4.0;
+
+impl TransformHandle {
+    /// Where `original` ends up when the pointer has moved by `(dx, dy)`.
+    ///
+    /// Here rather than in the view because it is arithmetic with edge cases —
+    /// a corner dragged past its opposite, a drag that collapses the box — and
+    /// those are worth a test that needs no window.
+    pub fn applied(self, original: PageRect, dx: f32, dy: f32) -> PageRect {
+        if !dx.is_finite() || !dy.is_finite() {
+            return original;
+        }
+        let TransformHandle::Resize(corner) = self else {
+            return PageRect::new(
+                original.left + dx,
+                original.top + dy,
+                original.right + dx,
+                original.bottom + dy,
+            );
+        };
+        let (mut left, mut top, mut right, mut bottom) =
+            (original.left, original.top, original.right, original.bottom);
+        match corner {
+            Corner::TopLeft => {
+                left += dx;
+                top += dy;
+            }
+            Corner::TopRight => {
+                right += dx;
+                top += dy;
+            }
+            Corner::BottomLeft => {
+                left += dx;
+                bottom += dy;
+            }
+            Corner::BottomRight => {
+                right += dx;
+                bottom += dy;
+            }
+        }
+        // Clamped away from the corner that did *not* move, so a box squashed
+        // flat collapses towards its anchor rather than around its centre.
+        match corner {
+            Corner::TopLeft | Corner::BottomLeft => left = left.min(right - MIN_MARK_SIZE),
+            Corner::TopRight | Corner::BottomRight => right = right.max(left + MIN_MARK_SIZE),
+        }
+        match corner {
+            Corner::TopLeft | Corner::TopRight => top = top.min(bottom - MIN_MARK_SIZE),
+            Corner::BottomLeft | Corner::BottomRight => bottom = bottom.max(top + MIN_MARK_SIZE),
+        }
+        PageRect::new(left, top, right, bottom)
+    }
 }
 
 impl Gesture {
@@ -107,7 +207,7 @@ impl GestureOutcome {
 /// This is the type §5.3 splits out of the presenter's `Annotations`: what the
 /// user is doing, with none of what they have done. Committed marks live in
 /// the open PDF document and nowhere else (A1).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationInteraction {
     tool: Option<AnnotationTool>,
     gesture: Option<Gesture>,
@@ -121,14 +221,31 @@ pub struct AnnotationInteraction {
     /// The style the next mark will be made in, per tool.
     ink_style: MarkStyle,
     highlight_style: MarkStyle,
+    /// What placed text — free text and notes — is written in. Separate from
+    /// the ink's: the pen drawing in green does not make the commentary green.
+    text_style: MarkStyle,
+}
+
+impl Default for AnnotationInteraction {
+    /// The same thing as [`AnnotationInteraction::new`], spelled out so a
+    /// derived `Default` can never quietly hand the highlighter the ink's
+    /// opaque style again.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnnotationInteraction {
     pub fn new() -> Self {
         Self {
+            tool: None,
+            gesture: None,
+            pointer: None,
+            spotlight: None,
+            selected: None,
             ink_style: MarkStyle::default(),
             highlight_style: MarkStyle::highlighter(),
-            ..Default::default()
+            text_style: MarkStyle::default(),
         }
     }
 
@@ -175,6 +292,14 @@ impl AnnotationInteraction {
 
     pub fn set_highlight_style(&mut self, style: MarkStyle) {
         self.highlight_style = style.sanitised();
+    }
+
+    pub fn text_style(&self) -> MarkStyle {
+        self.text_style
+    }
+
+    pub fn set_text_style(&mut self, style: MarkStyle) {
+        self.text_style = style.sanitised();
     }
 
     /// Abandon whatever is open. Escape, a tool change, a page change and a
@@ -297,12 +422,19 @@ impl AnnotationInteraction {
     }
 
     /// Start moving or resizing a selected annotation.
-    pub fn begin_transform(&mut self, id: AnnotationId, page: PageIndex, bounds: PageRect) {
+    pub fn begin_transform(
+        &mut self,
+        id: AnnotationId,
+        page: PageIndex,
+        bounds: PageRect,
+        handle: TransformHandle,
+    ) {
         self.gesture = Some(Gesture::Transforming {
             id,
             page,
             original: bounds,
             current: bounds,
+            handle,
         });
     }
 
@@ -356,22 +488,16 @@ impl AnnotationInteraction {
                 .into_iter()
                 .map(|id| AnnotationCommand::Delete { id })
                 .collect(),
-            Gesture::Transforming {
-                id,
-                original,
-                current,
-                ..
-            } => {
-                if original == current {
-                    return GestureOutcome::Nothing;
-                }
-                // A transform's replacement draft is assembled by the caller,
-                // which holds the annotation's contents; the gesture only
-                // knows the new rectangle. Reporting nothing here would lose
-                // the move, so the caller is handed the geometry through
-                // `Gesture::Transforming` before calling `finish`.
-                return GestureOutcome::Commit(vec![AnnotationCommand::Delete { id }]);
-            }
+            // A transform is *not* finished here. Its replacement draft needs
+            // the annotation's contents, which live with the caller and not in
+            // the gesture, so the caller reads `Gesture::Transforming` and
+            // builds the `Replace` itself before ever reaching this point.
+            //
+            // Nothing, rather than the bare `Delete` this once returned: a
+            // caller that forgot to intercept would have had the mark it was
+            // moving silently deleted, and losing a mark is far worse than
+            // losing a move (A3).
+            Gesture::Transforming { .. } => return GestureOutcome::Nothing,
         };
 
         let ok = commands.iter().all(|command| {
@@ -405,7 +531,7 @@ impl AnnotationInteraction {
                     rect: PageRect::new(at.x, at.y, at.x + size.0, at.y + size.1),
                     text,
                     source,
-                    style: self.ink_style,
+                    style: self.text_style,
                 })
             }
             PlacedMark::Note { text, open } => AnnotationDraft::Note(NoteDraft {
@@ -413,7 +539,7 @@ impl AnnotationInteraction {
                 at,
                 text,
                 open,
-                style: self.ink_style,
+                style: self.text_style,
             }),
             PlacedMark::Stamp { mark, size } => AnnotationDraft::Stamp(StampDraft {
                 page,
@@ -640,10 +766,76 @@ mod tests {
         let mut interaction = AnnotationInteraction::new();
         let id = super::super::id::IdGenerator::new(1).next_id();
         let bounds = PageRect::new(10.0, 10.0, 100.0, 40.0);
-        interaction.begin_transform(id, PageIndex(0), bounds);
+        interaction.begin_transform(id, PageIndex(0), bounds, TransformHandle::Move);
         interaction.set_transform(PageRect::new(20.0, 20.0, 110.0, 50.0));
         interaction.set_transform(bounds);
         assert_eq!(interaction.finish(&page()), GestureOutcome::Nothing);
+    }
+
+    #[test]
+    fn finishing_a_transform_here_never_deletes_the_mark() {
+        // The caller assembles a transform's `Replace` from the annotation's
+        // contents and intercepts before `finish`. A caller that forgot must
+        // lose the move, not the mark (A3).
+        let mut interaction = AnnotationInteraction::new();
+        let id = super::super::id::IdGenerator::new(1).next_id();
+        let bounds = PageRect::new(10.0, 10.0, 100.0, 40.0);
+        interaction.begin_transform(id, PageIndex(0), bounds, TransformHandle::Move);
+        interaction.set_transform(PageRect::new(60.0, 60.0, 150.0, 90.0));
+        assert_eq!(interaction.finish(&page()), GestureOutcome::Nothing);
+    }
+
+    #[test]
+    fn moving_carries_every_edge_the_same_distance() {
+        let original = PageRect::new(10.0, 20.0, 110.0, 60.0);
+        assert_eq!(
+            TransformHandle::Move.applied(original, 5.0, -7.0),
+            PageRect::new(15.0, 13.0, 115.0, 53.0)
+        );
+    }
+
+    #[test]
+    fn a_corner_drag_leaves_the_opposite_corner_where_it_was() {
+        let original = PageRect::new(10.0, 20.0, 110.0, 60.0);
+        assert_eq!(
+            TransformHandle::Resize(Corner::TopLeft).applied(original, -4.0, -6.0),
+            PageRect::new(6.0, 14.0, 110.0, 60.0)
+        );
+        assert_eq!(
+            TransformHandle::Resize(Corner::BottomRight).applied(original, 30.0, 10.0),
+            PageRect::new(10.0, 20.0, 140.0, 70.0)
+        );
+    }
+
+    #[test]
+    fn a_corner_dragged_past_its_opposite_stops_rather_than_inverting() {
+        // A box dragged through zero comes out inside-out, and a mark with a
+        // negative width is one nobody can find again in order to undo it.
+        let original = PageRect::new(10.0, 20.0, 110.0, 60.0);
+
+        let squashed = TransformHandle::Resize(Corner::TopLeft).applied(original, 500.0, 500.0);
+        assert!(squashed.width() >= MIN_MARK_SIZE && squashed.height() >= MIN_MARK_SIZE);
+        assert_eq!(squashed.right, 110.0, "the anchored corner moved");
+        assert_eq!(squashed.bottom, 60.0, "the anchored corner moved");
+
+        let squashed =
+            TransformHandle::Resize(Corner::BottomRight).applied(original, -500.0, -500.0);
+        assert!(squashed.width() >= MIN_MARK_SIZE && squashed.height() >= MIN_MARK_SIZE);
+        assert_eq!(squashed.left, 10.0, "the anchored corner moved");
+        assert_eq!(squashed.top, 20.0, "the anchored corner moved");
+    }
+
+    #[test]
+    fn a_drag_by_something_that_is_not_a_number_moves_nothing() {
+        let original = PageRect::new(10.0, 20.0, 110.0, 60.0);
+        assert_eq!(
+            TransformHandle::Move.applied(original, f32::NAN, 0.0),
+            original
+        );
+        assert_eq!(
+            TransformHandle::Resize(Corner::TopLeft).applied(original, 0.0, f32::INFINITY),
+            original
+        );
     }
 
     #[test]
@@ -678,6 +870,19 @@ mod tests {
             outcome.commands()[0].draft().unwrap().kind(),
             AnnotationKind::Note
         );
+    }
+
+    #[test]
+    fn a_default_interaction_is_the_same_as_a_new_one() {
+        // The derived `Default` once handed the highlighter the ink's opaque
+        // style, and every session built by `..Default::default()` drew
+        // highlights as solid bars.
+        assert_eq!(
+            AnnotationInteraction::default(),
+            AnnotationInteraction::new()
+        );
+        let translucent = AnnotationInteraction::default().highlight_style();
+        assert!(translucent.opacity < 1.0, "a highlight is see-through");
     }
 
     #[test]

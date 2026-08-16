@@ -92,6 +92,8 @@ pub enum Icon {
     FitWidth,
     /// Fit the whole page in the cell: `maximize`.
     FitPage,
+    /// Fit the page.s height to the cell: `move-vertical`.
+    FitHeight,
     /// The previous page: `chevron-left`.
     ChevronLeft,
     /// The next page: `chevron-right`.
@@ -102,6 +104,10 @@ pub enum Icon {
     Document,
     /// A filled or satisfied thing: `check`.
     Check,
+    /// One page across the window: `file`.
+    SinglePage,
+    /// Two facing pages: `book-open`.
+    TwoPages,
 }
 
 impl Icon {
@@ -135,11 +141,14 @@ impl Icon {
             Icon::ZoomOut => include_bytes!("../../assets/icons/zoom-out.svg"),
             Icon::FitWidth => include_bytes!("../../assets/icons/move-horizontal.svg"),
             Icon::FitPage => include_bytes!("../../assets/icons/maximize.svg"),
+            Icon::FitHeight => include_bytes!("../../assets/icons/move-vertical.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
             Icon::Document => include_bytes!("../../assets/icons/file-text.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
+            Icon::SinglePage => include_bytes!("../../assets/icons/file.svg"),
+            Icon::TwoPages => include_bytes!("../../assets/icons/book-open.svg"),
         }
     }
 
@@ -152,7 +161,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 32] = [
+    const ALL: [Icon; 35] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -180,11 +189,14 @@ impl Icon {
         Icon::ZoomOut,
         Icon::FitWidth,
         Icon::FitPage,
+        Icon::FitHeight,
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Outline,
         Icon::Document,
         Icon::Check,
+        Icon::SinglePage,
+        Icon::TwoPages,
     ];
 
     /// The handle for this icon, built once per process.

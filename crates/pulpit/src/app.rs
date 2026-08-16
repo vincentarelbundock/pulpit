@@ -99,6 +99,7 @@ pub enum Message {
         scancode: Option<u32>,
         shift: bool,
         control: bool,
+        alt: bool,
     },
     /// Text read asynchronously after Paste while a label is active.
     PasteAnnotationText {
@@ -109,9 +110,6 @@ pub enum Message {
     Nav(Nav),
     OpenDialog,
     Opened(Option<PathBuf>),
-    /// Where the presenter chose to write an annotated copy, or `None` if
-    /// they dismissed the dialog.
-    ExportAnnotatedTo(Option<PathBuf>),
     /// Where the reader's annotated document should be written. `None` when
     /// the chooser was dismissed, which is not a failure.
     SaveDocumentTo(Option<PathBuf>),
@@ -229,16 +227,11 @@ pub enum Message {
     Transport(crate::widgets::event::TransportRequest),
     /// Something the reader asked of the open document.
     Read(crate::widgets::event::ReadCommand),
+    /// Something asked of the search pane, in whatever view it is placed.
+    Find(crate::widgets::event::FindCommand),
     /// Put back the edits a previous run did not save, or do not.
     RestoreReaderEdits,
     DiscardReaderEdits,
-    /// What has been typed into the mark being composed, as typed.
-    ComposeMark(String),
-    /// Place the composed mark, or abandon it.
-    CommitMark,
-    CancelMark,
-    /// Typeset the mark being composed, or write it plainly.
-    ComposeAsTypst(bool),
     /// A widget that produces nothing (preview mode).
     Ignore,
 }
@@ -267,14 +260,18 @@ fn grid_target(
     // the eye just read; a viewport too short to hold a whole row still
     // moves one.
     let page = columns * page_rows.max(1);
+    // The grid answers to the vim keys as well as the arrows, in the vim
+    // sense rather than the navigation one: here `j` and `k` move between
+    // rows and `h` and `l` along one, because this is a grid being looked
+    // over and not a deck being advanced through.
     Some(match key {
-        "Left" => current.checked_sub(1),
-        "Right" => (current < last).then(|| current + 1),
-        "Up" => current.checked_sub(columns),
+        "Left" | "h" => current.checked_sub(1),
+        "Right" | "l" => (current < last).then(|| current + 1),
+        "Up" | "k" => current.checked_sub(columns),
         // The last row is usually short. Dropping to its final page is what
         // the eye expects of a grid; refusing to move is not.
-        "Down" if current + columns <= last => Some(current + columns),
-        "Down" => (current / columns < last / columns).then_some(last),
+        "Down" | "j" if current + columns <= last => Some(current + columns),
+        "Down" | "j" => (current / columns < last / columns).then_some(last),
         // A page step that would fall off the end lands on the first or the
         // last page rather than nowhere — the same reasoning as a short last
         // row, over a whole screenful.
@@ -349,16 +346,19 @@ impl Default for OverviewGrid {
 /// Sharp enough for the preview card; a deck warms in a few seconds.
 pub const THUMBNAIL_WIDTH: u32 = 480;
 
-/// The width a deck falls back to when it is too long for the budget at
-/// [`THUMBNAIL_WIDTH`] — several hundred pages. Still one pass at one width:
-/// a giant deck gets a coarser grid, never a re-rendering treadmill.
-pub const THUMBNAIL_FALLBACK_WIDTH: u32 = 240;
+/// The narrowest a thumbnail is ever rendered.
+///
+/// Below this a page is a grey smudge rather than a picture of anything, so a
+/// deck long enough to need it is one whose furthest pages the budget cannot
+/// hold at any useful size. It gets the floor, and [`ThumbnailCache::trim`]
+/// keeps the pages nearest the presenter.
+pub const THUMBNAIL_MIN_WIDTH: u32 = 120;
 
 /// What the whole deck's thumbnails may occupy. At 480×270 a page is about
 /// 520 kB, so this holds roughly two hundred and fifty of them — more than
-/// nearly any deck anyone brings to a talk; longer decks warm at
-/// [`THUMBNAIL_FALLBACK_WIDTH`], which quadruples that. Separate from the
-/// frame cache so the two can never evict each other.
+/// nearly any deck anyone brings to a talk; a longer one is warmed at
+/// whatever narrower width does fit, down to [`THUMBNAIL_MIN_WIDTH`].
+/// Separate from the frame cache so the two can never evict each other.
 const THUMBNAIL_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 
 /// How many thumbnails may be outstanding (queued or rendering) at once.
@@ -389,28 +389,74 @@ type ThumbnailPlanInputs = (
 ///
 /// Held in the application rather than in the gesture state because it is not
 /// a gesture: the click chose a spot, and what happens next is a text editor
-/// with a caret, a clipboard and an input method behind it.
-#[derive(Debug, Clone)]
-pub struct ComposingMark {
-    pub page: pulpit_core::page::PageIndex,
-    pub at: pulpit_core::page::PagePoint,
-    pub tool: pulpit_core::annotation::AnnotationTool,
-    pub text: String,
-    /// Compile the text as Typst and place the result as a picture (§7.4),
-    /// rather than writing it as plain `/FreeText`.
-    ///
-    /// Offered for the text tool only: a sticky note is read in a viewer's own
-    /// popup, which shows `/Contents` and not an appearance, so typesetting it
-    /// would produce a mark whose text nobody sees.
-    pub typst: bool,
-}
+/// with a caret, a clipboard and an input method behind it. It is defined
+/// beside the reader's other facets because the page surface draws it.
+pub use crate::widgets::context::ComposingMark;
 
 /// One mutation sent to the document worker, waiting to be confirmed.
 struct PendingEdit {
     kind: AppliedKind,
+    /// Whether the answer to this names a mark the presenter just drew, so
+    /// the overlay stroke can be told which annotation it is showing.
+    names_a_presenter_mark: bool,
     /// The transaction, for the journal. `None` for an undo or a redo, whose
     /// journal entry is written from the answer instead.
     transaction: Option<pulpit_render::document::DocumentTransaction>,
+}
+
+/// Where the reader's pages are rendered from.
+///
+/// With no edits committed, they come straight from the presentation's own
+/// document in the render pool, drawn `with_annotations` so the file's marks
+/// are in the pixels. After an edit only the document worker's in-memory PDF
+/// contains the commit, so the worker writes a *snapshot* to a scratch path
+/// and the pool renders from that, under a generation of its own. Generation
+/// order is revision order, which is what makes the cache's "newest complete
+/// frame wins, never a downgrade" lookup the same guarantee A7 asks for.
+#[derive(Default)]
+struct ReaderRenderState {
+    /// The snapshot currently rendered from, once any edit has landed.
+    snapshot: Option<ReaderSnapshot>,
+    /// The serial and destination of the snapshot being written, if one is.
+    /// One at a time: the worker is serial, and a second request would only
+    /// queue behind the round trips the reader is already waiting on.
+    snapshot_in_flight: Option<(u64, PathBuf)>,
+    /// When the last confirmed edit landed, for the debounce that lets a
+    /// burst of strokes become one snapshot rather than one each.
+    edited_at: Option<Instant>,
+    /// Counts snapshots, and names their files, documents and generations.
+    serial: u64,
+}
+
+/// One snapshot the render pool is drawing reader pages from.
+struct ReaderSnapshot {
+    /// Its id in the render pool's document table.
+    document: u64,
+    generation: pulpit_core::RenderGeneration,
+    /// The document revision the snapshot was taken at, so a frame rendered
+    /// from it says which retained mark previews it makes redundant (§9.2).
+    revision: pulpit_render::document::DocumentRevision,
+    /// The scratch file, deleted when a newer snapshot replaces it.
+    path: PathBuf,
+}
+
+/// Reader snapshots live in a namespace of their own, far above anything the
+/// document manager or a presentation reload will ever allocate, so the two
+/// id spaces and the two generation sequences cannot collide — and a reader
+/// generation is never fed to `cancel_older_than`, whose floor would take
+/// presentation jobs with it.
+const READER_RENDER_BASE: u64 = 1 << 32;
+
+/// How long after the last confirmed edit the snapshot is taken. Long enough
+/// to coalesce a flurry of strokes, short enough that a mark sharpens on the
+/// page while the pen is still in the air.
+const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Where reader snapshots are written: a per-process scratch directory, so a
+/// crash leaves nothing worse than temporary files and two running pulpits
+/// cannot overwrite each other's.
+fn reader_snapshot_directory() -> PathBuf {
+    std::env::temp_dir().join(format!("pulpit-reader-{}", std::process::id()))
 }
 
 pub struct App {
@@ -436,6 +482,12 @@ pub struct App {
     /// A handle is a name, not a residency: which *window* can draw it at once
     /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
+    /// Page pictures with a retained highlight multiplied into them, keyed by
+    /// a hash of the frame and the washes. Interior mutability because the
+    /// composite is made on demand inside the view's frame lookup, which is
+    /// `&self`; bounded by a hard cap, and empty again the moment the frames
+    /// containing the real highlights arrive.
+    wash_cache: std::cell::RefCell<std::collections::HashMap<u64, iced::widget::image::Handle>>,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -613,6 +665,9 @@ pub struct App {
     thumbnail_requests: std::collections::HashSet<RequestId>,
     /// The generation and page count the warming plan was made for.
     thumbnail_plan: Option<(pulpit_core::RenderGeneration, usize)>,
+    /// The one width this document's thumbnails are rendered at, chosen when
+    /// the plan was made so the whole deck fits the budget.
+    thumbnail_plan_width: u32,
     /// Everything the thumbnail plan depends on, so the per-tick replan is
     /// skipped whenever none of it moved.
     thumbnail_plan_inputs: Option<ThumbnailPlanInputs>,
@@ -620,8 +675,13 @@ pub struct App {
     /// dragging, and wants to see what they are about to land on.
     pub scrubbing: bool,
     /// The presenter's marks on the current slide, and what the pointer is
-    /// armed to do. What is on screen now; the marks made on other slides
-    /// are in [`Self::ink`].
+    /// armed to do.
+    ///
+    /// What is on screen: the unfinished gesture, which is this and nothing
+    /// else's (A2), and a view of the annotations the document holds for the
+    /// page this slide is showing. There is no cache of other slides' marks
+    /// any more — the document is where they are (A1), and a page turn reads
+    /// them back out of it.
     pub annotations: pulpit_core::annotation::Annotations,
     /// A shared snapshot of `annotations` the views draw from. Refreshed by
     /// [`App::sync_annotation_layers`] only when the model changed, so a
@@ -672,6 +732,13 @@ pub struct App {
     /// state rather than replacing it, because mode is which layout is
     /// mounted, not which document is loaded (§2.3 of `SPEC-document.md`).
     pub reader: crate::reader::ReaderSession,
+    /// The one search, whichever view is on screen.
+    ///
+    /// On the application rather than on the reader: a presenter looking for
+    /// the slide whose notes mention a name is searching the same document
+    /// through a different layout, and two models would be two answers to one
+    /// question.
+    pub search: pulpit_core::search::SearchState,
     /// The thread talking to this document's worker, when document mode is
     /// available for it. `None` when nothing is open, or when the worker
     /// could not be started — presentation mode does not depend on it.
@@ -684,6 +751,19 @@ pub struct App {
     /// answer confirms it and not before. A mutation with no answer is not a
     /// mutation that happened (§11.5).
     reader_pending: std::collections::VecDeque<PendingEdit>,
+    /// Is a text-selection query at the document worker with no answer yet?
+    ///
+    /// The worker is serial, and a drag samples the pointer far faster than
+    /// text can be resolved. Without this guard every sample queued a query,
+    /// and the release's finalising one — the one that commits — sat behind
+    /// the whole backlog: the highlighter "eventually worked". With it there
+    /// is one query in flight and one waiting, and the waiting one is always
+    /// the newest.
+    selection_query_in_flight: bool,
+    selection_query_waiting: Option<(
+        pulpit_core::page::PageIndex,
+        pulpit_render::document::TextSelection,
+    )>,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -694,6 +774,24 @@ pub struct App {
     /// The offer itself, drawn as a dialogue with no way out but an answer.
     /// Inert: nothing is applied until one is given (§11.4).
     pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
+    /// How the reader's pages reach the render worker pool: which supervisor
+    /// document and generation they are rendered from, and the snapshot
+    /// machinery that moves those forward after an edit (A7).
+    reader_render: ReaderRenderState,
+    /// The highlighter's open text selection on the live slide.
+    ///
+    /// The *same* gesture type document mode uses, and deliberately so: the
+    /// highlighter selects text in both modes, so there is one implementation
+    /// of "sweep text, ask the engine where it is, commit a `/Highlight` over
+    /// it" and this is presentation's handle on it. What differs between the
+    /// modes is only the space the pointer arrives in — slide fractions here,
+    /// page points there — and `SlidePlacement` is the whole of that
+    /// difference (§14.3).
+    ///
+    /// Separate from `self.reader.interaction` rather than shared with it
+    /// because the two modes arm tools independently: a highlighter armed at
+    /// the lectern must not disarm the reader's eraser.
+    presenter_interaction: pulpit_core::annotate::AnnotationInteraction,
     /// The note or text mark being written, if one is.
     pub composing_mark: Option<ComposingMark>,
     /// Live tool choices for the annotation palette. These are session
@@ -708,9 +806,9 @@ pub struct App {
     /// The wall-clock second the last tick saw, so a cue is caught by the
     /// window it fell in rather than by an equality test.
     pub last_seconds_of_day: u32,
-    /// The marks made on every other slide, for as long as pulpit runs.
-    /// Never written to disk: closing the application wipes it.
-    pub ink: pulpit_core::annotation::InkCache,
+    /// Whether the presenter has already been told that marks made over this
+    /// document are not being kept. Said once, not once per stroke.
+    warned_marks_are_not_kept: bool,
 }
 
 /// A cached frame together with the texture handle that draws it.
@@ -854,6 +952,7 @@ impl App {
             layout_dialog: None,
             cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
             handles: std::collections::HashMap::new(),
+            wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -949,6 +1048,7 @@ impl App {
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnail_requests: std::collections::HashSet::new(),
             thumbnail_plan: None,
+            thumbnail_plan_width: THUMBNAIL_WIDTH,
             thumbnail_plan_inputs: None,
             scrubbing: false,
             annotations: pulpit_core::annotation::Annotations::default(),
@@ -966,17 +1066,22 @@ impl App {
             pending_pointer_move: None,
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
+            search: pulpit_core::search::SearchState::new(),
+            reader_render: ReaderRenderState::default(),
             reader_link: None,
             reader_pending: std::collections::VecDeque::new(),
+            selection_query_in_flight: false,
+            selection_query_waiting: None,
+            warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
             reader_recovery: None,
+            presenter_interaction: pulpit_core::annotate::AnnotationInteraction::new(),
             composing_mark: None,
             annotation_controls,
             alarm_controls,
             timer_controls,
             last_seconds_of_day: crate::view::seconds_of_day(),
-            ink: pulpit_core::annotation::InkCache::default(),
         };
 
         // Open directly on a layout page when asked.
@@ -1106,6 +1211,15 @@ impl App {
             // than a fade.
             || self.alarm_controls.ringing.is_some()
             || self.needs_reconcile
+            // An edit on its way to the page: the worker has been asked and
+            // has not answered, or it has and the snapshot the render pool
+            // draws from is still owed. Every step of that is a round trip
+            // polled from the tick, so at the settled tick a placed mark waits
+            // a quarter of a second per step for no reason other than the
+            // clock — which is what "it takes a long time to appear" is.
+            || !self.reader_pending.is_empty()
+            || self.reader_render.edited_at.is_some()
+            || self.reader_render.snapshot_in_flight.is_some()
             // A scroll settles in about a tenth of a second; the settled tick
             // would miss the moment the grid stopped moving entirely.
             || self.overview_settling.is_some()
@@ -1135,6 +1249,7 @@ impl App {
                 scancode: physical_scancode(&physical_key),
                 shift: modifiers.shift(),
                 control: modifiers.command() || modifiers.control(),
+                alt: modifiers.alt(),
             }),
             // Letting go of the button ends a scrub, wherever the pointer
             // happens to be. The slider's own release only arrives when the
@@ -1518,6 +1633,7 @@ impl App {
                 scancode,
                 shift,
                 control,
+                alt,
             } => {
                 if self.annotations.is_typing() {
                     match key.as_deref() {
@@ -1551,6 +1667,18 @@ impl App {
                             }
                         }
                         _ => {}
+                    }
+                    return Task::none();
+                }
+                // A mark being written owns the keyboard while the caret is in
+                // it: the box on the page takes the typing itself, and every
+                // key that reached the bindings from here would be a document
+                // shortcut fired by someone writing a word — "n" for the next
+                // page, Home for the first one. Escape is the way out, and
+                // cancelling is not a mutation (§8.5).
+                if self.composing_mark.is_some() {
+                    if key.as_deref() == Some("Escape") {
+                        self.composing_mark = None;
                     }
                     return Task::none();
                 }
@@ -1651,11 +1779,18 @@ impl App {
                         }
                     }
                 }
-                match self
-                    .settings
-                    .keymap
-                    .resolve_with_shift(key.as_deref(), shift, scancode)
-                {
+                // Reading a document, Page Down means the next screenful of
+                // this document — not the next slide. The presenter's
+                // bindings are unchanged and mean what they always did the
+                // moment the reader is closed again.
+                if let Some(task) = self.document_key(key.as_deref(), control, shift) {
+                    return task;
+                }
+                match self.settings.keymap.resolve_with_mods(
+                    key.as_deref(),
+                    crate::settings::Mods::new(control, shift, alt),
+                    scancode,
+                ) {
                     Some(action) => self.update(Message::Do(action)),
                     None => {
                         // An unbound press is the raw-scancode fallback path:
@@ -1699,14 +1834,17 @@ impl App {
                     // last tick — the very error this exists to find.
                     self.latency
                         .begin_turn(self.state.committed(), Instant::now());
-                    // Marks belong to the slide they were made on, so they go
-                    // with it — into the cache, where they wait in case the
-                    // presenter comes back. A link highlight is about this
-                    // page too, and indexes into its link list, so it goes
-                    // rather than pointing at the wrong rectangle on the next
-                    // page; unlike ink it is not worth remembering.
-                    self.ink
-                        .follow(self.state.committed(), &mut self.annotations);
+                    // The marks on the slide being left are in the document,
+                    // so there is nothing to stash. What the slide arriving
+                    // carries is asked for here and adopted when the engine
+                    // answers; until then the overlay is empty, which is the
+                    // right way round — a stale mark drawn over new content is
+                    // the failure worth avoiding, and a mark that appears a
+                    // frame late is not. A link highlight indexes into this
+                    // page's link list, so it goes rather than pointing at the
+                    // wrong rectangle on the next one.
+                    self.annotations.clear_on_slide_change();
+                    self.request_marks_for_this_slide();
                     self.focused_link = None;
                     self.hovered_link = None;
                     // Media follows the committed page here, on the page
@@ -1899,39 +2037,20 @@ impl App {
             // Saving is the one palette command that leaves the process, so
             // it answers with a task rather than a state change.
             Message::Annotate(crate::widgets::event::AnnotationCommand::Save) => {
-                self.ask_where_to_export()
+                // The palette’s save is the document’s Save As. There is no
+                // separate "annotated copy" any more: the marks *are* the
+                // document’s own annotations, so saving the document saves
+                // them (criterion 7).
+                self.ask_where_to_save_document()
             }
             Message::Annotate(command) => {
                 self.on_annotation_command(command);
                 Task::none()
             }
             Message::Read(command) => self.on_read_command(command),
-            Message::ComposeMark(text) => {
-                if let Some(composing) = self.composing_mark.as_mut() {
-                    composing.text = text;
-                }
-                Task::none()
-            }
-            Message::ComposeAsTypst(typst) => {
-                if let Some(composing) = self.composing_mark.as_mut() {
-                    composing.typst = typst;
-                }
-                Task::none()
-            }
-            Message::CommitMark => self.commit_composed_mark(),
-            Message::CancelMark => {
-                // Escape cancels without mutation (§8.5): a mark nobody
-                // finished writing is not a mark.
-                self.composing_mark = None;
-                Task::none()
-            }
+            Message::Find(command) => self.on_find_command(command),
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
-            Message::ExportAnnotatedTo(Some(path)) => {
-                self.export_annotations(path);
-                Task::none()
-            }
-            Message::ExportAnnotatedTo(None) => Task::none(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
             Message::SaveDocumentTo(None) => Task::none(),
             Message::Alarm(command) => self.on_alarm_command(command),
@@ -1947,7 +2066,19 @@ impl App {
                 self.scrubbing = false;
                 // A stroke ends where the button came up, wherever that was:
                 // releasing outside the panel must not leave the pen down.
-                self.annotations.end_stroke();
+                // The pen coming up is also what turns the gesture into an
+                // annotation in the open document (§14.3 step 4) — the stroke
+                // that was drawn and the marks an eraser sweep took, in one
+                // transaction, because they are one thing the presenter did.
+                // A highlighter sweep is not a stroke and does not end like
+                // one: the release asks the engine once more, and *that*
+                // answer is what commits (§7.2).
+                if self.presenter_interaction.pending_selection().is_some() {
+                    self.ask_presenter_selection(true);
+                } else {
+                    let finished = self.annotations.end_stroke();
+                    self.commit_presenter_gesture(finished);
+                }
                 // The same is true of a press inside a browser: a mouseup it
                 // never hears leaves the page dragging for ever.
                 let over = self.overlay_under_cursor();
@@ -2485,7 +2616,9 @@ impl App {
                 },
                 annotation_controls: if live {
                     crate::widgets::AnnotationControls {
-                        can_save: self.can_export_annotations(),
+                        can_save: self.reader.is_open() && self.reader.is_dirty(),
+                        can_undo: self.reader.can_undo(),
+                        can_redo: self.reader.can_redo(),
                         ..self.annotation_controls
                     }
                 } else {
@@ -2528,12 +2661,38 @@ impl App {
             // The reader's facet. A presentation has no document open in the
             // reader's sense, so its widgets say so rather than drawing a
             // sample page that would be mistaken for the user's own (§2).
-            reader: self.reader.facet(live),
+            reader: {
+                let mut reader = self.reader.facet(
+                    live,
+                    &|page, width| self.reader_frame(page, width),
+                    &self.search,
+                );
+                // The half-written mark belongs to the application, and the
+                // page surface is where it is drawn (§8.5).
+                if live {
+                    reader.composing = self.composing_mark.clone();
+                }
+                reader
+            },
+            // One model, whichever layout is mounted: the pane in a presenter
+            // layout and the pane in a document layout are the same search.
+            search: crate::widgets::context::SearchData {
+                state: if live {
+                    &self.search
+                } else {
+                    // The editor judges the pane against a search that found
+                    // something; an empty box says nothing about how much
+                    // room the results want.
+                    &crate::widgets::sample::SEARCH
+                },
+            },
             audience: crate::widgets::context::AudienceData {
                 blank: self.state.blank(),
                 connected: self.coordinator.snapshot.len() > 1,
                 fullscreen: self.coordinator.windows.audience.mode
                     == pulpit_display::WindowMode::Fullscreen,
+                started: self.audience_started,
+                menu_open: self.menu_open,
             },
             media: crate::widgets::context::MediaData {
                 // The transport always means the media the *audience* is
@@ -2765,6 +2924,25 @@ impl App {
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::ToggleReader => self.toggle_reader(),
+            // The caret goes to the box wherever the layout put it. Nothing
+            // is opened or mounted: a layout without a search pane has
+            // nowhere for the caret to go, and the key does nothing rather
+            // than rearranging the presenter's screen mid-talk.
+            // The rail collapses in place, wherever the layout put it, and a
+            // layout without an outline pane simply has nothing to collapse.
+            Action::ToggleOutline => {
+                let collapsed = self.reader.controls().outline_collapsed;
+                self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineCollapsed(
+                    !collapsed,
+                ))
+            }
+            Action::FocusSearch => {
+                iced::widget::operation::focus(crate::widgets::search::view::input_id())
+            }
+            Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
+            Action::FindPrevious => {
+                self.on_find_command(crate::widgets::event::FindCommand::Previous)
+            }
             Action::Next => self.update(Message::Nav(Nav::Next)),
             Action::Previous => self.update(Message::Nav(Nav::Previous)),
             Action::First => self.update(Message::Nav(Nav::First)),
@@ -2836,6 +3014,7 @@ impl App {
                 self.run_document_actions(actions)
             }
             Action::ShowOverview => self.update(Message::ToggleOverview),
+            Action::ShowLayouts => self.update(Message::ShowLibrary),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
             Action::AnnotateHighlighter => self.arm_from_key(AnnotationTool::Highlighter),
             Action::AnnotateEraser => self.arm_from_key(AnnotationTool::Eraser),
@@ -3102,6 +3281,7 @@ impl App {
         //     the reader now needs drawn. On the tick rather than in a view
         //     pass: a page render must not happen inside a draw.
         self.pump_reader();
+        self.pump_search();
 
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
@@ -3324,6 +3504,34 @@ impl App {
 
     fn on_render_event(&mut self, event: RenderEvent) {
         match event {
+            // A reader snapshot opening or failing to open is the reader's
+            // business alone: routed into the deck-reload machinery it would
+            // masquerade as a candidate presentation.
+            RenderEvent::Opened(opened) if opened.document >= READER_RENDER_BASE => {
+                self.diagnostics.note(format!(
+                    "reader snapshot {} open ({} pages)",
+                    opened.document, opened.page_count
+                ));
+            }
+            RenderEvent::OpenFailed { document, reason } if document >= READER_RENDER_BASE => {
+                tracing::warn!(document, reason, "reader snapshot failed to open");
+                // Fall back to the previous picture source rather than
+                // resubmitting jobs against a document no worker holds: the
+                // pages keep their pre-edit pixels, the way they would if the
+                // snapshot had never been taken, and the next edit tries
+                // again with a fresh one.
+                if self
+                    .reader_render
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.document == document)
+                {
+                    if let Some(snapshot) = self.reader_render.snapshot.take() {
+                        let _ = std::fs::remove_file(&snapshot.path);
+                    }
+                    self.notify(format!("The page cannot show recent edits yet: {reason}"));
+                }
+            }
             RenderEvent::Opened(opened) => {
                 let mut info = DocumentInfo::new(
                     pulpit_core::DocumentId(opened.document),
@@ -3427,6 +3635,23 @@ impl App {
                 // The memoised section may predate this outline.
                 *self.section_cache.borrow_mut() = None;
             }
+            RenderEvent::Found {
+                document: _,
+                generation,
+                chunk,
+                searchable,
+            } => {
+                if searchable {
+                    self.search.accept(generation, chunk);
+                } else {
+                    self.search.fail(
+                        generation,
+                        pulpit_core::search::SearchProblem::Unsupported(
+                            "this deck has no text layer to search".into(),
+                        ),
+                    );
+                }
+            }
             RenderEvent::Capabilities {
                 document,
                 capabilities,
@@ -3475,25 +3700,6 @@ impl App {
             RenderEvent::AttachmentFailed { name, reason, .. } => {
                 tracing::debug!(name, reason, "attachment unavailable");
                 self.media.attachment_failed(&name, &reason);
-            }
-            RenderEvent::Exported {
-                destination, pages, ..
-            } => {
-                let name = std::path::Path::new(&destination)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or(destination);
-                self.notify_done(format!(
-                    "Saved {name} with the marks on {} {}",
-                    pages,
-                    if pages == 1 { "slide" } else { "slides" }
-                ));
-            }
-            // A save that failed is worth stopping for: the presenter asked
-            // for a file and does not have one, and nothing else in the
-            // presentation will tell them so.
-            RenderEvent::ExportFailed { reason, .. } => {
-                self.notify_error(format!("Could not save the annotated copy: {reason}"), None);
             }
             RenderEvent::Frame {
                 job,
@@ -3555,6 +3761,19 @@ impl App {
                     return;
                 }
                 tracing::debug!(slide = key.slide, quality = ?key.quality, width = key.width, "frame cached");
+                // A reader page rendered from a snapshot now shows every mark
+                // committed at or before that snapshot's revision, so their
+                // retained previews come down (§9.2).
+                if key.kind == FrameKind::Page {
+                    if let Some(snapshot) = &self.reader_render.snapshot {
+                        if key.generation >= snapshot.generation {
+                            self.reader.frame_landed(
+                                pulpit_core::page::PageIndex(key.slide),
+                                snapshot.revision,
+                            );
+                        }
+                    }
+                }
                 if self.cache.insert(key, frame.clone()) {
                     // The handle shares the cached frame's own allocation, so
                     // naming a frame costs nothing. Uploading it is a separate
@@ -3742,9 +3961,15 @@ impl App {
         };
         self.document_serial += 1;
         // Slide 7 of one deck has nothing to do with slide 7 of another, so
-        // opening a document starts with a clean sheet.
-        self.ink.clear_all(&mut self.annotations);
-        self.open_for_reading(&path);
+        // opening a document starts with a clean sheet. The new document's own
+        // marks arrive from its engine once it has described itself.
+        self.annotations.clear();
+        self.warned_marks_are_not_kept = false;
+        // Diagnostic kill switch while chasing a page-turn regression: skip
+        // the document session entirely to measure its cost.
+        if std::env::var_os("PULPIT_NO_READER").is_none() {
+            self.open_for_reading(&path);
+        }
         let actions = self.documents.open_initial(self.now);
         self.run_document_actions(actions)
     }
@@ -3762,6 +3987,7 @@ impl App {
     /// says why rather than taking the presentation down with it.
     fn open_for_reading(&mut self, path: &std::path::Path) {
         self.reader.closed();
+        self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_journal = None;
 
@@ -3863,7 +4089,6 @@ impl App {
                     info,
                     geometry,
                     outline,
-                    fields,
                 } => {
                     // The document is up, so what the last run left unsaved
                     // can be *offered*. It is not applied: recovery needs an
@@ -3871,7 +4096,6 @@ impl App {
                     self.reader_recovery = self.pending_reader_recovery.take();
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone());
-                    self.reader.set_has_form(info.has_form);
                     self.reader.set_outline(
                         outline
                             .flattened()
@@ -3888,21 +4112,37 @@ impl App {
                             })
                             .collect(),
                     );
-                    self.reader.set_fields(fields);
                     // Every warning is said once, before the first edit, which
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
                     }
                 }
-                crate::reader_link::Told::Frame(frame) => {
-                    self.reader.frame_arrived(
-                        frame.page,
-                        frame.width,
-                        frame.height,
-                        frame.revision,
-                        frame.pixels,
+                crate::reader_link::Told::Found { generation, chunk } => {
+                    // Stale chunks land nowhere: the model compares the
+                    // generation and drops what belongs to a query the
+                    // reader has already typed past.
+                    self.search.accept(generation, chunk);
+                }
+                crate::reader_link::Told::CannotSearch {
+                    generation,
+                    message,
+                } => {
+                    self.search.fail(
+                        generation,
+                        pulpit_core::search::SearchProblem::Unsupported(message),
                     );
+                }
+                crate::reader_link::Told::Snapshotted(saved) => {
+                    self.reader_snapshot_landed(saved);
+                }
+                crate::reader_link::Told::SnapshotFailed { message } => {
+                    // The edit is safe in the document worker; what failed is
+                    // only the copy the render pool draws from, so the page
+                    // keeps its pre-edit picture. Said once, and not retried
+                    // in a loop: the next edit arms the debounce again.
+                    self.reader_render.snapshot_in_flight = None;
+                    self.notify(format!("The page cannot show recent edits yet: {message}"));
                 }
                 crate::reader_link::Told::Applied(applied) => {
                     let pending = self.reader_pending.pop_front();
@@ -3911,6 +4151,26 @@ impl App {
                         .map(|pending| pending.kind)
                         .unwrap_or(AppliedKind::Edit);
                     self.reader.applied(&applied, kind);
+                    // The render pool cannot see this commit until the next
+                    // snapshot, so arm the debounce that takes one.
+                    self.reader_render.edited_at = Some(Instant::now());
+
+                    // A mark the presenter drew now has a name. Giving it to
+                    // the overlay stroke is what makes the two one thing: the
+                    // eraser can delete it, a page turn can recognise it, and
+                    // document mode is editing the same annotation.
+                    if pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.names_a_presenter_mark)
+                    {
+                        for effect in &applied.effects {
+                            if let pulpit_render::document::AppliedEffect::Annotation(summary) =
+                                effect
+                            {
+                                self.annotations.name_stroke(summary.id.clone());
+                            }
+                        }
+                    }
 
                     // Journalled now that the worker has confirmed it, and
                     // not when it was sent: a mutation with no answer is not
@@ -3932,9 +4192,26 @@ impl App {
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
                     self.reader.set_annotations(page, &summaries);
+                    // …and if this is the page the projector is showing, the
+                    // slide's marks are these (A1). Presentation and document
+                    // mode read the same answer.
+                    self.adopt_document_marks(page);
                 }
                 crate::reader_link::Told::Selection { result, finalising } => {
-                    if let Some(transaction) =
+                    // The worker is free again: the newest waiting sample, if
+                    // any, goes out before this answer is even drawn.
+                    self.selection_query_answered();
+                    // Both modes sweep text through the same worker, and only
+                    // one of them can have a sweep open, because there is one
+                    // pointer. The presenter is asked first and answers for
+                    // its own gesture only.
+                    if self.presenter_selection_resolved(
+                        result.quads.clone(),
+                        result.text.clone(),
+                        finalising,
+                    ) {
+                        // Answered by the presenter's gesture.
+                    } else if let Some(transaction) =
                         self.reader
                             .selection_resolved(result.quads, result.text, finalising)
                     {
@@ -3965,8 +4242,24 @@ impl App {
                     // be answered and a mutation in flight must not be
                     // assumed committed (§11.5).
                     self.notify(message);
+                    // Whatever was asked for has not been answered and will
+                    // not be. An annotation list left marked in flight would
+                    // never be asked for again, and the eraser would sweep a
+                    // page it knows nothing about.
+                    self.reader.annotations_abandoned();
+                    // …and if it answered a commit, the mark the UI is still
+                    // drawing for it is a mark the document will never hold.
+                    self.reader.commit_refused();
+                    // A selection query that failed is answered too, as far
+                    // as the in-flight guard is concerned.
+                    self.selection_query_in_flight = false;
+                    self.selection_query_waiting = None;
+                    // If the refusal answered a snapshot request, nothing
+                    // will confirm it either.
+                    self.reader_render.snapshot_in_flight = None;
                     if fatal {
                         self.reader.closed();
+                        self.reset_reader_rendering();
                         self.reader_link = None;
                         return;
                     }
@@ -3995,32 +4288,336 @@ impl App {
             }
         }
 
+        // A burst of edits settled: take one snapshot of the document as it
+        // now stands, so the render pool can draw pages that contain them.
+        self.pump_reader_snapshot();
+
+        // …and ask the pool for whatever the window now needs drawn.
+        self.request_reader_renders();
+    }
+
+    /// Ask the document worker for a snapshot when one is due.
+    fn pump_reader_snapshot(&mut self) {
+        if self.reader_render.snapshot_in_flight.is_some() {
+            return;
+        }
+        let Some(edited_at) = self.reader_render.edited_at else {
+            return;
+        };
+        if edited_at.elapsed() < SNAPSHOT_DEBOUNCE {
+            return;
+        }
+        let Some(link) = self.reader_link.as_mut() else {
+            return;
+        };
+        let serial = self.reader_render.serial + 1;
+        let destination = reader_snapshot_directory().join(format!("snapshot-{serial}.pdf"));
+        if let Err(error) = std::fs::create_dir_all(reader_snapshot_directory()) {
+            tracing::warn!(%error, "no snapshot directory; edits stay off the page until saved");
+            self.reader_render.edited_at = None;
+            return;
+        }
+        if link.ask(crate::reader_link::Ask::Snapshot {
+            destination: destination.clone(),
+        }) {
+            self.reader_render.serial = serial;
+            self.reader_render.snapshot_in_flight = Some((serial, destination));
+            self.reader_render.edited_at = None;
+        }
+    }
+
+    /// A snapshot landed: point the render pool at it and let the generation
+    /// walk prefer its frames over everything older (A7).
+    fn reader_snapshot_landed(&mut self, saved: pulpit_render::document::SavedDocument) {
+        let Some((serial, destination)) = self.reader_render.snapshot_in_flight.take() else {
+            tracing::warn!("a snapshot nobody asked for was ignored");
+            return;
+        };
+        let previous = self.reader_render.snapshot.take();
+        let snapshot = ReaderSnapshot {
+            document: READER_RENDER_BASE + serial,
+            generation: pulpit_core::RenderGeneration(READER_RENDER_BASE + serial),
+            revision: saved.revision,
+            path: destination,
+        };
+        tracing::debug!(
+            revision = saved.revision.0,
+            document = snapshot.document,
+            "reader: rendering from a new snapshot"
+        );
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            supervisor.open(snapshot.document, &snapshot.path.to_string_lossy());
+            if let Some(previous) = &previous {
+                supervisor.close(previous.document);
+            }
+        }
+        if let Some(previous) = previous {
+            let _ = std::fs::remove_file(&previous.path);
+        }
+        self.reader_render.snapshot = Some(snapshot);
+        // The stale-job sweep in `request_reader_renders` cancels everything
+        // still in flight at the old generation on its next pass, which is
+        // right now.
+        self.request_reader_renders();
+    }
+
+    /// Which supervisor document and generation reader pages render from.
+    ///
+    /// The latest snapshot once there is one; before any edit, the
+    /// presentation's own document — already open in every pool worker — at
+    /// the presentation's generation.
+    fn reader_render_source(&self) -> Option<(u64, pulpit_core::RenderGeneration)> {
+        if let Some(snapshot) = &self.reader_render.snapshot {
+            return Some((snapshot.document, snapshot.generation));
+        }
+        self.state
+            .document()
+            .map(|document| (document.id.0, self.state.generation()))
+    }
+
+    /// Forget the reader's snapshots and cancel its renders: the document
+    /// closed, or a new one is taking its place.
+    fn reset_reader_rendering(&mut self) {
+        let state = std::mem::take(&mut self.reader_render);
+        let doomed: Vec<RequestId> = self
+            .pending
+            .iter()
+            .filter(|(_, key)| key.kind == FrameKind::Page)
+            .map(|(id, _)| *id)
+            .collect();
+        self.pending.retain(|(_, key)| key.kind != FrameKind::Page);
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            for id in doomed {
+                supervisor.cancel(id);
+            }
+            if let Some(snapshot) = &state.snapshot {
+                supervisor.close(snapshot.document);
+            }
+        }
+        if let Some(snapshot) = state.snapshot {
+            let _ = std::fs::remove_file(&snapshot.path);
+        }
+    }
+
+    /// Submit the reader's render plan to the pool, and cancel what it no
+    /// longer wants.
+    ///
+    /// The same shape as `request_renders`: plan, drop what the cache already
+    /// satisfies and what is in flight, cancel the obsolete, submit the rest.
+    /// Only `FrameKind::Page` keys are touched here, and only they are spared
+    /// there, so the two sweeps cannot cancel each other's work.
+    fn request_reader_renders(&mut self) {
+        if !self.reader.is_open() || self.page_surface_size().is_none() {
+            return;
+        }
+        let Some((document, generation)) = self.reader_render_source() else {
+            return;
+        };
         let scale = self.presenter_scale_factor();
-        let revision = self.reader.revision();
-        let wanted = self.reader.renders_wanted(scale);
-        let mut abandoned = Vec::new();
-        if let Some(link) = self.reader_link.as_mut() {
-            for (page, width, height) in wanted {
-                let sent = link.ask(crate::reader_link::Ask::Render(
-                    pulpit_render::document::protocol::DocumentRenderRequest {
-                        page,
-                        width,
-                        height,
-                        expected_revision: revision,
-                    },
-                ));
-                if !sent {
-                    abandoned.push(page);
+        let plan = self.reader.render_plan(scale);
+
+        let mut jobs = Vec::new();
+        let mut still_wanted: Vec<FrameKey> = Vec::new();
+        for entry in plan {
+            let key = FrameKey {
+                generation,
+                slide: entry.page.get(),
+                kind: FrameKind::Page,
+                quality: entry.quality,
+                width: entry.width,
+                height: entry.height,
+            };
+            still_wanted.push(key);
+            if self.cache.satisfies(
+                generation,
+                key.slide,
+                FrameKind::Page,
+                key.quality,
+                key.width,
+            ) {
+                continue;
+            }
+            if self.pending.iter().any(|(_, pending)| *pending == key) {
+                continue;
+            }
+            // The pages on screen outrank the margin; nothing here outranks
+            // an audience frame, and in the reader layout there is none.
+            let priority = if entry.visible {
+                Priority::Presenter
+            } else {
+                Priority::Adjacent
+            };
+            jobs.push((key, priority));
+        }
+
+        // A page render still in flight for a page the reader has scrolled
+        // away from — or from before the last snapshot — is a worker burning
+        // time on a picture nobody will look at, ahead of one somebody is
+        // waiting for. This cancellation is most of the difference between
+        // paging through a document and waiting for it.
+        let obsolete: Vec<RequestId> = self
+            .pending
+            .iter()
+            .filter(|(_, key)| {
+                key.kind == FrameKind::Page
+                    && (key.generation < generation || !still_wanted.contains(key))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let Some(supervisor) = self.supervisor.as_mut() else {
+            return;
+        };
+        if !obsolete.is_empty() {
+            let doomed: std::collections::HashSet<RequestId> = obsolete.iter().copied().collect();
+            self.pending
+                .retain(|(pending, _)| !doomed.contains(pending));
+            for id in obsolete {
+                supervisor.cancel(id);
+                self.submitted_at.remove(&id);
+            }
+        }
+
+        for (key, priority) in jobs {
+            let id = supervisor.next_request_id();
+            supervisor.submit(RenderJob {
+                id,
+                generation,
+                document,
+                page: key.slide,
+                region: pulpit_core::notes::Region::FULL,
+                width: key.width,
+                height: key.height,
+                priority,
+                quality: key.quality,
+                with_annotations: true,
+                region_name: String::new(),
+            });
+            self.pending.push((id, key));
+            self.submitted_at.insert(id, Instant::now());
+        }
+    }
+
+    /// The best resident picture for one reader page drawn `width` layout
+    /// points wide, preferring the newest snapshot generation: a frame from
+    /// before the last edit is shown until one containing it exists, and a
+    /// coarse frame can never replace a refined one at the same generation.
+    fn reader_frame(
+        &self,
+        page: pulpit_core::page::PageIndex,
+        width: f32,
+    ) -> Option<iced::widget::image::Handle> {
+        let key = self.ready_reader_frame_key(page, width)?;
+        let washes = self.reader.retained_washes(page);
+        if !washes.is_empty() {
+            if let Some(washed) = self.washed_frame(key, page, &washes) {
+                return Some(washed);
+            }
+        }
+        self.handles.get(&key).cloned()
+    }
+
+    /// The page picture with its retained highlights multiplied in.
+    ///
+    /// A committed `/Highlight` is blended by multiplying, so text under it
+    /// stays fully dark; a translucent rectangle drawn over the frame would
+    /// lighten it, and the wash would visibly settle when the real frame
+    /// arrived (§9.2). Multiplying the frame's own pixels — `p·(1 − a·(1−c))`
+    /// per channel, which is multiply at `/CA` — is the same arithmetic the
+    /// renderer does, so the retained wash and the rendered one match.
+    fn washed_frame(
+        &self,
+        key: FrameKey,
+        page: pulpit_core::page::PageIndex,
+        washes: &[&crate::widgets::document::preview::GesturePreview],
+    ) -> Option<iced::widget::image::Handle> {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        for wash in washes {
+            for quad in &wash.quads {
+                let bounds = quad.bounds();
+                for value in [bounds.left, bounds.top, bounds.right, bounds.bottom] {
+                    value.to_bits().hash(&mut hasher);
                 }
             }
-        } else {
-            abandoned.extend(wanted.into_iter().map(|(page, _, _)| page));
+            for value in [wash.color.0, wash.color.1, wash.color.2, wash.opacity] {
+                value.to_bits().hash(&mut hasher);
+            }
         }
-        // Nothing took those requests, so nothing will answer them. Leaving
-        // the pages marked in flight would leave them blank forever.
-        for page in abandoned {
-            self.reader.render_abandoned(page);
+        let stamp = hasher.finish();
+        if let Some(handle) = self.wash_cache.borrow().get(&stamp) {
+            return Some(handle.clone());
         }
+
+        let (_, frame) =
+            self.cache
+                .best_exact(key.generation, key.slide, key.kind, key.width, key.height)?;
+        let geometry = self.reader.page_geometry(page)?;
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return None;
+        }
+        let scale_x = frame.width as f32 / geometry.width;
+        let scale_y = frame.height as f32 / geometry.height;
+
+        let mut pixels = (*frame.pixels).clone();
+        for wash in washes {
+            let alpha = wash.opacity.clamp(0.0, 1.0);
+            // 8.8 fixed point per channel; 256 is "leave the pixel alone".
+            let factor = [wash.color.0, wash.color.1, wash.color.2]
+                .map(|c| ((1.0 - alpha * (1.0 - c.clamp(0.0, 1.0))) * 256.0).round() as u32);
+            for quad in &wash.quads {
+                let bounds = quad.bounds();
+                let x0 = ((bounds.left * scale_x).floor().max(0.0)) as usize;
+                let y0 = ((bounds.top * scale_y).floor().max(0.0)) as usize;
+                let x1 = ((bounds.right * scale_x).ceil() as usize).min(frame.width as usize);
+                let y1 = ((bounds.bottom * scale_y).ceil() as usize).min(frame.height as usize);
+                for y in y0..y1 {
+                    let row = y * frame.width as usize;
+                    for x in x0..x1 {
+                        let at = (row + x) * 4;
+                        for channel in 0..3 {
+                            pixels[at + channel] =
+                                ((u32::from(pixels[at + channel]) * factor[channel]) >> 8).min(255)
+                                    as u8;
+                        }
+                    }
+                }
+            }
+        }
+        let handle = iced::widget::image::Handle::from_rgba(frame.width, frame.height, pixels);
+        let mut cache = self.wash_cache.borrow_mut();
+        // A hard cap rather than an LRU: at most a handful of pages can have
+        // a highlight in flight, and a stale composite is rebuilt in one pass.
+        if cache.len() >= 8 {
+            cache.clear();
+        }
+        cache.insert(stamp, handle.clone());
+        Some(handle)
+    }
+
+    fn ready_reader_frame_key(
+        &self,
+        page: pulpit_core::page::PageIndex,
+        width: f32,
+    ) -> Option<FrameKey> {
+        let (_, generation) = self.reader_render_source()?;
+        // The same arithmetic the plan asked in, rounded the same way. The
+        // refined frame is rendered at `round(width × scale)`; a ceiling this
+        // truncated instead sat a pixel *below* it whenever that product had
+        // a fraction of a half or more, and `best_fitting` then preferred the
+        // coarse frame that did fit — the page stayed soft for as long as it
+        // was looked at, on some zoom levels and pages and not others.
+        let max_width = crate::reader::rendered_width(width, self.presenter_scale_factor());
+        self.cache
+            .generations_at_or_below(generation)
+            .into_iter()
+            .find_map(|generation| {
+                self.cache
+                    .best_fitting(generation, page.get(), FrameKind::Page, max_width)
+                    .map(|(key, _)| key)
+                    .filter(|key| self.handles.contains_key(key))
+            })
     }
 
     /// The inside of the page-surface cell in the mounted layout, if there is
@@ -4049,6 +4646,114 @@ impl App {
             (placed.width - cell.padding * 2.0).max(0.0),
             (placed.height - cell.padding * 2.0).max(0.0),
         ))
+    }
+
+    /// The keys that mean something different while a document is being read.
+    ///
+    /// `None` when the key is not one of them, or when the reader is not what
+    /// is on screen: everything else goes on to the keymap, so a presenter's
+    /// remote is never quietly rebound by opening a document.
+    fn document_key(
+        &mut self,
+        key: Option<&str>,
+        control: bool,
+        shift: bool,
+    ) -> Option<Task<Message>> {
+        use crate::layout::builtin::LayoutMode;
+        use crate::widgets::event::ReadCommand;
+        use pulpit_core::annotation::AnnotationTool;
+
+        if !self.reader.is_open() || LayoutMode::of(&self.active_layout) != LayoutMode::Document {
+            return None;
+        }
+        let key = key?;
+
+        // Scrolling first: it is what the keys were bound to before anything
+        // else was, and a reader pressing Page Down means the page.
+        let windows = match key {
+            "PageDown" => Some(1),
+            "PageUp" => Some(-1),
+            _ => None,
+        };
+        if let Some(windows) = windows {
+            self.reader.apply(&ReadCommand::ScrollByWindows(windows));
+            return Some(self.scroll_surface_to_reader());
+        }
+
+        // History, on the keys every editor on the machine uses for it. These
+        // were toolbar buttons only, which meant the one action a reader takes
+        // most often was the one they had to reach for the mouse to take.
+        if control && key.eq_ignore_ascii_case("z") {
+            let command = if shift {
+                ReadCommand::Redo
+            } else {
+                ReadCommand::Undo
+            };
+            return Some(self.on_read_command(command));
+        }
+        if control && key.eq_ignore_ascii_case("y") {
+            return Some(self.on_read_command(ReadCommand::Redo));
+        }
+
+        // The rest are single keys, so a modifier means the press belongs to
+        // some other binding and not to the toolbar.
+        if control {
+            return None;
+        }
+
+        // What to do with the mark that is held. Delete and Backspace both,
+        // because which one removes a selection is a thing keyboards disagree
+        // about; Enter opens what it says, as it does for a file name.
+        if self.reader.selected().is_some() {
+            match key {
+                "Delete" | "Backspace" => {
+                    return Some(self.on_read_command(ReadCommand::DeleteSelected))
+                }
+                "Enter" => return Some(self.on_read_command(ReadCommand::EditSelected)),
+                // Escape puts a mark down without committing anything. It is
+                // consumed here only when something is actually held, so it
+                // still backs out of everything else when nothing is.
+                "Escape" => return Some(self.on_read_command(ReadCommand::ClearSelection)),
+                _ => {}
+            }
+        }
+
+        // Arming a tool by number, in the order the toolbar draws them, plus
+        // the escape hatch back to the hand. These are the reader's own keys
+        // and reach the presenter's palette in neither direction (§5.3): the
+        // presenter's annotation bindings arm the slide overlay, which has
+        // nothing to do with the document on screen here.
+        let armed = match key {
+            "0" => Some(None),
+            "1" => Some(Some(AnnotationTool::Select)),
+            "2" => Some(Some(AnnotationTool::Ink)),
+            "3" => Some(Some(AnnotationTool::Highlighter)),
+            "4" => Some(Some(AnnotationTool::Text)),
+            "5" => Some(Some(AnnotationTool::Note)),
+            "6" => Some(Some(AnnotationTool::Eraser)),
+            _ => None,
+        };
+        if let Some(tool) = armed {
+            return Some(self.on_read_command(ReadCommand::Arm(tool)));
+        }
+
+        None
+    }
+
+    /// Put the page surface where the session says the reader is.
+    ///
+    /// The scrollable owns a scroll position of its own and only hears about
+    /// the ones it caused. A page jump, a zoom, a key or the hand dragging
+    /// the page all move the session's offset behind its back, and this is
+    /// how the two are brought back together.
+    fn scroll_surface_to_reader(&self) -> Task<Message> {
+        iced::widget::operation::scroll_to(
+            crate::widgets::document::view::page_surface_id(),
+            iced::widget::operation::AbsoluteOffset {
+                x: self.reader.controls().offset_x,
+                y: self.reader.controls().offset,
+            },
+        )
     }
 
     /// Something the reader's widgets asked for.
@@ -4081,6 +4786,7 @@ impl App {
                     } else {
                         AppliedKind::Undo
                     },
+                    names_a_presenter_mark: false,
                     transaction: None,
                 });
                 if let Some(link) = self.reader_link.as_mut() {
@@ -4094,21 +4800,39 @@ impl App {
                 Task::none()
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
+            // Writing a mark on the page is the same four steps the dialog
+            // used to be, minus the dialog (§8.5).
+            ReadCommand::ComposeMark(text) => {
+                if let Some(composing) = self.composing_mark.as_mut() {
+                    composing.text = text.clone();
+                }
+                Task::none()
+            }
+            ReadCommand::ComposeAsTypst(typst) => {
+                if let Some(composing) = self.composing_mark.as_mut() {
+                    composing.typst = *typst;
+                }
+                Task::none()
+            }
+            ReadCommand::CommitMark => self.commit_composed_mark(),
+            ReadCommand::CancelMark => {
+                self.composing_mark = None;
+                Task::none()
+            }
             ReadCommand::PageCursor { page, x, y } => {
                 self.reader.pointer_moved(*page, *x, *y);
+                // The hand moved the document, and the scrollable has no way
+                // of knowing that unless it is told.
+                if self.reader.is_panning() {
+                    return self.scroll_surface_to_reader();
+                }
                 // A drag with the highlighter is a *text* selection, and only
                 // the engine knows where the text is. The query is read-only
                 // and never moves the revision (§6.3); the UI draws whatever
                 // came back last, which is why re-querying as the drag moves
                 // is a redraw rather than a mutation.
                 if let Some((page, selection)) = self.reader.pending_selection() {
-                    if let Some(link) = self.reader_link.as_mut() {
-                        link.ask(crate::reader_link::Ask::SelectText {
-                            page,
-                            selection,
-                            finalising: false,
-                        });
-                    }
+                    self.ask_select_text(page, selection, false);
                 }
                 Task::none()
             }
@@ -4128,9 +4852,60 @@ impl App {
                         tool,
                         text: String::new(),
                         typst: false,
+                        editing: None,
                     });
+                    // The caret goes to the box on the page, and nowhere else.
+                    // Without this the keyboard is still wherever it was — the
+                    // page-number box, or the presenter's own bindings — and
+                    // typing the mark's text navigates the document instead of
+                    // writing it.
+                    return iced::widget::operation::focus(
+                        crate::widgets::document::view::compose_input_id(),
+                    );
                 }
                 Task::none()
+            }
+            ReadCommand::DeleteSelected => {
+                // One mark, one transaction, one undo entry — the same shape
+                // as every other edit, so taking a mark back is one press of
+                // undo however it was removed (§9.1).
+                if let Some(transaction) = self.reader.delete_selected() {
+                    self.commit_to_document(transaction);
+                }
+                Task::none()
+            }
+            ReadCommand::EditSelected => {
+                let Some(found) = self.reader.selected_editable() else {
+                    return Task::none();
+                };
+                self.composing_mark = Some(ComposingMark {
+                    page: found.page,
+                    at: found.at,
+                    tool: found.tool,
+                    text: found.text,
+                    typst: found.typst,
+                    editing: Some(found.id),
+                });
+                iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
+            }
+            ReadCommand::PageDoubleClicked => {
+                // Whatever the armed tool is: opening what a mark says is not
+                // a tool, it is what double-clicking text means. With the text
+                // tool armed the press before this one opened an empty box at
+                // the click; that box is replaced by the mark's own words, and
+                // an empty one places nothing anyway (§8.5).
+                let Some(found) = self.reader.text_under_cursor() else {
+                    return Task::none();
+                };
+                self.composing_mark = Some(ComposingMark {
+                    page: found.page,
+                    at: found.at,
+                    tool: found.tool,
+                    text: found.text,
+                    typst: found.typst,
+                    editing: Some(found.id),
+                });
+                iced::widget::operation::focus(crate::widgets::document::view::compose_input_id())
             }
             ReadCommand::PageReleased => {
                 // One gesture, one transaction, one revision, one undo entry
@@ -4144,13 +4919,7 @@ impl App {
                         // and `/QuadPoints` has to describe the text that was
                         // actually selected (§7.2). So the release asks once
                         // more and the answer is what commits.
-                        if let Some(link) = self.reader_link.as_mut() {
-                            link.ask(crate::reader_link::Ask::SelectText {
-                                page,
-                                selection,
-                                finalising: true,
-                            });
-                        }
+                        self.ask_select_text(page, selection, true);
                     }
                     crate::reader::Released::Nothing => {}
                 }
@@ -4162,6 +4931,22 @@ impl App {
             }
             _ => {
                 let _needs_render = self.reader.apply(&command);
+                // A page jump or a zoom moves the session's offset, and the
+                // scrollable has no way of knowing that: it is told. A scroll
+                // is the other direction — the widget is already where it
+                // says it is, and sending it back would fight the wheel.
+                if matches!(
+                    command,
+                    ReadCommand::GoToPage(_)
+                        | ReadCommand::CommitPage
+                        | ReadCommand::DragScrollHandle(_)
+                        | ReadCommand::ScrollByWindows(_)
+                        | ReadCommand::SetZoom(_)
+                        | ReadCommand::ZoomIn
+                        | ReadCommand::ZoomOut
+                ) {
+                    return self.scroll_surface_to_reader();
+                }
                 Task::none()
             }
         }
@@ -4197,12 +4982,24 @@ impl App {
             );
             match crate::typst_annotation::rasterise(&composing.text, 240.0, 12.0, colour, 2.0) {
                 Ok(rendered) => {
-                    if let Some(transaction) = self.reader.place_typst(
-                        composing.page,
-                        composing.at,
-                        composing.text,
-                        rendered,
-                    ) {
+                    // A rewrite keeps the mark's identity and its corner; only
+                    // a new mark chooses where it goes (A3, §8.4).
+                    let transaction = match &composing.editing {
+                        Some(id) => self.reader.replace_typst(
+                            id,
+                            composing.page,
+                            composing.at,
+                            composing.text,
+                            rendered,
+                        ),
+                        None => self.reader.place_typst(
+                            composing.page,
+                            composing.at,
+                            composing.text,
+                            rendered,
+                        ),
+                    };
+                    if let Some(transaction) = transaction {
                         self.commit_to_document(transaction);
                     }
                 }
@@ -4213,10 +5010,16 @@ impl App {
             return Task::none();
         }
 
-        if let Some(transaction) =
-            self.reader
-                .place_text(composing.page, composing.at, composing.tool, composing.text)
-        {
+        let transaction = match &composing.editing {
+            Some(id) => self
+                .reader
+                .replace_text(id, composing.page, composing.text.clone()),
+            None => {
+                self.reader
+                    .place_text(composing.page, composing.at, composing.tool, composing.text)
+            }
+        };
+        if let Some(transaction) = transaction {
             self.commit_to_document(transaction);
         }
         Task::none()
@@ -4250,6 +5053,7 @@ impl App {
                     let expected = self.reader.revision();
                     self.reader_pending.push_back(PendingEdit {
                         kind: AppliedKind::Undo,
+                        names_a_presenter_mark: false,
                         transaction: None,
                     });
                     match self.reader_link.as_mut() {
@@ -4393,6 +5197,529 @@ impl App {
         Task::none()
     }
 
+    /// Where the slide the presenter is annotating sits on which page.
+    ///
+    /// This is the bridge between the two coordinate systems (§8.7, A4): the
+    /// notes mapping says which physical page the audience is looking at and
+    /// which part of it, and the document engine says how big that page is
+    /// after its crop box and rotation. Both are needed, and `None` when
+    /// either is missing — a deck whose mapping does not reach this slide, or
+    /// a document mode that failed to open. A mark that cannot be placed is
+    /// not committed, rather than committed to page zero.
+    fn slide_placement(&self) -> Option<pulpit_core::annotate::presenter::SlidePlacement> {
+        let document = self.state.document()?;
+        let source = self
+            .state
+            .mapping()
+            .audience_source(self.state.committed(), document.pdf_pages)?;
+        let page = pulpit_core::page::PageIndex(source.pdf_page);
+        let geometry = self.reader.page_geometry(page)?;
+        let placement =
+            pulpit_core::annotate::presenter::SlidePlacement::new(page, source.region, geometry);
+        placement.is_usable().then_some(placement)
+    }
+
+    /// The highlighter went down on the live slide: anchor a text selection.
+    ///
+    /// Returns whether the press was taken. It is refused when the slide
+    /// cannot be placed on a page — an unmapped slide, or a document mode that
+    /// never opened — because there is no text to select without one. That is
+    /// a harder refusal than ink's, which at least leaves a mark on the screen
+    /// for the length of the slide; a highlight over text nobody can find is
+    /// not a lesser version of a highlight, it is nothing. Saying so once is
+    /// better than a tool that silently does nothing all talk.
+    fn begin_presenter_selection(&mut self, point: (f32, f32)) -> bool {
+        let Some(placement) = self.slide_placement() else {
+            self.warn_marks_are_not_kept();
+            return false;
+        };
+        // The palette's colour is the mark's colour, and the highlighter's
+        // opacity is what makes it a highlighter (§7.2).
+        let options = self.annotation_options();
+        self.presenter_interaction
+            .set_highlight_style(pulpit_core::annotate::MarkStyle {
+                color: options.highlight_color,
+                ..pulpit_core::annotate::MarkStyle::highlighter()
+            });
+        self.presenter_interaction
+            .arm(Some(pulpit_core::annotation::AnnotationTool::Highlighter));
+        self.annotations.set_selection(None);
+        self.presenter_interaction
+            .begin(placement.page, placement.to_page(point))
+    }
+
+    /// The highlighter swept further: ask the engine what text that covers.
+    ///
+    /// Read-only, and re-asked as the drag moves. The answer is what the
+    /// overlay draws, so the sweep shows the words rather than the pointer's
+    /// path — one query per move event, never a mutation (§6.3).
+    fn extend_presenter_selection(&mut self, point: (f32, f32)) {
+        let Some(placement) = self.slide_placement() else {
+            return;
+        };
+        if !self.presenter_interaction.extend(placement.to_page(point)) {
+            return;
+        }
+        self.ask_presenter_selection(false);
+    }
+
+    /// Something the search pane asked for.
+    ///
+    /// A query change restarts the search: the in-process sources — speaker
+    /// notes and the bookmark tree — are answered here and now, so the list
+    /// has something in it before the first chunk of page text comes back,
+    /// and the page scan is left to [`App::pump_search`].
+    fn on_find_command(&mut self, command: crate::widgets::event::FindCommand) -> Task<Message> {
+        use crate::widgets::event::FindCommand;
+        match command {
+            FindCommand::Type(typed) => {
+                let query = pulpit_core::search::Query::new(
+                    &typed,
+                    self.search.query().case_sensitive,
+                    self.search.query().whole_word,
+                );
+                self.restart_search(query);
+                Task::none()
+            }
+            FindCommand::ToggleCaseSensitive | FindCommand::ToggleWholeWord => {
+                let current = self.search.query();
+                let case_sensitive =
+                    current.case_sensitive ^ (command == FindCommand::ToggleCaseSensitive);
+                let whole_word = current.whole_word ^ (command == FindCommand::ToggleWholeWord);
+                let query =
+                    pulpit_core::search::Query::new(current.text(), case_sensitive, whole_word);
+                self.restart_search(query);
+                Task::none()
+            }
+            FindCommand::Clear => {
+                self.search.clear();
+                Task::none()
+            }
+            FindCommand::Next => {
+                let hit = self.search.advance().cloned();
+                self.go_to_hit(hit)
+            }
+            FindCommand::Previous => {
+                let hit = self.search.retreat().cloned();
+                self.go_to_hit(hit)
+            }
+            FindCommand::Focus(index) => {
+                let hit = self.search.focus(index).cloned();
+                self.go_to_hit(hit)
+            }
+        }
+    }
+
+    /// Point the search at the open document under a new query.
+    fn restart_search(&mut self, query: pulpit_core::search::Query) {
+        // The page count comes from whichever half is open. In document mode
+        // the reader knows it; in presentation mode the deck does.
+        let pages = if self.reader.is_open() {
+            self.reader.page_count()
+        } else {
+            self.state
+                .document()
+                .map(|document| document.pdf_pages)
+                .unwrap_or(0)
+        };
+        self.search.open(pages);
+        self.search.set_query(query);
+        if self.search.query().is_empty() {
+            return;
+        }
+        // Notes and bookmarks are already in this process, so they are
+        // searched now rather than asked for: the box has results before the
+        // first round trip, which in a long deck is the difference between
+        // "instant" and "a second of nothing".
+        let mut found = Vec::new();
+        if let Some(document) = self.state.document() {
+            if let Some(notes) = document.text_notes.as_ref() {
+                found.extend(pulpit_core::search::search_notes(
+                    self.search.query(),
+                    notes,
+                    document.pdf_pages,
+                ));
+            }
+            if let Some(navigation) = self.navigation.get(&document.id.0) {
+                found.extend(pulpit_core::search::search_outline(
+                    self.search.query(),
+                    &navigation.outline,
+                ));
+            }
+        }
+        self.search.absorb(found);
+    }
+
+    /// Show a hit: put its page on screen in whichever view is mounted.
+    ///
+    /// Navigation goes through the ordinary verbs — the reader's `GoToPage`,
+    /// the presentation's preview move — rather than a second way to move,
+    /// because in presentation mode a page change has an audience window on
+    /// the other end of it.
+    fn go_to_hit(&mut self, hit: Option<pulpit_core::search::Hit>) -> Task<Message> {
+        let Some(hit) = hit else {
+            return Task::none();
+        };
+        use crate::layout::builtin::LayoutMode;
+        if LayoutMode::of(&self.active_layout) == LayoutMode::Document {
+            return self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(hit.page));
+        }
+        // In presentation mode the presenter moves and the audience does not:
+        // finding a slide is looking for it, not showing it to the room.
+        let slide = self.slide_showing(hit.page.get());
+        self.update(Message::Nav(pulpit_core::Command::PreviewGoTo(slide)))
+    }
+
+    /// Which slide shows a given PDF page.
+    ///
+    /// A search hit is a fact about a page; the presenter moves in slides, and
+    /// under a paired notes mapping those are not the same number. Resolved by
+    /// asking the mapping in force rather than by arithmetic on it, so a
+    /// swapped or split deck lands on the slide the reader meant.
+    fn slide_showing(&self, page: usize) -> usize {
+        let pdf_pages = self
+            .state
+            .document()
+            .map(|document| document.pdf_pages)
+            .unwrap_or(0);
+        let mapping = self.state.mapping();
+        (0..self.state.slide_count())
+            .find(|slide| {
+                mapping
+                    .audience_source(*slide, pdf_pages)
+                    .is_some_and(|source| source.pdf_page == page)
+            })
+            .unwrap_or(page)
+    }
+
+    /// Ask for the next chunk of page text, if a search is running and the
+    /// document worker is there to answer.
+    ///
+    /// Called from the tick, like every other round trip: a scan must not
+    /// start inside a draw.
+    fn pump_search(&mut self) {
+        let Some((generation, pages)) = self.search.next_request() else {
+            return;
+        };
+        let query = self.search.query().clone();
+        let sent = self
+            .reader_link
+            .as_mut()
+            .map(|link| {
+                link.ask(crate::reader_link::Ask::FindText {
+                    generation,
+                    query,
+                    from_page: pages.start,
+                    to_page: pages.end,
+                })
+            })
+            .unwrap_or(false);
+        if sent {
+            return;
+        }
+        // No document worker — presentation mode, where the render pool holds
+        // the deck. It searches through the same matcher over the same text
+        // layer, so what the presenter finds is what the reader would.
+        let asked = self.state.document().map(|document| document.id.0);
+        if let (Some(document), Some(supervisor)) = (asked, self.supervisor.as_mut()) {
+            supervisor.request_find_text(document, generation, self.search.query().clone(), pages);
+            return;
+        }
+        // Nothing open that can answer. Notes and bookmarks have already been
+        // searched in this process; saying "no page text here" once is better
+        // than asking nobody again on every tick.
+        self.search.fail(
+            generation,
+            pulpit_core::search::SearchProblem::Unsupported(
+                "the page text of this document is not available".into(),
+            ),
+        );
+    }
+
+    /// Put one text-selection query to the document worker, coalescing the
+    /// drag's samples: one query in flight, one waiting, newest wins.
+    ///
+    /// A finalising query — the one whose answer commits — is never held
+    /// back, and supersedes whatever sample was waiting: the release is the
+    /// newest position by definition.
+    fn ask_select_text(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        selection: pulpit_render::document::TextSelection,
+        finalising: bool,
+    ) {
+        if finalising {
+            self.selection_query_waiting = None;
+        } else if self.selection_query_in_flight {
+            self.selection_query_waiting = Some((page, selection));
+            return;
+        }
+        if let Some(link) = self.reader_link.as_mut() {
+            if link.ask(crate::reader_link::Ask::SelectText {
+                page,
+                selection,
+                finalising,
+            }) {
+                self.selection_query_in_flight = true;
+            }
+        }
+    }
+
+    /// A selection query was answered (or will never be): the next waiting
+    /// sample, if any, goes out now.
+    fn selection_query_answered(&mut self) {
+        self.selection_query_in_flight = false;
+        if let Some((page, selection)) = self.selection_query_waiting.take() {
+            self.ask_select_text(page, selection, false);
+        }
+    }
+
+    /// Put the open presenter selection to the engine.
+    ///
+    /// `finalising` marks the query whose answer commits: the quads on screen
+    /// may be one round trip behind the hand, and `/QuadPoints` has to
+    /// describe the text that was actually selected (§7.2). Same reasoning,
+    /// and same request, as the reader's release.
+    fn ask_presenter_selection(&mut self, finalising: bool) {
+        let Some((page, anchor, head)) = self.presenter_interaction.pending_selection() else {
+            return;
+        };
+        let selection = pulpit_render::document::TextSelection::Range { anchor, head };
+        self.ask_select_text(page, selection, finalising);
+    }
+
+    /// The engine answered a presenter selection query.
+    ///
+    /// Returns whether the answer was this path's — the reader and the
+    /// presenter ask the same question of the same worker, and only one of
+    /// them can have a selection open, because there is one pointer.
+    fn presenter_selection_resolved(
+        &mut self,
+        quads: Vec<pulpit_core::page::PageQuad>,
+        text: String,
+        finalising: bool,
+    ) -> bool {
+        if self.presenter_interaction.pending_selection().is_none() {
+            return false;
+        }
+        let Some(placement) = self.slide_placement() else {
+            return false;
+        };
+        self.presenter_interaction
+            .set_selection_result(quads.clone(), text);
+        if !finalising {
+            // Still sweeping: show the words, commit nothing.
+            let runs = quads
+                .iter()
+                .map(|quad| placement.quad_to_slide(quad))
+                .collect::<Vec<_>>();
+            let style = self.presenter_interaction.highlight_style();
+            let selection = pulpit_core::annotation::SlideSelection {
+                runs,
+                color: style.color,
+                opacity: style.opacity,
+            };
+            self.annotations
+                .set_selection((!selection.runs.is_empty()).then_some(selection));
+            return true;
+        }
+        // The sweep is over and this is the answer that commits. The live
+        // selection goes first: from here the mark is the document's, and a
+        // copy of it on the overlay would be a second representation (A1).
+        self.annotations.set_selection(None);
+        let geometry = self.reader.page_geometry(placement.page).cloned();
+        let outcome = match geometry {
+            Some(geometry) => self.presenter_interaction.finish(&geometry),
+            None => {
+                self.presenter_interaction.cancel();
+                pulpit_core::annotate::GestureOutcome::Nothing
+            }
+        };
+        match outcome {
+            pulpit_core::annotate::GestureOutcome::Commit(commands) => {
+                let transaction =
+                    pulpit_render::document::DocumentTransaction::from_annotations(commands);
+                if !self.commit_to_document(transaction) {
+                    self.warn_marks_are_not_kept();
+                }
+            }
+            pulpit_core::annotate::GestureOutcome::Nothing => {
+                self.notify(
+                    "There is no selectable text there, so there is nothing to highlight."
+                        .to_string(),
+                );
+            }
+        }
+        true
+    }
+
+    /// A completed presenter gesture becomes an annotation in the open
+    /// document (§14.3 step 4).
+    ///
+    /// Called on every pointer release, because that is when a gesture is
+    /// over. Everything it might have produced goes in *one* transaction:
+    /// a stroke that was drawn, and the marks an eraser sweep took. One
+    /// gesture is one revision and one undo entry (§9.1, criterion 8),
+    /// whether the presenter drew one line or swept through eleven.
+    fn commit_presenter_gesture(&mut self, finished: Option<pulpit_core::InkStroke>) {
+        use pulpit_core::annotate::AnnotationCommand;
+
+        let erased = self.annotations.take_erased();
+        if finished.is_none() && erased.is_empty() {
+            return;
+        }
+        let mut commands: Vec<AnnotationCommand> = erased
+            .into_iter()
+            .map(|id| AnnotationCommand::Delete { id })
+            .collect();
+
+        let mut expects_a_name = false;
+        if let Some(stroke) = finished {
+            match self.slide_placement() {
+                Some(placement) => {
+                    if let Some(draft) =
+                        pulpit_core::annotate::presenter::stroke_to_draft(&stroke, &placement)
+                    {
+                        commands.push(AnnotationCommand::Create(draft));
+                        expects_a_name = true;
+                    }
+                }
+                None => {
+                    // The mark stays on the screen for this slide, because
+                    // taking it away under the presenter's hand would be
+                    // worse. It will not come back, and saying so once is
+                    // better than letting them find out after the talk.
+                    self.warn_marks_are_not_kept();
+                }
+            }
+        }
+        if commands.is_empty() {
+            return;
+        }
+        let transaction = pulpit_render::document::DocumentTransaction::from_annotations(commands);
+        if self.commit_to_document(transaction) {
+            if let Some(pending) = self.reader_pending.back_mut() {
+                pending.names_a_presenter_mark = expects_a_name;
+            }
+        } else if expects_a_name {
+            self.warn_marks_are_not_kept();
+        }
+    }
+
+    /// Say once, per document, that marks made here are not being kept.
+    ///
+    /// Once: a presenter who draws thirty strokes over a deck pulpit cannot
+    /// annotate does not need thirty toasts, and the thirtieth would be over
+    /// the slide.
+    fn warn_marks_are_not_kept(&mut self) {
+        if self.warned_marks_are_not_kept {
+            return;
+        }
+        self.warned_marks_are_not_kept = true;
+        self.notify(
+            "These marks are on the screen only: this document cannot be annotated, so \
+             there is nothing to save them into."
+                .to_string(),
+        );
+    }
+
+    /// Take every mark off this slide, and out of the document.
+    ///
+    /// One transaction, so "clear" is one undo (§9.1) — a presenter who wipes
+    /// a slide by accident presses undo once, not once per stroke.
+    ///
+    /// Only what is *on this slide*: for a split-page deck that is the marks
+    /// on the slide half of the page, and the notes half is left alone.
+    fn clear_marks_on_this_slide(&mut self) {
+        use pulpit_core::annotate::AnnotationCommand;
+
+        self.annotations.settle();
+        let ids: Vec<_> = self
+            .annotations
+            .strokes
+            .iter()
+            .filter_map(|stroke| stroke.id.clone())
+            .chain(
+                self.annotations
+                    .texts
+                    .iter()
+                    .filter_map(|mark| mark.annotation.clone()),
+            )
+            .collect();
+        self.annotations.clear();
+        if ids.is_empty() {
+            return;
+        }
+        self.commit_to_document(
+            pulpit_render::document::DocumentTransaction::from_annotations(
+                ids.into_iter()
+                    .map(|id| AnnotationCommand::Delete { id })
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    /// Ask the engine what is on the page this slide is showing.
+    ///
+    /// Sent on every page turn. The answer arrives as `Told::Annotations` and
+    /// is adopted then; if document mode is not open there is no answer and no
+    /// marks, which is the same thing said two ways.
+    fn request_marks_for_this_slide(&mut self) {
+        let Some(placement) = self.slide_placement() else {
+            return;
+        };
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::ListAnnotations {
+                page: placement.page,
+            });
+        }
+    }
+
+    /// Take what the document says is on this slide and draw that.
+    ///
+    /// The other half of A1: the marks a presenter sees are a *view* of the
+    /// annotations in the open document, so a mark made in document mode, or
+    /// one that was in the PDF before pulpit opened it, appears on the slide
+    /// like any other.
+    fn adopt_document_marks(&mut self, page: pulpit_core::page::PageIndex) {
+        use pulpit_core::annotate::presenter;
+
+        let Some(placement) = self.slide_placement() else {
+            return;
+        };
+        if placement.page != page {
+            // An answer about a page the presenter has since left. Dropped
+            // rather than drawn: it would put the previous slide's marks over
+            // this one, which is the exact failure the old per-slide cache
+            // existed to avoid and this must not reintroduce.
+            return;
+        }
+        let strokes = self
+            .reader
+            .annotations_on(page)
+            .filter(|summary| {
+                // Ink is what a slide draws. A highlight over text, a note, a
+                // stamp: those are document marks, and the presenter's overlay
+                // has no way to draw them that would not be a second, worse
+                // rendering of what the page already shows.
+                summary.kind == pulpit_core::annotate::AnnotationKind::Ink
+                    && !summary.geometry_elided
+            })
+            .filter_map(|summary| {
+                presenter::ink_to_stroke(
+                    summary.id.clone(),
+                    page,
+                    &summary.path,
+                    summary.style.color,
+                    summary.style.width,
+                    presenter::kind_of(&summary.style),
+                    &placement,
+                )
+            })
+            .collect();
+        self.annotations.adopt(strokes);
+    }
+
     /// Post one atomic user action to the document worker.
     ///
     /// One transaction is one revision and one undo entry, whatever it
@@ -4407,18 +5734,25 @@ impl App {
         let expected = self.reader.revision();
         self.reader_pending.push_back(PendingEdit {
             kind: AppliedKind::Edit,
+            names_a_presenter_mark: false,
             transaction: Some(transaction.clone()),
         });
-        match self.reader_link.as_mut() {
+        // Keep drawing what this commit creates until a frame containing it
+        // arrives (§9.2): the stroke must not vanish at release and reappear
+        // a snapshot round trip later.
+        self.reader.retain_commit(&transaction);
+        let sent = match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::Apply {
                 expected_revision: expected,
                 transaction,
             }),
-            None => {
-                self.reader_pending.pop_back();
-                false
-            }
+            None => false,
+        };
+        if !sent {
+            self.reader_pending.pop_back();
+            self.reader.commit_refused();
         }
+        sent
     }
 
     /// The scale a rendered page is drawn at, so a frame is made at the
@@ -4478,9 +5812,6 @@ impl App {
                             ..
                         }
                         | pulpit_display::Warning::SelectedDisplayMissing {
-                            role: Role::Audience
-                        }
-                        | pulpit_display::Warning::PlacementUnsupported {
                             role: Role::Audience
                         }
                         | pulpit_display::Warning::CannotLeaveFullscreen {
@@ -4556,9 +5887,8 @@ impl App {
                         });
                     } else if !placed {
                         // Backends that cannot place (Wayland, tiling) still
-                        // get their window mode set below; the standing
-                        // PlacementUnsupported condition already tells the
-                        // presenter what to do, so no error toast here.
+                        // get their window mode set below, so no error toast
+                        // here.
                         if let Some(message) = display::describe_placement(&outcome) {
                             self.diagnostics.note(format!("display: {message}"));
                         }
@@ -4830,9 +6160,10 @@ impl App {
         match self.annotations.tool {
             Some(AnnotationTool::Pointer) => self.annotations.set_pointer(Some(point)),
             Some(AnnotationTool::Spotlight) => self.annotations.set_spotlight(Some(point)),
-            Some(AnnotationTool::Ink | AnnotationTool::Highlighter) => {
+            Some(AnnotationTool::Ink) => {
                 self.annotations.extend_stroke(point);
             }
+            Some(AnnotationTool::Highlighter) => self.extend_presenter_selection(point),
             Some(AnnotationTool::Eraser) => {
                 self.annotations
                     .extend_erase(point, self.annotation_options().eraser_radius);
@@ -4865,15 +6196,11 @@ impl App {
                 self.annotations
                     .begin_stroke(point, options.ink_width, options.ink_color);
             }
-            AnnotationTool::Highlighter => {
-                let options = self.annotation_options();
-                self.annotations.begin_mark(
-                    point,
-                    options.highlight_width,
-                    options.highlight_color,
-                    pulpit_core::annotation::StrokeKind::Highlight,
-                );
-            }
+            // The highlighter does not draw where the hand goes: it selects
+            // the page's own text and lays a `/Highlight` over the words. The
+            // press only anchors the sweep; the engine says where the text is
+            // (§8.2), exactly as it does in document mode.
+            AnnotationTool::Highlighter => return self.begin_presenter_selection(point),
             AnnotationTool::Eraser => {
                 self.annotations
                     .begin_erase(point, self.annotation_options().eraser_radius);
@@ -5157,16 +6484,33 @@ impl App {
                         .arm(Some(self.annotation_controls.options.pointer_tool()));
                 }
             }
-            AnnotationCommand::Undo => {
-                self.annotations.undo_stroke();
+            // Undo and redo are the *document's*, in both modes. There is one
+            // history because there is one representation (A1, criterion 8):
+            // a stroke drawn at the lectern and a highlight made in document
+            // mode go back in the order they were made, and taking one back
+            // restores the annotation rather than drawing a new one that
+            // looks like it (§9.4). The open gesture is settled first, so
+            // undo means the same thing whether or not the pen is down.
+            AnnotationCommand::Undo | AnnotationCommand::Redo => {
+                let redoing = matches!(command, AnnotationCommand::Redo);
+                if self.annotations.has_open_gesture() {
+                    self.annotations.settle();
+                    let finished = self.annotations.strokes.last().cloned();
+                    self.commit_presenter_gesture(finished);
+                }
+                // The reader's own handler is the one place that sends an
+                // undo, so presentation goes through it rather than growing a
+                // second copy that could drift from it. It answers with an
+                // empty task: the work is a message to the worker.
+                let _ = self.on_read_command(if redoing {
+                    crate::widgets::event::ReadCommand::Redo
+                } else {
+                    crate::widgets::event::ReadCommand::Undo
+                });
             }
-            AnnotationCommand::Redo => {
-                self.annotations.redo_stroke();
-            }
-            // Clearing is about the slide in front of the presenter. Wiping
-            // it must also wipe what the cache is holding for that slide, or
-            // the marks would come back on the next visit.
-            AnnotationCommand::Clear => self.ink.clear_current(&mut self.annotations),
+            // Clearing takes the marks off this slide, which now means
+            // deleting the annotations they are showing.
+            AnnotationCommand::Clear => self.clear_marks_on_this_slide(),
             // Saving leaves the process, so it is answered with a task at the
             // message boundary rather than as a state change here.
             AnnotationCommand::Save => {}
@@ -5183,113 +6527,6 @@ impl App {
                 });
             }
         }
-    }
-
-    /// Whether there is an annotated copy to be written: marks somewhere in
-    /// the talk, and a document on disk to copy.
-    fn can_export_annotations(&self) -> bool {
-        self.state.document().is_some()
-            && (self.ink.annotated_slides() > 0
-                || !self.annotations.strokes.is_empty()
-                || !self.annotations.texts.is_empty())
-    }
-
-    /// Ask where the annotated copy should go.
-    ///
-    /// The dialog is offered a name beside the deck rather than the deck's
-    /// own: overwriting the source is the one outcome a presenter cannot
-    /// undo, and the marks are a performance layered over someone's
-    /// document, not a correction to it.
-    fn ask_where_to_export(&mut self) -> Task<Message> {
-        let Some(document) = self.state.document() else {
-            return Task::none();
-        };
-        let directory = document
-            .path
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let stem = document
-            .path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "deck".to_string());
-        Task::perform(
-            async move {
-                rfd::AsyncFileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_directory(directory)
-                    .set_file_name(format!("{stem}-annotated.pdf"))
-                    .save_file()
-                    .await
-                    .map(|handle| handle.path().to_path_buf())
-            },
-            Message::ExportAnnotatedTo,
-        )
-    }
-
-    /// Hand the marks to a renderer worker to be written into a copy of the
-    /// deck.
-    ///
-    /// Everything expensive happens over there: this compiles the text
-    /// annotations, which is the one part that needs Typst and so cannot,
-    /// and then the presenter's window is free again.
-    fn export_annotations(&mut self, destination: PathBuf) {
-        let Some(document) = self.state.document() else {
-            return;
-        };
-        let source = document.path.clone();
-        let pdf_pages = document.pdf_pages;
-        let fallback = document.first_page_size.map(|size| size.width);
-        let sizes = document.page_sizes.clone();
-        let marks = self.ink.marks(&self.annotations);
-        if marks.is_empty() {
-            self.notify("There are no marks to save".to_string());
-            return;
-        }
-        let export = crate::annotation_export::build(
-            &marks,
-            self.state.mapping(),
-            pdf_pages,
-            |page: usize| {
-                sizes
-                    .get(page)
-                    .map(|size| size.width)
-                    .or(fallback)
-                    // A deck that never reported a page size still exports;
-                    // the number only sets the resolution a text annotation
-                    // is rasterised at, and US Letter is a fair guess.
-                    .unwrap_or(612.0)
-            },
-        );
-        for diagnostic in &export.diagnostics {
-            self.notify(diagnostic.clone());
-        }
-        if export.pages.is_empty() {
-            self.notify("There are no marks to save".to_string());
-            return;
-        }
-
-        let pages = export.pages.len();
-        let Some(supervisor) = self.supervisor.as_mut() else {
-            self.notify_error(
-                "Cannot save an annotated copy: no renderer is running".to_string(),
-                None,
-            );
-            return;
-        };
-        let id = supervisor.next_request_id();
-        supervisor.request_export(
-            id,
-            &source.to_string_lossy(),
-            &destination.to_string_lossy(),
-            export.pages,
-        );
-        tracing::info!(
-            destination = %destination.display(),
-            pages,
-            "asked a worker for an annotated copy"
-        );
     }
 
     /// The outline section the audience page falls in, if the document has
@@ -5801,6 +7038,11 @@ impl App {
         // now. It is a megabyte against an audience frame's tens, and losing
         // it is losing the picture that is up.
         candidates.push(self.ready_frame_key(committed, FrameKind::Slide, self.coarse_width()));
+        // The reader's own sheets, when the reader layout is up: each one is
+        // the picture on screen, and evicting it blanks a page mid-read.
+        for placed in self.reader.visible_pages() {
+            candidates.push(self.ready_reader_frame_key(placed.page, placed.width));
+        }
         let mut pinned = Vec::new();
         for key in candidates.into_iter().flatten() {
             if self.handles.contains_key(&key) && !pinned.contains(&key) {
@@ -6013,6 +7255,16 @@ impl App {
         if self.state.mapping().has_notes() {
             let notes = (self.preview_size.width.max(240.0)) as u32;
             keys.push(self.ready_frame_key(self.state.preview(), FrameKind::Notes, notes));
+        }
+        // The reader's sheets, when the reader layout is up. A full-size page
+        // is tens of megabytes — far over the threshold at which iced uploads
+        // asynchronously and *skips the image* while the upload is in flight
+        // — so the sharpened frame that just replaced a coarse one would
+        // paint as background for a few passes: a flicker on every settle.
+        // Resident, the upload happens at layout, ahead of the prepare pass
+        // that would have skipped it.
+        for placed in self.reader.visible_pages() {
+            keys.push(self.ready_reader_frame_key(placed.page, placed.width));
         }
         self.resident_handles(keys)
     }
@@ -6301,29 +7553,49 @@ impl App {
                 self.thumbnails.reset(generation);
             }
             self.thumbnail_plan = Some((generation, count));
-            // One pass, at the sharp width, unless the whole deck cannot fit
-            // the budget at that size — then the whole deck at the coarse
-            // width instead. One width per deck, decided up front: the
-            // upgrade pass this replaces re-rendered pages the grid was
-            // already showing, and every upgrade was a texture swap — a
-            // visible blink — in whatever panel was standing in on that
-            // thumbnail at that moment.
-            let per_page = {
-                let aspect = self
-                    .state
-                    .first_page_size()
-                    .map(|size| size.aspect_ratio())
-                    .unwrap_or(16.0 / 9.0);
-                let height = (THUMBNAIL_WIDTH as f32 / aspect).max(1.0) as u64;
-                THUMBNAIL_WIDTH as u64 * height * 4
-            };
-            let width = if per_page.saturating_mul(count as u64) <= THUMBNAIL_BUDGET_BYTES {
-                THUMBNAIL_WIDTH
-            } else {
-                THUMBNAIL_FALLBACK_WIDTH
-            };
+            // One pass at one width, decided up front and chosen so the whole
+            // deck fits the budget: the upgrade pass this replaces re-rendered
+            // pages the grid was already showing, and every upgrade was a
+            // texture swap — a visible blink — in whatever panel was standing
+            // in on that thumbnail at that moment.
+            //
+            // The width has to be *computed* rather than picked from a pair of
+            // constants. A six-hundred-page book of portrait pages overflows
+            // the budget at any fixed coarse width too, and what overflow
+            // means here is not a coarser grid: it is eviction, and an evicted
+            // page is one nothing ever asks for again, so its cell in the grid
+            // stays empty for the life of the session.
+            let aspect = self
+                .state
+                .first_page_size()
+                .map(|size| size.aspect_ratio())
+                .unwrap_or(16.0 / 9.0);
+            let width = fitting_thumbnail_width(count, aspect, THUMBNAIL_BUDGET_BYTES);
+            self.thumbnail_plan_width = width;
             self.thumbnail_queue = (0..count)
                 .filter(|s| !self.thumbnails.contains(*s))
+                .map(|s| (s, width))
+                .collect();
+        }
+        // A page can go missing after the one pass has been through it: a
+        // render that failed or was cancelled frees its slot without leaving
+        // a picture, and a deck too long for the budget even at the floor
+        // width has its furthest pages evicted. Either way nothing above
+        // would ever ask again, and the grid keeps an empty cell for the rest
+        // of the session.
+        //
+        // So the pages around the presenter are swept once the pass has
+        // drained. Bounded to a window the budget can certainly hold, which
+        // is what stops a deck that overflows from chasing its own tail:
+        // re-requesting the far end would only evict the near end that the
+        // presenter is looking at, and then re-request that.
+        if self.thumbnail_queue.is_empty() && self.thumbnail_requests.is_empty() {
+            let width = self.thumbnail_plan_width;
+            let reach = self.thumbnails.capacity_at(width, count).max(1) / 2;
+            let first = centre.saturating_sub(reach);
+            let last = centre.saturating_add(reach).min(count.saturating_sub(1));
+            self.thumbnail_queue = (first..=last)
+                .filter(|s| !self.thumbnails.has_at_least(*s, width))
                 .map(|s| (s, width))
                 .collect();
         }
@@ -6415,6 +7687,7 @@ impl App {
                 height,
                 priority,
                 quality: Quality::Refined,
+                with_annotations: false,
                 region_name: String::new(),
             });
             self.pending.push((id, key));
@@ -6515,6 +7788,9 @@ impl App {
                     .state
                     .mapping()
                     .notes_source(slide, self.state.pdf_pages()),
+                // Reader pages have a plan of their own; the slide plan never
+                // produces one.
+                FrameKind::Page => None,
             };
             let Some(mut source) = source else { continue };
             // A `/FitR` zoom re-crops the committed slide everywhere it is
@@ -6551,6 +7827,13 @@ impl App {
             .pending
             .iter()
             .filter(|(id, key)| {
+                // Reader page renders have a sweep of their own in
+                // `request_reader_renders`, keyed to the reader's generation
+                // and window; judged against the slide plan they would all
+                // look obsolete and be cancelled every navigation.
+                if key.kind == FrameKind::Page {
+                    return false;
+                }
                 // A thumbnail is never in this list — it is warming work, not
                 // something either window is waiting for — so it must be
                 // excluded explicitly or every navigation would cancel it and
@@ -6593,6 +7876,7 @@ impl App {
                 height,
                 priority,
                 quality,
+                with_annotations: false,
                 region_name: String::new(),
             });
             self.pending.push((id, key));
@@ -6989,9 +8273,6 @@ fn advice(warning: &pulpit_display::Warning) -> Option<String> {
             role: Role::Presenter,
         } => {
             "Reconnect the presenter display; pulpit will recover the window to an available screen."
-        }
-        W::PlacementUnsupported { .. } => {
-            "Drag the audience window onto the projector, then press F for fullscreen."
         }
         W::CannotLeaveFullscreen { .. } => {
             "Leave fullscreen from the window manager if you need the window back."
@@ -7469,6 +8750,36 @@ mod canonical_frame_tests {
     }
 }
 
+/// The widest a page can be rendered and still leave room for every other
+/// page in the deck.
+///
+/// The budget holds `count` pictures of `width × width/aspect × 4` bytes, so
+/// the width that exactly spends it is the square root of
+/// `budget × aspect / (4 × count)`. Rounded down to a multiple of eight,
+/// because a texture width that is a round number of pixels is kinder to
+/// every stage below this one, and clamped: never sharper than
+/// [`THUMBNAIL_WIDTH`], which is all the grid can show, and never narrower
+/// than [`THUMBNAIL_MIN_WIDTH`], below which there is nothing to look at.
+///
+/// A deck long enough to hit the floor is one the budget genuinely cannot
+/// hold, and it is the only case where a thumbnail is evicted at all.
+fn fitting_thumbnail_width(count: usize, aspect: f32, budget: u64) -> u32 {
+    if count == 0 {
+        return THUMBNAIL_WIDTH;
+    }
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        16.0 / 9.0
+    };
+    let exact = (budget as f64 * aspect as f64 / (4.0 * count as f64)).sqrt();
+    if !exact.is_finite() {
+        return THUMBNAIL_WIDTH;
+    }
+    let rounded = ((exact as u32) / 8) * 8;
+    rounded.clamp(THUMBNAIL_MIN_WIDTH, THUMBNAIL_WIDTH)
+}
+
 fn warming_order(
     queue: &std::collections::VecDeque<(usize, u32)>,
     count: usize,
@@ -7580,14 +8891,14 @@ mod warming_tests {
     #[test]
     fn a_coarse_picture_does_not_satisfy_a_wider_request() {
         // Warming is one pass at one width now, but a reload can lower a
-        // giant deck to the fallback width and a later reload restore it:
+        // giant deck to a narrower width and a later reload restore it:
         // a narrower picture must still count as missing.
         let mut have = cache();
         have.insert(
             3,
             iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]),
             10,
-            super::THUMBNAIL_FALLBACK_WIDTH,
+            super::THUMBNAIL_MIN_WIDTH,
             3,
         );
         let queue: VecDeque<(usize, u32)> = [(3, super::THUMBNAIL_WIDTH)].into();
@@ -7598,6 +8909,61 @@ mod warming_tests {
             order.len(),
             1,
             "the page is still wanted, at the wider width"
+        );
+    }
+
+    /// The whole deck must fit the budget at the width warming chooses.
+    /// Anything that does not fit is evicted, and nothing ever asks for an
+    /// evicted page again — which is a grid with permanent holes in it.
+    #[test]
+    fn every_page_of_a_long_book_fits_the_budget_at_the_chosen_width() {
+        use super::{fitting_thumbnail_width, THUMBNAIL_BUDGET_BYTES, THUMBNAIL_MIN_WIDTH};
+
+        // A real one: 655 portrait pages, 439.42 × 683.15 points. At the two
+        // fixed widths this replaced — 480 and 240 — this deck needed 938 MB
+        // and 234 MB against a 128 MB budget, so roughly half of it was
+        // evicted as fast as it was rendered and the grid never filled in.
+        for (count, aspect) in [
+            (655usize, 439.42f32 / 683.15),
+            (120, 16.0 / 9.0),
+            (1, 16.0 / 9.0),
+            (2_000, 0.7),
+        ] {
+            let width = fitting_thumbnail_width(count, aspect, THUMBNAIL_BUDGET_BYTES);
+            if width == THUMBNAIL_MIN_WIDTH {
+                // The floor: a deck this long is one the budget cannot hold
+                // at any width worth looking at, and eviction is the answer.
+                continue;
+            }
+            let height = (width as f64 / aspect as f64).max(1.0) as u64;
+            let total = width as u64 * height * 4 * count as u64;
+            assert!(
+                total <= THUMBNAIL_BUDGET_BYTES,
+                "{count} pages at {width}px need {} MiB of a {} MiB budget",
+                total / (1024 * 1024),
+                THUMBNAIL_BUDGET_BYTES / (1024 * 1024),
+            );
+        }
+    }
+
+    /// A short deck is not punished for the long ones: it still gets the
+    /// sharp width the grid is designed around.
+    #[test]
+    fn an_ordinary_deck_still_warms_at_the_sharp_width() {
+        use super::{fitting_thumbnail_width, THUMBNAIL_BUDGET_BYTES, THUMBNAIL_WIDTH};
+
+        assert_eq!(
+            fitting_thumbnail_width(120, 16.0 / 9.0, THUMBNAIL_BUDGET_BYTES),
+            THUMBNAIL_WIDTH
+        );
+        // A degenerate document cannot produce a nonsense width.
+        assert_eq!(
+            fitting_thumbnail_width(0, 16.0 / 9.0, THUMBNAIL_BUDGET_BYTES),
+            THUMBNAIL_WIDTH
+        );
+        assert_eq!(
+            fitting_thumbnail_width(10, f32::NAN, THUMBNAIL_BUDGET_BYTES),
+            THUMBNAIL_WIDTH
         );
     }
 
@@ -7685,6 +9051,21 @@ mod grid_navigation_tests {
             grid_target("Down", COUNT - 1, COUNT, COLUMNS, PAGE_ROWS),
             Some(None)
         );
+    }
+
+    #[test]
+    fn the_grid_answers_to_the_vim_keys_as_well_as_the_arrows() {
+        // In the vim sense: `j` and `k` between rows, `h` and `l` along one.
+        // The overview is a grid being looked over, not a deck being advanced
+        // through, so `j` here means what it means in vim rather than what it
+        // means on the slide.
+        for (vim, arrow) in [("h", "Left"), ("l", "Right"), ("k", "Up"), ("j", "Down")] {
+            assert_eq!(
+                grid_target(vim, 7, COUNT, COLUMNS, PAGE_ROWS),
+                grid_target(arrow, 7, COUNT, COLUMNS, PAGE_ROWS),
+                "{vim} should move like {arrow}"
+            );
+        }
     }
 
     #[test]
