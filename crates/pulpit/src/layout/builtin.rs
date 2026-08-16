@@ -130,7 +130,7 @@ fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
 
 /// **Presenter Default** — the layout a first run opens with. Most of the
 /// width is the live slide; the remaining rail stacks the two readings (clock
-/// and timer side by side), the next slide, and the notes; a shallow band
+/// and timer side by side), the next slide, the notes, and search; a shallow band
 /// along the bottom carries the controls.
 ///
 /// The rail is a little over a quarter of the width, which is what the notes
@@ -149,15 +149,15 @@ pub fn presenter_default() -> Layout {
         readings,
         b.slide(WidgetKind::NextSlide),
         b.panel(WidgetKind::SpeakerNotes),
+        b.panel(WidgetKind::Search),
     ];
-    // Notes take half the rail, the next slide most of the rest, and the
-    // clock and timer the shallow band their digits and one line need — a
-    // reading is read at a glance, and height past the digits is height the
-    // notes are not getting.
+    // Notes and search share most of the rail, the next slide takes most of
+    // the rest, and the clock and timer get the shallow band their digits and
+    // one line need.
     let rail = b.split(
         "Look-ahead rail",
         Direction::Vertical,
-        &[0.16, 0.32, 0.52],
+        &[0.125, 0.25, 0.375, 0.25],
         rail_children,
     );
 
@@ -202,7 +202,7 @@ pub fn presenter_default() -> Layout {
 ///
 /// The page gets everything that is not a control: a shallow band along the
 /// top carries navigation and the annotation tools, and a narrow rail carries
-/// the outline.
+/// the outline and search.
 ///
 /// The band is the height of a button and no more. The rail is narrower than
 /// the presenter's, because it holds page thumbnails and bookmark titles
@@ -226,7 +226,17 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
         band_children,
     );
 
-    let body_children = vec![b.panel(WidgetKind::DocumentOutline), b.page()];
+    let rail_children = vec![
+        b.panel(WidgetKind::DocumentOutline),
+        b.panel(WidgetKind::Search),
+    ];
+    let rail = b.split(
+        "Outline and search",
+        Direction::Vertical,
+        &[0.65, 0.35],
+        rail_children,
+    );
+    let body_children = vec![rail, b.page()];
     let body = b.split(
         "Document",
         Direction::Horizontal,
@@ -471,7 +481,7 @@ mod tests {
         assert_eq!(stage.sizes, vec![0.72, 0.28]);
 
         let rail = stage.children[1].as_split().unwrap();
-        assert_eq!(rail.sizes, vec![0.16, 0.32, 0.52]);
+        assert_eq!(rail.sizes, vec![0.125, 0.25, 0.375, 0.25]);
         assert_eq!(rail.children[0].as_split().unwrap().sizes, vec![0.5, 0.5]);
 
         for size in &root.children[1].as_split().unwrap().sizes {

@@ -337,13 +337,32 @@ struct KeymapWire {
 
 impl From<KeymapWire> for Keymap {
     fn from(wire: KeymapWire) -> Self {
-        Keymap {
-            bindings: wire
-                .bindings
-                .into_iter()
-                .map(|(binding, action)| (binding.normalized(), action))
-                .collect(),
+        let mut bindings: Vec<_> = wire
+            .bindings
+            .into_iter()
+            .map(|(binding, action)| (binding.normalized(), action))
+            .collect();
+
+        // These were shipped as defaults but could not do what their labels
+        // promised: Iced reports the slash character as "/", not "slash",
+        // while Ctrl+F is the conventional way to find. Move the old
+        // fullscreen default to the bare `f` documented by the launcher and
+        // carry existing keymaps forward with the corrected bindings.
+        for (binding, action) in &mut bindings {
+            if *action == Action::FocusSearch && *binding == KeyBinding::named("slash") {
+                *binding = KeyBinding::named("/");
+            }
+            if *action == Action::ToggleAudienceFullscreen
+                && *binding == KeyBinding::named_with("f", Mods::ctrl())
+            {
+                *binding = KeyBinding::named("f");
+            }
         }
+        let ctrl_f = KeyBinding::named_with("f", Mods::ctrl());
+        if !bindings.iter().any(|(binding, _)| *binding == ctrl_f) {
+            bindings.push((ctrl_f, Action::FocusSearch));
+        }
+        Keymap { bindings }
     }
 }
 
@@ -430,21 +449,20 @@ impl Default for Keymap {
                 // as it does in every other application. Quit especially: a
                 // bare "q" next to "w" is a talk ended by a typo.
                 with("o", Mods::ctrl(), Action::OpenDocument),
-                // "/", F3 and Shift+F3: find, next, previous. Not Ctrl+F,
-                // which has meant the audience window's fullscreen since
-                // before there was a search and is not being taken off
-                // anyone's fingers for it; "/" is what every reader and
-                // pager on the machine already opens a search with.
+                // Ctrl+F and "/" find; F3 and Shift+F3 step through matches.
+                // Iced reports the slash character as "/", so the binding
+                // must use the character rather than the key-cap name.
                 // Ctrl+B for the side rail, as every editor and reader with a
                 // sidebar has it. Bare "b" is not free — and would be a
                 // blanked screen in the middle of a talk if it were taken.
                 with("b", Mods::ctrl(), Action::ToggleOutline),
-                named("slash", Action::FocusSearch),
+                with("f", Mods::ctrl(), Action::FocusSearch),
+                named("/", Action::FocusSearch),
                 named("f3", Action::FindNext),
                 with("f3", Mods::shift(), Action::FindPrevious),
                 with("r", Mods::ctrl(), Action::ReloadDocument),
                 named("F5", Action::ReloadDocument),
-                with("f", Mods::ctrl(), Action::ToggleAudienceFullscreen),
+                named("f", Action::ToggleAudienceFullscreen),
                 with("q", Mods::ctrl(), Action::Quit),
                 // Link focus has no default key. Stepping through a slide's
                 // links is rare enough that it does not earn one of the bare
@@ -911,6 +929,20 @@ mod tests {
     }
 
     #[test]
+    fn search_uses_the_characters_iced_reports() {
+        let keymap = Keymap::default();
+        assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
+        assert_eq!(
+            keymap.resolve_with_mods(Some("f"), Mods::ctrl(), None),
+            Some(Action::FocusSearch)
+        );
+        assert_eq!(
+            keymap.resolve(Some("f"), None),
+            Some(Action::ToggleAudienceFullscreen)
+        );
+    }
+
+    #[test]
     fn link_focus_has_no_default_key_but_stays_bindable() {
         let mut keymap = Keymap::default();
         assert!(keymap.keys_for(Action::FocusNextLink).is_empty());
@@ -965,6 +997,21 @@ mod migration_tests {
         let text = serde_json::to_string(&keymap).expect("should write");
         let back: Keymap = serde_json::from_str(&text).expect("should load");
         assert_eq!(back, keymap);
+    }
+
+    #[test]
+    fn shipped_search_and_fullscreen_defaults_are_repaired() {
+        let stored = r#"{"bindings":[[{"kind":"named","key":"slash"},"focus-search"],[{"kind":"named","key":"f","mods":{"ctrl":true}},"toggle-audience-fullscreen"]]}"#;
+        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
+        assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
+        assert_eq!(
+            keymap.resolve_with_mods(Some("f"), Mods::ctrl(), None),
+            Some(Action::FocusSearch)
+        );
+        assert_eq!(
+            keymap.resolve(Some("f"), None),
+            Some(Action::ToggleAudienceFullscreen)
+        );
     }
 }
 

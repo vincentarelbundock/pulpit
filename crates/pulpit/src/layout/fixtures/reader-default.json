@@ -97,25 +97,56 @@
         "direction": "horizontal",
         "children": [
           {
-            "type": "leaf",
+            "type": "split",
             "id": 6,
-            "widget": {
-              "kind": "document-outline",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
+            "name": "Outline and search",
+            "direction": "vertical",
+            "children": [
+              {
+                "type": "leaf",
+                "id": 7,
+                "widget": {
+                  "kind": "document-outline",
+                  "style": {
+                    "variant": "standard",
+                    "scale": 1.0,
+                    "alignment": "center"
+                  },
+                  "config": "none"
+                },
+                "padding": 12.0,
+                "background": "panel",
+                "border": "none",
+                "empty_behavior": "show-blank-panel"
               },
-              "config": "none"
-            },
-            "padding": 12.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+              {
+                "type": "leaf",
+                "id": 8,
+                "widget": {
+                  "kind": "search",
+                  "style": {
+                    "variant": "standard",
+                    "scale": 1.0,
+                    "alignment": "center"
+                  },
+                  "config": "none"
+                },
+                "padding": 12.0,
+                "background": "panel",
+                "border": "none",
+                "empty_behavior": "show-blank-panel"
+              }
+            ],
+            "sizes": [
+              0.65,
+              0.35
+            ],
+            "gap": 8.0,
+            "min_child": 0.05
           },
           {
             "type": "leaf",
-            "id": 7,
+            "id": 9,
             "widget": {
               "kind": "document-page",
               "style": {

@@ -142,12 +142,30 @@
                 "background": "panel",
                 "border": "none",
                 "empty_behavior": "show-blank-panel"
+              },
+              {
+                "type": "leaf",
+                "id": 9,
+                "widget": {
+                  "kind": "search",
+                  "style": {
+                    "variant": "standard",
+                    "scale": 1.0,
+                    "alignment": "center"
+                  },
+                  "config": "none"
+                },
+                "padding": 12.0,
+                "background": "panel",
+                "border": "none",
+                "empty_behavior": "show-blank-panel"
               }
             ],
             "sizes": [
-              0.16,
-              0.32,
-              0.52
+              0.125,
+              0.25,
+              0.375,
+              0.25
             ],
             "gap": 8.0,
             "min_child": 0.05
@@ -162,13 +180,13 @@
       },
       {
         "type": "split",
-        "id": 9,
+        "id": 10,
         "name": "Navigation and tools",
         "direction": "horizontal",
         "children": [
           {
             "type": "leaf",
-            "id": 10,
+            "id": 11,
             "widget": {
               "kind": "slide-slider",
               "style": {
@@ -185,7 +203,7 @@
           },
           {
             "type": "leaf",
-            "id": 11,
+            "id": 12,
             "widget": {
               "kind": "slide-buttons",
               "style": {
@@ -208,7 +226,7 @@
           },
           {
             "type": "leaf",
-            "id": 12,
+            "id": 13,
             "widget": {
               "kind": "annotations",
               "style": {
