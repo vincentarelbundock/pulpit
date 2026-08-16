@@ -3064,6 +3064,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // handled there is nothing focused left to name it.
         let was_focused = self.focused_form_field(page);
         let dropping_focus = matches!(&event, FormInputEvent::Focus { gained: false });
+        // What a copy read out, filled in by the one event that asks for it.
+        let mut selected_text: Option<String> = None;
         // A press on a non-editable choice widget is answered with *focus*
         // rather than with the click itself. `FORM_OnLButtonDown` on one of
         // those opens PDFium's own list, drawn into the page bitmap and
@@ -3175,6 +3177,30 @@ impl DocumentBackend for PdfiumDocument<'_> {
                             break;
                         }
                     }
+                }
+                // The clipboard trio. All three are PDFium's own entry points
+                // into the selection it made, which is the only place the
+                // selection exists: this layer forwarded the clicks and the
+                // shift-arrows that built it and never modelled the result.
+                FormInputEvent::CopySelection => {
+                    selected_text = form_string(bindings, |buffer, length| {
+                        bindings.FORM_GetSelectedText(
+                            form,
+                            handle,
+                            buffer as *mut std::os::raw::c_void,
+                            length,
+                        )
+                    });
+                }
+                FormInputEvent::ReplaceSelection { ref text } => {
+                    // NUL-terminated UTF-16LE, the shape every `FPDF_WIDESTRING`
+                    // takes; the same conversion `set_field` does for an undo.
+                    let mut units: Vec<u16> = text.encode_utf16().collect();
+                    units.push(0);
+                    bindings.FORM_ReplaceSelection(form, handle, units.as_ptr());
+                }
+                FormInputEvent::SelectAll => {
+                    bindings.FORM_SelectAllText(form, handle);
                 }
             }
         }
@@ -3323,6 +3349,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             focused_hint,
             focused_date,
             focused_widget,
+            selected_text,
         })
     }
 

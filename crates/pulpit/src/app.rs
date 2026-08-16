@@ -106,6 +106,9 @@ pub enum Message {
         target: u64,
         value: Option<String>,
     },
+    /// Text read asynchronously after Ctrl-V while a form field holds the
+    /// caret. `None` for a clipboard holding something that is not text.
+    PasteFormText(Option<String>),
     Do(Action),
     Nav(Nav),
     /// The back button: return to the place the last jump left behind, or —
@@ -545,6 +548,39 @@ fn reader_snapshot_directory() -> PathBuf {
     std::env::temp_dir().join(format!("pulpit-reader-{}", std::process::id()))
 }
 
+/// Which clipboard shortcut is waiting on the engine's answer (§8.6).
+///
+/// Both send the same event, because a cut is a copy that then removes what it
+/// took, and the removal cannot happen until the text is safely out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormClipboard {
+    Copy,
+    Cut,
+}
+
+/// What of a clipboard's contents may be put into a form field.
+///
+/// Control characters are dropped — a field value is text, and the `\u{1b}`
+/// that came out of a terminal is not text — except the newline, which a
+/// multiline field really can hold and which PDFium discards itself in a
+/// single-line one. Bounded because a clipboard is not: the protocol would
+/// refuse an oversized request, and a refusal is a worse answer than a paste
+/// of what the field could have held anyway.
+fn sanitised_paste(text: &str) -> String {
+    let limit = pulpit_render::document::limits::MAX_FIELD_VALUE_BYTES;
+    let mut clean = String::new();
+    for character in text.chars() {
+        if character.is_control() && character != '\n' {
+            continue;
+        }
+        if clean.len() + character.len_utf8() > limit {
+            break;
+        }
+        clean.push(character);
+    }
+    clean
+}
+
 /// A jump a document's own JavaScript asked for, and what to call it (§8.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormNavigation {
@@ -659,6 +695,14 @@ pub struct App {
     /// replaces an unanswered one, because two offers over one another is a
     /// puzzle about which page is being agreed to.
     pub pending_form_goto: Option<FormNavigation>,
+    /// What the copy now in flight is for. `None` when no clipboard shortcut
+    /// is waiting on an answer, which is almost always: only the event a
+    /// Ctrl-C or a Ctrl-X sent brings a selection back, and only the shortcut
+    /// that sent it knows whether the text is also to be removed.
+    pub form_clipboard: Option<FormClipboard>,
+    /// A field's selection, copied and waiting for a tick to write it out.
+    /// The worker pump that receives it has no `Task` to hand back.
+    pub form_clipboard_text: Option<String>,
     /// Which role's colour wheel is open, if any. One at a time: two wheels
     /// over one another would be a puzzle about which one is being dragged.
     pub color_picker_open: Option<crate::theme::ColorRole>,
@@ -1184,6 +1228,8 @@ impl App {
             color_drafts: std::collections::BTreeMap::new(),
             confirm_reset_colors: false,
             pending_form_goto: None,
+            form_clipboard: None,
+            form_clipboard_text: None,
             color_picker_open: None,
             session,
             pending_restore,
@@ -2056,6 +2102,24 @@ impl App {
                 if let Some(value) = value.filter(|_| still_editing_target) {
                     self.annotations.type_text(&value);
                 }
+                Task::none()
+            }
+            Message::PasteFormText(value) => {
+                // The read is asynchronous, so the caret may have left the
+                // field — or the document — while it was in flight. A paste
+                // with nowhere to land is dropped rather than sent: the worker
+                // would answer an event with no focused field with a refusal,
+                // and a refusal is not what "nothing was selected" means.
+                let Some(value) = value.filter(|_| self.reader.form_holds_the_caret()) else {
+                    return Task::none();
+                };
+                let text = sanitised_paste(&value);
+                if text.is_empty() {
+                    return Task::none();
+                }
+                self.ask_focused_form_event(
+                    pulpit_render::document::protocol::FormInputEvent::ReplaceSelection { text },
+                );
                 Task::none()
             }
             Message::Do(action) => self.on_action(action),
@@ -3628,6 +3692,13 @@ impl App {
         //     pass: a page render must not happen inside a draw.
         self.pump_reader();
         self.pump_search();
+
+        // 1b-i. A field's selection, copied out and now on its way to the
+        //       clipboard. The pump has no `Task` to return, so the write
+        //       waits for this one.
+        if let Some(text) = self.form_clipboard_text.take() {
+            tasks.push(iced::clipboard::write(text));
+        }
 
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
@@ -5276,9 +5347,20 @@ impl App {
 
         // Ctrl-anything is a shortcut, not text. Undo, Save As and the rest
         // keep working with the caret in a field, which is what every other
-        // editor does — and PDFium's environment has no clipboard of its own
-        // for a Ctrl-V to reach anyway.
+        // editor does.
+        //
+        // The four exceptions are the clipboard, which is a shortcut a *text
+        // box* owns: with a caret in a field, Ctrl-C means the field's
+        // selection and nothing else. PDFium's form environment has no
+        // clipboard of its own — it has `FORM_GetSelectedText`,
+        // `FORM_ReplaceSelection` and `FORM_SelectAllText`, and the host is
+        // expected to be the clipboard — so this is where the two are joined.
         if control {
+            if self.reader.form_holds_the_caret() {
+                if let Some(task) = self.form_clipboard_key(key) {
+                    return Some(task);
+                }
+            }
             return None;
         }
 
@@ -5316,7 +5398,8 @@ impl App {
             Some("Backspace") => Some(FormKey::Backspace),
             Some("Delete") => Some(FormKey::Delete),
             Some("Enter") => Some(FormKey::Enter),
-            Some("Tab") => Some(FormKey::Tab),
+            // Tab is not here: field traversal is `document_key`'s, above,
+            // because it has to turn the page as well as move the caret.
             Some("ArrowLeft") | Some("Left") => Some(FormKey::Left),
             Some("ArrowRight") | Some("Right") => Some(FormKey::Right),
             // A *list* box moves its own selection on an arrow key, so those
@@ -5366,6 +5449,66 @@ impl App {
             sent = true;
         }
         sent.then(Task::none)
+    }
+
+    /// The clipboard shortcuts, with the caret in a text field (§8.6).
+    ///
+    /// `None` for a Ctrl-press that is not one of them, which carries on to
+    /// the keymap exactly as every other Ctrl-press does.
+    ///
+    /// Copy and cut cannot answer here: what is selected is PDFium's to
+    /// report, so the event goes out and the clipboard is written when the
+    /// answer arrives — see [`Self::form_changed`]. Cut is a copy that
+    /// remembers to remove what it took.
+    fn form_clipboard_key(&mut self, key: Option<&str>) -> Option<Task<Message>> {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        let key = key?;
+        if key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x") {
+            let intent = if key.eq_ignore_ascii_case("x") {
+                FormClipboard::Cut
+            } else {
+                FormClipboard::Copy
+            };
+            if !self.ask_focused_form_event(FormInputEvent::CopySelection) {
+                // Nothing will answer, so nothing is left waiting for one.
+                return None;
+            }
+            self.form_clipboard = Some(intent);
+            return Some(Task::none());
+        }
+        if key.eq_ignore_ascii_case("v") {
+            // Read now, sent when it arrives: the clipboard is the toolkit's
+            // and answers asynchronously.
+            return Some(iced::clipboard::read().map(Message::PasteFormText));
+        }
+        if key.eq_ignore_ascii_case("a") {
+            self.ask_focused_form_event(FormInputEvent::SelectAll);
+            return Some(Task::none());
+        }
+        None
+    }
+
+    /// Send one event to the page the *focus* is on, not the page the pointer
+    /// is over.
+    ///
+    /// The clipboard events all reach the focused field through its own page
+    /// handle, and the two pages need not be the same: a caret can sit in a
+    /// field at the foot of one page with the pointer resting over the next,
+    /// and a copy addressed to the wrong page reads an empty selection. Falls
+    /// back to the ordinary route when nothing is focused, where the answer is
+    /// "nothing is selected" either way.
+    fn ask_focused_form_event(
+        &mut self,
+        event: pulpit_render::document::protocol::FormInputEvent,
+    ) -> bool {
+        let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
+            return self.ask_form_key(event);
+        };
+        match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
+            None => false,
+        }
     }
 
     /// Send one keyboard event to the field that holds the caret.
@@ -5503,6 +5646,31 @@ impl App {
         page: pulpit_core::page::PageIndex,
         mut result: pulpit_render::document::protocol::FormEventResult,
     ) {
+        // What a copy asked for, on its way out. Held rather than written:
+        // this runs inside the worker pump, which has no `Task` to hand back,
+        // so the write goes out on the next tick alongside everything else the
+        // pump left behind.
+        //
+        // An empty selection is left alone. Copy with nothing selected is a
+        // no-op in every text box there is, and emptying the clipboard instead
+        // would lose whatever the reader had put there to paste.
+        if let Some(text) = result.selected_text.take() {
+            if let Some(intent) = self.form_clipboard.take() {
+                if !text.is_empty() {
+                    self.form_clipboard_text = Some(text);
+                    if intent == FormClipboard::Cut {
+                        // The other half of a cut: what was taken is removed
+                        // through the engine's own replacement, in one edit,
+                        // rather than by a run of synthesised backspaces.
+                        self.ask_focused_form_event(
+                            pulpit_render::document::protocol::FormInputEvent::ReplaceSelection {
+                                text: String::new(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
         self.reader.set_form_typing(result.text_focus);
         let opened_choice = result.opened_choice;
         // Read before the choice moves into the reader: the uncommitted rule
@@ -5838,6 +6006,46 @@ impl App {
             return Some(Task::none());
         }
 
+        // Tab walks the form's own fields, and it does so whether or not one
+        // of them already holds the caret: reaching the *first* field of a
+        // form is precisely the case a keyboard has no other way to do, and a
+        // reader who cannot start has no traversal at all.
+        //
+        // Ahead of `form_key` because PDFium has a Tab of its own —
+        // `FORM_OnChar('\t')` — and the two cannot both have the key. Its walk
+        // follows the file's `/Fields` order rather than reading order, stops
+        // at the edge of the loaded page, and cannot scroll the page it lands
+        // on, so a field two pages down is focused invisibly. `GoToField`
+        // turns the page first and then names the field (§8.6).
+        //
+        // Only where there is a form: on a deck of slides Tab stays what the
+        // keymap says it is.
+        if !control && key == Some("Tab") && self.reader.has_form() {
+            if let Some((page, name)) = self.reader.field_to_focus(!shift) {
+                return Some(self.on_read_command(ReadCommand::GoToField { page, name }));
+            }
+        }
+
+        // Space toggles the box that holds the focus, as it does in every
+        // form on the machine. It has to be caught here rather than in
+        // `form_key`: a checkbox takes the focus without taking a *caret*, so
+        // `form_has_keyboard` is false below and the key would otherwise be
+        // the keymap's — which is to say, the next slide. Forwarded as the
+        // character PDFium's own button handler acts on, not as a synthesised
+        // click on a widget whose position this layer would have to guess.
+        if !control && key == Some("Space") {
+            use pulpit_render::document::FieldKind;
+            if matches!(
+                self.reader.focused_field_kind(),
+                Some(FieldKind::Checkbox | FieldKind::RadioGroup)
+            ) {
+                self.ask_focused_form_event(
+                    pulpit_render::document::protocol::FormInputEvent::Char { character: ' ' },
+                );
+                return Some(Task::none());
+            }
+        }
+
         // A field has the caret: the keyboard belongs to the document, not to
         // the toolbar (§8.6). This comes before everything, including Page
         // Down and Ctrl-Z, because a field being typed into is a text box and
@@ -6005,6 +6213,16 @@ impl App {
                 let page = *page;
                 let name = name.clone();
                 let task = self.on_read_command(ReadCommand::GoToPage(page));
+                // The page alone is not enough for a field near its foot: the
+                // caret would land somewhere the reader cannot see, which for
+                // a Tab is indistinguishable from the key doing nothing. The
+                // scroll is recomputed after the reveal, because the one the
+                // page jump made was worked out before it.
+                let task = if self.reader.reveal_field(&name) {
+                    self.scroll_surface_to_reader()
+                } else {
+                    task
+                };
                 if let Some(link) = self.reader_link.as_mut() {
                     link.ask(crate::reader_link::Ask::FormEvent {
                         page,
