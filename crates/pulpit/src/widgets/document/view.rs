@@ -132,16 +132,29 @@ fn sheet<Message: Clone + 'static>(
             .height(Length::Fixed(page.placed.height))
             .into(),
     };
+    let drawn = (page.placed.width, page.placed.height);
     let sheet = container(inner)
-        .width(Length::Fixed(page.placed.width))
-        .height(Length::Fixed(page.placed.height))
+        .width(Length::Fixed(drawn.0))
+        .height(Length::Fixed(drawn.1))
         .style(|_theme| container::Style {
             background: Some(iced::Background::Color(iced::Color::WHITE)),
             ..container::Style::default()
         });
 
+    // The unfinished gesture goes over the page, so the stroke follows the
+    // hand instead of the round trip that rasterises it (A2). It is only ever
+    // the *open* gesture: once released there is nothing here to duplicate the
+    // committed mark (A1, §9.2).
+    let sheet: Element<'static, Message> = match page.preview.clone() {
+        Some(preview) => {
+            iced::widget::stack![sheet, super::preview::layer(preview, page.canonical, drawn)]
+                .into()
+        }
+        None => sheet.into(),
+    };
+
     if !mode.interactive() {
-        return sheet.into();
+        return sheet;
     }
 
     // Pointer positions leave this widget in canonical page points and in no

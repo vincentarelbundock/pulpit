@@ -6,4 +6,5 @@
 //! and validation depend on it, and `view.rs` is free to draw.
 
 pub mod model;
+pub mod preview;
 pub mod view;

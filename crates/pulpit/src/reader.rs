@@ -294,6 +294,41 @@ impl ReaderSession {
         }
     }
 
+    /// The unfinished gesture on `page`, if it is there and worth drawing.
+    ///
+    /// Only ink and a text selection draw anything: an eraser sweep shows its
+    /// effect by taking marks away, and a click-placed note has no gesture at
+    /// all. Nothing here outlives the gesture, so it cannot become a second
+    /// copy of a committed mark (A1).
+    fn preview_for(
+        &self,
+        page: PageIndex,
+    ) -> Option<crate::widgets::document::preview::GesturePreview> {
+        use pulpit_core::annotate::Gesture;
+
+        let gesture = self.interaction.gesture()?;
+        if gesture.page() != page {
+            return None;
+        }
+        let (points, quads, style) = match gesture {
+            Gesture::Ink { points, style, .. } => (
+                points.iter().map(|point| point.at).collect(),
+                Vec::new(),
+                *style,
+            ),
+            Gesture::Selecting { quads, style, .. } => (Vec::new(), quads.clone(), *style),
+            Gesture::Erasing { .. } | Gesture::Transforming { .. } => return None,
+        };
+        let preview = crate::widgets::document::preview::GesturePreview {
+            points,
+            quads,
+            color: style.color.rgb(),
+            opacity: style.opacity,
+            width: style.width,
+        };
+        (!preview.is_empty()).then_some(preview)
+    }
+
     /// How far from a mark the eraser still takes it, in page points.
     ///
     /// Scaled by the zoom, because the eraser is aimed with a pointer on
@@ -624,6 +659,10 @@ impl ReaderSession {
                 .visible(self.controls.offset, self.cell.1)
                 .into_iter()
                 .map(|placed| ReaderPage {
+                    // The open gesture, drawn by the UI so the stroke follows
+                    // the hand rather than the round trip (A2). Only ever on
+                    // the page the gesture is on.
+                    preview: self.preview_for(placed.page),
                     canonical: self
                         .pages
                         .get(placed.page.get())
@@ -1220,6 +1259,103 @@ mod tests {
             session.annotations_wanted().contains(&PageIndex(0)),
             "the edited page's marks were not re-read"
         );
+    }
+
+    #[test]
+    fn an_open_stroke_is_previewed_on_its_own_page_and_nowhere_else() {
+        // A2: the UI draws the unfinished stroke so it follows the hand
+        // rather than the round trip that rasterises it.
+        let mut session = open(3);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+
+        let facet = session.facet(true);
+        let drawn = facet.visible.iter().filter(|page| page.preview.is_some());
+        assert_eq!(drawn.count(), 1, "the preview is on exactly one page");
+        let on = facet
+            .visible
+            .iter()
+            .find(|page| page.preview.is_some())
+            .unwrap();
+        assert_eq!(on.placed.page, PageIndex(0));
+        assert!(on.preview.as_ref().unwrap().points.len() >= 2);
+    }
+
+    #[test]
+    fn the_preview_is_gone_the_moment_the_gesture_is() {
+        // Nothing here may outlive the commit, or it would be a second copy
+        // of the mark (A1).
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        assert!(session
+            .facet(true)
+            .visible
+            .iter()
+            .any(|page| page.preview.is_some()));
+
+        let Released::Commit(_) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        assert!(
+            session
+                .facet(true)
+                .visible
+                .iter()
+                .all(|page| page.preview.is_none()),
+            "the preview outlived the gesture"
+        );
+    }
+
+    #[test]
+    fn an_eraser_sweep_previews_nothing() {
+        // It shows its effect by taking marks away; a line drawn along the
+        // sweep would read as a mark being made.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(100.0)]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Eraser)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 100.0);
+        assert!(session
+            .facet(true)
+            .visible
+            .iter()
+            .all(|page| page.preview.is_none()));
+    }
+
+    #[test]
+    fn a_selection_previews_the_runs_the_engine_resolved() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Highlighter)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 300.0, 100.0);
+        // Nothing resolved yet: nothing to show.
+        assert!(session
+            .facet(true)
+            .visible
+            .iter()
+            .all(|page| page.preview.is_none()));
+
+        session.selection_resolved(
+            vec![pulpit_core::page::PageQuad::from_rect(
+                pulpit_core::page::PageRect::new(72.0, 92.0, 300.0, 108.0),
+            )],
+            "words".into(),
+            false,
+        );
+        let facet = session.facet(true);
+        let preview = facet
+            .visible
+            .iter()
+            .find_map(|page| page.preview.as_ref())
+            .expect("the resolved runs are drawn");
+        assert_eq!(preview.quads.len(), 1);
     }
 
     #[test]

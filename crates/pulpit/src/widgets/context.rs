@@ -232,6 +232,9 @@ pub struct ReaderPage {
     /// document that mixes portrait body pages with a landscape appendix has
     /// no single scale and the conversion has to be per page.
     pub canonical: (f32, f32),
+    /// The unfinished gesture, when one is open on this page (A2). Only ever
+    /// on one page at a time, because only one gesture is open at a time.
+    pub preview: Option<crate::widgets::document::preview::GesturePreview>,
     /// The most recent complete frame for this page at roughly this size, or
     /// `None` while one is being rendered. A page with no frame yet draws its
     /// sheet and nothing on it, rather than nothing at all: the column must
