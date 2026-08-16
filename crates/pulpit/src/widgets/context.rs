@@ -271,6 +271,22 @@ pub struct ReaderPage {
     /// The marquee being drawn or chosen about, when it is on this page, in
     /// canonical page points.
     pub marquee: Option<pulpit_core::page::PageRect>,
+    /// Fields on this page that are drawn but can never be filled, so the
+    /// reader is told rather than left clicking at a box that does nothing.
+    pub dead_fields: Vec<DeadField>,
+}
+
+/// A widget pulpit shows and refuses to fill (§6.4).
+///
+/// Chrome, like the selection outline: it is a statement about what the
+/// document contains, nothing about it is ever written to the file, and it is
+/// drawn only where the reader can act on knowing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeadField {
+    /// Where the widget is, in canonical page space (A4).
+    pub bounds: pulpit_core::page::PageRect,
+    /// What to say about it, in the fewest words that are still true.
+    pub label: &'static str,
 }
 
 /// The selected annotation, as the page surface draws it.
@@ -349,6 +365,12 @@ pub struct ReaderData<'a> {
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
     pub outline: &'a [OutlineRow],
+    /// Does this document have fields at all (§8.6)? The navigator is offered
+    /// only where there is something to navigate.
+    pub has_form: bool,
+    /// The document's fields, in the order the file lists them, as the engine
+    /// last reported them. Empty for everything that is not a form.
+    pub fields: &'a [pulpit_render::document::FormField],
     /// The calendar open over a date field, if one is (§8.6).
     pub date_picker: Option<&'a crate::reader::DatePicker>,
     /// The language a picked date is written in.

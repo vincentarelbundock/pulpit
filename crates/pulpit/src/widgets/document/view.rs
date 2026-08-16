@@ -372,8 +372,21 @@ fn sheet<'a, Message: Clone + 'static>(
         || searched
         || !page.selection.is_empty()
         || page.marquee.is_some()
+        || !page.dead_fields.is_empty()
     {
         let mut layers = iced::widget::stack![sheet];
+        // Under everything the reader made: a badge is a statement about the
+        // file, and nothing that says what the document *is* may cover what
+        // somebody wrote on it.
+        if !page.dead_fields.is_empty() {
+            layers = layers.push(super::preview::dead_field_layer(
+                page.dead_fields.clone(),
+                theme::ambient::muted(),
+                shown,
+                origin,
+                drawn,
+            ));
+        }
         // Search hits go under the marks: they are a way of finding the page,
         // not something on it, and must never cover what the reader wrote.
         for (quads, opacity) in [
@@ -1098,9 +1111,15 @@ fn outline<Message: Clone + 'static>(
             .into()
     };
 
-    let tabs = row![tab(OutlineView::Bookmarks), tab(OutlineView::Thumbnails)]
+    let mut tabs = row![tab(OutlineView::Bookmarks), tab(OutlineView::Thumbnails)]
         .spacing(theme::space::XS)
         .align_y(Alignment::Center);
+    // A third tab only where there is a form. The rail is the toggle: a
+    // document with fields grows one more way to look at itself, and a deck of
+    // slides is left exactly as it was.
+    if reader.has_form {
+        tabs = tabs.push(tab(OutlineView::Fields));
+    }
 
     let header = row![disclosure(), tabs]
         .spacing(theme::space::XS)
@@ -1148,6 +1167,80 @@ fn outline<Message: Clone + 'static>(
                     control.on_press(send(ReadCommand::GoToPage(entry.page)))
                 } else {
                     control
+                });
+            }
+            scrollable(list)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+        OutlineView::Fields if reader.fields.is_empty() => {
+            nothing("This document has no form fields.")
+        }
+        OutlineView::Fields => {
+            let mut list = column![].spacing(2.0);
+            for field in reader.fields {
+                // A choice field with several selections has no single value,
+                // so "filled" asks both questions rather than only the first.
+                let filled = !field.value.is_empty() || !field.selected.is_empty();
+                let wanted = field.required && !filled;
+                // The name as the file gives it. A field with no name is a
+                // field nothing can say anything about, and it is still listed:
+                // it is on the page either way.
+                let name = if field.name.is_empty() {
+                    "(unnamed)".to_string()
+                } else {
+                    field.name.clone()
+                };
+                let label = text(name)
+                    .size(theme::type_scale::LABEL)
+                    .width(Length::Fill)
+                    .color(if wanted {
+                        theme::ambient::alert()
+                    } else {
+                        theme::ambient::text()
+                    });
+                // Two words at most, in the muted role: what kind of control
+                // it is, and whether anything is in it. The status is said in
+                // words rather than in a colour alone, because a colour is the
+                // one thing a reader cannot be asked to decode.
+                let kind = text(field.kind.label().to_string())
+                    .size(theme::type_scale::LABEL)
+                    .color(theme::ambient::muted());
+                let status = text(
+                    if wanted {
+                        "required"
+                    } else if filled {
+                        "filled"
+                    } else {
+                        "empty"
+                    }
+                    .to_string(),
+                )
+                .size(theme::type_scale::LABEL)
+                .color(if wanted {
+                    theme::ambient::alert()
+                } else {
+                    theme::ambient::muted()
+                });
+                let control = button(
+                    row![label, kind, status]
+                        .spacing(theme::space::XS)
+                        .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding(Padding::from([3.0, 6.0]))
+                .style(theme::ambient::tool_button);
+                // A field the producer placed nowhere has no page to go to, so
+                // the row says it exists and does not offer a jump it cannot
+                // make.
+                let target = field.widgets.first().map(|widget| widget.page);
+                list = list.push(match (live, target) {
+                    (true, Some(page)) => control.on_press(send(ReadCommand::GoToField {
+                        page,
+                        name: field.name.clone(),
+                    })),
+                    _ => control,
                 });
             }
             scrollable(list)

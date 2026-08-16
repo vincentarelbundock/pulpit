@@ -199,6 +199,13 @@ pub struct ReaderSession {
     /// click on a slide is not a click on a field, and a round trip per click
     /// on a serial worker queues ahead of the page renders.
     has_form: bool,
+    /// The document's fields, as the engine last listed them (§6.4).
+    ///
+    /// A copy for drawing and for nothing else: the navigator reads it and the
+    /// badges read it, and neither writes to it. It changes only when a fresh
+    /// list arrives, so nothing here can disagree with PDFium for longer than
+    /// the round trip after a commit.
+    fields: Vec<pulpit_render::document::FormField>,
     /// Whether a field currently holds the caret, as the *worker* last said.
     ///
     /// Never guessed here. PDFium owns the caret — it decides whether a click
@@ -414,6 +421,58 @@ impl ReaderSession {
         self.has_form
     }
 
+    /// Take the engine's field list as it stands.
+    pub fn set_fields(&mut self, fields: Vec<pulpit_render::document::FormField>) {
+        self.fields = fields;
+    }
+
+    /// The widgets on `page` that are drawn but can never be filled (§6.4).
+    ///
+    /// Signature fields and file-selection fields are the two the worker
+    /// refuses outright, so they are the two a reader would otherwise click at
+    /// and get nothing from. Everything else is either fillable or read-only,
+    /// and a read-only field that looks like a printed value is not a fault.
+    fn dead_fields_on(&self, page: PageIndex) -> Vec<crate::widgets::context::DeadField> {
+        use pulpit_render::document::FieldKind;
+
+        if !self.has_form {
+            return Vec::new();
+        }
+        self.fields
+            .iter()
+            .filter_map(|field| {
+                let label = if field.kind == FieldKind::Signature {
+                    "signature — not supported"
+                } else if field.file_select {
+                    "file field — not fillable"
+                } else {
+                    return None;
+                };
+                Some(
+                    field
+                        .widgets
+                        .iter()
+                        .filter(move |widget| widget.page == page)
+                        .map(move |widget| crate::widgets::context::DeadField {
+                            bounds: widget.bounds,
+                            label,
+                        }),
+                )
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Where a named field is drawn, for the jump the navigator makes.
+    /// `None` for a field the producer placed nowhere.
+    pub fn field_page(&self, name: &str) -> Option<PageIndex> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .and_then(|field| field.widgets.first())
+            .map(|widget| widget.page)
+    }
+
     /// Whether the keyboard belongs to a field rather than to the toolbar.
     ///
     /// Two ways in, because PDFium reports them differently. A text field
@@ -567,6 +626,7 @@ impl ReaderSession {
             operations: vec![UndoOperation::SetField {
                 name: committed.name.clone(),
                 value: committed.previous.clone(),
+                selected: committed.previous_selected.clone(),
             }],
             restores,
             label: format!("Fill {}", committed.name),
@@ -2282,6 +2342,9 @@ impl ReaderSession {
                 self.page_entry = None;
                 true
             }
+            // Handled above the session: it becomes an ordinary `GoToPage`
+            // plus a focus request, and moving the caret is the worker's.
+            ReadCommand::GoToField { .. } => false,
             ReadCommand::SetZoom(zoom) => {
                 self.set_zoom(*zoom);
                 true
@@ -2681,6 +2744,7 @@ impl ReaderSession {
                         .marquee()
                         .filter(|(page, _)| *page == placed.page)
                         .map(|(_, rect)| rect),
+                    dead_fields: self.dead_fields_on(placed.page),
                     placed,
                 })
                 .collect()
@@ -2696,6 +2760,8 @@ impl ReaderSession {
             controls: &self.controls,
             scale: self.scale,
             outline: &self.outline,
+            has_form: self.has_form,
+            fields: &self.fields,
             date_picker: self.date_picker.as_ref(),
             date_language: self.date_language,
             level: self.level,
@@ -2832,6 +2898,85 @@ mod tests {
         );
         session.set_cell(612.0, 400.0);
         session
+    }
+
+    /// A form document with one field of every kind the reader has to treat
+    /// differently: one it can fill, one it never can, and one the worker
+    /// refuses because it names a file.
+    fn form(pages: usize) -> ReaderSession {
+        use pulpit_render::document::{FieldKind, FieldWidget, FormField};
+
+        let widget = |page: usize| FieldWidget {
+            page: PageIndex(page),
+            bounds: pulpit_core::page::PageRect::new(100.0, 100.0, 300.0, 130.0),
+            option: None,
+        };
+        let field = |name: &str, kind, page, file_select| FormField {
+            name: name.to_string(),
+            kind,
+            value: String::new(),
+            selected: Vec::new(),
+            read_only: false,
+            required: false,
+            password: false,
+            file_select,
+            rich_text: false,
+            format: Default::default(),
+            options: Vec::new(),
+            allows_custom_value: false,
+            multiple_selection: false,
+            widgets: vec![widget(page)],
+        };
+        let mut session = ReaderSession::new();
+        session.opened(
+            vec![PageGeometry::upright(612.0, 792.0); pages],
+            CompatibilityLevel::Native,
+            Vec::new(),
+            true,
+        );
+        session.set_cell(612.0, 400.0);
+        session.set_fields(vec![
+            field("name", FieldKind::Text, 0, false),
+            field("attachment", FieldKind::Text, 0, true),
+            field("sign here", FieldKind::Signature, 1, false),
+        ]);
+        session
+    }
+
+    #[test]
+    fn only_the_fields_nobody_can_fill_are_badged() {
+        let session = form(2);
+
+        let first: Vec<&str> = session
+            .dead_fields_on(PageIndex(0))
+            .iter()
+            .map(|field| field.label)
+            .collect();
+        assert_eq!(
+            first,
+            vec!["file field — not fillable"],
+            "the plain text field is fillable and says nothing"
+        );
+
+        let second: Vec<&str> = session
+            .dead_fields_on(PageIndex(1))
+            .iter()
+            .map(|field| field.label)
+            .collect();
+        assert_eq!(second, vec!["signature — not supported"]);
+    }
+
+    #[test]
+    fn a_document_with_no_form_badges_nothing() {
+        assert!(open(2).dead_fields_on(PageIndex(0)).is_empty());
+    }
+
+    #[test]
+    fn the_navigator_finds_the_page_a_field_is_drawn_on() {
+        let session = form(2);
+        assert_eq!(session.field_page("sign here"), Some(PageIndex(1)));
+        assert_eq!(session.field_page("name"), Some(PageIndex(0)));
+        assert_eq!(session.field_page("no such field"), None);
     }
 
     #[test]
@@ -3723,6 +3868,8 @@ mod tests {
             value: value.into(),
             previous: previous.into(),
             revision: DocumentRevision(4),
+            selected: Vec::new(),
+            previous_selected: Vec::new(),
         }
     }
 
@@ -3758,6 +3905,7 @@ mod tests {
                 // Back to what was there before, which for a first fill is
                 // an empty field rather than the value just typed.
                 value: String::new(),
+                selected: Vec::new(),
             }]
         );
         assert_eq!(

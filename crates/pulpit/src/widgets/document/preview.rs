@@ -137,6 +137,116 @@ pub fn marquee_layer<'a, Message: 'a>(
     .into()
 }
 
+/// Mark the widgets on one sheet that are drawn but can never be filled
+/// (§6.4).
+///
+/// Chrome, like the selection outline and for the same reason it is allowed:
+/// nothing about it is ever written to the document, and it says something
+/// about the file that the file itself never says. A signature field and a
+/// file-selection field both look exactly like a box to click at, and the only
+/// way to find out that pulpit refuses them is to click.
+///
+/// Deliberately quiet: the muted role and the smallest type, so a form with
+/// twenty signature lines still reads as a form and not as an error report.
+pub fn dead_field_layer<'a, Message: 'a>(
+    fields: Vec<crate::widgets::context::DeadField>,
+    muted: Color,
+    canonical: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+) -> Element<'a, Message> {
+    canvas_widget::Canvas::new(DeadFieldPainter {
+        fields,
+        muted,
+        canonical,
+        origin,
+        drawn,
+    })
+    .width(Length::Fixed(drawn.0))
+    .height(Length::Fixed(drawn.1))
+    .into()
+}
+
+/// How big a badge's words are drawn, on screen. Smaller than any type in the
+/// chrome: this is a footnote on the page, not a label in the interface.
+const BADGE_TEXT: f32 = 9.0;
+
+struct DeadFieldPainter {
+    fields: Vec<crate::widgets::context::DeadField>,
+    muted: Color,
+    canonical: (f32, f32),
+    /// As [`SelectionPainter::origin`].
+    origin: (f32, f32),
+    drawn: (f32, f32),
+}
+
+impl<Message> canvas::Program<Message> for DeadFieldPainter {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let scale_x = if self.canonical.0 > 0.0 {
+            self.drawn.0 / self.canonical.0
+        } else {
+            1.0
+        };
+        let scale_y = if self.canonical.1 > 0.0 {
+            self.drawn.1 / self.canonical.1
+        } else {
+            1.0
+        };
+        for field in &self.fields {
+            let rect = field.bounds;
+            let top_left = Point::new(
+                (rect.left - self.origin.0) * scale_x,
+                (rect.top - self.origin.1) * scale_y,
+            );
+            let size = Size::new(
+                (rect.width() * scale_x).max(1.0),
+                (rect.height() * scale_y).max(1.0),
+            );
+            // A hairline round the widget and a light wash inside: enough to
+            // say "this box is not the same as the ones you can type in",
+            // without covering whatever the producer drew in it.
+            frame.fill_rectangle(
+                top_left,
+                size,
+                Color {
+                    a: 0.06,
+                    ..self.muted
+                },
+            );
+            frame.stroke(
+                &Path::rectangle(top_left, size),
+                Stroke::default()
+                    .with_color(Color {
+                        a: 0.55,
+                        ..self.muted
+                    })
+                    .with_width(1.0),
+            );
+            // The words sit inside the widget's own top-left corner, so a
+            // badge never reaches over a neighbouring field to be read as
+            // that one's.
+            frame.fill_text(canvas::Text {
+                content: field.label.to_string(),
+                position: Point::new(top_left.x + 2.0, top_left.y + 1.0),
+                color: self.muted,
+                size: BADGE_TEXT.into(),
+                ..canvas::Text::default()
+            });
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 struct MarqueePainter {
     rect: PageRect,
     canonical: (f32, f32),

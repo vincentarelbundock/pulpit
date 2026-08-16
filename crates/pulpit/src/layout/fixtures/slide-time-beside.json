@@ -1,0 +1,140 @@
+{
+  "format_version": 1,
+  "name": "Slide + Time Beside",
+  "design_ratio": "sixteen-nine",
+  "root": {
+    "type": "split",
+    "id": 0,
+    "name": "Presenter screen",
+    "direction": "horizontal",
+    "children": [
+      {
+        "type": "leaf",
+        "id": 1,
+        "widget": {
+          "kind": "current-slide",
+          "style": {
+            "variant": "standard",
+            "scale": 1.0,
+            "alignment": "center"
+          },
+          "config": {
+            "slide": {
+              "fit": "fit"
+            }
+          }
+        },
+        "padding": 0.0,
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel"
+      },
+      {
+        "type": "split",
+        "id": 2,
+        "name": "Time and navigation",
+        "direction": "vertical",
+        "children": [
+          {
+            "type": "leaf",
+            "id": 3,
+            "widget": {
+              "kind": "timer",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "timer": {
+                  "warning_minutes": 5
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 4,
+            "widget": {
+              "kind": "clock",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "clock": {
+                  "twenty_four_hour": true,
+                  "show_seconds": false,
+                  "show_alarms": true
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 5,
+            "widget": {
+              "kind": "slide-slider",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": "none"
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          },
+          {
+            "type": "leaf",
+            "id": 6,
+            "widget": {
+              "kind": "slide-buttons",
+              "style": {
+                "variant": "standard",
+                "scale": 1.0,
+                "alignment": "center"
+              },
+              "config": {
+                "buttons": {
+                  "back": true,
+                  "forward": true,
+                  "labels": true
+                }
+              }
+            },
+            "padding": 12.0,
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel"
+          }
+        ],
+        "sizes": [
+          0.24,
+          0.16,
+          0.16,
+          0.44
+        ],
+        "gap": 8.0,
+        "min_child": 0.05
+      }
+    ],
+    "sizes": [
+      0.75,
+      0.25
+    ],
+    "gap": 8.0,
+    "min_child": 0.05
+  }
+}

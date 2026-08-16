@@ -56,6 +56,12 @@ pub enum Ask {
     /// What is on a page, for hit-testing. The eraser and the selection tool
     /// need to know what is under the pointer, and only the document does.
     ListAnnotations { page: pulpit_core::page::PageIndex },
+    /// Every AcroForm field, in the order the file lists them (§6.4).
+    ///
+    /// Read-only: it never moves the revision. Asked once when the document is
+    /// described and again after a commit, because PDFium is the sole author
+    /// of a value and a list this process patched would be a second opinion.
+    ListFields,
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -141,6 +147,8 @@ pub enum Told {
         page: pulpit_core::page::PageIndex,
         summaries: Vec<pulpit_render::document::AnnotationSummary>,
     },
+    /// The document's fields as the engine now holds them.
+    Fields(Vec<pulpit_render::document::FormField>),
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
@@ -185,7 +193,14 @@ pub enum Told {
     /// over the page's frame until a full frame containing the same revision
     /// arrives (§9.2, §9.4).
     Patched(Box<pulpit_render::document::protocol::DocumentFrame>),
-    Saved(pulpit_render::document::SavedDocument),
+    Saved {
+        saved: pulpit_render::document::SavedDocument,
+        /// The required fields (`/Ff` bit 2) still holding nothing when the
+        /// copy was written. Told, never enforced: pulpit is not the form's
+        /// submit button, but a copy quietly missing what the document says it
+        /// needs is worth one sentence.
+        unfilled_required: Vec<String>,
+    },
     /// Something was refused, or the worker went. `fatal` is the difference
     /// that matters: a refusal is an answer and the session carries on; a lost
     /// worker means nothing more will be answered until the document is
@@ -373,6 +388,10 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             Ok(DocumentResponse::Annotations(summaries)) => Told::Annotations { page, summaries },
             other => unexpected(other, "an annotation list"),
         }],
+        Ask::ListFields => vec![match session.request(DocumentRequest::ListFields) {
+            Ok(DocumentResponse::Fields(fields)) => Told::Fields(fields),
+            other => unexpected(other, "a field list"),
+        }],
         Ask::SelectText {
             page,
             selection,
@@ -407,10 +426,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
         }],
         Ask::FormEvent { page, event } => {
             match session.request(DocumentRequest::FormEvent { page, event }) {
-                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged {
-                    page,
-                    result: Box::new(result),
-                }],
+                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged { page, result }],
                 // A refused keystroke is not a lost worker and not a lost
                 // edit: the field simply did not take it. Reported at debug
                 // level rather than as a failure banner, because a document
@@ -457,7 +473,25 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 options,
             },
         )) {
-            Ok(DocumentResponse::Saved(saved)) => Told::Saved(saved),
+            Ok(DocumentResponse::Saved(saved)) => {
+                // What the document says it still needs, read after the write
+                // so the answer describes the copy that was actually made. A
+                // form that cannot be listed simply reports nothing missing.
+                let unfilled_required = match session.request(DocumentRequest::ListFields) {
+                    Ok(DocumentResponse::Fields(fields)) => fields
+                        .into_iter()
+                        .filter(|field| {
+                            field.required && field.value.is_empty() && field.selected.is_empty()
+                        })
+                        .map(|field| field.name)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Told::Saved {
+                    saved,
+                    unfilled_required,
+                }
+            }
             other => unexpected(other, "a saved document"),
         }],
     }
