@@ -891,11 +891,17 @@ code that generates its appearance.
   only, so there is exactly one editing surface and no value-mismatch class
   of bugs.
 - Undoing a field edit is the one thing that puts a value back without a
-  person typing it, and it MUST go through the same editor: focus the widget,
-  select its contents, replace the selection. It MUST NOT write `/V` or
-  generate an appearance itself, so the comb spacing, auto-sizing, quadding
-  and format script are still PDFium's, computed once. Nothing sends a
-  forward `SetField`; the inverse is the only caller.
+  person typing it, and it MUST go through the same editor, by the mechanism
+  the field's kind takes: a text value is typed (focus the widget, select its
+  contents, replace the selection), a checkbox or radio option is pressed,
+  and a choice field's options are selected by index — text replacement edits
+  a button not at all, silently. A multi-select list box's before-image is
+  its selection indices, because one string cannot name three choices; the
+  undo record carries them. It MUST NOT write `/V` or generate an appearance
+  itself, so the comb spacing, auto-sizing, quadding and format script are
+  still PDFium's, computed once. Nothing sends a forward `SetField`; the
+  inverse is the only caller. A state no press can produce — clearing a
+  chosen radio group — is refused rather than faked.
 
 The engine remains in the supervised worker process. Interactive events
 travel over the existing IPC; invalidations return as dirty rectangles

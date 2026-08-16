@@ -138,7 +138,12 @@ pub trait DocumentBackend: Send {
     }
 
     /// Write a field, returning the value the document actually took.
-    fn set_field(&mut self, name: &str, value: &str) -> Result<String>;
+    ///
+    /// `selected` names the target selection, by option index, for a choice
+    /// field that takes several — the one shape of value a string cannot
+    /// carry. Empty for everything else, and a backend may derive a single
+    /// selection from `value` when it is.
+    fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String>;
 
     fn field_value(&self, name: &str) -> Result<String>;
 
@@ -371,8 +376,8 @@ impl<'a> PdfDocument<'a> {
     ///
     /// Present so the trait's surface is reachable, and refused by the engine
     /// that has a form-fill environment (§8.6): values are typed on the page.
-    pub fn set_field(&mut self, name: &str, value: &str) -> Result<String> {
-        self.backend.set_field(name, value)
+    pub fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String> {
+        self.backend.set_field(name, value, selected)
     }
 
     /// Forward one raw input event to the form-fill environment (§8.6).
@@ -692,14 +697,17 @@ impl<'a> PdfDocument<'a> {
                 })
             }
             DocumentCommand::SetField { name, value } => {
-                let previous = self.backend.field_value(name)?;
-                let taken = self.backend.set_field(name, value)?;
-                let widget = self
+                // The whole before-image, not only the value: a multi-select
+                // list box's state is its selection, and the string alone
+                // restores at most one of three choices.
+                let before = self
                     .backend
                     .fields()?
                     .into_iter()
                     .find(|field| field.name == *name)
-                    .and_then(|field| field.widgets.first().cloned());
+                    .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
+                let taken = self.backend.set_field(name, value, &[])?;
+                let widget = before.widgets.first().cloned();
                 Ok(Step {
                     page: widget.as_ref().map(|widget| widget.page),
                     region: widget.map(|widget| widget.bounds),
@@ -709,7 +717,8 @@ impl<'a> PdfDocument<'a> {
                     },
                     undo: UndoOperation::SetField {
                         name: name.clone(),
-                        value: previous,
+                        value: before.value,
+                        selected: before.selected,
                     },
                 })
             }
@@ -754,9 +763,18 @@ impl<'a> PdfDocument<'a> {
                     },
                 })
             }
-            UndoOperation::SetField { name, value } => {
-                let previous = self.backend.field_value(name)?;
-                let taken = self.backend.set_field(name, value)?;
+            UndoOperation::SetField {
+                name,
+                value,
+                selected,
+            } => {
+                let current = self
+                    .backend
+                    .fields()?
+                    .into_iter()
+                    .find(|field| field.name == *name)
+                    .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
+                let taken = self.backend.set_field(name, value, selected)?;
                 Ok(Step {
                     page: None,
                     region: None,
@@ -766,7 +784,8 @@ impl<'a> PdfDocument<'a> {
                     },
                     undo: UndoOperation::SetField {
                         name: name.clone(),
-                        value: previous,
+                        value: current.value,
+                        selected: current.selected,
                     },
                 })
             }

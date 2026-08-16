@@ -384,6 +384,10 @@ impl<'a> PdfiumDocument<'a> {
         unsafe { bindings.FORM_OnAfterLoadPage(handle, form) };
         if let Some(binding) = self.form.as_mut() {
             binding.open_page = Some((page.get(), handle));
+            // Lent to the environment so `FFI_GetCurrentPage` can answer while
+            // a field script runs; taken back in `release_form_page`, before
+            // the handle it lends is closed.
+            binding.environment.set_current_page(page.get(), handle);
         }
         Ok(handle)
     }
@@ -396,6 +400,11 @@ impl<'a> PdfiumDocument<'a> {
         let Some((_, handle)) = self.form.as_mut().and_then(|form| form.open_page.take()) else {
             return;
         };
+        // The loan comes back before the page it lent goes away, so no script
+        // can be handed a pointer to a freed page.
+        if let Some(binding) = self.form.as_mut() {
+            binding.environment.clear_current_page();
+        }
         let bindings = self.backend.bindings();
         unsafe {
             bindings.FORM_OnBeforeClosePage(handle, form);
@@ -543,53 +552,32 @@ impl<'a> PdfiumDocument<'a> {
     fn committed_field(
         &self,
         page: PageIndex,
-        was_focused: Option<(String, String)>,
+        was_focused: Option<FormField>,
     ) -> Option<crate::document::protocol::CommittedField> {
         use crate::document::protocol::CommittedField;
 
-        let form = self.form_handle()?;
-        let bindings = self.backend.bindings();
-        let geometry = self.measure(page).ok()?;
-
-        // The focused widget first: during typing that is the field being
-        // edited, and it is exact.
-        let focused = self
-            .backend
-            .on_page(self.document, page.get(), |handle| {
-                let mut index = 0;
-                let annotation = std::ptr::null_mut();
-                let mut annotation = annotation;
-                let found =
-                    unsafe { bindings.FORM_GetFocusedAnnot(form, &mut index, &mut annotation) }
-                        != 0;
-                if !found || annotation.is_null() {
-                    return Ok(None);
-                }
-                let field =
-                    read_form_field(bindings, form, annotation, PageIndex(page.get()), &geometry);
-                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                let _ = handle;
-                Ok(field.map(|field| (field.name, field.value)))
-            })
-            .ok()
-            .flatten();
         // The before-image for whichever field this turns out to be. A commit
         // with no focus is the field that *was* focused; a commit with focus
         // is the same field, still held.
-        let previous = |name: &str| -> String {
+        let previous = |name: &str| -> (String, Vec<u32>) {
             was_focused
                 .as_ref()
-                .filter(|(had, _)| had == name)
-                .map(|(_, value)| value.clone())
+                .filter(|had| had.name == name)
+                .map(|had| (had.value.clone(), had.selected.clone()))
                 .unwrap_or_default()
         };
-        if let Some((name, value)) = focused {
-            let previous = previous(&name);
+
+        // The focused widget first: during typing that is the field being
+        // edited, and it is exact.
+        if let Some(field) = self.focused_form_field(page) {
+            let (previous, previous_selected) = previous(&field.name);
             return Some(CommittedField {
-                name,
-                value,
+                name: field.name,
+                value: field.value,
                 previous,
                 revision: DocumentRevision::INITIAL,
+                selected: field.selected,
+                previous_selected,
             });
         }
 
@@ -603,52 +591,302 @@ impl<'a> PdfiumDocument<'a> {
         // was the old behaviour: enough to bump a revision, useless to a caller
         // that wants to say *which* field it just filled, and invisible because
         // nothing asserted on it.
-        let (name, previous) = was_focused?;
-        let value = self.field_value(&name).ok()?;
+        let had = was_focused?;
+        // Read back from the page the interaction is on, which is where the
+        // field that just lost the caret almost always is. Walking the whole
+        // document — every page loaded, every widget read — is the fallback
+        // for a field mirrored somewhere else, not the cost of every commit.
+        let field = self.field_on_page(&had.name, page).or_else(|| {
+            self.fields()
+                .ok()?
+                .into_iter()
+                .find(|field| field.name == had.name)
+        })?;
         Some(CommittedField {
-            name,
-            value,
-            previous,
+            name: had.name,
+            value: field.value,
+            previous: had.value,
             revision: DocumentRevision::INITIAL,
+            selected: field.selected,
+            previous_selected: had.selected,
         })
     }
 
-    ///
-    /// Read before an event is dispatched, so a commit caused by *losing* the
-    /// focus can still say what it committed.
-    fn focused_field(&self, page: PageIndex) -> Option<(String, String)> {
-        let field = self.focused_form_field(page)?;
-        Some((field.name, field.value))
-    }
-
-    /// The field holding the caret, read from the focused annotation.
-    ///
-    /// One annotation, not a walk of the document. This runs on every form
-    /// event — twice, once before to name a commit and once after to report
-    /// the focus — so going through [`PdfiumDocument::fields`] would put a
-    /// scan of every widget on every page behind every keystroke.
-    fn focused_form_field(&self, page: PageIndex) -> Option<FormField> {
+    /// One named field, read from one page's widgets only.
+    fn field_on_page(&self, name: &str, page: PageIndex) -> Option<FormField> {
         let form = self.form_handle()?;
         let bindings = self.backend.bindings();
         let geometry = self.measure(page).ok()?;
         self.backend
-            .on_page(self.document, page.get(), |_handle| {
-                let mut index = 0;
-                let annotation = std::ptr::null_mut();
-                let mut annotation = annotation;
-                let found =
-                    unsafe { bindings.FORM_GetFocusedAnnot(form, &mut index, &mut annotation) }
-                        != 0;
-                if !found || annotation.is_null() {
-                    return Ok(None);
+            .on_page(self.document, page.get(), |handle| {
+                let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+                for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+                    let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+                    if annotation.is_null() {
+                        continue;
+                    }
+                    let field = (unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
+                        == FPDF_ANNOT_WIDGET)
+                        .then(|| read_form_field(bindings, form, annotation, page, &geometry))
+                        .flatten()
+                        .filter(|field| field.name == name);
+                    unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                    if field.is_some() {
+                        return Ok(field);
+                    }
                 }
-                let field =
-                    read_form_field(bindings, form, annotation, PageIndex(page.get()), &geometry);
-                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                Ok(field)
+                Ok(None)
             })
             .ok()
             .flatten()
+    }
+
+    /// The field holding the caret, read from the focused annotation.
+    ///
+    /// One annotation, not a walk of the document — and no page load either:
+    /// `FORM_GetFocusedAnnot` answers from the form environment alone. This
+    /// runs on every form event, twice — once before to name a commit and once
+    /// after to report the focus — so anything heavier here is paid at
+    /// keystroke rate.
+    fn focused_form_field(&self, page: PageIndex) -> Option<FormField> {
+        let form = self.form_handle()?;
+        let bindings = self.backend.bindings();
+        let geometry = self.measure(page).ok()?;
+        let mut index = 0;
+        let mut annotation = std::ptr::null_mut();
+        let found =
+            unsafe { bindings.FORM_GetFocusedAnnot(form, &mut index, &mut annotation) } != 0;
+        if !found || annotation.is_null() {
+            return None;
+        }
+        let field = read_form_field(bindings, form, annotation, page, &geometry);
+        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+        field
+    }
+
+    /// Focus the first widget of `name` on `page`, on the page the form
+    /// environment has open, and return that page's handle.
+    ///
+    /// Focusing by annotation rather than by synthesising a click is what
+    /// makes this work for a widget that sits underneath another one.
+    ///
+    /// The annotations are enumerated from the form environment's own open
+    /// page — not from a separately loaded copy of the same page. PDFium
+    /// matches a widget to its page *view*, so an annotation read off a second
+    /// `FPDF_PAGE` for the same page is not one `FORM_SetFocusedAnnot`
+    /// recognises: it returns false, and the field silently refuses to take a
+    /// value.
+    fn focus_field_widget(&mut self, name: &str, page: PageIndex) -> Result<FPDF_PAGE> {
+        let form = self
+            .form_handle()
+            .ok_or_else(|| DocumentError::Backend("this document has no fillable form".into()))?;
+        let handle = self.open_form_page(page)?;
+        let bindings = self.backend.bindings();
+        let geometry = self.measure(page)?;
+        let mut focused = false;
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+        for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+            let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+            if annotation.is_null() {
+                continue;
+            }
+            let matches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) } == FPDF_ANNOT_WIDGET
+                && read_form_field(bindings, form, annotation, page, &geometry)
+                    .is_some_and(|found| found.name == name);
+            if matches {
+                focused = unsafe { bindings.FORM_SetFocusedAnnot(form, annotation) } != 0;
+                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                break;
+            }
+            unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+        }
+        if !focused {
+            return Err(DocumentError::Backend(format!(
+                "the field {name} could not be focused"
+            )));
+        }
+        Ok(handle)
+    }
+
+    /// Put `value` into a text-editable field, exactly as a person selecting
+    /// all and typing would.
+    fn set_text_field(&mut self, field: &FormField, value: &str) -> Result<()> {
+        let page = field.widgets[0].page;
+        let handle = self.focus_field_widget(&field.name, page)?;
+        let form = self
+            .form_handle()
+            .expect("the widget above was focused through this form");
+        let bindings = self.backend.bindings();
+        // Select what is there, then replace it. An empty replacement is a
+        // cleared field, which is what undoing the first fill of an empty
+        // field has to produce.
+        unsafe { bindings.FORM_SelectAllText(form, handle) };
+        let mut text: Vec<u16> = value.encode_utf16().collect();
+        text.push(0);
+        unsafe { bindings.FORM_ReplaceSelection(form, handle, text.as_ptr()) };
+        // Losing the focus is what commits it, exactly as it is when a person
+        // clicks away.
+        unsafe { bindings.FORM_ForceToKillFocus(form) };
+        self.release_form_page();
+        Ok(())
+    }
+
+    /// Press a checkbox or one option of a radio group, exactly as a person
+    /// clicking it would.
+    ///
+    /// Text replacement does not edit a button — PDFium accepts the calls and
+    /// changes nothing — so the inverse of a toggle has to be a press. The
+    /// press is only made when the state differs from what is asked for,
+    /// because pressing a checkbox that is already right would toggle it
+    /// wrong.
+    fn set_button_field(&mut self, field: &FormField, value: &str) -> Result<()> {
+        let unchecked = |held: &str| held.is_empty() || held == "Off";
+        if field.kind == FieldKind::Checkbox {
+            if unchecked(value) == unchecked(&field.value) {
+                // Already what was asked for. Pressing anyway would toggle it
+                // wrong.
+                return Ok(());
+            }
+            // A checkbox is a toggle, so any of its widgets presses it.
+            return self.press_widget(&field.widgets[0]);
+        }
+
+        // A radio group. Pressing an option chooses it; nothing a person can
+        // press chooses *nothing*, and this path does what a person can do
+        // (§8.6). A group that has never been chosen cannot be returned to
+        // that state, and saying so beats pretending.
+        if unchecked(value) {
+            return if unchecked(&field.value) {
+                Ok(())
+            } else {
+                Err(DocumentError::Unsupported(
+                    "clear a chosen radio group".into(),
+                ))
+            };
+        }
+        if field.value == value {
+            return Ok(());
+        }
+        // Which widget stands for `value`? A group with `/Opt` says so per
+        // widget; the common group without one keeps its on-state in each
+        // kid's appearance dictionary, whose keys PDFium cannot enumerate. So
+        // the stated option is believed where there is one, and otherwise the
+        // options are pressed in turn and the group's own value — read back
+        // from the page after each press — says when the right one was hit.
+        let mut candidates: Vec<&FieldWidget> = field
+            .widgets
+            .iter()
+            .filter(|widget| widget.option.as_deref() == Some(value))
+            .collect();
+        candidates.extend(
+            field
+                .widgets
+                .iter()
+                .filter(|widget| widget.option.is_none()),
+        );
+        let mut pressed_something = false;
+        for widget in candidates {
+            self.press_widget(widget)?;
+            pressed_something = true;
+            let now = self
+                .field_on_page(&field.name, widget.page)
+                .map(|field| field.value);
+            if now.as_deref() == Some(value) {
+                return Ok(());
+            }
+        }
+        // Nothing produced the asked-for value. Best effort to leave the
+        // group as it was found rather than on whichever option the search
+        // ended on; the refusal is the answer either way.
+        if pressed_something {
+            for widget in &field.widgets {
+                self.press_widget(widget)?;
+                let now = self
+                    .field_on_page(&field.name, widget.page)
+                    .map(|found| found.value);
+                if now.as_deref() == Some(field.value.as_str()) {
+                    break;
+                }
+            }
+        }
+        Err(DocumentError::Backend(format!(
+            "{} does not offer {value}",
+            field.name
+        )))
+    }
+
+    /// One click in the middle of a widget, exactly as a pointer would make it.
+    fn press_widget(&mut self, widget: &FieldWidget) -> Result<()> {
+        let handle = self.open_form_page(widget.page)?;
+        let form = self
+            .form_handle()
+            .expect("the page above was opened through this form");
+        let bindings = self.backend.bindings();
+        let geometry = self.measure(widget.page)?;
+        let centre = PagePoint::new(
+            (widget.bounds.left + widget.bounds.right) / 2.0,
+            (widget.bounds.top + widget.bounds.bottom) / 2.0,
+        );
+        let (x, y) = geometry.to_user_space(centre);
+        unsafe {
+            bindings.FORM_OnLButtonDown(form, handle, 0, f64::from(x), f64::from(y));
+            bindings.FORM_OnLButtonUp(form, handle, 0, f64::from(x), f64::from(y));
+            bindings.FORM_ForceToKillFocus(form);
+        }
+        self.release_form_page();
+        Ok(())
+    }
+
+    /// Select the asked-for options of a combo or list box, through
+    /// `FORM_SetIndexSelected` — PDFium's own way in, the same one the
+    /// interactive `SelectOption` event uses.
+    ///
+    /// `selected` names the whole target selection when it is non-empty; a
+    /// bare `value` names one option, or — for an editable combo box — a
+    /// custom value that goes in by typing instead.
+    fn set_choice_field(&mut self, field: &FormField, value: &str, selected: &[u32]) -> Result<()> {
+        let target: Vec<u32> = if !selected.is_empty() {
+            selected.to_vec()
+        } else if let Some(index) = field.options.iter().position(|option| option == value) {
+            vec![index as u32]
+        } else if value.is_empty() {
+            Vec::new()
+        } else if field.allows_custom_value {
+            // Not in the list, but the field takes what is typed.
+            return self.set_text_field(field, value);
+        } else {
+            return Err(DocumentError::Backend(format!(
+                "{} does not offer {value}",
+                field.name
+            )));
+        };
+        if target
+            .iter()
+            .any(|index| *index as usize >= field.options.len())
+        {
+            return Err(DocumentError::Backend(format!(
+                "{} has no such option to select",
+                field.name
+            )));
+        }
+
+        let page = field.widgets[0].page;
+        let handle = self.focus_field_widget(&field.name, page)?;
+        let form = self
+            .form_handle()
+            .expect("the widget above was focused through this form");
+        let bindings = self.backend.bindings();
+        for index in 0..field.options.len().min(limits::MAX_FIELD_OPTIONS) {
+            let wanted = target.contains(&(index as u32));
+            unsafe {
+                bindings.FORM_SetIndexSelected(form, handle, index as i32, i32::from(wanted))
+            };
+        }
+        unsafe {
+            self.backend.bindings().FORM_ForceToKillFocus(form);
+        }
+        self.release_form_page();
+        Ok(())
     }
 
     /// The backend, for rendering the same open document.
@@ -1716,37 +1954,106 @@ fn field_format(
     form: FPDF_FORMHANDLE,
     annotation: pdfium_render::prelude::FPDF_ANNOTATION,
 ) -> FieldFormat {
-    /// `FPDF_ANNOT_AACTION_FORMAT`, from `fpdf_annot.h`.
+    /// `FPDF_ANNOT_AACTION_KEY_STROKE` and `FPDF_ANNOT_AACTION_FORMAT`, from
+    /// `fpdf_annot.h`.
+    const KEYSTROKE_EVENT: i32 = 12;
     const FORMAT_EVENT: i32 = 13;
 
-    let Some(script) = additional_action_script(bindings, form, annotation, FORMAT_EVENT) else {
-        return FieldFormat::Plain;
-    };
-    // `AFDate_FormatEx("dd mmmm yyyy")` carries its pattern; `AFDate_Format(2)`
-    // names one of Acrobat's numbered presets instead, and the number means
-    // nothing to anyone reading it, so that one is reported as a date with no
-    // pattern to show.
-    if let Some(pattern) = quoted_argument(&script, "AFDate_FormatEx") {
-        return FieldFormat::Date { pattern };
+    if let Some(script) = additional_action_script(bindings, form, annotation, FORMAT_EVENT) {
+        // `AFDate_FormatEx("dd mmmm yyyy")` carries its pattern;
+        // `AFDate_Format(2)` names one of Acrobat's numbered presets, whose
+        // table has been fixed since Acrobat 4 and is translated below so the
+        // date picker has a pattern to format into.
+        if let Some(pattern) = quoted_argument(&script, "AFDate_FormatEx") {
+            return FieldFormat::Date { pattern };
+        }
+        if script.contains("AFDate_Format") {
+            return FieldFormat::Date {
+                pattern: numbered_argument(&script, "AFDate_Format")
+                    .and_then(date_preset_pattern)
+                    .unwrap_or_default(),
+            };
+        }
+        if script.contains("AFTime_Format") {
+            return FieldFormat::Time;
+        }
+        if script.contains("AFPercent_Format") {
+            return FieldFormat::Percent;
+        }
+        if script.contains("AFNumber_Format") {
+            return FieldFormat::Number;
+        }
+        if script.contains("AFSpecial_Format") {
+            use crate::document::model::SpecialFormat;
+            let kind = match numbered_argument(&script, "AFSpecial_Format") {
+                Some(0) => SpecialFormat::Zip,
+                Some(1) => SpecialFormat::ZipPlusFour,
+                Some(2) => SpecialFormat::Phone,
+                Some(3) => SpecialFormat::Ssn,
+                _ => SpecialFormat::Unknown,
+            };
+            return FieldFormat::Special { kind };
+        }
     }
-    if script.contains("AFDate_Format") {
-        return FieldFormat::Date {
-            pattern: String::new(),
-        };
-    }
-    if script.contains("AFTime_Format") {
-        return FieldFormat::Time;
-    }
-    if script.contains("AFPercent_Format") {
-        return FieldFormat::Percent;
-    }
-    if script.contains("AFNumber_Format") {
-        return FieldFormat::Number;
-    }
-    if script.contains("AFSpecial_Format") {
-        return FieldFormat::Special;
+    // No recognised format script. An explicit keystroke mask still says what
+    // the field takes — `AFSpecial_KeystrokeEx("999-9999")` is how Acrobat
+    // writes an arbitrary mask, and it lives on the keystroke event alone.
+    if let Some(script) = additional_action_script(bindings, form, annotation, KEYSTROKE_EVENT) {
+        if let Some(mask) = quoted_argument(&script, "AFSpecial_KeystrokeEx") {
+            return FieldFormat::Special {
+                kind: crate::document::model::SpecialFormat::Mask { mask },
+            };
+        }
     }
     FieldFormat::Plain
+}
+
+/// Acrobat's numbered `AFDate_Format` presets, as the patterns its own field
+/// properties dialog shows for them.
+///
+/// The table is `AFDate_Format`'s `cFormat` list, unchanged across Acrobat
+/// versions — which is what makes translating a bare number safe. A number
+/// beyond it is a document from a future Acrobat, and honesty about that is a
+/// date with no pattern rather than a guessed one.
+fn date_preset_pattern(preset: u32) -> Option<String> {
+    const PRESETS: [&str; 14] = [
+        "m/d",
+        "m/d/yy",
+        "mm/dd/yy",
+        "mm/yy",
+        "d-mmm",
+        "d-mmm-yy",
+        "dd-mmm-yy",
+        "yy-mm-dd",
+        "mmm-yy",
+        "mmmm-yy",
+        "mmm d, yyyy",
+        "mmmm d, yyyy",
+        "m/d/yy h:MM tt",
+        "m/d/yy HH:MM",
+    ];
+    PRESETS
+        .get(preset as usize)
+        .map(|pattern| pattern.to_string())
+}
+
+/// The first bare-number argument of a call to `name`, if there is one.
+///
+/// The counterpart of [`quoted_argument`] for `AFDate_Format(2)` and
+/// `AFSpecial_Format(0)`, and deliberately no more of a parser than that one
+/// is: what is read is a one-line call written by Acrobat's own form editor.
+fn numbered_argument(script: &str, name: &str) -> Option<u32> {
+    let start = script.find(name)? + name.len();
+    let rest = script.get(start..)?;
+    let open = rest.find('(')?;
+    let digits: String = rest
+        .get(open + 1..)?
+        .chars()
+        .skip_while(|character| character.is_whitespace())
+        .take_while(|character| character.is_ascii_digit())
+        .take(4)
+        .collect();
+    digits.parse().ok()
 }
 
 /// The first double-quoted argument of a call to `name`, if there is one.
@@ -2035,8 +2342,16 @@ const FIELD_TYPE_LISTBOX: std::os::raw::c_int = 5;
 const FIELD_TYPE_TEXTFIELD: std::os::raw::c_int = 6;
 const FIELD_TYPE_SIGNATURE: std::os::raw::c_int = 7;
 
-/// `FPDF_FORMFLAG_READONLY` from `fpdf_annot.h`.
+/// `FPDF_FORMFLAG_READONLY` and `FPDF_FORMFLAG_REQUIRED` from `fpdf_annot.h`.
 const FORMFLAG_READONLY: std::os::raw::c_int = 1;
+const FORMFLAG_REQUIRED: std::os::raw::c_int = 2;
+/// The `/Ff` text-field flags PDF 12.7.4.3 defines: a password field, one
+/// whose value is a file path, and one whose value is also styled `/RV` rich
+/// text. `fpdf_annot.h` names only the first; the other two are the PDF
+/// specification's own bit positions, which is where PDFium's come from too.
+const FORMFLAG_TEXT_PASSWORD: u32 = 1 << 13;
+const FORMFLAG_TEXT_FILE_SELECT: u32 = 1 << 20;
+const FORMFLAG_TEXT_RICH_TEXT: u32 = 1 << 25;
 /// `FPDF_FORMFLAG_CHOICE_*` from `fpdf_annot.h`: an editable combo box, and a
 /// list box that takes more than one selection.
 const FPDF_FORMFLAG_CHOICE_EDIT: u32 = 262_144;
@@ -2134,6 +2449,14 @@ fn read_form_field(
     let value = value.replace("\r\n", "\n").replace('\r', "\n");
     let flags = unsafe { bindings.FPDFAnnot_GetFormFieldFlags(form, annotation) };
     let read_only = flags >= 0 && flags & FORMFLAG_READONLY != 0;
+    let required = flags >= 0 && flags & FORMFLAG_REQUIRED != 0;
+    // The text-field variants `/FT Tx` hides behind `/Ff` bits. Only read for
+    // a text field, because the same bit positions mean other things for the
+    // other kinds.
+    let text_flag = |bit: u32| kind == FieldKind::Text && flags >= 0 && flags as u32 & bit != 0;
+    let password = text_flag(FORMFLAG_TEXT_PASSWORD);
+    let file_select = text_flag(FORMFLAG_TEXT_FILE_SELECT);
+    let rich_text = text_flag(FORMFLAG_TEXT_RICH_TEXT);
 
     // What the field is *for*, when its own format script says so. Only text
     // fields carry one, and reading the script for a checkbox would be work
@@ -2236,6 +2559,10 @@ fn read_form_field(
         allows_custom_value,
         multiple_selection,
         selected,
+        required,
+        password,
+        file_select,
+        rich_text,
         // One widget: this call reads one annotation. The caller collects the
         // widgets that name the same field, because a field can be drawn in
         // several places and each of them is a separate annotation.
@@ -2594,9 +2921,13 @@ impl DocumentBackend for PdfiumDocument<'_> {
     /// value needs to put the old one back, and there is no other way to say
     /// that (§9.1). It is deliberately not reachable from the UI as a way to
     /// *set* a field — nothing in the application sends `SetField` forward.
-    fn set_field(&mut self, name: &str, value: &str) -> Result<String> {
-        let form = self
-            .form_handle()
+    ///
+    /// The mechanism follows the kind, because PDFium's editor does: a text
+    /// value is typed, a button is pressed, a choice is selected. Replacing
+    /// the selection of a checkbox edits nothing at all — silently — which is
+    /// why the dispatch is on [`FieldKind`] rather than one path for all.
+    fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String> {
+        self.form_handle()
             .ok_or_else(|| DocumentError::Backend("this document has no fillable form".into()))?;
 
         // Where the field is. A field with no widget on any page cannot be
@@ -2612,64 +2943,19 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 "the field {name} is read-only"
             )));
         }
-        let widget = field
-            .widgets
-            .first()
-            .ok_or_else(|| DocumentError::NoSuchField(name.to_string()))?;
-        let page = widget.page;
-
-        // The page has to be the one the form interaction is open on, for the
-        // same reason every other form event does: PDFium keys a field's
-        // editing state to the `FPDF_PAGE` it was given.
-        let handle = self.open_form_page(page)?;
-        let bindings = self.backend.bindings();
-        let geometry = self.measure(page)?;
-
-        // Focus the widget by finding it again on the page. Focusing by
-        // annotation rather than by synthesising a click is what makes this
-        // work for a widget that sits underneath another one.
-        //
-        // The annotations are enumerated from `handle` — the page the form
-        // environment has open — and not from a separately loaded copy of the
-        // same page. PDFium matches a widget to its page *view*, so an
-        // annotation read off a second `FPDF_PAGE` for the same page is not one
-        // `FORM_SetFocusedAnnot` recognises: it returns false, and the field
-        // silently refuses to take a value.
-        let mut focused = false;
-        let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
-        for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-            let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-            if annotation.is_null() {
-                continue;
-            }
-            let matches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) } == FPDF_ANNOT_WIDGET
-                && read_form_field(bindings, form, annotation, page, &geometry)
-                    .is_some_and(|found| found.name == name);
-            if matches {
-                focused = unsafe { bindings.FORM_SetFocusedAnnot(form, annotation) } != 0;
-                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                break;
-            }
-            unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-        }
-        if !focused {
-            return Err(DocumentError::Backend(format!(
-                "the field {name} could not be focused"
-            )));
+        if field.widgets.is_empty() {
+            return Err(DocumentError::NoSuchField(name.to_string()));
         }
 
-        // Select what is there, then replace it. An empty replacement is a
-        // cleared field, which is what undoing the first fill of an empty
-        // field has to produce.
-        unsafe { bindings.FORM_SelectAllText(form, handle) };
-        let mut text: Vec<u16> = value.encode_utf16().collect();
-        text.push(0);
-        unsafe { bindings.FORM_ReplaceSelection(form, handle, text.as_ptr()) };
-        // Losing the focus is what commits it, exactly as it is when a person
-        // clicks away.
-        unsafe { bindings.FORM_ForceToKillFocus(form) };
-        self.release_form_page();
-
+        match field.kind {
+            FieldKind::Checkbox | FieldKind::RadioGroup => {
+                self.set_button_field(&field, value)?;
+            }
+            FieldKind::ComboBox | FieldKind::ListBox => {
+                self.set_choice_field(&field, value, selected)?;
+            }
+            _ => self.set_text_field(&field, value)?,
+        }
         self.field_value(name)
     }
 
@@ -2713,7 +2999,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // Who has the caret *now*, before this event moves it. A focus loss
         // commits the field it is leaving, and by the time the event has been
         // handled there is nothing focused left to name it.
-        let was_focused = self.focused_field(page);
+        let was_focused = self.focused_form_field(page);
         let dropping_focus = matches!(&event, FormInputEvent::Focus { gained: false });
         unsafe {
             match event {
@@ -2806,7 +3092,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             .form
             .as_mut()
             .expect("the handle above came from this binding");
-        let invalidated = form
+        let invalidated: Vec<PageRect> = form
             .environment
             .take_dirty()
             .into_iter()
@@ -2828,7 +3114,17 @@ impl DocumentBackend for PdfiumDocument<'_> {
         let requests = form.environment.take_requests();
         let text_focus = form.environment.has_text_focus();
         let focused = self.focused_form_field(page);
-        let focused_hint = focused.as_ref().and_then(|field| field.format.hint());
+        let focused_hint = focused.as_ref().and_then(|field| {
+            // A file-select field looks exactly like a text field and can
+            // never be filled — its value is a path a picker pulpit refuses
+            // to open — so what it is has to be said the moment the caret
+            // arrives, before typing into it teaches the wrong lesson.
+            if field.file_select {
+                Some("file path this viewer cannot choose".into())
+            } else {
+                field.format.hint()
+            }
+        });
         let focused_date = focused.as_ref().and_then(|field| match &field.format {
             FieldFormat::Date { pattern } => {
                 let widget = field.widgets.first()?;
@@ -2847,6 +3143,31 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 options: field.options.len().min(u32::MAX as usize) as u32,
             })
         });
+        // A focused combo box may have its list open, and PDFium draws that
+        // list into the page while reporting only the slivers that changed —
+        // opening it invalidates a few pixels of border, not the rows about to
+        // appear. The caller composites exactly what is invalidated, so the
+        // popup would arrive on screen in fragments. Widening to the area the
+        // list can occupy costs redrawing pixels that come out identical;
+        // under-reporting costs a dropdown visibly missing its own rows.
+        let mut invalidated = invalidated;
+        if let (Some(field), Some(_)) = (&focused, &focused_choice) {
+            if let Some(widget) = field.widgets.iter().find(|widget| widget.page == page) {
+                if !invalidated.is_empty() {
+                    let row = (widget.bounds.bottom - widget.bounds.top).max(4.0);
+                    // One row per option plus the field itself, capped: the
+                    // popup never grows past what PDFium could draw on the
+                    // page below the field.
+                    let rows = (field.options.len() as f32 + 1.0).min(24.0);
+                    invalidated.push(PageRect::new(
+                        widget.bounds.left,
+                        widget.bounds.top,
+                        widget.bounds.right,
+                        (widget.bounds.bottom + rows * row).min(geometry.height),
+                    ));
+                }
+            }
+        }
 
         // Which field changed is read back from the document rather than
         // guessed from the event: PDFium knows what it committed and the
@@ -3128,6 +3449,54 @@ fn expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acrobats_numbered_date_presets_translate_to_their_patterns() {
+        // The fixed table Acrobat's own field-properties dialog writes
+        // `AFDate_Format(n)` from. The old, still very common form of the
+        // script — a bare number instead of a pattern — used to reach the
+        // date picker as a date with nothing to format into.
+        assert_eq!(
+            numbered_argument("AFDate_Format(2);", "AFDate_Format"),
+            Some(2)
+        );
+        assert_eq!(
+            numbered_argument("AFDate_Format( 13 );", "AFDate_Format"),
+            Some(13)
+        );
+        assert_eq!(numbered_argument("AFDate_Format();", "AFDate_Format"), None);
+        assert_eq!(date_preset_pattern(0).as_deref(), Some("m/d"));
+        assert_eq!(date_preset_pattern(2).as_deref(), Some("mm/dd/yy"));
+        assert_eq!(date_preset_pattern(11).as_deref(), Some("mmmm d, yyyy"));
+        assert_eq!(
+            date_preset_pattern(99),
+            None,
+            "a preset from a future Acrobat is honestly patternless"
+        );
+    }
+
+    #[test]
+    fn the_special_formats_are_told_apart_by_their_number() {
+        use crate::document::model::{FieldFormat, SpecialFormat};
+        // The hint is the point: "a phone number" beats "a formatted value",
+        // and beats learning the shape from a rejection alert after typing.
+        for (kind, expectation) in [
+            (SpecialFormat::Zip, "a ZIP code"),
+            (SpecialFormat::Phone, "a phone number"),
+            (SpecialFormat::Ssn, "a Social Security number"),
+            (
+                SpecialFormat::Mask {
+                    mask: "999-9999".into(),
+                },
+                "a value shaped 999-9999",
+            ),
+        ] {
+            assert_eq!(
+                FieldFormat::Special { kind }.hint().as_deref(),
+                Some(expectation)
+            );
+        }
+    }
 
     #[test]
     fn utf16_from_pdfium_stops_at_the_terminator() {

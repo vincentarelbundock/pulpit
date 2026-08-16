@@ -20,7 +20,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 1;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 2;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,8 +382,9 @@ pub struct FormEventResult {
 pub struct FocusedDate {
     pub field: String,
     /// The Acrobat pattern the field's own format script names — `dd mmmm
-    /// yyyy`. Empty when the script used a numbered preset, which names no
-    /// pattern anyone could render.
+    /// yyyy`. A numbered preset — `AFDate_Format(2)` — arrives translated
+    /// through Acrobat's fixed preset table; empty only for a preset that
+    /// table does not know.
     pub pattern: String,
     pub page: PageIndex,
     /// Where the widget is, in canonical page space (A4), so the caller can
@@ -462,6 +463,14 @@ pub struct CommittedField {
     /// the event was dispatched, because afterwards the old value is gone.
     pub previous: String,
     pub revision: DocumentRevision,
+    /// Which options are chosen now, by index, for a choice field. Empty for
+    /// every other kind. (No `serde` attribute for the reason given on
+    /// [`FormEventResult::requests`]: bincode is positional.)
+    pub selected: Vec<u32>,
+    /// Which options were chosen before this commit — the selection half of
+    /// `previous`, and the only faithful before-image a multi-select list box
+    /// has: three selections cannot be named by one string.
+    pub previous_selected: Vec<u32>,
 }
 
 /// What the worker answers.
@@ -481,7 +490,7 @@ pub enum DocumentResponse {
     Found(HitChunk),
     Fields(Vec<FormField>),
     Outline(pulpit_core::navigation::Outline),
-    Form(FormEventResult),
+    Form(Box<FormEventResult>),
     Applied(Box<Applied>),
     Saved(SavedDocument),
     Closed,
@@ -772,6 +781,10 @@ mod tests {
                 options: Vec::new(),
                 allows_custom_value: true,
                 multiple_selection: false,
+                required: false,
+                password: false,
+                file_select: false,
+                rich_text: false,
                 selected: Vec::new(),
                 widgets: Vec::new(),
             };
@@ -836,13 +849,15 @@ mod tests {
             request
         );
 
-        let answer = DocumentResponse::Form(FormEventResult {
+        let answer = DocumentResponse::Form(Box::new(FormEventResult {
             invalidated: vec![PageRect::new(0.0, 0.0, 10.0, 10.0)],
             committed: Some(CommittedField {
                 name: "name".into(),
                 value: "Ada".into(),
                 previous: String::new(),
                 revision: DocumentRevision(4),
+                selected: Vec::new(),
+                previous_selected: Vec::new(),
             }),
             requests: vec![HostRequest::Alert {
                 message: "filled".into(),
@@ -852,7 +867,7 @@ mod tests {
             focused_choice: None,
             focused_hint: None,
             focused_date: None,
-        });
+        }));
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
@@ -865,6 +880,6 @@ mod tests {
         let result = FormEventResult::default();
         assert!(result.invalidated.is_empty());
         assert!(result.committed.is_none());
-        assert!(DocumentResponse::Form(result).validate().is_ok());
+        assert!(DocumentResponse::Form(Box::new(result)).validate().is_ok());
     }
 }

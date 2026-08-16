@@ -247,6 +247,19 @@ pub struct FormEnvironment {
     /// field, or to the shortcut that letter is bound to. Getting it wrong
     /// means a talk where typing a name into a form turns the page.
     text_focus: bool,
+    /// The page the form interaction is open on, for `FFI_GetCurrentPage` and
+    /// `FFI_GetPage`.
+    ///
+    /// This is the one page handle the engine deliberately keeps loaded (see
+    /// `FormBinding::open_page` for why), lent to the environment for exactly
+    /// as long as it is open. A calculation script that reads `this.pageNum`,
+    /// or an `AFSimple_Calculate` resolving its own field, asks through these
+    /// callbacks — and a null answer while an interaction is live is what made
+    /// cross-page arithmetic silently stop recalculating.
+    current_page: FPDF_PAGE,
+    /// Which page index [`Self::current_page`] is, so `FFI_GetPage` can answer
+    /// for that page and refuse every other.
+    current_page_index: c_int,
 }
 
 impl FormEnvironment {
@@ -291,6 +304,8 @@ impl FormEnvironment {
             dirty: Vec::new(),
             changed: false,
             text_focus: false,
+            current_page: std::ptr::null_mut(),
+            current_page_index: -1,
         });
 
         environment.info.version = Self::INTERFACE_VERSION;
@@ -441,6 +456,23 @@ impl FormEnvironment {
         std::mem::take(&mut self.requests)
     }
 
+    /// Lend the environment the page a form interaction is open on, so
+    /// `FFI_GetCurrentPage` and `FFI_GetPage` can answer while a script runs.
+    ///
+    /// The handle is borrowed, not owned: the caller that keeps the page
+    /// loaded MUST call [`Self::clear_current_page`] before closing it, or the
+    /// next script would be handed a pointer to a freed page.
+    pub fn set_current_page(&mut self, index: usize, page: FPDF_PAGE) {
+        self.current_page = page;
+        self.current_page_index = index.min(c_int::MAX as usize) as c_int;
+    }
+
+    /// The interaction is over; scripts get the null answer again.
+    pub fn clear_current_page(&mut self) {
+        self.current_page = std::ptr::null_mut();
+        self.current_page_index = -1;
+    }
+
     /// Record one request, if there is room for it.
     fn request(&mut self, request: HostRequest) {
         if self.requests.len() < limits::MAX_HOST_REQUESTS {
@@ -471,7 +503,7 @@ unsafe fn environment<'a>(this: *mut FPDF_FORMFILLINFO) -> Option<&'a mut FormEn
 
 unsafe extern "C" fn invalidate(
     this: *mut FPDF_FORMFILLINFO,
-    _page: FPDF_PAGE,
+    page: FPDF_PAGE,
     left: f64,
     top: f64,
     right: f64,
@@ -480,6 +512,15 @@ unsafe extern "C" fn invalidate(
     let Some(environment) = (unsafe { environment(this) }) else {
         return;
     };
+    // Only the page the interaction is open on. The dirty list is read back
+    // as rectangles *of that page*, so a rectangle a calculation script
+    // invalidates on another page — reachable now that `FFI_GetCurrentPage`
+    // answers — must not be patched onto this one. The other page's repaint
+    // arrives with the snapshot the commit triggers, which re-renders it
+    // whole.
+    if !page.is_null() && !environment.current_page.is_null() && page != environment.current_page {
+        return;
+    }
     let rect = DirtyRect {
         left,
         top,
@@ -538,23 +579,40 @@ unsafe extern "C" fn on_change(this: *mut FPDF_FORMFILLINFO) {
 }
 
 unsafe extern "C" fn get_page(
-    _this: *mut FPDF_FORMFILLINFO,
+    this: *mut FPDF_FORMFILLINFO,
     _document: FPDF_DOCUMENT,
-    _index: c_int,
+    index: c_int,
 ) -> FPDF_PAGE {
     // PDFium asks for a page it does not itself hold, which happens for
-    // document-level actions and cross-page focus moves. pulpit does not keep
-    // pages loaded across calls — a page handle that outlived the call that
-    // made it is the second of this codebase's three rules — so the honest
-    // answer is that there is no page here.
+    // document-level actions, cross-page focus moves and calculation scripts.
+    // pulpit does not keep pages loaded across calls — a page handle that
+    // outlived the call that made it is the second of this codebase's three
+    // rules — with one stated exception: the page a form interaction is open
+    // on (see `FormBinding::open_page`). That page is already loaded and
+    // already lent to PDFium, so answering with it hands over nothing new;
+    // every other page is honestly not here.
+    let Some(environment) = (unsafe { environment(this) }) else {
+        return std::ptr::null_mut();
+    };
+    if index >= 0 && index == environment.current_page_index {
+        return environment.current_page;
+    }
     std::ptr::null_mut()
 }
 
 unsafe extern "C" fn get_current_page(
-    _this: *mut FPDF_FORMFILLINFO,
+    this: *mut FPDF_FORMFILLINFO,
     _document: FPDF_DOCUMENT,
 ) -> FPDF_PAGE {
-    std::ptr::null_mut()
+    // The page the interaction is open on, while one is. A calculation or
+    // format script that asks `this.pageNum`, or resolves a field through the
+    // current page, gets the page the person is actually typing on — a null
+    // here is why a subtotal driven from another page used to stop
+    // recalculating until its own page was next opened.
+    match unsafe { environment(this) } {
+        Some(environment) => environment.current_page,
+        None => std::ptr::null_mut(),
+    }
 }
 
 unsafe extern "C" fn get_rotation(_this: *mut FPDF_FORMFILLINFO, _page: FPDF_PAGE) -> c_int {

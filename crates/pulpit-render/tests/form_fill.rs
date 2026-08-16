@@ -467,7 +467,7 @@ fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
         assert_eq!(document.field_value("name").unwrap(), "Ada");
 
         // …and put it back the way an undo would.
-        assert_eq!(document.set_field("name", "").unwrap(), "");
+        assert_eq!(document.set_field("name", "", &[]).unwrap(), "");
         assert_eq!(
             document.field_value("name").unwrap(),
             "",
@@ -475,11 +475,11 @@ fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
         );
 
         // And forward again, which is what a redo is.
-        assert_eq!(document.set_field("name", "Grace").unwrap(), "Grace");
+        assert_eq!(document.set_field("name", "Grace", &[]).unwrap(), "Grace");
         assert_eq!(document.field_value("name").unwrap(), "Grace");
 
         // A field that is not there is still refused rather than invented.
-        assert!(document.set_field("nobody", "x").is_err());
+        assert!(document.set_field("nobody", "x", &[]).is_err());
     });
 }
 
@@ -893,4 +893,149 @@ fn dated_form() -> Vec<u8> {
         .as_bytes(),
     );
     pdf
+}
+
+/// One named corpus case, written where the engine can open it.
+fn corpus_form(directory: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let case = corpus().into_iter().find(|case| case.name == name)?;
+    let path = directory.join(format!("{name}.pdf"));
+    std::fs::write(&path, &case.bytes).ok()?;
+    Some(path)
+}
+
+#[test]
+fn undoing_a_checkbox_toggle_presses_the_box_again() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // `set_field` used to reach every kind through text replacement, which
+        // edits a button not at all — silently, because the read-back then
+        // reported the unchanged value as a success. The inverse of a toggle
+        // is a press, and only when the state differs from what is asked for:
+        // pressing a box that is already right would toggle it wrong.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "checkbox-standard") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 71);
+        assert_eq!(document.field_value("agree").unwrap(), "Off");
+
+        // Tick it the way a person does…
+        click_into(&mut document, "agree");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+        assert_eq!(document.field_value("agree").unwrap(), "Yes");
+
+        // …and put it back the way an undo would.
+        assert_eq!(document.set_field("agree", "Off", &[]).unwrap(), "Off");
+        // Redo, and then redo again: the second application must not toggle.
+        assert_eq!(document.set_field("agree", "Yes", &[]).unwrap(), "Yes");
+        assert_eq!(
+            document.set_field("agree", "Yes", &[]).unwrap(),
+            "Yes",
+            "setting a checkbox to the state it already holds must not press it"
+        );
+    });
+}
+
+#[test]
+fn undoing_a_radio_choice_presses_the_previous_option() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "radio-group") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 72);
+        assert_eq!(document.field_value("contact").unwrap(), "Email");
+
+        // Forward — what a redo of "choose Phone" is…
+        assert_eq!(
+            document.set_field("contact", "Phone", &[]).unwrap(),
+            "Phone"
+        );
+        // …and back, which is the undo pressing the other option.
+        assert_eq!(
+            document.set_field("contact", "Email", &[]).unwrap(),
+            "Email"
+        );
+        // A state no press can produce is refused rather than faked: nothing a
+        // person can click chooses *nothing* in a chosen group.
+        assert!(
+            document.set_field("contact", "Off", &[]).is_err(),
+            "clearing a chosen radio group has no press to do it with"
+        );
+        // An option the group does not offer is refused by name.
+        assert!(document.set_field("contact", "Fax", &[]).is_err());
+    });
+}
+
+#[test]
+fn a_multi_select_list_box_round_trips_through_its_selection_indices() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // One string cannot name three selections, which is why the undo
+        // record carries the selected indices — and why `set_field` takes
+        // them: restoring "the first of what was chosen" is not restoring
+        // what was chosen.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "list-box-multi-select") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 73);
+        let selected = |document: &PdfDocument<'_>| {
+            document
+                .fields()
+                .unwrap()
+                .into_iter()
+                .find(|field| field.name == "colour")
+                .expect("the list box is listed")
+                .selected
+        };
+        assert_eq!(selected(&document), vec![0], "the file starts on Red");
+
+        // Choose Blue and Green together, as a redo of that selection would.
+        document.set_field("colour", "Blue", &[1, 2]).unwrap();
+        assert_eq!(selected(&document), vec![1, 2]);
+
+        // And back to Red alone, as the undo would.
+        document.set_field("colour", "Red", &[0]).unwrap();
+        assert_eq!(selected(&document), vec![0]);
+
+        // An index past the options is refused before anything is selected.
+        assert!(document.set_field("colour", "", &[9]).is_err());
+    });
+}
+
+#[test]
+fn the_text_field_flag_variants_are_told_apart() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // `/FT Tx` hides its variants in `/Ff` bits, and collapsing them into
+        // plain text is how a password ends up echoed and a file-select field
+        // ends up looking editable when no fill of it can ever succeed.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "password-field") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let document = PdfDocument::new(Box::new(engine), 74);
+        let field = document
+            .fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.name == "secret")
+            .expect("the password field is listed");
+        assert_eq!(field.kind, FieldKind::Text);
+        assert!(field.password, "the password flag must be surfaced");
+        assert!(!field.file_select);
+        assert!(!field.rich_text);
+        assert!(
+            field.is_editable(),
+            "a password field still fills; only the echo is masked"
+        );
+    });
 }
