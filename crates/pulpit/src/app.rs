@@ -2244,7 +2244,16 @@ impl App {
     fn adopt_layout(&mut self, layout: Layout) {
         self.diagnostics
             .note(format!("presenter layout: {}", layout.name));
-        self.settings.layout.active = Some(layout.id.0.clone());
+        // Each mode remembers its own (§2.3): choosing a presenter variant
+        // must never change what a PDF opens into, and the reverse.
+        match crate::layout::builtin::LayoutMode::of(&layout) {
+            crate::layout::builtin::LayoutMode::Presentation => {
+                self.settings.layout.active = Some(layout.id.0.clone());
+            }
+            crate::layout::builtin::LayoutMode::Document => {
+                self.settings.layout.active_document = Some(layout.id.0.clone());
+            }
+        }
         self.active_layout = layout;
         self.annotation_controls =
             crate::widgets::AnnotationControls::new(annotation_options_in(&self.active_layout));
@@ -2677,6 +2686,7 @@ impl App {
 
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
+            Action::ToggleReader => self.toggle_reader(),
             Action::Next => self.update(Message::Nav(Nav::Next)),
             Action::Previous => self.update(Message::Nav(Nav::Previous)),
             Action::First => self.update(Message::Nav(Nav::First)),
@@ -2807,7 +2817,14 @@ impl App {
                 self.annotation_controls = crate::widgets::AnnotationControls::new(
                     annotation_options_in(&self.active_layout),
                 );
-                self.settings.layout.active = Some(id.0);
+                match crate::layout::builtin::LayoutMode::of(&self.active_layout) {
+                    crate::layout::builtin::LayoutMode::Presentation => {
+                        self.settings.layout.active = Some(id.0)
+                    }
+                    crate::layout::builtin::LayoutMode::Document => {
+                        self.settings.layout.active_document = Some(id.0)
+                    }
+                }
                 self.persist();
             }
         }
@@ -3866,6 +3883,45 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Move between reading the document and presenting it (§2.3).
+    ///
+    /// Mode is which layout is mounted, not which document is loaded: nothing
+    /// is closed, no revision changes, and unsaved annotations stay in the
+    /// document because that is where they are (A1). Each mode comes back to
+    /// the layout it was last in, which is why the two are remembered apart.
+    fn toggle_reader(&mut self) -> Task<Message> {
+        use crate::layout::builtin::LayoutMode;
+
+        let wanted = match LayoutMode::of(&self.active_layout) {
+            LayoutMode::Presentation => LayoutMode::Document,
+            LayoutMode::Document => LayoutMode::Presentation,
+        };
+        let remembered = match wanted {
+            LayoutMode::Presentation => self.settings.layout.active.clone(),
+            LayoutMode::Document => self.settings.layout.active_document.clone(),
+        };
+        // The layout this mode was last in, or its default when it has not
+        // been in one yet. A remembered id that no longer names a layout —
+        // a custom one that was deleted — falls back the same way.
+        let id = remembered
+            .map(LayoutId)
+            .filter(|id| self.layouts.get(id).is_some())
+            .unwrap_or_else(|| crate::layout::builtin::default_for(wanted));
+
+        let Some(layout) = self.layouts.get(&id).cloned() else {
+            self.notify(format!("The {} layout is missing.", wanted.label()));
+            return Task::none();
+        };
+        if wanted == LayoutMode::Document && !self.reader.is_open() {
+            // Saying so beats mounting a Reader over a document that is not
+            // there and letting the empty page speak for itself.
+            self.notify("There is no document open to read.".to_string());
+            return Task::none();
+        }
+        self.adopt_layout(layout);
+        Task::none()
     }
 
     /// Are these the same file on disk?

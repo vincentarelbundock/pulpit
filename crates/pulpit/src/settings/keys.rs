@@ -62,12 +62,18 @@ pub enum Action {
     /// Move the preview a tenth of the deck at a time. Iced only gives the
     /// slider its arrow keys while the pointer rests on it, which is no use
     /// to someone scrubbing a long deck from a lectern.
+    /// Move between reading the document and presenting it.
+    ///
+    /// Mode is which layout is mounted, not which document is loaded (§2.3 of
+    /// `SPEC-document.md`): the document stays open, the revision is
+    /// unchanged, and each mode comes back to the layout it was last in.
+    ToggleReader,
     Quit,
 }
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -95,6 +101,7 @@ impl Action {
         Action::ToggleAnnotationAudience,
         Action::FocusNextLink,
         Action::FocusPreviousLink,
+        Action::ToggleReader,
         Action::Quit,
     ];
 
@@ -127,6 +134,7 @@ impl Action {
             Action::ToggleAnnotationAudience => "Show annotations to the audience",
             Action::FocusNextLink => "Focus the next link",
             Action::FocusPreviousLink => "Focus the previous link",
+            Action::ToggleReader => "Read or present",
             Action::Quit => "Quit",
         }
     }
@@ -199,6 +207,9 @@ impl Default for Keymap {
                 // "j" for jump: the deck at a glance, to land on a slide by
                 // eye rather than by number.
                 named("j", Action::ShowOverview),
+                // "r" for read: the same file, as a document to mark up
+                // rather than a deck to present. Pressed again it goes back.
+                named("r", Action::ToggleReader),
                 // The three tools sit under the digits, in the order the
                 // palette draws them; the marks they make are cleared and
                 // taken back from the keys beside them.

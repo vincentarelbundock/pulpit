@@ -65,6 +65,13 @@ pub struct Settings {
 pub struct LayoutSettings {
     /// The active presenter layout, remembered across sessions.
     pub active: Option<String>,
+    /// The active *document* layout, remembered separately.
+    ///
+    /// Separately on purpose (§2.3 of `SPEC-document.md`): presentation and
+    /// document are two roots rather than two variants of one, so choosing a
+    /// presenter layout must never change what a PDF opens into, and the
+    /// reverse. One field would make each choice quietly overwrite the other.
+    pub active_document: Option<String>,
     /// The one-time "review this layout at your screen ratio" notice.
     pub ratio_notice_dismissed: bool,
 }

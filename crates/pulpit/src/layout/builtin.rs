@@ -599,6 +599,38 @@ mod tests {
         }
     }
 
+    /// §2.3: each mode remembers its own last-used layout, so choosing a
+    /// presenter variant never changes what a PDF opens into and the reverse.
+    /// A user's *copy* of a built-in answers the same way the built-in does,
+    /// which is what makes the memory work for a layout somebody edited.
+    #[test]
+    fn a_copy_of_a_layout_belongs_to_the_same_mode_as_its_original() {
+        for (original, mode) in [
+            (presenter_default(), LayoutMode::Presentation),
+            (slide_time_beside(), LayoutMode::Presentation),
+            (
+                reader_default(AspectRatio::SixteenNine),
+                LayoutMode::Document,
+            ),
+            (
+                reader_fields(AspectRatio::SixteenNine),
+                LayoutMode::Document,
+            ),
+        ] {
+            let mut copy = original.clone();
+            copy.id = crate::layout::LayoutId("a-users-copy".into());
+            copy.name = "Mine".into();
+            copy.origin = Origin::Custom;
+            assert_eq!(
+                LayoutMode::of(&copy),
+                mode,
+                "a copy of {} changed mode",
+                original.name
+            );
+            assert_eq!(mode.label(), LayoutMode::of(&original).label());
+        }
+    }
+
     /// §2.4: this is the only built-in whose ratio is not a fixed preset, so
     /// the designer previews a Reader the size a Reader is actually used at.
     #[test]
