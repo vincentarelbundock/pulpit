@@ -24,7 +24,7 @@ pub use draft::{
     InkDraft, MarkStyle, NoteDraft, StampDraft, StampMark, TextSource, MAX_ANNOTATION_TEXT,
     MAX_QUADS,
 };
-pub use gesture::{AnnotationInteraction, AnnotationTool, Gesture, GestureOutcome};
+pub use gesture::{AnnotationInteraction, AnnotationTool, Gesture, GestureOutcome, PlacedMark};
 pub use hit::{AnnotationHit, HitTarget};
 pub use id::{AnnotationId, IdGenerator};
 pub use stroke::{simplify, InkPoint, MAX_INK_POINTS, MIN_SAMPLE_DISTANCE};

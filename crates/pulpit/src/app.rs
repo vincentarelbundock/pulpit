@@ -232,6 +232,11 @@ pub enum Message {
     /// Put back the edits a previous run did not save, or do not.
     RestoreReaderEdits,
     DiscardReaderEdits,
+    /// What has been typed into the mark being composed, as typed.
+    ComposeMark(String),
+    /// Place the composed mark, or abandon it.
+    CommitMark,
+    CancelMark,
     /// A widget that produces nothing (preview mode).
     Ignore,
 }
@@ -377,6 +382,19 @@ type ThumbnailPlanInputs = (
     usize,
     usize,
 );
+
+/// A mark the reader placed and is typing into (§8.5).
+///
+/// Held in the application rather than in the gesture state because it is not
+/// a gesture: the click chose a spot, and what happens next is a text editor
+/// with a caret, a clipboard and an input method behind it.
+#[derive(Debug, Clone)]
+pub struct ComposingMark {
+    pub page: pulpit_core::page::PageIndex,
+    pub at: pulpit_core::page::PagePoint,
+    pub tool: pulpit_core::annotation::AnnotationTool,
+    pub text: String,
+}
 
 /// One mutation sent to the document worker, waiting to be confirmed.
 struct PendingEdit {
@@ -667,6 +685,8 @@ pub struct App {
     /// The offer itself, drawn as a dialogue with no way out but an answer.
     /// Inert: nothing is applied until one is given (§11.4).
     pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
+    /// The note or text mark being written, if one is.
+    pub composing_mark: Option<ComposingMark>,
     /// Live tool choices for the annotation palette. These are session
     /// controls, not mutations to a built-in layout.
     pub annotation_controls: crate::widgets::AnnotationControls,
@@ -942,6 +962,7 @@ impl App {
             reader_journal: None,
             pending_reader_recovery: None,
             reader_recovery: None,
+            composing_mark: None,
             annotation_controls,
             alarm_controls,
             timer_controls,
@@ -1876,6 +1897,19 @@ impl App {
                 Task::none()
             }
             Message::Read(command) => self.on_read_command(command),
+            Message::ComposeMark(text) => {
+                if let Some(composing) = self.composing_mark.as_mut() {
+                    composing.text = text;
+                }
+                Task::none()
+            }
+            Message::CommitMark => self.commit_composed_mark(),
+            Message::CancelMark => {
+                // Escape cancels without mutation (§8.5): a mark nobody
+                // finished writing is not a mark.
+                self.composing_mark = None;
+                Task::none()
+            }
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::ExportAnnotatedTo(Some(path)) => {
@@ -4066,7 +4100,20 @@ impl App {
             ReadCommand::PagePressed => {
                 // A press an armed tool does not take belongs to the
                 // document's own links and fields, and is not this path's.
-                let _taken = self.reader.pointer_pressed();
+                if self.reader.pointer_pressed() {
+                    return Task::none();
+                }
+                // …unless the armed tool *places* a mark rather than drawing
+                // one. Those have no gesture: the click chooses the spot and
+                // the text arrives from an editor (§8.5).
+                if let Some((page, at, tool)) = self.reader.placement() {
+                    self.composing_mark = Some(ComposingMark {
+                        page,
+                        at,
+                        tool,
+                        text: String::new(),
+                    });
+                }
                 Task::none()
             }
             ReadCommand::PageReleased => {
@@ -4102,6 +4149,27 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Place the mark that was being written (§8.5).
+    ///
+    /// Committing new text creates one annotation, which is one revision and
+    /// one undo entry like any other. Empty text places nothing: a note
+    /// nobody wrote is not a note, and it is not an error either.
+    fn commit_composed_mark(&mut self) -> Task<Message> {
+        let Some(composing) = self.composing_mark.take() else {
+            return Task::none();
+        };
+        if composing.text.trim().is_empty() {
+            return Task::none();
+        }
+        if let Some(transaction) =
+            self.reader
+                .place_text(composing.page, composing.at, composing.tool, composing.text)
+        {
+            self.commit_to_document(transaction);
+        }
+        Task::none()
     }
 
     /// Put back what a previous run left unsaved (§11.4).

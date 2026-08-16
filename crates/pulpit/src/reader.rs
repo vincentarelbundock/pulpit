@@ -345,6 +345,52 @@ impl ReaderSession {
         }
     }
 
+    /// Where a click-placed mark would go, when the armed tool places one.
+    ///
+    /// Free text and notes have no gesture: the click chooses a spot and the
+    /// text arrives afterwards from an editor (§8.5). This is what the
+    /// application opens that editor for.
+    pub fn placement(&self) -> Option<(PageIndex, PagePoint, AnnotationTool)> {
+        let tool = self.controls.tool?;
+        if !matches!(tool, AnnotationTool::Text | AnnotationTool::Note) {
+            return None;
+        }
+        let (page, at) = self.cursor?;
+        Some((page, at, tool))
+    }
+
+    /// Commit a mark the user placed and then typed into.
+    ///
+    /// Returns `None` when the text is empty or the spot is off the page:
+    /// an empty note is a note nobody wrote (§8.5).
+    pub fn place_text(
+        &self,
+        page: PageIndex,
+        at: PagePoint,
+        tool: AnnotationTool,
+        text: String,
+    ) -> Option<DocumentTransaction> {
+        let geometry = self.pages.get(page.get()).copied()?;
+        let content = match tool {
+            AnnotationTool::Note => pulpit_core::annotate::PlacedMark::Note { text, open: false },
+            _ => pulpit_core::annotate::PlacedMark::FreeText {
+                text,
+                source: pulpit_core::annotate::TextSource::Plain,
+                // A box wide enough for a line of comment at the style's own
+                // size, and tall enough for two of them. The reader can move
+                // and resize it afterwards; guessing narrower would clip the
+                // first thing anybody types.
+                size: (
+                    (self.interaction.ink_style().font_size * 18.0).min(geometry.width),
+                    self.interaction.ink_style().font_size * 2.4,
+                ),
+            },
+        };
+        let outcome = self.interaction.place(page, at, content, &geometry);
+        let commands = outcome.commands();
+        (!commands.is_empty()).then(|| DocumentTransaction::from_annotations(commands.to_vec()))
+    }
+
     /// The pointer went down on the page it was last over.
     ///
     /// Returns `false` when nothing took the press — no tool armed, or a tool
@@ -1356,6 +1402,65 @@ mod tests {
             .find_map(|page| page.preview.as_ref())
             .expect("the resolved runs are drawn");
         assert_eq!(preview.quads.len(), 1);
+    }
+
+    #[test]
+    fn a_placed_mark_is_a_spot_first_and_text_afterwards() {
+        // §8.5: free text and notes have no gesture. The click chooses a
+        // spot; what happens next is a text editor.
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Note)));
+        session.pointer_moved(PageIndex(0), 120.0, 240.0);
+        assert!(
+            !session.pointer_pressed(),
+            "a placing tool starts no gesture"
+        );
+        let (page, at, tool) = session.placement().expect("a note has somewhere to go");
+        assert_eq!(page, PageIndex(0));
+        assert_eq!(tool, AnnotationTool::Note);
+
+        let transaction = session
+            .place_text(page, at, tool, "remember this".into())
+            .expect("a note with text in it commits");
+        assert_eq!(transaction.len(), 1);
+        assert_eq!(transaction.label(), "Add Note");
+    }
+
+    #[test]
+    fn an_empty_note_is_not_a_note() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Note)));
+        session.pointer_moved(PageIndex(0), 120.0, 240.0);
+        let (page, at, tool) = session.placement().unwrap();
+        assert!(session.place_text(page, at, tool, String::new()).is_none());
+        assert!(session
+            .place_text(page, at, tool, "   \n ".into())
+            .is_none());
+    }
+
+    #[test]
+    fn only_a_placing_tool_has_somewhere_to_place() {
+        let mut session = open(2);
+        session.pointer_moved(PageIndex(0), 120.0, 240.0);
+        assert!(
+            session.placement().is_none(),
+            "nothing armed places nothing"
+        );
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(session.placement().is_none(), "ink is drawn, not placed");
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Text)));
+        assert!(session.placement().is_some());
+    }
+
+    #[test]
+    fn a_mark_placed_off_the_page_commits_nothing() {
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Note)));
+        session.pointer_moved(PageIndex(0), 99_000.0, 40.0);
+        let (page, at, tool) = session.placement().unwrap();
+        assert!(session.place_text(page, at, tool, "hello".into()).is_none());
     }
 
     #[test]

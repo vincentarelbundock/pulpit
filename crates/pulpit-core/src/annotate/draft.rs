@@ -411,6 +411,12 @@ impl AnnotationDraft {
             }
             AnnotationDraft::Note(d) => {
                 check_text(&d.text)?;
+                // An empty note is an icon on a page with nothing behind it:
+                // the reader who clicks it learns nothing, and the reader who
+                // sees it wonders what they missed. Same rule as free text.
+                if d.text.trim().is_empty() {
+                    return Err(DraftError::Empty);
+                }
                 if !d.at.is_valid_on(page) {
                     return Err(DraftError::OffPage);
                 }
@@ -609,6 +615,28 @@ mod tests {
             style: MarkStyle::default(),
         });
         assert_eq!(draft.validate(&page()), Err(DraftError::Empty));
+    }
+
+    #[test]
+    fn an_empty_note_is_not_committed_either() {
+        let mut draft = NoteDraft {
+            page: PageIndex(0),
+            at: PagePoint::new(100.0, 100.0),
+            text: String::new(),
+            open: false,
+            style: MarkStyle::default(),
+        };
+        assert_eq!(
+            AnnotationDraft::Note(draft.clone()).validate(&page()),
+            Err(DraftError::Empty)
+        );
+        draft.text = "  \n ".into();
+        assert_eq!(
+            AnnotationDraft::Note(draft.clone()).validate(&page()),
+            Err(DraftError::Empty)
+        );
+        draft.text = "remember this".into();
+        assert!(AnnotationDraft::Note(draft).validate(&page()).is_ok());
     }
 
     #[test]

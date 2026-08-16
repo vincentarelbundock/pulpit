@@ -96,6 +96,9 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if let Some(journal) = app.reader_recovery.as_ref() {
         page = stack![page, restore_edits_dialog(journal)].into();
     }
+    if let Some(composing) = app.composing_mark.as_ref() {
+        page = stack![page, compose_mark_dialog(composing)].into();
+    }
     // Its own renderer, its own atlas, its own residency — exactly as the
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
@@ -1865,6 +1868,42 @@ fn restore_session_dialog(plan: &crate::session::RestorePlan) -> Element<'static
     // audience, and a stray press on the ground behind must not decide that
     // either way.
     panel(body, None)
+}
+
+/// Write the note or text mark that was just placed (§8.5).
+///
+/// A real text input rather than something hand-rolled, so an input method, a
+/// clipboard, a selection and dead keys all behave the way they do everywhere
+/// else on the machine. Escape cancels without mutation; Return commits.
+fn compose_mark_dialog(composing: &crate::app::ComposingMark) -> Element<'static, Message> {
+    use pulpit_core::annotation::AnnotationTool;
+
+    let title = match composing.tool {
+        AnnotationTool::Note => "Write the note",
+        _ => "Write the text",
+    };
+    let body = column![
+        text(title).size(type_scale::TITLE),
+        text(format!("On page {}.", composing.page)).size(type_scale::LABEL),
+        text_input("", &composing.text)
+            .size(type_scale::BODY)
+            .on_input(Message::ComposeMark)
+            .on_submit(Message::CommitMark),
+        row![
+            button(text("Cancel").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press(Message::CancelMark),
+            button(text("Place it").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::alert_button)
+                .on_press(Message::CommitMark),
+        ]
+        .spacing(gap::S),
+    ]
+    .spacing(gap::M);
+
+    panel(body, Some(Message::CancelMark))
 }
 
 /// Offer back the edits a previous run did not save (§11.4).
