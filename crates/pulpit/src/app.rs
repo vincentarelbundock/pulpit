@@ -5332,6 +5332,17 @@ impl App {
         Task::none()
     }
 
+    /// Turn the highlighted row of an open multi-select list on or off,
+    /// leaving the list open. The keyboard's half of a click on a row.
+    fn toggle_highlighted_option(&mut self) -> Task<Message> {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        if let Some((index, selected)) = self.reader.toggle_highlighted_option() {
+            self.ask_form_key(FormInputEvent::SelectOption { index, selected });
+        }
+        Task::none()
+    }
+
     /// Route one key press to the field that holds the caret (§8.6).
     ///
     /// `None` means the key was not the field's and should carry on to the
@@ -5378,6 +5389,23 @@ impl App {
                 }
                 Some("ArrowDown") | Some("Down") => {
                     self.reader.step_choice_list(true);
+                    return Some(Task::none());
+                }
+                // Space ticks the highlighted row of a multi-select list, and
+                // is the keyboard's half of what a click does there. On a
+                // single-select list it is nothing: Enter already chooses, and
+                // a second key that also chose would only be a way to choose
+                // by accident.
+                Some("Space") if self.reader.choice_list_is_multiple() => {
+                    return Some(self.toggle_highlighted_option());
+                }
+                // Enter is "done" on a multi-select list rather than "choose":
+                // each tick was committed as it was made, so there is nothing
+                // held back for Enter to commit, and treating it as a choice
+                // would silently toggle whichever row the highlight happened
+                // to be resting on.
+                Some("Enter") if self.reader.choice_list_is_multiple() => {
+                    self.reader.close_choice_list();
                     return Some(Task::none());
                 }
                 Some("Enter") => {
@@ -6350,6 +6378,20 @@ impl App {
                     index: *index,
                     selected: true,
                 });
+                Task::none()
+            }
+            ReadCommand::ToggleOption(index) => {
+                use pulpit_render::document::protocol::FormInputEvent;
+
+                // Left open, unlike `PickOption`: choosing three things takes
+                // three presses, and a list that shut after the first would
+                // have to be reopened for each of them. The answer that comes
+                // back re-reports the field, and the open list takes its new
+                // selection from it — so the ticks a reader sees are PDFium's
+                // and not this layer's guess (§8.6).
+                if let Some((index, selected)) = self.reader.toggle_option(*index) {
+                    self.ask_form_key(FormInputEvent::SelectOption { index, selected });
+                }
                 Task::none()
             }
             ReadCommand::CloseChoiceList => {

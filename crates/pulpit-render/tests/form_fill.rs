@@ -1071,6 +1071,114 @@ fn undoing_a_radio_choice_presses_the_previous_option() {
     });
 }
 
+/// A multi-select list box is toggled one index at a time, and the others stay.
+///
+/// This is what lets the application draw a list of tick boxes rather than a
+/// list of one choice (§8.6). `FORM_SetIndexSelected` is per-index on a
+/// multi-select field — it does *not* clear the rest, the way it does on a
+/// combo box — so one `SelectOption` per press is enough, and the selection
+/// the drawn rows are ticked from comes back on every answer.
+#[test]
+fn a_multi_select_list_box_toggles_one_index_without_clearing_the_others() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = corpus_form(directory.path(), "list-box-multi-select") else {
+            return;
+        };
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 79);
+
+        let pressed = click_into(&mut document, "colour");
+        assert!(pressed.is_some(), "the list box takes the press");
+
+        let toggle = |document: &mut PdfDocument<'_>, index: u32, selected: bool| {
+            document
+                .form_event(
+                    PageIndex(0),
+                    FormInputEvent::SelectOption { index, selected },
+                )
+                .expect("the selection is answered")
+        };
+        let chosen = |document: &PdfDocument<'_>| {
+            document
+                .fields()
+                .unwrap()
+                .into_iter()
+                .find(|field| field.name == "colour")
+                .expect("the list box is listed")
+                .selected
+        };
+
+        // The file starts on Red alone.
+        assert_eq!(chosen(&document), vec![0]);
+
+        // Add Green. Red stays — this is the whole point: a single-select
+        // field would have answered with `[2]`.
+        let answer = toggle(&mut document, 2, true);
+        assert!(
+            !answer.invalidated.is_empty(),
+            "ticking a row must repaint the field"
+        );
+        assert_eq!(chosen(&document), vec![0, 2]);
+        let choice = answer
+            .focused_choice
+            .expect("the focused list box is reported with its selection");
+        assert!(choice.multiple_selection, "the fixture sets /Ff bit 22");
+        assert!(choice.list_box);
+        assert_eq!(
+            choice.selections,
+            vec![0, 2],
+            "every chosen row is reported, not only the first"
+        );
+        assert_eq!(
+            choice.selected,
+            Some(0),
+            "and the single-index field stays the first of them"
+        );
+
+        // Add Blue: three at once, which no single string could name.
+        toggle(&mut document, 1, true);
+        assert_eq!(chosen(&document), vec![0, 1, 2]);
+
+        // And take Red away again, leaving the two that were added.
+        let answer = toggle(&mut document, 0, false);
+        assert_eq!(chosen(&document), vec![1, 2]);
+        assert_eq!(
+            answer.focused_choice.map(|choice| choice.selections),
+            Some(vec![1, 2]),
+            "unticking is reported the same way as ticking"
+        );
+
+        // Each tick is committed as it is made, not held back until the field
+        // loses focus — that is what lets the drawn rows be ticked from the
+        // engine's own answer rather than from a guess. So it is a change with
+        // a faithful before-image of its own: one string cannot name three
+        // selections, so the indices carry it, and the undo history gets one
+        // entry per tick (§8.6).
+        let committed = answer
+            .committed
+            .expect("each tick is a committed change of its own");
+        assert_eq!(committed.name, "colour");
+        assert_eq!(committed.selected, vec![1, 2]);
+        assert_eq!(
+            committed.previous_selected,
+            vec![0, 1, 2],
+            "and its before-image is the selection it undoes to"
+        );
+
+        // …and the focus loss that follows has nothing left to commit.
+        assert!(
+            document
+                .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+                .expect("the focus loss is answered")
+                .committed
+                .is_none(),
+            "nothing is held back for the blur to commit"
+        );
+    });
+}
+
 #[test]
 fn a_multi_select_list_box_round_trips_through_its_selection_indices() {
     pulpit_testkit::on_the_pdfium_thread(|| {

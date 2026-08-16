@@ -895,9 +895,31 @@ code that generates its appearance.
   is drawing, and a second editing surface over that is what this section
   forbids. Which path a field takes is read from `/Ff` bit 19, not decided by
   the application.
-- **Known limitation:** the drawn list is single-select. A multi-select list
-  box commits one option at a time through the same path; choosing several at
-  once is not offered rather than half-offered.
+- A **multi-select** list box (`/Ff` bit 22) is drawn by the same overlay with
+  a tick per row rather than one chosen row. Clicking a row, or pressing Space
+  on the highlighted one, toggles that row and **leaves the list open**;
+  Enter closes it and Escape closes it, and both mean the same thing, because
+  there is nothing held back for Enter to commit. The event is the same
+  `SelectOption` the single-select path sends, because `FORM_SetIndexSelected`
+  is already per-index: on a single-select field the engine clears the other
+  options, and on a multi-select one it leaves them alone. Which of the two
+  happens is decided inside PDFium by the field's own flag, not by the
+  application.
+  - The engine drops and immediately restores the widget's focus after each
+    such selection, because PDFium holds a multi-select list box's pending
+    selection in the form-fill widget and writes it to `/V` and `/I` only when
+    the field loses focus. An overlay the application draws can read only the
+    committed field, so without this every tick would come back unticked and
+    the rows would show the selection as it was one press ago.
+  - **Consequence:** each tick is one commit, one `DocumentRevision` and one
+    undo entry, rather than one entry per visit to the field. This is
+    accepted: each tick is a change a person made deliberately and may want
+    back on its own, and the alternative — an overlay whose ticks lag the
+    document — is worse. `CommittedField` carries `selected` and
+    `previous_selected`, so each of those entries has a faithful before-image;
+    one string could not name three choices.
+  - An **editable** combo box is still excluded, multi-select or not, for the
+    reason above: its list stays PDFium's.
 - **Known limitation:** in-progress IME composition is not displayed inside
   the field; committed characters are forwarded. This is documented as a
   compatibility limitation (§3.4), not silently degraded.
