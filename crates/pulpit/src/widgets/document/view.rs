@@ -157,6 +157,8 @@ fn page_surface<'a, Message: Clone + 'static>(
                 compose,
                 reader.date_picker,
                 reader.date_language,
+                reader.focused_widget,
+                reader.focused_hint,
                 on_event,
             ));
         }
@@ -328,6 +330,8 @@ fn sheet<'a, Message: Clone + 'static>(
     buffer: Option<&'a iced::widget::text_editor::Content>,
     picker: Option<&crate::reader::DatePicker>,
     language: crate::datefield::Locale,
+    focused: Option<&pulpit_render::document::protocol::FocusedWidget>,
+    focused_hint: Option<&str>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
     let inner: Element<'static, Message> = match &page.frame {
@@ -523,12 +527,121 @@ fn sheet<'a, Message: Clone + 'static>(
         .filter(|picker| picker.page == index)
         .map(|picker| date_picker_layer(picker, language, shown, origin, drawn, on_event));
 
-    match (writing, calendar) {
-        (Some(writing), Some(calendar)) => iced::widget::stack![area, writing, calendar].into(),
-        (Some(writing), None) => iced::widget::stack![area, writing].into(),
-        (None, Some(calendar)) => iced::widget::stack![area, calendar].into(),
-        (None, None) => area,
+    // The ring around the field with the focus, and what that field expects.
+    // Both are pulpit's own chrome, drawn from the widget's page rectangle at
+    // this sheet's current geometry — so they follow a scroll and a zoom, and
+    // they outlive the frame swap that throws PDFium's own decoration away.
+    let focused = focused.filter(|widget| widget.page == index);
+    let ring = focused.map(|widget| {
+        focus_ring_layer::<Message>(
+            super::model::Anchor::of(widget.bounds, shown, origin, drawn),
+            drawn,
+        )
+    });
+    let hint = focused.zip(focused_hint).map(|(widget, hint)| {
+        field_hint_layer::<Message>(
+            super::model::Anchor::of(widget.bounds, shown, origin, drawn),
+            hint,
+            drawn,
+        )
+    });
+
+    let overlays = [writing, calendar, ring, hint];
+    if overlays.iter().all(Option::is_none) {
+        return area;
     }
+    let mut layers = iced::widget::stack![area];
+    for overlay in overlays.into_iter().flatten() {
+        layers = layers.push(overlay);
+    }
+    layers.into()
+}
+
+/// How far the focus ring stands off the widget it marks, in layout points.
+const FOCUS_RING_MARGIN: f32 = 2.0;
+/// How thick it is. Two points is the width every other focus indicator on
+/// the desktop uses; thinner disappears against a field's own border.
+const FOCUS_RING_WIDTH: f32 = 2.0;
+
+/// The ring around the field holding the focus (§8.6).
+///
+/// Drawn here rather than taken from the picture. PDFium's own focus
+/// decoration is in the rectangles it invalidates, and those arrive as
+/// patches; a full page frame is rendered by the pool from a fresh form
+/// environment that has no focus in it, so a ring that came from the bitmap
+/// would blink out every time a frame superseded a patch (A2). A ring that is
+/// an element cannot: it is rebuilt from the widget's page rectangle on every
+/// view, whatever the pixels underneath are doing.
+fn focus_ring_layer<Message: 'static>(
+    anchor: super::model::Anchor,
+    drawn: (f32, f32),
+) -> Element<'static, Message> {
+    let ring = anchor.inflated(FOCUS_RING_MARGIN, drawn);
+    let outline = container(space::horizontal())
+        .width(Length::Fixed(ring.width))
+        .height(Length::Fixed(ring.height))
+        .style(|_theme| container::Style {
+            border: iced::Border {
+                color: theme::ambient::accent(),
+                width: FOCUS_RING_WIDTH,
+                radius: 3.0.into(),
+            },
+            ..container::Style::default()
+        });
+    placed_over_the_sheet(outline, (ring.left, ring.top), drawn)
+}
+
+/// What the focused field expects, said beside the field rather than only in
+/// the diagnostics — "this field takes a date, as dd mmmm yyyy" is an answer
+/// to a question asked at the field, and a line in a log is not where the
+/// reader is looking.
+fn field_hint_layer<Message: 'static>(
+    anchor: super::model::Anchor,
+    hint: &str,
+    drawn: (f32, f32),
+) -> Element<'static, Message> {
+    /// Roughly how wide a caption character is, and how tall the box is with
+    /// its padding. Estimated rather than measured because the placement has
+    /// to be decided before the text is laid out; it is only used to keep the
+    /// box on the sheet, so being a little out costs a little clamping.
+    const CHARACTER: f32 = 0.58;
+    const PADDING: f32 = 6.0;
+
+    let label = format!("Takes {hint}");
+    let width = (label.chars().count() as f32 * theme::type_scale::CAPTION * CHARACTER
+        + 2.0 * PADDING)
+        .min(drawn.0.max(0.0));
+    let height = theme::type_scale::CAPTION * 1.4 + 2.0 * PADDING;
+    let (left, top) = anchor
+        .inflated(FOCUS_RING_MARGIN, drawn)
+        .place_beside((width, height), drawn);
+
+    let bubble = container(text(label).size(theme::type_scale::CAPTION))
+        .padding(PADDING)
+        .style(theme::ambient::dialog);
+    placed_over_the_sheet(bubble, (left, top), drawn)
+}
+
+/// Put `content` at a point on the sheet, in a box exactly the sheet's size.
+///
+/// Spacers rather than absolute positioning, the way every other layer over a
+/// page is placed: the sheet is a fixed-size box, and a layer the same size
+/// stacks over it without changing what the column thinks the page measures.
+fn placed_over_the_sheet<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    at: (f32, f32),
+    drawn: (f32, f32),
+) -> Element<'a, Message> {
+    container(column![
+        space::vertical().height(Length::Fixed(at.1)),
+        row![
+            space::horizontal().width(Length::Fixed(at.0)),
+            content.into()
+        ],
+    ])
+    .width(Length::Fixed(drawn.0))
+    .height(Length::Fixed(drawn.1))
+    .into()
 }
 
 /// The calendar pulpit draws over a date field (§8.6).

@@ -437,6 +437,27 @@ struct ReaderPatch {
     frame_height: u32,
     pixels: Vec<u8>,
     revision: pulpit_render::document::DocumentRevision,
+    /// True when the pixels show form-field state PDFium holds *uncommitted* —
+    /// typing in progress, a value not yet under `/V`. No snapshot contains
+    /// that state, so a full frame at the same revision must not take this
+    /// patch down: the frame was drawn without the typed characters, and
+    /// removing the patch makes them vanish until the next keystroke.
+    uncommitted: bool,
+}
+
+/// A patch the worker has been asked for and not yet answered.
+#[derive(Clone, Copy)]
+struct PendingReaderPatch {
+    /// The full-page frame size the answer is to be composited into.
+    frame_width: u32,
+    frame_height: u32,
+    /// How many requests are still unanswered for this page. A click is two
+    /// events — down and up — and each asks for a patch; forgetting the entry
+    /// when the *first* answer lands used to drop the second on the floor,
+    /// which read as the field flickering on every interaction.
+    in_flight: usize,
+    /// Whether the newest request covers uncommitted form state.
+    uncommitted: bool,
 }
 
 /// Where the reader's pages are rendered from.
@@ -563,7 +584,17 @@ pub struct App {
     reader_patches: std::collections::HashMap<pulpit_core::page::PageIndex, ReaderPatch>,
     /// The full-page frame size each in-flight patch was asked for, so the
     /// answer can be matched to the frame it was meant to fit.
-    reader_patch_pending: std::collections::HashMap<pulpit_core::page::PageIndex, (u32, u32)>,
+    reader_patch_pending:
+        std::collections::HashMap<pulpit_core::page::PageIndex, PendingReaderPatch>,
+    /// Everything patched on a page since its frame last caught up, in page
+    /// points. One patch per page means each new patch *replaces* the last, so
+    /// it has to keep covering what earlier ones covered: PDFium draws a combo
+    /// box's open list into the page, a hover then invalidates only the two
+    /// rows that changed, and a patch of just those rows would take the rest
+    /// of the list back to a frame that never had it — the popup visibly
+    /// breaking apart and reassembling as the pointer moves.
+    reader_patch_scope:
+        std::collections::HashMap<pulpit_core::page::PageIndex, pulpit_core::page::PageRect>,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -1087,6 +1118,7 @@ impl App {
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             reader_patches: std::collections::HashMap::new(),
             reader_patch_pending: std::collections::HashMap::new(),
+            reader_patch_scope: std::collections::HashMap::new(),
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -4048,12 +4080,15 @@ impl App {
                             // repaint was standing in for (§9.4): once one
                             // contains the patch's revision, the patch is a
                             // second copy of pixels the frame already has.
-                            if self
-                                .reader_patches
-                                .get(&page)
-                                .is_some_and(|patch| patch.revision <= snapshot.revision)
-                            {
+                            // …unless the patch shows *uncommitted* typing,
+                            // which no snapshot contains: taking it down here
+                            // made half-typed values blink out whenever a
+                            // deferred frame landed behind them.
+                            if self.reader_patches.get(&page).is_some_and(|patch| {
+                                patch.revision <= snapshot.revision && !patch.uncommitted
+                            }) {
                                 self.reader_patches.remove(&page);
+                                self.reader_patch_scope.remove(&page);
                                 self.wash_cache.borrow_mut().clear();
                             }
                         }
@@ -4392,6 +4427,7 @@ impl App {
                     // now, and a repaint of page three of the last one is not
                     // a repaint of anything.
                     self.reader_patches.clear();
+                    self.reader_patch_scope.clear();
                     self.reader_patch_pending.clear();
                     self.wash_cache.borrow_mut().clear();
                     self.reader
@@ -4563,8 +4599,25 @@ impl App {
                 crate::reader_link::Told::Patched(frame) => {
                     self.reader_patch_landed(*frame);
                 }
-                crate::reader_link::Told::Saved(saved) => {
+                crate::reader_link::Told::Saved {
+                    saved,
+                    unfilled_required,
+                } => {
                     self.notify(format!("Saved {}", saved.path.display()));
+                    // Said once, at the moment the copy exists, and never
+                    // enforced: the document names these fields required for
+                    // *its* submit button, and pulpit only writes copies.
+                    if !unfilled_required.is_empty() {
+                        self.notify(format!(
+                            "The form marks {} required and still empty: {}",
+                            if unfilled_required.len() == 1 {
+                                "this field"
+                            } else {
+                                "these fields"
+                            },
+                            unfilled_required.join(", ")
+                        ));
+                    }
                     // The copy just written is the same document with more in
                     // it, and it hashes differently, so it would open as a
                     // stranger. Give it whatever this file was remembered as
@@ -4942,7 +4995,7 @@ impl App {
         let [page] = applied.dirty_pages[..] else {
             return;
         };
-        self.ask_patch_of(page, dirty, applied.document_revision);
+        self.ask_patch_of(page, dirty, applied.document_revision, false);
     }
 
     /// Ask for one rectangle of one page, at the revision it should contain.
@@ -4952,11 +5005,17 @@ impl App {
     /// typed into (§9.4). A keystroke reaches here through the same path a
     /// stroke does, because it is the same problem — the picture on screen was
     /// drawn from a snapshot that predates the edit.
+    ///
+    /// `uncommitted` says the rectangle shows form state PDFium has not yet
+    /// committed into the document, which no snapshot can contain — the patch
+    /// then outlives full frames at the same revision instead of being taken
+    /// down by one that was drawn without the typed characters.
     fn ask_patch_of(
         &mut self,
         page: pulpit_core::page::PageIndex,
         dirty: pulpit_core::page::PageRect,
         revision: pulpit_render::document::DocumentRevision,
+        uncommitted: bool,
     ) {
         let Some((surface_width, _)) = self.page_surface_size() else {
             return;
@@ -4970,6 +5029,21 @@ impl App {
         if geometry.width <= 0.0 || geometry.height <= 0.0 {
             return;
         }
+        // Cover everything patched since the frame last caught up, not only
+        // what this event dirtied. The next patch will *replace* the one on
+        // screen, and a combo box's open list — drawn into the page by PDFium,
+        // then invalidated two rows at a time as the pointer moves — must not
+        // be narrowed back down to two rows of popup over a frame that has no
+        // popup at all. The scope resets when a full frame takes the page's
+        // patch down.
+        let dirty = match self.reader_patch_scope.entry(page) {
+            std::collections::hash_map::Entry::Occupied(mut scope) => {
+                let grown = scope.get().union(&dirty);
+                scope.insert(grown);
+                grown
+            }
+            std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
+        };
         // A margin, in page points, so the edge of a mark's antialiasing is
         // inside the patch rather than split down the middle of a pixel by it.
         const MARGIN: f32 = 2.0;
@@ -4986,8 +5060,23 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        self.reader_patch_pending
-            .insert(page, (key.width, key.height));
+        // One entry per page, counting the answers still owed. Replacing the
+        // entry outright would forget the earlier request the moment a second
+        // one goes out, and its answer — a perfectly good newer picture —
+        // would then be dropped on arrival.
+        let pending = self
+            .reader_patch_pending
+            .entry(page)
+            .or_insert(PendingReaderPatch {
+                frame_width: key.width,
+                frame_height: key.height,
+                in_flight: 0,
+                uncommitted,
+            });
+        pending.frame_width = key.width;
+        pending.frame_height = key.height;
+        pending.in_flight += 1;
+        pending.uncommitted = uncommitted;
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::RenderPatch {
                 page,
@@ -5222,19 +5311,26 @@ impl App {
     ) {
         self.reader.set_form_typing(result.text_focus);
         self.reader.set_focused_choice(result.focused_choice);
-        // What this field wants, said once as the caret arrives in it. A date
-        // field is a plain box with a caret in it and no calendar; the pattern
-        // its own format script names is the only thing that says what to
-        // type, and repeating it on every keystroke would be a stream of
-        // identical lines rather than a hint.
+        // Where to draw the focus ring, taken as fact like the caret itself.
+        // The answer that says nothing is focused matters as much as the one
+        // that names a widget: it is what takes the ring off the last field.
+        self.reader
+            .set_focused_widget(result.focused_widget.clone());
         // Open the calendar when the caret lands in a date field, and put it
         // away when it leaves. The clock is read here, at the edge, because
         // the reader's state deliberately reads none.
         self.reader.set_date_language(self.date_language);
         self.reader
             .set_focused_date(result.focused_date.as_ref(), today());
+        // What this field wants, said once as the caret arrives in it rather
+        // than once per keystroke — every event carries the hint, including
+        // the ones that changed nothing, so the dedup is what keeps it a hint
+        // instead of a stream. It is shown beside the field, which is where
+        // the reader is looking; the diagnostics line stays only for the case
+        // the tooltip cannot cover, which is a focus the worker reported
+        // without a widget to hang the tooltip on.
         if self.reader.take_form_hint(result.focused_hint.as_deref()) {
-            if let Some(hint) = &result.focused_hint {
+            if let (Some(hint), None) = (&result.focused_hint, &result.focused_widget) {
                 self.diagnostics.note(format!("this field takes a {hint}"));
             }
         }
@@ -5272,17 +5368,32 @@ impl App {
             .copied()
             .reduce(|all, one| all.union(&one));
         if let Some(dirty) = dirty {
-            self.ask_patch_of(page, dirty, revision);
+            // A keystroke's pixels are uncommitted until the field commits:
+            // they live in PDFium's form environment and in no snapshot, so
+            // this patch must survive full frames at the same revision.
+            self.ask_patch_of(page, dirty, revision, result.committed.is_none());
         }
     }
 
     /// A partial repaint arrived. It is held over the page's frame until a
     /// full frame containing the same revision replaces it.
     fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
-        let Some((frame_width, frame_height)) = self.reader_patch_pending.remove(&frame.page)
-        else {
+        let Some(pending) = self.reader_patch_pending.get_mut(&frame.page) else {
             return;
         };
+        let PendingReaderPatch {
+            frame_width,
+            frame_height,
+            uncommitted,
+            ..
+        } = *pending;
+        // Every answer owed is settled one at a time; the entry goes only when
+        // nothing is in flight, so a click's second patch — pointer down and
+        // up each ask for one — is composited instead of dropped.
+        pending.in_flight = pending.in_flight.saturating_sub(1);
+        if pending.in_flight == 0 {
+            self.reader_patch_pending.remove(&frame.page);
+        }
         if !frame.is_consistent() {
             return;
         }
@@ -5304,6 +5415,7 @@ impl App {
                 frame_height,
                 pixels: frame.pixels,
                 revision: frame.revision,
+                uncommitted,
             },
         );
     }

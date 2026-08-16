@@ -353,6 +353,13 @@ pub struct ReaderData<'a> {
     pub date_picker: Option<&'a crate::reader::DatePicker>,
     /// The language a picked date is written in.
     pub date_language: crate::datefield::Locale,
+    /// The widget holding the form's focus, if one is (§8.6). The ring is
+    /// drawn from this at the current zoom and scroll, never cached in
+    /// pixels, so it stays on the field through both.
+    pub focused_widget: Option<&'a pulpit_render::document::protocol::FocusedWidget>,
+    /// What that field expects, when it expects something in particular —
+    /// shown beside it rather than only said in the diagnostics.
+    pub focused_hint: Option<&'a str>,
     /// What pulpit can honour in this document, and what it cannot (§3.4).
     pub level: pulpit_render::document::CompatibilityLevel,
     pub warnings: &'a [pulpit_render::document::DocumentWarning],

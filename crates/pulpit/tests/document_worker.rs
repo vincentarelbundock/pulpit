@@ -479,6 +479,7 @@ fn a_filled_field_can_be_undone_and_redone_across_the_boundary() {
         operations: vec![UndoOperation::SetField {
             name: committed.name.clone(),
             value: committed.previous.clone(),
+            selected: committed.previous_selected.clone(),
         }],
         restores: DocumentRevision::INITIAL,
         label: format!("Fill {}", committed.name),
