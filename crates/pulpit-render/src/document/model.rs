@@ -254,6 +254,9 @@ impl AnnotationSummary {
                 rect: self.bounds,
                 mark: StampMark::Check,
                 style,
+                // Whatever markup generated this mark, so reopening it for
+                // editing shows the source rather than the picture (§7.4).
+                source: self.contents.pulpit_source.clone(),
             })),
             AnnotationKind::Other => None,
         }

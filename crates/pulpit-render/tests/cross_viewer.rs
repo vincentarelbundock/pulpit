@@ -281,6 +281,7 @@ fn a_picture_stamp_is_embedded_and_visible_to_another_renderer() {
                     rgba,
                 },
                 style: MarkStyle::default(),
+                source: None,
             }),
         )]);
         document
@@ -323,6 +324,84 @@ fn a_picture_stamp_is_embedded_and_visible_to_another_renderer() {
     assert!(
         added > 100,
         "another renderer drew {added} more dark pixels; the picture is not visible"
+    );
+}
+
+/// §7.4: a generated mark shows *somewhere else* as a picture and reopens
+/// *here* as its source.
+///
+/// The markup is stood in for rather than compiled — this crate has no Typst —
+/// but everything the specification asks of the annotation is the same either
+/// way: a standard subtype with a generated appearance, a plain fallback in
+/// `/Contents`, and the source in pulpit's namespaced entry.
+#[test]
+fn a_generated_mark_carries_its_source_and_shows_its_appearance() {
+    let Some(mut guard) = binding() else { return };
+    let engines = Engines::detect();
+    if !engines.can_read_objects("the generated-mark check") {
+        return;
+    }
+    let directory = temp_dir("generated");
+    let path = source(&directory);
+    let destination = directory.join("generated.pdf");
+    let markup = "$ integral_0^1 x^2 dif x $";
+
+    let (pixel_width, pixel_height) = (24u32, 12u32);
+    let rgba = (0..pixel_width * pixel_height)
+        .flat_map(|_| [0u8, 0, 0, 255])
+        .collect::<Vec<u8>>();
+
+    {
+        let engine = PdfiumDocument::open(&mut guard, &path).unwrap();
+        let mut document = PdfDocument::new(Box::new(engine), 4);
+        let transaction = DocumentTransaction::from_annotations([AnnotationCommand::Create(
+            AnnotationDraft::Stamp(pulpit_core::annotate::StampDraft {
+                page: PageIndex(0),
+                rect: pulpit_core::page::PageRect::new(72.0, 260.0, 216.0, 332.0),
+                mark: pulpit_core::annotate::StampMark::Image {
+                    pixel_width,
+                    pixel_height,
+                    rgba,
+                },
+                style: MarkStyle::default(),
+                source: Some(markup.to_string()),
+            }),
+        )]);
+        document
+            .apply(DocumentRevision::INITIAL, transaction)
+            .expect("the generated mark commits");
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .unwrap();
+    }
+
+    // Reopened, pulpit finds the source and offers it for editing.
+    let reopened = PdfiumDocument::open(&mut guard, &destination).unwrap();
+    let document = PdfDocument::new(Box::new(reopened), 6);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(
+        annotations[0].contents.pulpit_source.as_deref(),
+        Some(markup),
+        "the markup did not survive, so the mark cannot be reopened for editing"
+    );
+    // …and the plain fallback is there for anything that reads /Contents.
+    assert_eq!(annotations[0].contents.text, markup);
+
+    // Another reader sees a standard subtype with a picture in it, and is not
+    // asked to understand Typst.
+    let objects = engines.objects(&destination).expect("MuPDF parses it");
+    assert!(
+        objects
+            .iter()
+            .any(|line| line.contains("/Subtype") && line.contains("/Stamp")),
+        "a generated mark must be an ordinary annotation to other software"
+    );
+    assert!(
+        objects
+            .iter()
+            .any(|line| line.contains("/Subtype") && line.contains("/Image")),
+        "the generated appearance is not in the file"
     );
 }
 

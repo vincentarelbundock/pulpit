@@ -48,6 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 typst = "=0.15.1"
 typst-assets = { version = "=0.15.1", features = ["fonts"] }
 typst-layout = "=0.15.1"
+typst-render = "=0.15.1"
 typst-svg = "=0.15.1"
 smithay-client-toolkit = { version = "0.21", default-features = false }
 wayland-client = "0.31"

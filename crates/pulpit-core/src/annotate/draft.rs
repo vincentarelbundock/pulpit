@@ -256,6 +256,14 @@ pub struct StampDraft {
     pub rect: PageRect,
     pub mark: StampMark,
     pub style: MarkStyle,
+    /// The Typst markup this mark was generated from, when it was (§7.4).
+    ///
+    /// Kept in pulpit's own namespaced entry so other viewers show the
+    /// appearance and are not asked to understand Typst, while pulpit can
+    /// reopen the source for editing. Absent for a check, a cross or a
+    /// picture somebody dropped in.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// One annotation, fully described, in canonical page space.
@@ -691,6 +699,7 @@ mod tests {
                 rgba: vec![0; 8],
             },
             style: MarkStyle::default(),
+            source: None,
         });
         assert_eq!(draft.validate(&page()), Err(DraftError::MalformedImage));
 
@@ -703,6 +712,7 @@ mod tests {
                 rgba: Vec::new(),
             },
             style: MarkStyle::default(),
+            source: None,
         });
         assert_eq!(huge.validate(&page()), Err(DraftError::MalformedImage));
     }
@@ -714,6 +724,7 @@ mod tests {
             rect: PageRect::new(10.0, 10.0, 10.0, 60.0),
             mark: StampMark::Check,
             style: MarkStyle::default(),
+            source: None,
         });
         assert_eq!(draft.validate(&page()), Err(DraftError::Empty));
     }

@@ -42,6 +42,7 @@ resvg = "0.45"
 typst = { workspace = true }
 typst-assets = { workspace = true }
 typst-layout = { workspace = true }
+typst-render = { workspace = true }
 typst-svg = { workspace = true }
 
 # The X11 and Wayland adapters, and the app ids the two windows are labelled

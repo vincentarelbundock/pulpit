@@ -181,6 +181,7 @@ impl MemoryDocument {
             rect: bounds,
             mark: pulpit_core::annotate::StampMark::Check,
             style: MarkStyle::default(),
+            source: None,
         });
         self.annotations[page.get()].push(Entry {
             id,

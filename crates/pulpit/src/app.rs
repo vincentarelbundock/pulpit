@@ -237,6 +237,8 @@ pub enum Message {
     /// Place the composed mark, or abandon it.
     CommitMark,
     CancelMark,
+    /// Typeset the mark being composed, or write it plainly.
+    ComposeAsTypst(bool),
     /// A widget that produces nothing (preview mode).
     Ignore,
 }
@@ -394,6 +396,13 @@ pub struct ComposingMark {
     pub at: pulpit_core::page::PagePoint,
     pub tool: pulpit_core::annotation::AnnotationTool,
     pub text: String,
+    /// Compile the text as Typst and place the result as a picture (§7.4),
+    /// rather than writing it as plain `/FreeText`.
+    ///
+    /// Offered for the text tool only: a sticky note is read in a viewer's own
+    /// popup, which shows `/Contents` and not an appearance, so typesetting it
+    /// would produce a mark whose text nobody sees.
+    pub typst: bool,
 }
 
 /// One mutation sent to the document worker, waiting to be confirmed.
@@ -1900,6 +1909,12 @@ impl App {
             Message::ComposeMark(text) => {
                 if let Some(composing) = self.composing_mark.as_mut() {
                     composing.text = text;
+                }
+                Task::none()
+            }
+            Message::ComposeAsTypst(typst) => {
+                if let Some(composing) = self.composing_mark.as_mut() {
+                    composing.typst = typst;
                 }
                 Task::none()
             }
@@ -4112,6 +4127,7 @@ impl App {
                         at,
                         tool,
                         text: String::new(),
+                        typst: false,
                     });
                 }
                 Task::none()
@@ -4163,6 +4179,40 @@ impl App {
         if composing.text.trim().is_empty() {
             return Task::none();
         }
+
+        if composing.typst {
+            // Typst markup has no lossless standard encoding, so §7.4 has
+            // pulpit generate the appearance and keep the source: other
+            // viewers show the picture, pulpit reopens the markup.
+            //
+            // Compiled here rather than through the closed-world worker
+            // because this is one mark on a click rather than a stream of
+            // edits being debounced. The world is the same closed one either
+            // way: no files, no packages, no network, no clock (§12).
+            let colour = self.annotation_options().text_color.rgb();
+            let colour = (
+                (colour.0 * 255.0) as u8,
+                (colour.1 * 255.0) as u8,
+                (colour.2 * 255.0) as u8,
+            );
+            match crate::typst_annotation::rasterise(&composing.text, 240.0, 12.0, colour, 2.0) {
+                Ok(rendered) => {
+                    if let Some(transaction) = self.reader.place_typst(
+                        composing.page,
+                        composing.at,
+                        composing.text,
+                        rendered,
+                    ) {
+                        self.commit_to_document(transaction);
+                    }
+                }
+                // A compile failure is the markup's, not the application's,
+                // and the message is Typst's own — which is the useful one.
+                Err(error) => self.notify(format!("That does not compile: {error}")),
+            }
+            return Task::none();
+        }
+
         if let Some(transaction) =
             self.reader
                 .place_text(composing.page, composing.at, composing.tool, composing.text)

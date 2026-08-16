@@ -421,6 +421,46 @@ impl ReaderSession {
         (!commands.is_empty()).then(|| DocumentTransaction::from_annotations(commands.to_vec()))
     }
 
+    /// Place a mark generated from Typst markup (§7.4).
+    ///
+    /// A `/Stamp` whose appearance is the rendered picture and whose
+    /// namespaced entry is the source, so other viewers show what it looks
+    /// like and pulpit can reopen what it says. The size comes from the
+    /// compile rather than being guessed: Typst has already decided how much
+    /// room the markup needs.
+    pub fn place_typst(
+        &self,
+        page: PageIndex,
+        at: PagePoint,
+        source: String,
+        rendered: crate::typst_annotation::RasterisedText,
+    ) -> Option<DocumentTransaction> {
+        let geometry = self.pages.get(page.get()).copied()?;
+        let draft =
+            pulpit_core::annotate::AnnotationDraft::Stamp(pulpit_core::annotate::StampDraft {
+                page,
+                rect: pulpit_core::page::PageRect::new(
+                    at.x,
+                    at.y,
+                    at.x + rendered.width_pt,
+                    at.y + rendered.height_pt,
+                ),
+                mark: pulpit_core::annotate::StampMark::Image {
+                    pixel_width: rendered.pixel_width,
+                    pixel_height: rendered.pixel_height,
+                    rgba: rendered.rgba,
+                },
+                style: self.interaction.ink_style(),
+                source: Some(source),
+            });
+        if draft.validate(&geometry).is_err() {
+            return None;
+        }
+        Some(DocumentTransaction::from_annotations([
+            pulpit_core::annotate::AnnotationCommand::Create(draft),
+        ]))
+    }
+
     /// The pointer went down on the page it was last over.
     ///
     /// Returns `false` when nothing took the press — no tool armed, or a tool

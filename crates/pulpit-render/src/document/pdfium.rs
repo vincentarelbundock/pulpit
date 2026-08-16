@@ -778,7 +778,20 @@ impl<'a> PdfiumDocument<'a> {
         // The `/Contents` of a stamp is its description, which is what a
         // screen reader announces; §7.6 says these are called marks and never
         // cryptographic signatures.
-        set_string(bindings, annotation, "Contents", stamp.mark.label())?;
+        //
+        // A generated mark says what it says instead — §7.4 asks for a plain
+        // fallback where a meaningful one exists, and for markup the source is
+        // the closest thing to one.
+        match &stamp.source {
+            Some(source) => set_string(bindings, annotation, "Contents", source)?,
+            None => set_string(bindings, annotation, "Contents", stamp.mark.label())?,
+        }
+        if let Some(source) = &stamp.source {
+            // The markup itself, in pulpit's own namespaced entry: other
+            // viewers show the appearance and are not asked to understand
+            // Typst, and pulpit reopens the source for editing (§7.4).
+            set_string(bindings, annotation, PULPIT_KEY, source)?;
+        }
 
         if let StampMark::Image {
             pixel_width,

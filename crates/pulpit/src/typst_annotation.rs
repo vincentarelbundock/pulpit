@@ -114,6 +114,91 @@ pub fn render(
     Ok(typst_svg::svg(page, &typst_svg::SvgOptions::default()))
 }
 
+/// One Typst annotation, rasterised for a PDF appearance (§7.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasterisedText {
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Tightly packed RGBA8.
+    pub rgba: Vec<u8>,
+    /// The size the mark should occupy on the page, in PDF points.
+    pub width_pt: f32,
+    pub height_pt: f32,
+}
+
+/// Compile one annotation to pixels, for embedding as a `/Stamp` appearance.
+///
+/// Typst markup has no lossless standard `/FreeText` encoding, so §7.4 has
+/// pulpit generate the appearance and keep the *source* in its own namespaced
+/// entry: other viewers show the picture, and pulpit reopens the markup.
+///
+/// Raster rather than vector because the workspace already rasterises Typst
+/// nowhere and vectorises it into SVG, which is not a PDF content stream; a
+/// bounded raster is what §7.4 explicitly permits. `scale` is pixels per
+/// point, so a mark stays sharp at the zoom it is read at.
+pub fn rasterise(
+    source: &str,
+    width_pt: f32,
+    size_pt: f32,
+    rgb: (u8, u8, u8),
+    scale: f32,
+) -> Result<RasterisedText, String> {
+    // Bounded before anything is allocated (A8): a document that asked for a
+    // hundred-megapixel appearance would be asking for the memory, not for a
+    // mark anyone can read.
+    const MAX_PIXELS: u64 = 2048 * 2048;
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale.clamp(0.5, 8.0)
+    } else {
+        2.0
+    };
+
+    let vertical_gutter = size_pt * 0.2;
+    let wrapped = format!(
+        "#set page(width: {width_pt}pt, height: auto, margin: (x: 0pt, y: {vertical_gutter}pt), fill: none)\n\
+         #set text(size: {size_pt}pt, fill: rgb(\"#{:02x}{:02x}{:02x}\"))\n{}",
+        rgb.0, rgb.1, rgb.2, source
+    );
+    let warned = typst::compile::<PagedDocument>(&ClosedWorld::new(wrapped));
+    let document = warned.output.map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let page = document.pages().first().ok_or("Typst produced no page")?;
+
+    let size = page.frame.size();
+    let (width_pt, height_pt) = (size.x.to_pt() as f32, size.y.to_pt() as f32);
+    if width_pt <= 0.0 || height_pt <= 0.0 || !width_pt.is_finite() || !height_pt.is_finite() {
+        return Err("Typst produced a page with no area".to_string());
+    }
+    let pixels = (f64::from(width_pt * scale) * f64::from(height_pt * scale)) as u64;
+    if pixels > MAX_PIXELS {
+        return Err(format!(
+            "that mark would need {pixels} pixels, past the {MAX_PIXELS} limit"
+        ));
+    }
+
+    let pixmap = typst_render::render(
+        page,
+        &typst_render::RenderOptions {
+            pixel_per_pt: f64::from(scale).into(),
+            render_bleed: false,
+        },
+    );
+    Ok(RasterisedText {
+        pixel_width: pixmap.width(),
+        pixel_height: pixmap.height(),
+        // `tiny_skia` hands back premultiplied RGBA; `take` gives the bytes in
+        // the order a PDF image wants them.
+        rgba: pixmap.take(),
+        width_pt,
+        height_pt,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Request {
     id: u64,

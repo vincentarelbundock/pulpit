@@ -420,6 +420,7 @@ impl AnnotationInteraction {
                 rect: PageRect::new(at.x, at.y, at.x + size.0, at.y + size.1),
                 mark,
                 style: self.ink_style,
+                source: None,
             }),
         };
         if draft.validate(page_geometry).is_err() {
