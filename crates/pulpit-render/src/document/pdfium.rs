@@ -3137,6 +3137,17 @@ impl DocumentBackend for PdfiumDocument<'_> {
             }
             _ => None,
         });
+        // Where to draw the focus ring. The widget on *this* page and no
+        // other: a field's widgets can sit on several pages, and the event
+        // names one.
+        let focused_widget = focused.as_ref().and_then(|field| {
+            let widget = field.widgets.iter().find(|widget| widget.page == page)?;
+            Some(crate::document::protocol::FocusedWidget {
+                field: field.name.clone(),
+                page: widget.page,
+                bounds: widget.bounds,
+            })
+        });
         let focused_choice = focused.as_ref().and_then(|field| {
             (field.kind == FieldKind::ComboBox).then(|| crate::document::protocol::FocusedChoice {
                 selected: field.selected.first().copied(),
@@ -3192,6 +3203,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
             focused_choice,
             focused_hint,
             focused_date,
+            focused_widget,
         })
     }
 

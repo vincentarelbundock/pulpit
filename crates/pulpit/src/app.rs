@@ -5312,19 +5312,26 @@ impl App {
     ) {
         self.reader.set_form_typing(result.text_focus);
         self.reader.set_focused_choice(result.focused_choice);
-        // What this field wants, said once as the caret arrives in it. A date
-        // field is a plain box with a caret in it and no calendar; the pattern
-        // its own format script names is the only thing that says what to
-        // type, and repeating it on every keystroke would be a stream of
-        // identical lines rather than a hint.
+        // Where to draw the focus ring, taken as fact like the caret itself.
+        // The answer that says nothing is focused matters as much as the one
+        // that names a widget: it is what takes the ring off the last field.
+        self.reader
+            .set_focused_widget(result.focused_widget.clone());
         // Open the calendar when the caret lands in a date field, and put it
         // away when it leaves. The clock is read here, at the edge, because
         // the reader's state deliberately reads none.
         self.reader.set_date_language(self.date_language);
         self.reader
             .set_focused_date(result.focused_date.as_ref(), today());
+        // What this field wants, said once as the caret arrives in it rather
+        // than once per keystroke — every event carries the hint, including
+        // the ones that changed nothing, so the dedup is what keeps it a hint
+        // instead of a stream. It is shown beside the field, which is where
+        // the reader is looking; the diagnostics line stays only for the case
+        // the tooltip cannot cover, which is a focus the worker reported
+        // without a widget to hang the tooltip on.
         if self.reader.take_form_hint(result.focused_hint.as_deref()) {
-            if let Some(hint) = &result.focused_hint {
+            if let (Some(hint), None) = (&result.focused_hint, &result.focused_widget) {
                 self.diagnostics.note(format!("this field takes a {hint}"));
             }
         }

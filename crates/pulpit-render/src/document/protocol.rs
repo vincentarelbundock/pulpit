@@ -401,6 +401,31 @@ pub struct FormEventResult {
     /// widget is so the calendar can open beside it rather than somewhere
     /// else on the page.
     pub focused_date: Option<FocusedDate>,
+    /// Where the widget holding the focus is, whatever kind of field it
+    /// belongs to.
+    ///
+    /// PDFium draws its own focus decoration into the bitmap it patches, and
+    /// that decoration is in the *patch* only: a full page frame comes from
+    /// the render pool's own form environment, which has no focus in it, so
+    /// the ring blinks out the moment a fresh frame supersedes a patch (A2).
+    /// Reported here so the application can draw the indicator itself, where
+    /// it survives every frame swap by construction.
+    ///
+    /// `None` when nothing is focused, and when the focused widget is not on
+    /// the page the event was sent to — a ring cannot be drawn on a page the
+    /// event does not name.
+    pub focused_widget: Option<FocusedWidget>,
+}
+
+/// The widget with the focus, wherever it is (§8.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FocusedWidget {
+    pub field: String,
+    pub page: PageIndex,
+    /// Where the widget is, in canonical page space (A4), so the caller can
+    /// place an indicator over it without knowing anything about PDF
+    /// coordinates.
+    pub bounds: PageRect,
 }
 
 /// The date field with the caret in it (§8.6).
@@ -939,6 +964,11 @@ mod tests {
             focused_choice: None,
             focused_hint: None,
             focused_date: None,
+            focused_widget: Some(FocusedWidget {
+                field: "name".into(),
+                page: PageIndex(2),
+                bounds: PageRect::new(10.0, 20.0, 120.0, 36.0),
+            }),
         }));
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(
@@ -952,6 +982,7 @@ mod tests {
         let result = FormEventResult::default();
         assert!(result.invalidated.is_empty());
         assert!(result.committed.is_none());
+        assert!(result.focused_widget.is_none());
         assert!(DocumentResponse::Form(Box::new(result)).validate().is_ok());
     }
 }

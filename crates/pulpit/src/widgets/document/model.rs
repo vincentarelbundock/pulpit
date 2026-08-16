@@ -630,6 +630,85 @@ impl OutlineView {
     }
 }
 
+/// A page rectangle, converted to the sheet it is drawn on (§8.6).
+///
+/// Everything pulpit draws over a page — the calendar, the focus ring, the
+/// hint beside a field — starts from a rectangle in canonical page points and
+/// has to end up in layout points on a sheet that is scrolled, zoomed and
+/// possibly cropped. That conversion is one piece of arithmetic, so it lives
+/// here once: computed from the geometry the sheet has *now*, never cached,
+/// which is what makes an overlay track a scroll and a zoom instead of
+/// sliding off the field it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Anchor {
+    /// Place `bounds` on a sheet drawn at `drawn` layout points showing
+    /// `shown` page points from the crop window's corner `origin`.
+    pub fn of(
+        bounds: pulpit_core::page::PageRect,
+        shown: (f32, f32),
+        origin: (f32, f32),
+        drawn: (f32, f32),
+    ) -> Self {
+        let scale_x = if shown.0 > 0.0 {
+            drawn.0 / shown.0
+        } else {
+            1.0
+        };
+        let scale_y = if shown.1 > 0.0 {
+            drawn.1 / shown.1
+        } else {
+            1.0
+        };
+        let left = (bounds.left - origin.0) * scale_x;
+        let top = (bounds.top - origin.1) * scale_y;
+        Self {
+            left,
+            top,
+            width: ((bounds.right - bounds.left) * scale_x).max(0.0),
+            height: ((bounds.bottom - bounds.top) * scale_y).max(0.0),
+        }
+    }
+
+    /// Grow the rectangle by `margin` on every side, staying on the sheet.
+    ///
+    /// A ring drawn exactly on a widget's own edge reads as part of the
+    /// field's border; a couple of points of air is what makes it read as an
+    /// indicator around it.
+    pub fn inflated(self, margin: f32, drawn: (f32, f32)) -> Self {
+        let left = (self.left - margin).max(0.0);
+        let top = (self.top - margin).max(0.0);
+        Self {
+            left,
+            top,
+            width: (self.width + 2.0 * margin).min((drawn.0 - left).max(0.0)),
+            height: (self.height + 2.0 * margin).min((drawn.1 - top).max(0.0)),
+        }
+    }
+
+    /// Where a panel of `size` goes: under the anchored rectangle by
+    /// preference, which is where a dropdown goes, and above it when there is
+    /// no room below — so a field near the foot of the page still opens
+    /// something the reader can see all of.
+    pub fn place_beside(self, size: (f32, f32), drawn: (f32, f32)) -> (f32, f32) {
+        let left = self.left.clamp(0.0, (drawn.0 - size.0).max(0.0));
+        let below = self.top + self.height;
+        let above = self.top - size.1;
+        let top = if below + size.1 <= drawn.1 || above < 0.0 {
+            below.clamp(0.0, (drawn.1 - size.1).max(0.0))
+        } else {
+            above
+        };
+        (left, top)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +978,70 @@ mod tests {
             controls.tool.is_none(),
             "a document opens for reading, not for drawing on"
         );
+    }
+
+    #[test]
+    fn an_anchor_follows_the_zoom_and_the_crop() {
+        use pulpit_core::page::PageRect;
+
+        let bounds = PageRect::new(100.0, 200.0, 200.0, 220.0);
+        // The whole page, drawn at twice its size.
+        let anchor = Anchor::of(bounds, (600.0, 800.0), (0.0, 0.0), (1200.0, 1600.0));
+        assert_eq!(anchor.left, 200.0);
+        assert_eq!(anchor.top, 400.0);
+        assert_eq!(anchor.width, 200.0);
+        assert_eq!(anchor.height, 40.0);
+        // The same page cropped to its lower right quarter and drawn at the
+        // same size: the field moves with the window's corner.
+        let cropped = Anchor::of(bounds, (300.0, 400.0), (100.0, 200.0), (1200.0, 1600.0));
+        assert_eq!(cropped.left, 0.0);
+        assert_eq!(cropped.top, 0.0);
+    }
+
+    #[test]
+    fn a_panel_goes_under_the_field_unless_the_page_ends_first() {
+        use pulpit_core::page::PageRect;
+
+        let sheet = (600.0, 800.0);
+        let near_the_top = Anchor::of(
+            PageRect::new(10.0, 10.0, 110.0, 30.0),
+            sheet,
+            (0.0, 0.0),
+            sheet,
+        );
+        assert_eq!(near_the_top.place_beside((80.0, 24.0), sheet), (10.0, 30.0));
+        let near_the_foot = Anchor::of(
+            PageRect::new(10.0, 790.0, 110.0, 799.0),
+            sheet,
+            (0.0, 0.0),
+            sheet,
+        );
+        let (_, top) = near_the_foot.place_beside((80.0, 24.0), sheet);
+        assert_eq!(top, 766.0, "no room below, so it opens above");
+    }
+
+    #[test]
+    fn an_inflated_anchor_stays_on_the_sheet() {
+        use pulpit_core::page::PageRect;
+
+        let sheet = (600.0, 800.0);
+        let corner = Anchor::of(
+            PageRect::new(0.0, 0.0, 20.0, 20.0),
+            sheet,
+            (0.0, 0.0),
+            sheet,
+        )
+        .inflated(3.0, sheet);
+        assert_eq!(corner.left, 0.0);
+        assert_eq!(corner.top, 0.0);
+        let far = Anchor::of(
+            PageRect::new(580.0, 780.0, 600.0, 800.0),
+            sheet,
+            (0.0, 0.0),
+            sheet,
+        )
+        .inflated(3.0, sheet);
+        assert_eq!(far.left + far.width, 600.0);
+        assert_eq!(far.top + far.height, 800.0);
     }
 }

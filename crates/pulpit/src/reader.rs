@@ -217,6 +217,13 @@ pub struct ReaderSession {
     /// What the field holding the caret expects, so it is said once rather
     /// than once per keystroke.
     form_hint: Option<String>,
+    /// The widget holding the focus, in canonical page space (§8.6).
+    ///
+    /// The focus ring is drawn from this rather than taken from the picture:
+    /// PDFium's own decoration lives in the patches it invalidates, and a
+    /// full frame from the render pool's fresh form environment has none, so
+    /// a ring read off the bitmap would blink out at every frame swap (A2).
+    form_widget: Option<pulpit_render::document::protocol::FocusedWidget>,
     /// The calendar open over a date field (§8.6).
     ///
     /// A PDF names a date field and its pattern and stops there; the calendar
@@ -500,6 +507,26 @@ impl ReaderSession {
         }
         self.form_hint = hint.map(str::to_owned);
         hint.is_some()
+    }
+
+    /// The widget the focus ring belongs on, as the worker last reported it.
+    pub fn focused_widget(&self) -> Option<&pulpit_render::document::protocol::FocusedWidget> {
+        self.form_widget.as_ref()
+    }
+
+    /// Take the worker's word for where the focus is, including the answer
+    /// that says nowhere: a click on bare page takes the ring off the field
+    /// it was on, and that has to reach the view.
+    pub fn set_focused_widget(
+        &mut self,
+        widget: Option<pulpit_render::document::protocol::FocusedWidget>,
+    ) {
+        self.form_widget = widget;
+    }
+
+    /// What the field holding the focus expects, for the tooltip beside it.
+    pub fn form_hint(&self) -> Option<&str> {
+        self.form_hint.as_deref()
     }
 
     /// The combo box holding the focus, as the worker last reported it.
@@ -2438,6 +2465,7 @@ impl ReaderSession {
                 self.form_typing = false;
                 self.form_choice = None;
                 self.form_hint = None;
+                self.form_widget = None;
                 self.date_picker = None;
                 false
             }
@@ -2818,6 +2846,8 @@ impl ReaderSession {
             scale: self.scale,
             outline: &self.outline,
             date_picker: self.date_picker.as_ref(),
+            focused_widget: self.form_widget.as_ref(),
+            focused_hint: self.form_hint.as_deref(),
             date_language: self.date_language,
             level: self.level,
             warnings: &self.warnings,
