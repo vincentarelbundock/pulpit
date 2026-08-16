@@ -231,3 +231,394 @@ fn a_worker_that_cannot_open_its_document_reports_it_rather_than_hanging() {
         Ok(_) => panic!("a worker opened a file that is not a PDF"),
     }
 }
+
+/// A one-page AcroForm with a single text field named `name`.
+///
+/// Written by hand for the same reason the JavaScript fixtures in
+/// `pulpit-render` are: the interesting part is four lines of PDF, and a
+/// binary blob in the tree would hide them.
+fn form_pdf() -> Vec<u8> {
+    let objects: [&str; 5] = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] \
+         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V () /Ff 0 \
+         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
+    ];
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+    let start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// Typing into a field, across the process boundary, ends up in the file.
+///
+/// The companion to the ink test above, and the one that covers what the
+/// application actually does when someone clicks a form field: the events it
+/// forwards are raw input, the value is composed by PDFium on the far side,
+/// and the proof is that reopening the saved file finds the characters.
+#[test]
+fn a_field_typed_across_the_process_boundary_is_in_the_saved_file() {
+    use pulpit_core::page::PagePoint;
+    use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let source = directory.path().join("form.pdf");
+    std::fs::write(&source, form_pdf()).expect("the fixture is written");
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+    let mut session = match DocumentSession::start(&command, &source) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("skipping the document worker test: {error}");
+            return;
+        }
+    };
+
+    let DocumentResponse::Opened(info) = session
+        .request(DocumentRequest::Info)
+        .expect("the worker describes its document")
+    else {
+        panic!("expected document info")
+    };
+    assert!(
+        info.has_form,
+        "the fixture is an AcroForm; if this is false the form-fill environment \
+         did not start and every field would silently be read-only"
+    );
+
+    // The centre of the widget, in page space — which measures down from the
+    // top, where the `/Rect` measures up from the bottom.
+    let at = PagePoint {
+        x: 200.0,
+        y: 792.0 - 715.0,
+    };
+    let page = PageIndex(0);
+    let mut focused = false;
+    for event in [
+        FormInputEvent::PointerDown { at },
+        FormInputEvent::PointerUp { at },
+    ] {
+        let DocumentResponse::Form(result) = session
+            .request(DocumentRequest::FormEvent { page, event })
+            .expect("the worker takes a pointer event")
+        else {
+            panic!("expected a form event result")
+        };
+        focused |= result.text_focus;
+    }
+    assert!(
+        focused,
+        "a click in the field must report the caret; without it the application \
+         cannot tell a letter from a shortcut"
+    );
+
+    for character in "Ada".chars() {
+        session
+            .request(DocumentRequest::FormEvent {
+                page,
+                event: FormInputEvent::Char { character },
+            })
+            .expect("the worker takes a character");
+    }
+    // A typo, taken back the way a person would take it back: backspace is a
+    // *character* to PDFium's environment, not a key event, and sending it as
+    // the latter deletes nothing at all.
+    session
+        .request(DocumentRequest::FormEvent {
+            page,
+            event: FormInputEvent::KeyDown {
+                key: FormKey::Backspace,
+            },
+        })
+        .expect("the worker takes a backspace");
+
+    // Losing focus commits the value, and the answer says so.
+    let DocumentResponse::Form(result) = session
+        .request(DocumentRequest::FormEvent {
+            page,
+            event: FormInputEvent::Focus { gained: false },
+        })
+        .expect("the worker takes a focus change")
+    else {
+        panic!("expected a form event result")
+    };
+    let committed = result
+        .committed
+        .expect("losing focus commits the field that was being typed into");
+    assert_eq!(committed.name, "name");
+    assert_eq!(committed.value, "Ad", "the backspace took the 'a' back");
+    assert!(!result.text_focus, "the caret left the field");
+
+    // …and the file that comes out of it holds what was typed.
+    let destination = directory.path().join("filled.pdf");
+    session
+        .request(DocumentRequest::SaveAs(SaveRequest {
+            destination: destination.clone(),
+            options: SaveOptions {
+                incremental: false,
+                verify: true,
+            },
+        }))
+        .expect("the worker saves the filled form");
+    let bytes = std::fs::read(&destination).expect("the saved form is readable");
+    assert!(
+        bytes.windows(2).any(|pair| pair == b"Ad"),
+        "the typed value is not in the saved file"
+    );
+    // A6: the source is never written.
+    assert_eq!(
+        std::fs::read(&source).expect("the source is readable"),
+        form_pdf(),
+        "the source file must be untouched"
+    );
+}
+
+/// Undoing a filled field puts the old value back, across the process
+/// boundary and through PDFium's own editor.
+///
+/// The half of §8.6 that was missing until an inverse existed: a field edit
+/// used to be the one mutation with no undo, so pressing undo after typing a
+/// value reached straight past it to the last annotation edit.
+#[test]
+fn a_filled_field_can_be_undone_and_redone_across_the_boundary() {
+    use pulpit_core::page::PagePoint;
+    use pulpit_render::document::protocol::FormInputEvent;
+    use pulpit_render::document::{DocumentUndo, UndoOperation};
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let source = directory.path().join("form.pdf");
+    std::fs::write(&source, form_pdf()).expect("the fixture is written");
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+    let mut session = match DocumentSession::start(&command, &source) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("skipping the document worker test: {error}");
+            return;
+        }
+    };
+
+    let value_now = |session: &mut DocumentSession| -> String {
+        let DocumentResponse::Fields(fields) = session
+            .request(DocumentRequest::ListFields)
+            .expect("the worker lists its fields")
+        else {
+            panic!("expected a field list")
+        };
+        fields
+            .into_iter()
+            .find(|field| field.name == "name")
+            .expect("the fixture has a field called name")
+            .value
+    };
+
+    let page = PageIndex(0);
+    let at = PagePoint {
+        x: 200.0,
+        y: 792.0 - 715.0,
+    };
+    for event in [
+        FormInputEvent::PointerDown { at },
+        FormInputEvent::PointerUp { at },
+    ] {
+        session
+            .request(DocumentRequest::FormEvent { page, event })
+            .expect("the worker takes a pointer event");
+    }
+    for character in "Ada".chars() {
+        session
+            .request(DocumentRequest::FormEvent {
+                page,
+                event: FormInputEvent::Char { character },
+            })
+            .expect("the worker takes a character");
+    }
+    let DocumentResponse::Form(result) = session
+        .request(DocumentRequest::FormEvent {
+            page,
+            event: FormInputEvent::Focus { gained: false },
+        })
+        .expect("the worker takes a focus change")
+    else {
+        panic!("expected a form event result")
+    };
+    let committed = result.committed.expect("the field committed");
+    assert_eq!(committed.value, "Ada");
+    assert_eq!(
+        committed.previous, "",
+        "the before-image is what makes the edit reversible"
+    );
+    assert_eq!(value_now(&mut session), "Ada");
+
+    // The inverse the application would have built from that commit.
+    let undo = DocumentUndo {
+        operations: vec![UndoOperation::SetField {
+            name: committed.name.clone(),
+            value: committed.previous.clone(),
+        }],
+        restores: DocumentRevision::INITIAL,
+        label: format!("Fill {}", committed.name),
+    };
+    let DocumentResponse::Applied(applied) = session
+        .request(DocumentRequest::Undo {
+            expected_revision: committed.revision,
+            operation: undo,
+        })
+        .expect("the worker undoes the fill")
+    else {
+        panic!("expected an applied undo")
+    };
+    assert_eq!(
+        value_now(&mut session),
+        "",
+        "undo did not put the field back the way it was"
+    );
+
+    // …and the answer to an undo redoes it, which is what makes redo need no
+    // request of its own.
+    session
+        .request(DocumentRequest::Undo {
+            expected_revision: applied.document_revision,
+            operation: applied.undo.clone(),
+        })
+        .expect("the worker redoes the fill");
+    assert_eq!(
+        value_now(&mut session),
+        "Ada",
+        "redo did not put the typed value back"
+    );
+}
+
+/// A date chosen from the calendar reaches the file, written the way the
+/// field's own pattern asks for.
+///
+/// The picker is pulpit's — a PDF names a date field and its pattern and
+/// offers no calendar — but what it produces is text, and it goes into the
+/// field through PDFium's own editor as a `SetField`, which is the same path
+/// an undo takes. So a picked date is an ordinary edit: one revision, one undo
+/// entry, and the field's own format script run over it.
+#[test]
+fn a_date_picked_from_the_calendar_lands_in_the_field_in_its_own_pattern() {
+    use pulpit_render::document::{DocumentCommand, DocumentTransaction};
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let source = directory.path().join("dates.pdf");
+    std::fs::write(&source, dated_pdf()).expect("the fixture is written");
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+    let mut session = match DocumentSession::start(&command, &source) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("skipping the document worker test: {error}");
+            return;
+        }
+    };
+
+    // What the picker would produce for the 16th of August 2026 in a field
+    // whose pattern is `dd mmmm yyyy`, in French.
+    let value = "16 août 2026";
+    let DocumentResponse::Applied(applied) = session
+        .request(DocumentRequest::Apply {
+            expected_revision: DocumentRevision::INITIAL,
+            transaction: DocumentTransaction::one(DocumentCommand::SetField {
+                name: "when".into(),
+                value: value.into(),
+            }),
+        })
+        .expect("the worker takes the picked date")
+    else {
+        panic!("expected an applied transaction")
+    };
+    assert!(applied.document_revision > DocumentRevision::INITIAL);
+
+    let DocumentResponse::Fields(fields) = session
+        .request(DocumentRequest::ListFields)
+        .expect("the worker lists its fields")
+    else {
+        panic!("expected a field list")
+    };
+    let field = fields
+        .into_iter()
+        .find(|field| field.name == "when")
+        .expect("the date field");
+    assert_eq!(
+        field.value, value,
+        "the picked date is not what the field holds; the accented month name \
+         is the part most likely to have been mangled on the way through"
+    );
+
+    // …and it survives the file.
+    let destination = directory.path().join("filled.pdf");
+    session
+        .request(DocumentRequest::SaveAs(SaveRequest {
+            destination: destination.clone(),
+            options: SaveOptions {
+                incremental: false,
+                verify: true,
+            },
+        }))
+        .expect("the worker saves the filled form");
+    assert!(destination.is_file());
+}
+
+/// One page, one text field whose format script makes it a date.
+fn dated_pdf() -> Vec<u8> {
+    let objects: [&str; 5] = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] \
+         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (when) /V () /Ff 0 \
+         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
+         /AA << /F << /S /JavaScript /JS (AFDate_FormatEx(\"dd mmmm yyyy\");) >> \
+         /K << /S /JavaScript /JS (AFDate_KeystrokeEx(\"dd mmmm yyyy\");) >> >> >>",
+    ];
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+    let start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}

@@ -8,6 +8,7 @@
 //! ship, sign or find on `PATH`.
 
 mod app;
+mod datefield;
 mod designer;
 mod designer_view;
 mod display;

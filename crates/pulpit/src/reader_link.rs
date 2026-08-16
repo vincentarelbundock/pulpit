@@ -166,6 +166,10 @@ pub enum Told {
         page: pulpit_core::page::PageIndex,
         result: Box<pulpit_render::document::protocol::FormEventResult>,
     },
+    /// A form event the worker would not take — a document with no fillable
+    /// form, or a page that would not load. Nothing changed, and saying so is
+    /// what keeps the caller's one-in-flight guard from latching shut.
+    FormRefused,
     Applied(Box<Applied>),
     /// A mutation — a transaction, an undo or a redo — was not applied.
     ///
@@ -413,8 +417,13 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 // with no fillable form answers this way for every stray
                 // click on the page, and a banner per click would be noise.
                 Err(error) if !error.is_worker_loss() => {
+                    // Answered even though nothing happened. The application
+                    // keeps at most one pointer move in flight and waits for
+                    // an answer before sending the next; a refusal that said
+                    // nothing would latch that guard shut and the form would
+                    // stop following the pointer for the rest of the session.
                     tracing::debug!(%error, "a form event was refused");
-                    Vec::new()
+                    vec![Told::FormRefused]
                 }
                 other => vec![unexpected(other, "a form event result")],
             }

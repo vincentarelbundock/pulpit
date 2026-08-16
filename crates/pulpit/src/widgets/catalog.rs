@@ -272,7 +272,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         group: WidgetGroup::Document,
         label: "Page Navigation",
         short_label: "Pages",
-        tooltip: "Which page you are on, and the zoom: fit the width, fit the page, or set it.",
+        tooltip: "Which page you are on, and the zoom: fit the width, fit the page, set it, or crop to a rectangle.",
         parts: NONE,
         multi_instance: false,
         // A counter, a page box and four controls in one row.

@@ -890,6 +890,12 @@ code that generates its appearance.
 - There is no field inspector widget. Values are edited in place on the page
   only, so there is exactly one editing surface and no value-mismatch class
   of bugs.
+- Undoing a field edit is the one thing that puts a value back without a
+  person typing it, and it MUST go through the same editor: focus the widget,
+  select its contents, replace the selection. It MUST NOT write `/V` or
+  generate an appearance itself, so the comb spacing, auto-sizing, quadding
+  and format script are still PDFium's, computed once. Nothing sends a
+  forward `SetField`; the inverse is the only caller.
 
 The engine remains in the supervised worker process. Interactive events
 travel over the existing IPC; invalidations return as dirty rectangles

@@ -261,6 +261,16 @@ pub struct ReaderPage {
     /// The marks the reader has picked up, when they are on this page, or the
     /// open rubber band while one is being dragged over it (§8.4).
     pub selection: Vec<SelectedMark>,
+    /// Which part of the page this sheet is a picture of, as a fraction of it
+    /// (§8.1). The whole page unless a crop is in force.
+    ///
+    /// Every conversion between a page point and a place on the sheet goes
+    /// through this, which is what keeps a mark made under a crop landing
+    /// where the reader put it.
+    pub window: pulpit_core::notes::Region,
+    /// The marquee being drawn or chosen about, when it is on this page, in
+    /// canonical page points.
+    pub marquee: Option<pulpit_core::page::PageRect>,
 }
 
 /// The selected annotation, as the page surface draws it.
@@ -339,6 +349,10 @@ pub struct ReaderData<'a> {
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
     pub outline: &'a [OutlineRow],
+    /// The calendar open over a date field, if one is (§8.6).
+    pub date_picker: Option<&'a crate::reader::DatePicker>,
+    /// The language a picked date is written in.
+    pub date_language: crate::datefield::Locale,
     /// What pulpit can honour in this document, and what it cannot (§3.4).
     pub level: pulpit_render::document::CompatibilityLevel,
     pub warnings: &'a [pulpit_render::document::DocumentWarning],

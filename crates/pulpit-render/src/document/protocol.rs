@@ -325,7 +325,14 @@ pub struct FormEventResult {
     /// no field script calls out to the viewer.
     ///
     /// Reported rather than performed. See [`HostRequest`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// No `skip_serializing_if` here, and that is load-bearing rather than an
+    /// omission. This wire is bincode, which is not self-describing: a field
+    /// the encoder skips is not a field the decoder knows to skip, so an empty
+    /// vector would be written as nothing and read as whatever bytes came
+    /// next. The symptom is a session that dies with "unexpected end of file"
+    /// on the *common* path — an event with no host requests, which is almost
+    /// every keystroke — while the rare path with an alert in it works.
     pub requests: Vec<HostRequest>,
     /// Whether a text field holds the caret now that this event has been
     /// handled.
@@ -336,8 +343,63 @@ pub struct FormEventResult {
     /// event, including the ones that changed nothing — a click on bare page
     /// takes the caret *out* of a field, and that answer matters as much as
     /// the one that put it there.
-    #[serde(default)]
+    /// (No `serde` attribute, for the reason given on `requests` above: on a
+    /// bincode wire, every field is positional and always present.)
     pub text_focus: bool,
+    /// The closed combo box holding the focus, when one does.
+    ///
+    /// Populated for combo boxes only, and the asymmetry is measured rather
+    /// than assumed. A *list* box responds to `FORM_OnKeyDown` with an arrow
+    /// key by moving its selection, so it needs nothing here. A closed combo
+    /// box ignores the same key entirely — the value does not change and
+    /// nothing is invalidated — because in a real viewer that key would be
+    /// travelling to a dropdown that is not open. `FORM_SetIndexSelected` is
+    /// PDFium's own way in, and choosing the index to pass it needs to know
+    /// what is selected now and how many options there are.
+    pub focused_choice: Option<FocusedChoice>,
+    /// What the field that just took the caret expects, when it expects
+    /// something in particular — "date, as dd mmmm yyyy".
+    ///
+    /// A date field in a PDF looks exactly like a text field: same box, same
+    /// caret, and in Acrobat a calendar that pulpit does not have. Without
+    /// this the only way to learn what to type is to type something wrong and
+    /// watch the format script rewrite it. Carried on the event that gives the
+    /// field focus so it can be said at the moment it is useful.
+    pub focused_hint: Option<String>,
+    /// The date field holding the caret, when one does.
+    ///
+    /// A PDF says a field is a date and says the pattern; it does not offer a
+    /// calendar, because a calendar is a *viewer's* answer to that — Acrobat
+    /// and PDF Studio each draw their own. pulpit draws one too, and this is
+    /// what it needs: which field, what shape the value takes, and where the
+    /// widget is so the calendar can open beside it rather than somewhere
+    /// else on the page.
+    pub focused_date: Option<FocusedDate>,
+}
+
+/// The date field with the caret in it (§8.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FocusedDate {
+    pub field: String,
+    /// The Acrobat pattern the field's own format script names — `dd mmmm
+    /// yyyy`. Empty when the script used a numbered preset, which names no
+    /// pattern anyone could render.
+    pub pattern: String,
+    pub page: PageIndex,
+    /// Where the widget is, in canonical page space (A4), so the caller can
+    /// place the calendar without knowing anything about PDF coordinates.
+    pub bounds: PageRect,
+}
+
+/// What the focused combo box currently holds (§8.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusedChoice {
+    /// Which option is chosen, if any. `None` for a combo box holding a value
+    /// that is not in its own `/Opt` list, which is a case the corpus carries.
+    pub selected: Option<u32>,
+    /// How many options there are, so a caller can step within them without
+    /// asking for the list.
+    pub options: u32,
 }
 
 /// Something a document's JavaScript asked the host to do (§8.6).
@@ -393,6 +455,12 @@ pub enum HostRequest {
 pub struct CommittedField {
     pub name: String,
     pub value: String,
+    /// What the field held before this commit.
+    ///
+    /// The inverse of the edit, and the only thing that lets a filled field
+    /// join the same undo history as the annotations (§9.1). Captured before
+    /// the event was dispatched, because afterwards the old value is gone.
+    pub previous: String,
     pub revision: DocumentRevision,
 }
 
@@ -700,6 +768,7 @@ mod tests {
                 kind: super::super::model::FieldKind::Text,
                 value: String::new(),
                 read_only: false,
+                format: crate::document::model::FieldFormat::Plain,
                 options: Vec::new(),
                 allows_custom_value: true,
                 multiple_selection: false,
@@ -772,12 +841,17 @@ mod tests {
             committed: Some(CommittedField {
                 name: "name".into(),
                 value: "Ada".into(),
+                previous: String::new(),
                 revision: DocumentRevision(4),
             }),
             requests: vec![HostRequest::Alert {
                 message: "filled".into(),
                 title: "pulpit".into(),
             }],
+            text_focus: true,
+            focused_choice: None,
+            focused_hint: None,
+            focused_date: None,
         });
         let encoded = serde_json::to_string(&answer).unwrap();
         assert_eq!(

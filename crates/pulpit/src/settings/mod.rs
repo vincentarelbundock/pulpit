@@ -56,6 +56,7 @@ pub struct Settings {
     pub diagnostics: DiagnosticsSettings,
     pub layout: LayoutSettings,
     pub appearance: AppearanceSettings,
+    pub reading: ReadingSettings,
 }
 
 /// Which presenter layout is in use. Stored as a plain identifier so the
@@ -134,6 +135,163 @@ impl LayoutSettings {
     }
 }
 
+/// Where the reader was in each document it has read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReadingSettings {
+    /// Most recently left first.
+    pub positions: VecDeque<ReadingPosition>,
+    /// Whether leaving a document records where you were. Off means the list
+    /// stops growing; clearing it is a separate, deliberate act.
+    pub remember: bool,
+}
+
+impl Default for ReadingSettings {
+    fn default() -> Self {
+        Self {
+            positions: VecDeque::new(),
+            // On: being put back where you were is the behaviour a reader
+            // expects of a document, and one that has to be found and switched
+            // on is one most readers never get.
+            remember: true,
+        }
+    }
+}
+
+/// One document's remembered reading position.
+///
+/// Keyed *twice*, and the two keys answer different questions.
+///
+/// The content hash is the primary key, for the same reason it is the layout
+/// store's only key: a preference should follow the document when it is moved,
+/// renamed or copied, and two copies of one file should agree about it. But a
+/// position is not quite a preference. The reader who most wants to be put
+/// back where they were is the author running `make` on a paper, and every
+/// recompile writes different bytes — so the content hash, which is exactly
+/// right about identity, misses on the one workflow the feature is for.
+///
+/// The path is therefore kept as a weaker second key, used only when the hash
+/// misses. It answers "the file that lives here, whatever it now contains",
+/// which is a real but much softer claim: the file at a path can be a
+/// different document altogether. What survives a path-only match is the page
+/// number and nothing else — see [`RestoredPosition`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadingPosition {
+    /// Lowercase hex BLAKE3 of the file's bytes, or `None` when it could not
+    /// be read at the moment the position was taken.
+    pub hash: Option<String>,
+    /// Where the file was when the position was taken.
+    pub path: PathBuf,
+    /// Zero-based page index.
+    pub page: usize,
+    pub zoom: StoredZoom,
+    /// How far down `page` the window was, as a fraction of that page's
+    /// height. Zero is the page's top.
+    ///
+    /// A fraction rather than an offset in points because points are a number
+    /// about a particular zoom in a particular window, and neither is
+    /// necessarily the one the document is reopened in.
+    pub fraction: f32,
+}
+
+/// The reader's zoom, in the settings schema's own vocabulary.
+///
+/// Spelled out here rather than reusing the reader's `Zoom` for the same
+/// reason [`LayoutSettings::active`] is a plain `String`: what is written to
+/// disk is a format with a compatibility obligation, and it should not change
+/// shape because a widget's enum did.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredZoom {
+    #[default]
+    FitWidth,
+    FitPage,
+    FitHeight,
+    Fixed(f32),
+}
+
+/// What a lookup found, and how much of it can be believed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RestoredPosition {
+    /// The same bytes. Everything recorded still describes this document, so
+    /// all of it is restored.
+    Exact {
+        page: usize,
+        zoom: StoredZoom,
+        fraction: f32,
+    },
+    /// The same path, different bytes: the document was rebuilt or edited
+    /// under us. The page number is the most that can honestly survive that —
+    /// a recompiled paper is usually about as long and usually says roughly
+    /// the same thing on page nine — and a fraction into a page whose content
+    /// has moved is a precision the record no longer has. The zoom is dropped
+    /// with it rather than applied to a document that may not be the same
+    /// shape.
+    PageOnly { page: usize },
+}
+
+/// How many documents remember a position. The same bound and the same
+/// reasoning as [`MAX_REMEMBERED_LAYOUTS`].
+const MAX_REMEMBERED_POSITIONS: usize = 200;
+
+impl ReadingSettings {
+    /// Where this document was left, if anywhere.
+    ///
+    /// The content hash first, then the path. A hash of `None` — an unreadable
+    /// file — matches nothing by hash, which is the right answer: it is not
+    /// evidence that this is the same document, it is the absence of evidence.
+    pub fn position_for(
+        &self,
+        hash: Option<&str>,
+        path: &std::path::Path,
+    ) -> Option<RestoredPosition> {
+        if let Some(hash) = hash {
+            if let Some(entry) = self
+                .positions
+                .iter()
+                .find(|entry| entry.hash.as_deref() == Some(hash))
+            {
+                return Some(RestoredPosition::Exact {
+                    page: entry.page,
+                    zoom: entry.zoom,
+                    fraction: entry.fraction,
+                });
+            }
+        }
+        self.positions
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| RestoredPosition::PageOnly { page: entry.page })
+    }
+
+    /// Record where a document was left, most recent first.
+    ///
+    /// An entry is replaced when *either* key matches, not only the hash. The
+    /// recompiling author is the reason: one entry per build would fill the
+    /// whole list with one paper in an afternoon and evict every other
+    /// document to hold a hundred stale copies of that one.
+    pub fn remember_position(&mut self, position: ReadingPosition) {
+        self.positions.retain(|entry| {
+            let same_document = match (&entry.hash, &position.hash) {
+                (Some(existing), Some(new)) => existing == new,
+                _ => false,
+            };
+            !same_document && entry.path != position.path
+        });
+        self.positions.push_front(position);
+        while self.positions.len() > MAX_REMEMBERED_POSITIONS {
+            self.positions.pop_back();
+        }
+    }
+
+    /// Forget every remembered position. The privacy control: a reading list
+    /// is a record of what someone has read, and it must be possible to say
+    /// so and be rid of it.
+    pub fn forget_all(&mut self) {
+        self.positions.clear();
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -147,6 +305,7 @@ impl Default for Settings {
             diagnostics: DiagnosticsSettings::default(),
             layout: LayoutSettings::default(),
             appearance: AppearanceSettings::default(),
+            reading: ReadingSettings::default(),
         }
     }
 }
@@ -555,6 +714,133 @@ impl Default for DiagnosticsSettings {
 mod tests {
     use super::*;
     use crate::theme::ColorRole;
+
+    fn position(hash: Option<&str>, path: &str, page: usize) -> ReadingPosition {
+        ReadingPosition {
+            hash: hash.map(str::to_string),
+            path: PathBuf::from(path),
+            page,
+            zoom: StoredZoom::FitPage,
+            fraction: 0.5,
+        }
+    }
+
+    #[test]
+    fn the_same_bytes_get_the_whole_position_back() {
+        let mut reading = ReadingSettings::default();
+        reading.remember_position(position(Some("abc"), "/papers/draft.pdf", 8));
+
+        assert_eq!(
+            reading.position_for(Some("abc"), std::path::Path::new("/papers/draft.pdf")),
+            Some(RestoredPosition::Exact {
+                page: 8,
+                zoom: StoredZoom::FitPage,
+                fraction: 0.5,
+            })
+        );
+    }
+
+    #[test]
+    fn a_moved_file_is_found_by_its_contents_and_not_by_where_it_was() {
+        let mut reading = ReadingSettings::default();
+        reading.remember_position(position(Some("abc"), "/papers/draft.pdf", 8));
+
+        // The content hash outranks the path, which is the whole reason it is
+        // the primary key: the same document under a new name is the same
+        // document.
+        assert!(matches!(
+            reading.position_for(Some("abc"), std::path::Path::new("/elsewhere/final.pdf")),
+            Some(RestoredPosition::Exact { page: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn a_recompiled_document_keeps_its_page_and_nothing_else() {
+        let mut reading = ReadingSettings::default();
+        reading.remember_position(position(Some("abc"), "/papers/draft.pdf", 8));
+
+        // Same path, different bytes: `make` ran. The page survives; the
+        // fraction into it and the zoom do not, because the text under them
+        // has moved.
+        assert_eq!(
+            reading.position_for(Some("def"), std::path::Path::new("/papers/draft.pdf")),
+            Some(RestoredPosition::PageOnly { page: 8 })
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_borrows_nobody_elses_position() {
+        let mut reading = ReadingSettings::default();
+        reading.remember_position(position(Some("abc"), "/papers/draft.pdf", 8));
+
+        // No hash is the absence of evidence, not evidence of sameness — but
+        // the path is still a path, and still the weaker answer.
+        assert_eq!(
+            reading.position_for(None, std::path::Path::new("/papers/draft.pdf")),
+            Some(RestoredPosition::PageOnly { page: 8 })
+        );
+        assert_eq!(
+            reading.position_for(None, std::path::Path::new("/papers/other.pdf")),
+            None
+        );
+    }
+
+    #[test]
+    fn rebuilding_a_paper_all_afternoon_leaves_one_entry_not_a_hundred() {
+        let mut reading = ReadingSettings::default();
+        for build in 0..50 {
+            reading.remember_position(position(
+                Some(&format!("hash-{build}")),
+                "/papers/draft.pdf",
+                build,
+            ));
+        }
+        // Every build is a new hash at the same path, and the path match is
+        // what keeps them from accumulating and evicting every other document.
+        assert_eq!(reading.positions.len(), 1);
+        assert_eq!(reading.positions[0].page, 49);
+    }
+
+    #[test]
+    fn the_position_list_is_bounded_and_drops_the_least_recent() {
+        let mut reading = ReadingSettings::default();
+        for document in 0..MAX_REMEMBERED_POSITIONS + 10 {
+            reading.remember_position(position(
+                Some(&format!("hash-{document}")),
+                &format!("/papers/{document}.pdf"),
+                document,
+            ));
+        }
+        assert_eq!(reading.positions.len(), MAX_REMEMBERED_POSITIONS);
+        // The first ten opened are the ten that went.
+        assert_eq!(
+            reading.position_for(Some("hash-0"), std::path::Path::new("/papers/0.pdf")),
+            None
+        );
+        assert!(reading
+            .position_for(Some("hash-10"), std::path::Path::new("/papers/10.pdf"))
+            .is_some());
+    }
+
+    #[test]
+    fn positions_survive_a_round_trip_through_the_settings_file() {
+        let mut settings = Settings::default();
+        settings
+            .reading
+            .remember_position(position(Some("abc"), "/papers/draft.pdf", 8));
+        let written = toml::to_string_pretty(&settings).expect("settings serialise");
+        let read: Settings = toml::from_str(&written).expect("settings parse");
+        assert_eq!(read.reading, settings.reading);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_reading_positions_still_loads() {
+        // The field is `serde(default)` like every other, so an older file is
+        // read as one that has simply never remembered a position.
+        let read: Settings = toml::from_str("schema = 2\n").expect("settings parse");
+        assert_eq!(read.reading, ReadingSettings::default());
+        assert!(read.reading.remember);
+    }
 
     #[test]
     fn a_files_remembered_layout_is_found_by_its_contents_and_replaced_in_place() {

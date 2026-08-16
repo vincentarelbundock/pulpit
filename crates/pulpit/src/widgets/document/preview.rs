@@ -19,7 +19,7 @@ use iced::widget::canvas as canvas_widget;
 use iced::widget::canvas::{self, Path, Stroke};
 use iced::{Color, Element, Length, Point, Renderer, Size, Theme};
 
-use pulpit_core::page::PagePoint;
+use pulpit_core::page::{PagePoint, PageRect};
 
 /// The open gesture, ready to draw over one sheet.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,11 +74,13 @@ impl GesturePreview {
 pub fn layer<'a, Message: 'a>(
     preview: GesturePreview,
     canonical: (f32, f32),
+    origin: (f32, f32),
     drawn: (f32, f32),
 ) -> Element<'a, Message> {
     canvas_widget::Canvas::new(Painter {
         preview,
         canonical,
+        origin,
         drawn,
     })
     .width(Length::Fixed(drawn.0))
@@ -97,17 +99,92 @@ pub fn selection_layer<'a, Message: 'a>(
     selection: crate::widgets::context::SelectedMark,
     accent: Color,
     canonical: (f32, f32),
+    origin: (f32, f32),
     drawn: (f32, f32),
 ) -> Element<'a, Message> {
     canvas_widget::Canvas::new(SelectionPainter {
         selection,
         accent,
         canonical,
+        origin,
         drawn,
     })
     .width(Length::Fixed(drawn.0))
     .height(Length::Fixed(drawn.1))
     .into()
+}
+
+/// Draw the marquee the reader is dragging, or the one they are being asked
+/// about, over one sheet (§8.1).
+///
+/// Chrome like the selection and not a mark: it is a rectangle describing a
+/// *view*, nothing about it is ever written to the document, and it is drawn
+/// dashed so it cannot be mistaken for a box somebody drew on the page.
+pub fn marquee_layer<'a, Message: 'a>(
+    rect: PageRect,
+    canonical: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+) -> Element<'a, Message> {
+    canvas_widget::Canvas::new(MarqueePainter {
+        rect,
+        canonical,
+        origin,
+        drawn,
+    })
+    .width(Length::Fixed(drawn.0))
+    .height(Length::Fixed(drawn.1))
+    .into()
+}
+
+struct MarqueePainter {
+    rect: PageRect,
+    canonical: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+}
+
+impl<Message> canvas::Program<Message> for MarqueePainter {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let scale_x = if self.canonical.0 > 0.0 {
+            self.drawn.0 / self.canonical.0
+        } else {
+            1.0
+        };
+        let scale_y = if self.canonical.1 > 0.0 {
+            self.drawn.1 / self.canonical.1
+        } else {
+            1.0
+        };
+        let top_left = Point::new(
+            (self.rect.left - self.origin.0) * scale_x,
+            (self.rect.top - self.origin.1) * scale_y,
+        );
+        let size = Size::new(
+            (self.rect.width() * scale_x).max(1.0),
+            (self.rect.height() * scale_y).max(1.0),
+        );
+        let accent = theme.extended_palette().primary.base.color;
+        // A light wash inside and a firm edge: the wash says which side of the
+        // line is being kept, which is the one thing a bare outline leaves the
+        // reader to guess.
+        frame.fill_rectangle(top_left, size, Color { a: 0.12, ..accent });
+        frame.stroke(
+            &Path::rectangle(top_left, size),
+            Stroke::default().with_color(accent).with_width(1.5),
+        );
+        vec![frame.into_geometry()]
+    }
 }
 
 /// How big a corner grip is drawn, on screen.
@@ -117,6 +194,9 @@ struct SelectionPainter {
     selection: crate::widgets::context::SelectedMark,
     accent: Color,
     canonical: (f32, f32),
+    /// The page point the sheet's top-left corner stands for: the crop
+    /// window's own corner, or the page's origin when nothing is cropped.
+    origin: (f32, f32),
     drawn: (f32, f32),
 }
 
@@ -143,7 +223,12 @@ impl<Message> canvas::Program<Message> for SelectionPainter {
         } else {
             1.0
         };
-        let place = |point: PagePoint| Point::new(point.x * scale_x, point.y * scale_y);
+        let place = |point: PagePoint| {
+            Point::new(
+                (point.x - self.origin.0) * scale_x,
+                (point.y - self.origin.1) * scale_y,
+            )
+        };
 
         let rect = self.selection.bounds;
         let top_left = place(PagePoint::new(rect.left, rect.top));
@@ -199,6 +284,8 @@ impl<Message> canvas::Program<Message> for SelectionPainter {
 struct Painter {
     preview: GesturePreview,
     canonical: (f32, f32),
+    /// As [`SelectionPainter::origin`].
+    origin: (f32, f32),
     drawn: (f32, f32),
 }
 
@@ -228,7 +315,12 @@ impl<Message> canvas::Program<Message> for Painter {
         } else {
             1.0
         };
-        let place = |point: &PagePoint| Point::new(point.x * scale_x, point.y * scale_y);
+        let place = |point: &PagePoint| {
+            Point::new(
+                (point.x - self.origin.0) * scale_x,
+                (point.y - self.origin.1) * scale_y,
+            )
+        };
 
         let (red, green, blue) = self.preview.color;
         let color = Color::from_rgba(red, green, blue, self.preview.opacity.clamp(0.0, 1.0));

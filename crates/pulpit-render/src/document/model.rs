@@ -111,6 +111,10 @@ pub enum DocumentWarning {
     /// opening a URL. pulpit refuses every one of those, and says so here
     /// rather than refusing silently.
     ScriptReachesOut,
+    /// A form button carries an action — submitting, resetting, or running a
+    /// script. pulpit performs none of them, and which one it is cannot be
+    /// told apart through PDFium's public API.
+    ButtonAction,
 }
 
 impl DocumentWarning {
@@ -141,6 +145,10 @@ impl DocumentWarning {
             DocumentWarning::ScriptReachesOut => {
                 "This form tries to send itself somewhere. pulpit fills it and saves it \
                  locally; nothing is submitted, mailed or opened over the network."
+            }
+            DocumentWarning::ButtonAction => {
+                "This form has buttons pulpit does not press — submit, reset or script. \
+                 Fill the fields and save a copy instead."
             }
         }
     }
@@ -347,6 +355,57 @@ pub struct FieldWidget {
     pub option: Option<String>,
 }
 
+/// What a text field's format script makes of the value typed into it.
+///
+/// Read from the script itself, because PDF has no other way to say it: the
+/// Acrobat form-field format categories are implemented as calls to a standard
+/// JavaScript library — `AFDate_FormatEx`, `AFNumber_Format` and friends — and
+/// the pattern is the argument. A field pulpit could only describe as "text"
+/// is one it cannot tell a person what to type into.
+///
+/// Not an interpretation of the value: PDFium runs these scripts, and what a
+/// date field holds after a commit is whatever they made of it. This is only
+/// what the field is *for*.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FieldFormat {
+    /// No format script, or one pulpit does not recognise. Plain text.
+    #[default]
+    Plain,
+    /// A date, with the pattern the script names — `dd mmmm yyyy`, `m/d/yy`.
+    ///
+    /// The pattern is Acrobat's own vocabulary, passed through unchanged
+    /// rather than translated: it is what the document author wrote, and it is
+    /// what an Acrobat user would see in the field's properties.
+    Date { pattern: String },
+    /// A number, per `AFNumber_Format`.
+    Number,
+    /// A percentage, per `AFPercent_Format`.
+    Percent,
+    /// A time of day, per `AFTime_Format`.
+    Time,
+    /// A telephone number, postcode or similar, per `AFSpecial_Format`.
+    Special,
+}
+
+impl FieldFormat {
+    /// What to tell someone about to type into this field.
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            FieldFormat::Plain => None,
+            FieldFormat::Date { pattern } => Some(format!("date, as {pattern}")),
+            FieldFormat::Number => Some("a number".into()),
+            FieldFormat::Percent => Some("a percentage".into()),
+            FieldFormat::Time => Some("a time".into()),
+            FieldFormat::Special => Some("a formatted value".into()),
+        }
+    }
+
+    pub fn is_date(&self) -> bool {
+        matches!(self, FieldFormat::Date { .. })
+    }
+}
+
 /// One AcroForm field (§6.4).
 ///
 /// This is pdfform's `FormValue`/`WidgetRect` with `NormalizedRect` replaced
@@ -366,6 +425,14 @@ pub struct FormField {
     #[serde(default)]
     pub selected: Vec<u32>,
     pub read_only: bool,
+    /// What the field's own format script makes of its value.
+    ///
+    /// A date field in a PDF is not a distinct field type: it is a text field
+    /// whose `/AA /F` script calls `AFDate_FormatEx("dd mmmm yyyy")`. So
+    /// [`Self::kind`] stays faithful to `/FT` — it really is `Text` — and what
+    /// the field *means* is said here, which is also how Acrobat models it.
+    #[serde(default)]
+    pub format: FieldFormat,
     pub options: Vec<String>,
     pub allows_custom_value: bool,
     pub multiple_selection: bool,
@@ -732,6 +799,7 @@ mod tests {
             kind: FieldKind::RadioGroup,
             value: "b".into(),
             read_only: false,
+            format: FieldFormat::Plain,
             options: vec!["a".into(), "b".into()],
             allows_custom_value: false,
             multiple_selection: false,
@@ -770,6 +838,7 @@ mod tests {
             kind: FieldKind::Text,
             value: "42".into(),
             read_only: true,
+            format: FieldFormat::Plain,
             options: Vec::new(),
             allows_custom_value: false,
             multiple_selection: false,
@@ -814,6 +883,7 @@ mod tests {
             DocumentWarning::MutationForbidden,
             DocumentWarning::FormUnavailable,
             DocumentWarning::ScriptReachesOut,
+            DocumentWarning::ButtonAction,
         ] {
             assert!(warning.message().len() > 30, "{warning:?}");
         }

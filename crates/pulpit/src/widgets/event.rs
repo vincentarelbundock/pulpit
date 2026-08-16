@@ -139,6 +139,22 @@ pub enum ReadCommand {
     SetZoom(crate::widgets::document::model::Zoom),
     ZoomIn,
     ZoomOut,
+    /// Arm the marquee crop, or put it away.
+    ///
+    /// A latch rather than a momentary press: putting it away while a crop is
+    /// in force clears the crop and restores the zoom and the offsets it
+    /// replaced, so one press undoes what one press did.
+    ArmCrop(bool),
+    /// Take the drawn rectangle as a zoom into it, or as a crop on every page.
+    ///
+    /// Asked rather than guessed: a marquee reads equally as "look at this
+    /// figure for a moment" and "take the margins off this scan", and the two
+    /// answers are not each other's neighbours — one is a zoom, the other
+    /// changes every page until it is cleared.
+    TakeCrop(crate::widgets::document::model::CropChoice),
+    /// Abandon the drawn rectangle. The tool stays armed, so the reader who
+    /// mis-drew one draws another rather than re-arming first.
+    CancelCrop,
     /// What has been typed into the page box, as typed. The model decides
     /// what of it is a page number.
     TypePage(String),
@@ -211,6 +227,16 @@ pub enum ReadCommand {
     ClearSelection,
     /// Set the size placed text is written at, in page points.
     SetTextSize(f32),
+    /// Page the open date calendar forward or back a month (§8.6).
+    ///
+    /// The calendar is pulpit's own: a PDF names a date field and its pattern
+    /// and offers no picker, so every viewer that has one drew it.
+    StepDatePicker(bool),
+    /// Put the chosen day into the field the calendar is open over, written
+    /// the way that field's own pattern asks for.
+    PickDate(crate::datefield::Date),
+    /// Put the calendar away without choosing anything.
+    CloseDatePicker,
     /// Take back the last edit, or put it back.
     Undo,
     Redo,

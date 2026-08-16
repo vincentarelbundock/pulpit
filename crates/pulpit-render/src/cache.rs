@@ -423,6 +423,31 @@ impl FrameCache {
         count
     }
 
+    /// Discard every frame of one kind, whatever generation it belongs to.
+    ///
+    /// For a change that alters what a picture of a page *contains* without
+    /// changing the document it came from — the reader's crop is the one such
+    /// change — where a generation bump would be a lie: the document has not
+    /// been reloaded, and the slides rendered from it are still correct.
+    pub fn evict_kind(&mut self, kind: FrameKind) -> usize {
+        let doomed: Vec<FrameKey> = self
+            .entries
+            .keys()
+            .filter(|key| key.kind == kind)
+            .copied()
+            .collect();
+        let count = doomed.len();
+        for key in doomed {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.account(&entry, -1);
+                self.stats.evictions += 1;
+                self.forget_resident(key.generation);
+                self.evicted_keys.push(key);
+            }
+        }
+        count
+    }
+
     pub fn clear(&mut self) {
         self.evicted_keys.extend(self.entries.keys().copied());
         self.entries.clear();
@@ -687,6 +712,24 @@ mod tests {
             cache.generations_at_or_below(RenderGeneration(1000)),
             vec![RenderGeneration(900)]
         );
+    }
+
+    /// A crop changes what a picture of a page contains without changing the
+    /// document, so the reader's frames go and the deck's stay: a generation
+    /// bump would evict both and claim a reload that never happened.
+    #[test]
+    fn evicting_a_kind_leaves_the_other_kinds_standing() {
+        let mut cache = FrameCache::new(100_000_000);
+        let page = FrameKey {
+            kind: FrameKind::Page,
+            ..key(1, 0, Quality::Refined)
+        };
+        cache.insert(page, frame(1_000));
+        cache.insert(key(1, 0, Quality::Refined), frame(1_000));
+        assert_eq!(cache.evict_kind(FrameKind::Page), 1);
+        assert!(!cache.contains(&page));
+        assert!(cache.contains(&key(1, 0, Quality::Refined)));
+        assert_eq!(cache.take_evicted(), vec![page]);
     }
 
     #[test]

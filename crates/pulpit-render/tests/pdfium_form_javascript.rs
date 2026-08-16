@@ -306,3 +306,84 @@ fn a_form_whose_script_reaches_out_is_warned_about_when_it_opens() {
         );
     });
 }
+
+/// A one-page form whose only field is a button carrying `/A << /S /SubmitForm >>`.
+///
+/// The case no script mentions: there is no JavaScript anywhere in it, so
+/// reading the field scripts finds nothing, and PDFium will not classify the
+/// action — `FPDFAnnot_GetLink` answers null for a widget. Only the presence
+/// of the `/A` dictionary is visible.
+fn submitting_button() -> Vec<u8> {
+    let objects: [&str; 5] = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] \
+         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (send) \
+         /Rect [100 700 200 730] /F 4 /P 3 0 R \
+         /A << /S /SubmitForm /F << /FS /URL /F (https://example.invalid/collect) >> \
+         /Flags 4 >> >>",
+    ];
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+    let start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// A submit button is named at open time, even though nothing can say it is a
+/// submit button.
+#[test]
+fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        use pulpit_render::document::{CompatibilityLevel, DocumentWarning};
+
+        let Some(mut guard) = binding() else {
+            eprintln!("no libpdfium; skipping");
+            return;
+        };
+        let backend = &mut *guard;
+
+        let path = std::env::temp_dir().join("pulpit-form-submit-button.pdf");
+        std::fs::write(&path, submitting_button()).expect("the fixture is written");
+        let document = PdfiumDocument::open(backend, &path).expect("the fixture opens");
+        assert!(
+            document
+                .info()
+                .warnings
+                .contains(&DocumentWarning::ButtonAction),
+            "a button carrying /A must be reported: {:?}",
+            document.info().warnings
+        );
+        assert_eq!(
+            document.info().level,
+            CompatibilityLevel::NativeWithLimitations,
+            "a form with a button that does not work is not fully native"
+        );
+
+        // And a form with no such button is not accused of having one.
+        let quiet = fixture("calculate");
+        let quiet = PdfiumDocument::open(backend, &quiet).expect("the fixture opens");
+        assert!(!quiet
+            .info()
+            .warnings
+            .contains(&DocumentWarning::ButtonAction));
+    });
+}

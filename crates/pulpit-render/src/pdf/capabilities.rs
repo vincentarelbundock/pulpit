@@ -198,6 +198,16 @@ pub struct AnnotationEvidence {
     /// The annotation carries an additional-actions (`/AA`) dictionary, which
     /// is where annotation JavaScript lives.
     pub has_additional_actions: bool,
+    /// The annotation carries an action (`/A`) dictionary.
+    ///
+    /// Recorded as a bare fact because PDFium will not say what *kind* of
+    /// action it is for a widget: `FPDFAnnot_GetLink` answers null for one,
+    /// and `FPDFAction_GetType` has no value for `/SubmitForm` or `/ResetForm`
+    /// even where it can be reached. A button that submits a form is
+    /// therefore indistinguishable here from one that resets it or runs a
+    /// script — but all three are things pulpit will not do, which is what
+    /// the reader needs to be told.
+    pub has_action: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -520,6 +530,7 @@ mod tests {
             action,
             uri: None,
             has_additional_actions: false,
+            has_action: false,
         }
     }
 
@@ -553,24 +564,28 @@ mod tests {
                     action: ActionKind::Rendition,
                     uri: None,
                     has_additional_actions: false,
+                    has_action: false,
                 },
                 AnnotationEvidence {
                     subtype: AnnotationSubtype::Movie,
                     action: ActionKind::None,
                     uri: None,
                     has_additional_actions: false,
+                    has_action: false,
                 },
                 AnnotationEvidence {
                     subtype: AnnotationSubtype::Link,
                     action: ActionKind::Uri,
                     uri: Some("pulpit://video/clip?autoplay".into()),
                     has_additional_actions: false,
+                    has_action: false,
                 },
                 AnnotationEvidence {
                     subtype: AnnotationSubtype::Link,
                     action: ActionKind::Uri,
                     uri: Some("run:media/clip.mp4?autostart".into()),
                     has_additional_actions: false,
+                    has_action: false,
                 },
             ],
         )]);
@@ -685,6 +700,7 @@ mod tests {
                 action: ActionKind::GoTo,
                 uri: None,
                 has_additional_actions: true,
+                has_action: false,
             }],
         )]);
         let findings = capabilities.of_kind(FindingKind::AnnotationJavaScript);

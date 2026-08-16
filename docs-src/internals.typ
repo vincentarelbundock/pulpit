@@ -541,10 +541,108 @@ rather than the wall clock, for the same reason the Typst compiler is
 closed-world. The tests assert each null is still null, because they are a
 posture and not an omission.
 
-One gap worth naming: `doc.submitForm` is refused through the null
-`FFI_UploadTo`/`FFI_PostRequestURL` rather than through the JS platform, so an
-attempted submission is stopped but *not* reported, and the user is not told it
-happened.
+Reporting an attempted submission cannot be done as it happens.
+`doc.submitForm` is refused through the null
+`FFI_UploadTo`/`FFI_PostRequestURL` rather than through the JS platform, and
+wiring those two callbacks does not help — measured, neither is ever reached.
+So both halves of the reporting are static, done once at open:
+
+- The four `/AA` field scripts are read through
+  `FPDFAnnot_GetFormAdditionalActionJavaScript`, which hands them over
+  decompressed, and a form naming `submitForm`, `mailDoc` or `launchURL` warns.
+- A widget carrying an `/A` action dictionary warns as well. *Which* action it
+  is cannot be told: `FPDFAnnot_GetLink` answers null for a widget, and
+  `FPDFAction_GetType` has no value for `/SubmitForm` or `/ResetForm` anyway.
+  One warning covers submit, reset and script buttons together, which is
+  honest, because pulpit presses none of them.
+
+Between them a form that tries to leave the machine is named before anyone
+types into it — which is the moment that matters, rather than afterwards.
+
+== Who draws a field's value
+
+PDFium splits a form's pixels in two, and both halves have to be drawn by
+whoever is producing the picture. `FPDF_RenderPageBitmap` draws page
+*content* — the boxes, the rules, the printed labels. A widget's *value* is
+drawn separately, by `FPDF_FFLDraw`, out of a form-fill environment.
+
+That is true of a form nobody has touched. The values were already in the file;
+they are simply not part of what a page render draws. So a renderer with no
+environment produces a form that looks blank, and the only field that ever
+appears is one that a §9.4 partial repaint happened to cover — because those
+come from the document worker, which has an environment for editing. The
+symptom is "the entries only show up when I click on a field", and it has
+nothing to do with clicking.
+
+The render pool therefore keeps a form-fill environment per open document that
+has one, purely to draw with — no events are ever forwarded to it. It costs
+nothing for a slide deck, where `FPDF_GetFormType` says there is no form.
+
+Exactly one environment may exist per `FPDF_DOCUMENT`. Two draw every field
+twice, and the second pass over the first is visible as text heavier than the
+page around it. The document engine opens its document *through* the pool
+backend and then starts an environment it can also type into, so it releases
+the backend's on the way past: editing and drawing belong together, and
+whoever is editing keeps the environment.
+
+== Following the pointer over a form
+
+PDFium wants `FORM_OnMouseMove` so a button under the pointer draws its
+rollover appearance. The worker is serial, and a round trip per pointer sample
+would queue in front of the page renders — the same trap the text-selection
+query fell into, where every sample queued a query and the one that committed
+sat behind the backlog.
+
+The same cure applies: at most one move in flight, at most one waiting, and the
+one waiting is always the newest, because an intermediate position the pointer
+has already left is not worth drawing. Coalescing rather than a clock is what
+keeps the rollover as close to the hand as the round trip allows. The guard
+must be released on a *refused* event as well as an answered one, or a document
+that will not take form events latches it shut and the form stops following the
+pointer for the rest of the session — which is why a refusal is reported rather
+than dropped.
+
+== Choice fields, and why the two kinds differ
+
+A list box moves its own selection on `FORM_OnKeyDown` with an arrow key. A
+closed combo box ignores exactly the same key: in a real viewer that key would
+be travelling to a dropdown that is not open, and PDFium has no dropdown open.
+Clicking the arrow does not open one either.
+
+So a combo box is the one field the application has to translate for, and
+`FORM_SetIndexSelected` — carried as `SelectOption` — is PDFium's own way in:
+the engine performs the selection, generates the appearance and reports the
+change, exactly as it does for a keystroke. To choose an index the application
+needs to know what is selected now and how many options there are, which is
+what `FormEventResult::focused_choice` carries, populated for combo boxes only
+so a list box is never double-stepped. Stepping stops at both ends rather than
+wrapping, and a combo holding a value outside its own `/Opt` list starts at the
+near end.
+
+A combo box is also not a text field, so PDFium never calls
+`FFI_SetTextFieldFocus` for one. Deciding the keyboard belongs to the form on
+that callback alone left the arrow keys with the toolbar, scrolling the page.
+
+== Undoing a filled field
+
+A field edit is a document change like any other, and §9.1 wants it in the same
+history as the marks — a fill followed by a stroke undoes the stroke first. The
+inverse is a `SetField` carrying the field's before-image, captured before the
+event that commits it, because afterwards the old value is gone.
+
+Putting a value back is the one write that does not come from someone typing,
+and it goes through the editor anyway: focus the widget, `FORM_SelectAllText`,
+`FORM_ReplaceSelection`, kill the focus to commit. PDFium does exactly what it
+does for a person who selected all and typed, so there is still one
+implementation of what a value looks like in a field. Two details are
+load-bearing. The annotation handed to `FORM_SetFocusedAnnot` must come from
+the page the form environment has open — an annotation read off a second
+`FPDF_PAGE` for the same page is not one PDFium recognises, and it refuses the
+focus silently. And the commit that reports the change has to be named from the
+focus captured *before* the event: a focus loss is the usual way a text field
+commits, so by the time the commit is reported there is no focused widget left
+to name it. Both of those were bugs that no test caught, because nothing
+asserted on the committed field's name.
 
 Measured on the development machines, in a debug build: one keystroke through
 the environment costs about 12 µs, and a full-page redraw with the compositing

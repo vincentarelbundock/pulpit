@@ -26,6 +26,7 @@ kind of obligation:
 | The Lucide icons, in `crates/pulpit/assets/icons/` | ISC, © 2026 Lucide Icons and Contributors | `LUCIDE-LICENSE` |
 | Fonts embedded by the `typst-assets` Cargo dependency | OFL-1.1 / GUST / Bitstream Vera terms | `TYPST_ASSETS-NOTICE`, a copy of the crate's `NOTICE` |
 | PDFium, fetched into `lib/` and shipped as `lib/pulpit/libpdfium.so` | BSD-3-Clause, plus MIT for the packaging | `lib/PDFIUM-LICENSE`, after `make pdfium` |
+| PDFium test corpus in `tests/pdf-corpus/` | BSD-style; upstream file also contains Apache-2.0, © The PDFium Authors | `tests/pdf-corpus/LICENSES/PDFIUM-LICENSE.txt` |
 | Everything resolved from `Cargo.lock` | MIT / Apache-2.0 / BSD / ISC | generated, see below |
 | `examples/stress-test-730.pdf` | © Gerth Stølting Brodal, Aarhus University; no reuse grant | none — see below |
 
@@ -91,6 +92,19 @@ every package alongside the other licence texts. When the pinned
 ---
 
 ## Third-party test material
+
+### `tests/pdf-corpus/`
+
+* What it is: 16 unmodified PDFium fixtures covering AcroForms, XFA,
+  annotations, signatures, encryption, malformed input, and JavaScript
+* Upstream: <https://pdfium.googlesource.com/pdfium/>, revision and per-file
+  paths recorded in `tests/pdf-corpus/MANIFEST.toml`
+* Licence: **BSD-style**; the upstream licence file also contains the full
+  Apache-2.0 text, © The PDFium Authors
+* Full text: `tests/pdf-corpus/LICENSES/PDFIUM-LICENSE.txt`, copied verbatim
+
+The fixtures are development inputs and are not included in binary release
+packages. Their `SHA256SUMS` file makes the recorded provenance verifiable.
 
 ### `examples/stress-test-730.pdf`
 

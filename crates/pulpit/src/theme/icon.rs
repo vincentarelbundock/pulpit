@@ -94,6 +94,8 @@ pub enum Icon {
     FitPage,
     /// Fit the page.s height to the cell: `move-vertical`.
     FitHeight,
+    /// Draw a rectangle on the page and read through it: `crop`.
+    Crop,
     /// The previous page: `chevron-left`.
     ChevronLeft,
     /// The next page: `chevron-right`.
@@ -142,6 +144,7 @@ impl Icon {
             Icon::FitWidth => include_bytes!("../../assets/icons/move-horizontal.svg"),
             Icon::FitPage => include_bytes!("../../assets/icons/maximize.svg"),
             Icon::FitHeight => include_bytes!("../../assets/icons/move-vertical.svg"),
+            Icon::Crop => include_bytes!("../../assets/icons/crop.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
@@ -161,7 +164,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 35] = [
+    const ALL: [Icon; 36] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -190,6 +193,7 @@ impl Icon {
         Icon::FitWidth,
         Icon::FitPage,
         Icon::FitHeight,
+        Icon::Crop,
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Outline,

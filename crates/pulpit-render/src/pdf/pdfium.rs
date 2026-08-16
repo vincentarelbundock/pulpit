@@ -21,8 +21,8 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use pdfium_render::prelude::{
-    Pdfium, PdfiumLibraryBindings, FPDF_ATTACHMENT, FPDF_BOOKMARK, FPDF_DOCUMENT, FPDF_LINK,
-    FPDF_PAGE, FS_RECTF, IFSDK_PAUSE,
+    Pdfium, PdfiumLibraryBindings, FPDF_ATTACHMENT, FPDF_BOOKMARK, FPDF_DOCUMENT, FPDF_FORMHANDLE,
+    FPDF_LINK, FPDF_PAGE, FS_RECTF, IFSDK_PAUSE,
 };
 
 /// PDFium ABI constants that `pdfium-render` does not re-export.
@@ -116,8 +116,34 @@ pub struct PdfiumBackend {
     /// can read the file's bytes for the one feature PDFium exposes no
     /// accessor for: page transitions.
     paths: HashMap<u64, PathBuf>,
+    /// A form-fill environment per open document that has a form, and the
+    /// handle that borrows it.
+    ///
+    /// Needed for *drawing*, not for editing. PDFium's page render draws a
+    /// page's content; a form field's value is drawn by `FPDF_FFLDraw` out of
+    /// the form-fill environment, and a renderer without one produces a page
+    /// whose fields are blank — the boxes and the printed labels, and nothing
+    /// in them. That is true of a form nobody has touched: the values were
+    /// already in the file.
+    ///
+    /// Empty for every slide deck, which is most of what this backend opens.
+    forms: HashMap<u64, FormBinding>,
     next_id: u64,
     library_path: Option<PathBuf>,
+}
+
+/// A form-fill environment and the handle PDFium gave back for it.
+///
+/// The environment is boxed and must outlive the handle: PDFium keeps the
+/// address it was given and calls back through it.
+struct FormBinding {
+    #[allow(
+        dead_code,
+        reason = "PDFium holds this box's address for the handle's lifetime; \
+                  dropping it early is what this field prevents"
+    )]
+    environment: Box<crate::document::form::FormEnvironment>,
+    handle: FPDF_FORMHANDLE,
 }
 
 // PDFium is not thread safe and `pdfium-render` serialises every call behind
@@ -135,6 +161,54 @@ impl std::fmt::Debug for PdfiumBackend {
 }
 
 impl PdfiumBackend {
+    /// Give up the form-fill environment for one document.
+    ///
+    /// Called by the document engine, which opens its document through this
+    /// backend and then starts an environment of its own — one it can forward
+    /// keystrokes to. Two environments on one `FPDF_DOCUMENT` would draw every
+    /// field twice, once from each, and the second pass over the first is
+    /// visible: the text comes out heavier than the page around it.
+    ///
+    /// Editing and drawing belong together, so whoever is editing keeps the
+    /// environment and this one steps aside.
+    pub fn release_form(&mut self, document: BackendDocumentId) {
+        if let Some(form) = self.forms.remove(&document.0) {
+            unsafe { self.bindings.FPDFDOC_ExitFormFillEnvironment(form.handle) };
+        }
+    }
+
+    /// Start a form-fill environment for a document that has a form.
+    ///
+    /// Failure is not failure to open: the pages still render, and what is
+    /// lost is the field values drawn over them. A slide deck gets nothing,
+    /// because `FPDF_GetFormType` says it has no form and the environment is
+    /// not free.
+    fn open_form_environment(&mut self, id: u64, document: FPDF_DOCUMENT) {
+        if self.form_type(document) == FormType::None {
+            return;
+        }
+        let mut environment = crate::document::form::FormEnvironment::new();
+        // Safety: the environment is boxed and stored beside the handle that
+        // borrows it; `close` exits the environment before the box is dropped,
+        // and nothing else removes either.
+        let attached = unsafe { environment.attach(self.bindings.as_ref(), document) };
+        match attached {
+            Some(handle) => {
+                self.forms.insert(
+                    id,
+                    FormBinding {
+                        environment,
+                        handle,
+                    },
+                );
+            }
+            None => tracing::warn!(
+                "this document's form fields cannot be drawn; its pages will \
+                 render with empty fields"
+            ),
+        }
+    }
+
     /// Bind to a `libpdfium` shared library.
     ///
     /// Search order: `PULPIT_PDFIUM_PATH`, the directory next to the
@@ -189,6 +263,7 @@ impl PdfiumBackend {
                     return Ok(Self {
                         bindings,
                         documents: HashMap::new(),
+                        forms: HashMap::new(),
                         paths: HashMap::new(),
                         next_id: 0,
                         library_path: Some(candidate),
@@ -203,6 +278,7 @@ impl PdfiumBackend {
                 Ok(Self {
                     bindings,
                     documents: HashMap::new(),
+                    forms: HashMap::new(),
                     paths: HashMap::new(),
                     next_id: 0,
                     library_path: None,
@@ -482,6 +558,7 @@ impl PdfiumBackend {
             // `/AA` is where an annotation's scripted actions live.
             let has_additional_actions =
                 unsafe { self.bindings.FPDFAnnot_HasKey(annotation, "AA") } != 0;
+            let has_action = unsafe { self.bindings.FPDFAnnot_HasKey(annotation, "A") } != 0;
             let link = unsafe { self.bindings.FPDFAnnot_GetLink(annotation) };
             let (action, uri) = if link.is_null() {
                 (ActionKind::None, None)
@@ -493,6 +570,7 @@ impl PdfiumBackend {
                 subtype,
                 action,
                 uri,
+                has_action,
                 has_additional_actions,
             });
         }
@@ -699,7 +777,6 @@ impl PdfBackend for PdfiumBackend {
             None => "system library".to_string(),
         }
     }
-
     fn open(&mut self, source: &Path) -> Result<BackendDocumentId> {
         let path = source.to_string_lossy().to_string();
         let handle = unsafe { self.bindings.FPDF_LoadDocument(&path, None) };
@@ -722,11 +799,18 @@ impl PdfBackend for PdfiumBackend {
         self.next_id += 1;
         self.documents.insert(self.next_id, handle);
         self.paths.insert(self.next_id, source.to_path_buf());
+        self.open_form_environment(self.next_id, handle);
         Ok(BackendDocumentId(self.next_id))
     }
 
     fn close(&mut self, document: BackendDocumentId) {
         self.paths.remove(&document.0);
+        // Before the document, and in this order: PDFium's environment holds
+        // the document, and closing the document first leaves it holding a
+        // dangling one.
+        if let Some(form) = self.forms.remove(&document.0) {
+            unsafe { self.bindings.FPDFDOC_ExitFormFillEnvironment(form.handle) };
+        }
         if let Some(handle) = self.documents.remove(&document.0) {
             unsafe { self.bindings.FPDF_CloseDocument(handle) };
         }
@@ -803,9 +887,16 @@ impl PdfBackend for PdfiumBackend {
                 request.height
             )));
         }
+        // The form handle for this document, if it has one. Looked up before
+        // the page is borrowed so the closure below needs nothing from `self`.
+        let form = request
+            .with_annotations
+            .then(|| self.forms.get(&request.document.0).map(|form| form.handle))
+            .flatten();
+        let bindings = self.bindings.as_ref();
         self.with_page(request.document, request.page, |page| {
             render_page_progressively(
-                self.bindings.as_ref(),
+                bindings,
                 page,
                 &mut target[..bytes],
                 request.width,
@@ -813,7 +904,26 @@ impl PdfBackend for PdfiumBackend {
                 request.region,
                 request.with_annotations,
                 cancel,
-            )
+            )?;
+            // …and then the field values over the top of it.
+            //
+            // Only when the page's own annotations were asked for: a
+            // presentation deliberately renders without them (§ the
+            // `with_annotations` note above), and a projector showing a form's
+            // filled-in values would be the same mistake as showing somebody's
+            // review notes.
+            if let Some(form) = form {
+                composite_form_fields(
+                    bindings,
+                    form,
+                    page,
+                    &mut target[..bytes],
+                    request.width,
+                    request.height,
+                    request.region,
+                );
+            }
+            Ok(())
         })
     }
 
@@ -1253,6 +1363,80 @@ unsafe extern "C" fn need_to_pause_now(this: *mut IFSDK_PAUSE) -> i32 {
     // pointer.
     let state = this as *const PauseState<'_>;
     i32::from((*state).cancel.is_cancelled())
+}
+
+/// Draw a page's form field values over the page already in `rgba`.
+///
+/// PDFium splits a form's pixels in two, and this is the half the page render
+/// does not do. `FPDF_RenderPageBitmap` draws page *content*; a widget's value
+/// is drawn from the form-fill environment by `FPDF_FFLDraw`. A renderer
+/// without an environment therefore produces a form whose boxes and printed
+/// labels are all there and whose answers are missing — including the answers
+/// that were in the file when it was opened, which is what made this look like
+/// a bug about typing rather than about drawing.
+///
+/// Failure is silent by design: a page with no field values is a great deal
+/// better than no page.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the destination, its size and the crop it holds are seven \
+              separate facts; grouping them into a struct for one caller would \
+              hide the arithmetic that has to match the page render's"
+)]
+fn composite_form_fields(
+    bindings: &dyn PdfiumLibraryBindings,
+    form: FPDF_FORMHANDLE,
+    page: FPDF_PAGE,
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    region: Region,
+) {
+    if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
+        return;
+    }
+    // The same arithmetic the page render used, because the two passes have to
+    // agree to the pixel: the page is drawn at whatever size brings the crop
+    // out at `width` × `height`, then shifted so the crop's corner lands on the
+    // bitmap's origin.
+    let full_width = (width as f32 / region.width).round() as i32;
+    let full_height = (height as f32 / region.height).round() as i32;
+    let start_x = -((region.x * full_width as f32).round() as i32);
+    let start_y = -((region.y * full_height as f32).round() as i32);
+
+    // PDFium will not draw fields into a page it has not been told about.
+    unsafe { bindings.FORM_OnAfterLoadPage(page, form) };
+    // The buffer the page was just drawn into, wrapped rather than copied:
+    // `FPDF_FFLDraw` composites over what is already there, which is exactly
+    // the page under the fields.
+    let bitmap = unsafe {
+        bindings.FPDFBitmap_CreateEx(
+            width as i32,
+            height as i32,
+            FPDF_BITMAP_BGRA,
+            rgba.as_mut_ptr() as *mut std::os::raw::c_void,
+            width as i32 * 4,
+        )
+    };
+    if !bitmap.is_null() {
+        unsafe {
+            bindings.FPDF_FFLDraw(
+                form,
+                bitmap,
+                page,
+                start_x,
+                start_y,
+                full_width,
+                full_height,
+                0,
+                // The byte-order flag the page render used. Without it the
+                // field text arrives with red and blue swapped.
+                FPDF_REVERSE_BYTE_ORDER,
+            );
+            bindings.FPDFBitmap_Destroy(bitmap);
+        }
+    }
+    unsafe { bindings.FORM_OnBeforeClosePage(page, form) };
 }
 
 /// Render one page into `pixels`, yielding to the cancel signal.

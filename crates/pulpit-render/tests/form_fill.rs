@@ -265,6 +265,13 @@ fn a_committed_value_is_one_revision_and_marks_the_document_unsaved() {
             committed.revision > before,
             "a committed value did not move the revision"
         );
+        // *Which* field, and what it now holds. This used to go unasserted,
+        // and both were empty: a focus loss is the usual way a text field
+        // commits, and by the time the commit is reported PDFium has no
+        // focused annotation left to name it. A caller that wanted to say
+        // which field it had just filled could not.
+        assert_eq!(committed.name, "name");
+        assert_eq!(committed.value, "Ada");
         assert!(document.is_dirty(), "a filled form is unsaved work");
     });
 }
@@ -426,11 +433,18 @@ fn the_form_events_survive_the_worker_boundary() {
 }
 
 #[test]
-fn a_field_cannot_be_set_from_outside_the_page() {
+fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        // §8.6's "exactly one editing surface", as a refusal rather than a
-        // comment. A second way to write a value is the thing that would let an
-        // inspector and the page disagree about what a field holds.
+        // §8.6's "exactly one editing surface", kept while still being able to
+        // put a value back. `set_field` used to refuse outright, which made a
+        // field edit the one mutation with no inverse — and so the one that
+        // could not join the undo history the annotations share (§9.1).
+        //
+        // It no longer refuses, and the way it works is what preserves the
+        // rule: it focuses the widget, selects what is in it and replaces the
+        // selection, so PDFium does the editing exactly as it does for a
+        // person who selected all and typed. There is still one implementation
+        // of what a value looks like in a field, and it is still PDFium's.
         let Some(mut guard) = binding() else { return };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
@@ -438,11 +452,34 @@ fn a_field_cannot_be_set_from_outside_the_page() {
         };
         let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
         let mut document = PdfDocument::new(Box::new(engine), 61);
-        assert!(
-            document.set_field("name", "Ada").is_err(),
-            "a field was written from outside the page"
-        );
         assert_eq!(document.field_value("name").unwrap(), "");
+
+        // Type into it the ordinary way…
+        click_into(&mut document, "name");
+        for character in "Ada".chars() {
+            document
+                .form_event(PageIndex(0), FormInputEvent::Char { character })
+                .unwrap();
+        }
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+        assert_eq!(document.field_value("name").unwrap(), "Ada");
+
+        // …and put it back the way an undo would.
+        assert_eq!(document.set_field("name", "").unwrap(), "");
+        assert_eq!(
+            document.field_value("name").unwrap(),
+            "",
+            "undoing the first fill of an empty field must clear it, not leave it"
+        );
+
+        // And forward again, which is what a redo is.
+        assert_eq!(document.set_field("name", "Grace").unwrap(), "Grace");
+        assert_eq!(document.field_value("name").unwrap(), "Grace");
+
+        // A field that is not there is still refused rather than invented.
+        assert!(document.set_field("nobody", "x").is_err());
     });
 }
 
@@ -520,4 +557,340 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
          leave a frame's room for the IPC and the redraw"
         );
     });
+}
+
+/// A choice field: what the arrow keys can do on their own, and what they
+/// cannot.
+///
+/// The asymmetry here is measured rather than assumed, and it is the reason
+/// the application treats the two kinds of choice field differently. A list
+/// box moves its own selection on `FORM_OnKeyDown`. A closed combo box
+/// ignores the same key entirely — in a real viewer it would be travelling to
+/// a dropdown that is not open — so a combo box needs `FORM_SetIndexSelected`,
+/// which is what `SelectOption` carries.
+#[test]
+fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        use pulpit_render::document::protocol::FormKey;
+
+        let Some(mut guard) = binding() else { return };
+
+        fn open_case<'a>(
+            guard: &'a mut PdfiumBackend,
+            name: &str,
+            directory: &std::path::Path,
+        ) -> Option<PdfDocument<'a>> {
+            let case = corpus().into_iter().find(|case| case.name == name)?;
+            let path = directory.join(format!("{name}.pdf"));
+            std::fs::write(&path, &case.bytes).ok()?;
+            let engine = PdfiumDocument::open(guard, &path).ok()?;
+            Some(PdfDocument::new(Box::new(engine), 71))
+        }
+        let directory = tempfile::tempdir().expect("a temporary directory");
+
+        // A list box, driven by the arrow key alone.
+        if let Some(mut document) = open_case(&mut guard, "list-box-multi-select", directory.path())
+        {
+            assert_eq!(document.field_value("colour").unwrap(), "Red");
+            // The click lands on a row and selects it, so where the arrow
+            // starts from depends on the geometry. What matters is that the
+            // key moves it at all — the value after the click is the baseline.
+            click_into(&mut document, "colour");
+            let after_click = document.field_value("colour").unwrap();
+            let arrowed = document
+                .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::Down })
+                .unwrap();
+            assert!(
+                !arrowed.invalidated.is_empty(),
+                "a list box must repaint when its selection moves"
+            );
+            assert!(
+                arrowed.focused_choice.is_none(),
+                "a list box needs no translation, so it must not be reported as \
+                 one that does"
+            );
+            document
+                .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+                .unwrap();
+            assert_ne!(
+                document.field_value("colour").unwrap(),
+                after_click,
+                "a list box must move its own selection on an arrow key"
+            );
+        }
+
+        // A combo box, which does not.
+        let Some(mut document) = open_case(&mut guard, "combo-box-plain-options", directory.path())
+        else {
+            return;
+        };
+        assert_eq!(document.field_value("country").unwrap(), "Canada");
+        click_into(&mut document, "country");
+
+        let arrowed = document
+            .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::Down })
+            .unwrap();
+        // The focused combo is reported, so the application knows to translate.
+        let choice = arrowed
+            .focused_choice
+            .expect("a focused combo box must be reported as one");
+        assert_eq!(choice.options, 2);
+        assert_eq!(choice.selected, Some(0));
+
+        // It may repaint — a focus ring, a caret — but the *value* does not
+        // move, which is the whole reason the arrow has to be translated. If
+        // this ever starts changing, the translation in the application is
+        // redundant and would double-step the selection.
+        assert_eq!(
+            document.field_value("country").unwrap(),
+            "Canada",
+            "a closed combo box was expected to ignore the arrow key"
+        );
+
+        let selected = document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::SelectOption {
+                    index: 1,
+                    selected: true,
+                },
+            )
+            .unwrap();
+        assert!(
+            !selected.invalidated.is_empty(),
+            "choosing an option must repaint the field"
+        );
+        let committed = document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap()
+            .committed
+            .expect("choosing an option is a committed change");
+        assert_eq!(committed.name, "country");
+        assert_eq!(committed.value, "France");
+        assert_eq!(
+            committed.previous, "Canada",
+            "a choice is undoable like any other field edit"
+        );
+    });
+}
+
+/// A form's values are in the picture the *render pool* draws, not only in the
+/// one the document worker draws.
+///
+/// This is the bug that made a filled form look empty. PDFium splits a form's
+/// pixels in two: `FPDF_RenderPageBitmap` draws page content, and a widget's
+/// value is drawn from the form-fill environment by `FPDF_FFLDraw`. The reader
+/// gets its full pages from the render pool, which had no environment, so
+/// every field came out blank — and the only field that ever appeared was the
+/// one under a §9.4 partial repaint, which *is* drawn by the document worker.
+/// The symptom was "the entries only show up when I click on a field"; the
+/// cause had nothing to do with clicking, and the values had been in the file
+/// all along.
+#[test]
+fn field_values_are_drawn_by_the_render_pool_and_not_only_by_the_editor() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        use pulpit_render::pdf::{NeverCancel, PdfBackend, RenderRequest};
+
+        /// Pixels inside a fraction-of-the-bitmap rectangle that are not white.
+        fn ink(rgba: &[u8], width: u32, height: u32, rect: (f32, f32, f32, f32)) -> usize {
+            let (l, t, r, b) = rect;
+            let (x0, x1) = ((l * width as f32) as u32, (r * width as f32) as u32);
+            let (y0, y1) = ((t * height as f32) as u32, (b * height as f32) as u32);
+            let mut count = 0;
+            for y in y0..y1.min(height) {
+                for x in x0..x1.min(width) {
+                    let index = ((y * width + x) * 4) as usize;
+                    if rgba[index] < 200 || rgba[index + 1] < 200 || rgba[index + 2] < 200 {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }
+
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+
+        // Fill the field and save, so the file on disk holds a value — which
+        // is the state the pool renders from, and the state a form that
+        // arrives already filled is in from the start.
+        let filled = directory.path().join("filled.pdf");
+        let field = {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 81);
+            let field = document.fields().unwrap().remove(0);
+            click_into(&mut document, &field.name);
+            for character in "WWWW".chars() {
+                document
+                    .form_event(PageIndex(0), FormInputEvent::Char { character })
+                    .unwrap();
+            }
+            document
+                .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+                .unwrap();
+            document
+                .save_as(
+                    &filled,
+                    SaveOptions {
+                        incremental: false,
+                        verify: true,
+                    },
+                )
+                .expect("the filled form saves");
+            field
+        };
+        let bounds = field.anchor_on(PageIndex(0)).expect("a widget to look at");
+
+        // Where that widget is, as a fraction of the page.
+        let geometry = {
+            let engine = PdfiumDocument::open(&mut guard, &filled).expect("the copy opens");
+            let document = PdfDocument::new(Box::new(engine), 82);
+            document
+                .page_geometry(PageIndex(0))
+                .expect("a measured page")
+        };
+        let rect = (
+            bounds.left / geometry.width,
+            bounds.top / geometry.height,
+            bounds.right / geometry.width,
+            bounds.bottom / geometry.height,
+        );
+
+        // Now draw it the way the reader does: through the pool backend, with
+        // no document engine and no editing anywhere in sight.
+        let backend: &mut PdfiumBackend = &mut guard;
+        let document = PdfBackend::open(backend, &filled).expect("the copy opens for rendering");
+        let (width, height) = (900, 1165);
+        let mut rgba = vec![0u8; width * height * 4];
+        PdfBackend::render_into(
+            backend,
+            &RenderRequest {
+                document,
+                page: 0,
+                region: pulpit_core::notes::Region::FULL,
+                width: width as u32,
+                height: height as u32,
+                with_annotations: true,
+            },
+            &mut rgba,
+            &NeverCancel,
+        )
+        .expect("the pool renders the page");
+
+        assert!(
+            ink(&rgba, width as u32, height as u32, rect) > 0,
+            "the field is blank in a pool render: its value is in the file and \
+             in the document worker's picture, but not in the one the reader \
+             actually shows"
+        );
+    });
+}
+
+/// A date field is recognised as one, and says what it wants typed into it.
+///
+/// PDF has no date field type: a date is a text field whose `/AA /F` script
+/// calls `AFDate_FormatEx("dd mmmm yyyy")`, and Acrobat shows a calendar for
+/// it. pulpit has no calendar, so the pattern the script names is the only
+/// thing that tells anyone what to type — and reporting the field as plain
+/// text threw it away.
+#[test]
+fn a_date_field_is_recognised_and_says_what_it_expects() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        use pulpit_render::document::FieldFormat;
+
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("dates.pdf");
+        std::fs::write(&path, dated_form()).expect("the fixture is written");
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 91);
+        let fields = document.fields().expect("the fields are readable");
+
+        let date = fields
+            .iter()
+            .find(|f| f.name == "when")
+            .expect("a date field");
+        assert_eq!(date.kind, FieldKind::Text, "a date really is a text field");
+        assert_eq!(
+            date.format,
+            FieldFormat::Date {
+                pattern: "dd mmmm yyyy".into()
+            }
+        );
+        assert_eq!(date.format.hint().as_deref(), Some("date, as dd mmmm yyyy"));
+
+        // A number field is told apart from a date, and a plain one from both.
+        let count = fields.iter().find(|f| f.name == "count").expect("a number");
+        assert_eq!(count.format, FieldFormat::Number);
+        let plain = fields
+            .iter()
+            .find(|f| f.name == "who")
+            .expect("a plain one");
+        assert_eq!(plain.format, FieldFormat::Plain);
+        assert!(plain.format.hint().is_none());
+
+        // The hint travels with the focus, so it can be said as the caret
+        // arrives rather than looked up separately.
+        let bounds = date.anchor_on(PageIndex(0)).expect("a widget");
+        let at = PagePoint {
+            x: (bounds.left + bounds.right) / 2.0,
+            y: (bounds.top + bounds.bottom) / 2.0,
+        };
+        document
+            .form_event(PageIndex(0), FormInputEvent::PointerDown { at })
+            .unwrap();
+        let focused = document
+            .form_event(PageIndex(0), FormInputEvent::PointerUp { at })
+            .unwrap();
+        assert_eq!(
+            focused.focused_hint.as_deref(),
+            Some("date, as dd mmmm yyyy"),
+            "the field with the caret in it must say what it wants"
+        );
+    });
+}
+
+/// Three text fields: a date, a number, and one with no format script.
+fn dated_form() -> Vec<u8> {
+    let objects: [&str; 7] = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R] \
+         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (when) /V () /Ff 0 \
+         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
+         /AA << /F << /S /JavaScript /JS (AFDate_FormatEx(\"dd mmmm yyyy\");) >> \
+         /K << /S /JavaScript /JS (AFDate_KeystrokeEx(\"dd mmmm yyyy\");) >> >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () /Ff 0 \
+         /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
+         /AA << /F << /S /JavaScript /JS (AFNumber_Format(1, 3, 0, 0, \"\", true);) >> >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (who) /V () /Ff 0 \
+         /Rect [100 600 300 630] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
+    ];
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+    let start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
 }

@@ -25,7 +25,7 @@ iced = { workspace = true, features = ["image", "tokio", "advanced", "wgpu", "ca
 # compiled.
 iced_core = "0.14"
 iced_widget = { version = "0.14.2", features = ["canvas"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "unstable-locales"] }
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"

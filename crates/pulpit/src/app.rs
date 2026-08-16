@@ -848,6 +848,23 @@ pub struct App {
         pulpit_core::page::PageIndex,
         pulpit_render::document::TextSelection,
     )>,
+    /// The same guard, for the pointer moving over a form (§8.6).
+    ///
+    /// PDFium wants `FORM_OnMouseMove` so a button under the pointer draws its
+    /// rollover appearance and the caret shape follows the field. A round trip
+    /// per pointer sample on a serial worker would queue in front of the page
+    /// renders, so at most one move is in flight and at most one waits — and
+    /// the one that waits is always the newest, because an intermediate
+    /// position the pointer has already left is not worth drawing.
+    /// The language dates are written in, from the environment at startup.
+    ///
+    /// Acrobat formats a date field in the viewer's locale, so the same file
+    /// reads "16 août 2026" to one person and "16 August 2026" to another.
+    /// Read once: it cannot change while the application is running, and
+    /// reading it per keystroke would be a syscall in the typing path.
+    date_language: crate::datefield::Locale,
+    form_move_in_flight: bool,
+    form_move_waiting: Option<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -860,6 +877,16 @@ pub struct App {
     /// file could not be read — in which case this file simply remembers
     /// nothing rather than borrowing somebody else's memory.
     document_hash: Option<String>,
+    /// Where this document was left last time, waiting for a window to be
+    /// restored into.
+    ///
+    /// Held rather than applied at once: the position is a page and a fraction
+    /// of it, and turning either into a scroll offset needs the column laid
+    /// out against the cell the surface really has. At the moment a document
+    /// finishes opening the reader has the layout's estimate at best, so the
+    /// restore waits for the first scroll report — which Iced sends as soon as
+    /// the surface has bounds, without anybody scrolling.
+    pending_position: Option<crate::settings::RestoredPosition>,
     /// The offer itself, drawn as a dialogue with no way out but an answer.
     /// Inert: nothing is applied until one is given (§11.4).
     pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
@@ -867,6 +894,11 @@ pub struct App {
     /// document and generation they are rendered from, and the snapshot
     /// machinery that moves those forward after an edit (A7).
     reader_render: ReaderRenderState,
+    /// The crop the resident page frames were rendered through, so a change
+    /// to it can take those frames with it. Not part of the render key: a
+    /// crop is not a generation, and the slides rendered from the same
+    /// document are still correct.
+    reader_crop: pulpit_core::notes::Region,
     /// The highlighter's open text selection on the live slide.
     ///
     /// The *same* gesture type document mode uses, and deliberately so: the
@@ -1171,14 +1203,19 @@ impl App {
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
             reader_render: ReaderRenderState::default(),
+            reader_crop: pulpit_core::notes::Region::FULL,
             reader_link: None,
             reader_pending: std::collections::VecDeque::new(),
             selection_query_in_flight: false,
             selection_query_waiting: None,
+            date_language: crate::datefield::Locale::from_environment(),
+            form_move_in_flight: false,
+            form_move_waiting: None,
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
             document_hash: None,
+            pending_position: None,
             reader_recovery: None,
             presenter_interaction: pulpit_core::annotate::AnnotationInteraction::new(),
             composing_mark: None,
@@ -1830,6 +1867,15 @@ impl App {
                     self.timer_controls.open = false;
                     return Task::none();
                 }
+                // A rectangle drawn on the page is the innermost thing of all,
+                // and Escape is how a rectangle is taken back everywhere else
+                // it can be drawn. It leaves the tool armed: the reader who
+                // mis-drew one meant to draw another.
+                if key.as_deref() == Some("Escape")
+                    && self.reader.controls().crop.takes_the_pointer()
+                {
+                    return self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop);
+                }
                 // The editor owns the keyboard while it is open: presenter
                 // shortcuts must not blank the audience while someone is
                 // typing a layout name.
@@ -1904,7 +1950,9 @@ impl App {
                 // this document — not the next slide. The presenter's
                 // bindings are unchanged and mean what they always did the
                 // moment the reader is closed again.
-                if let Some(task) = self.document_key(key.as_deref(), control, shift) {
+                if let Some(task) =
+                    self.document_key(key.as_deref(), text.as_deref(), control, shift)
+                {
                     return task;
                 }
                 match self.settings.keymap.resolve_with_mods(
@@ -3251,6 +3299,9 @@ impl App {
     }
 
     fn quit(&mut self) -> Task<Message> {
+        // Before the settings are written, since this is what makes them
+        // worth writing.
+        self.record_reading_position();
         self.inhibitor.release(self.platform.services.as_ref());
         if let Some(supervisor) = self.supervisor.as_mut() {
             supervisor.shutdown();
@@ -3611,6 +3662,7 @@ impl App {
         // 4b. A confirmed restore whose document has now finished opening,
         //     and the throttled crash-recovery snapshot.
         self.resume_restore_into_document();
+        self.record_reading_position();
         self.save_session(now);
         if self.settings_dirty && self.settings_throttle.due(now) {
             self.flush_settings();
@@ -4172,6 +4224,10 @@ impl App {
     }
 
     fn open_document(&mut self, path: PathBuf) -> Task<Message> {
+        // Where the document being put down was left. Before anything else,
+        // because everything below replaces the identity this position
+        // belongs to.
+        self.record_reading_position();
         let mut documents = DocumentManager::new(
             path.clone(),
             ReloadPolicy {
@@ -4359,6 +4415,9 @@ impl App {
                     // Now that the pages have been measured, the file can say
                     // what it is for.
                     self.settle_layout_for_document();
+                    // …and where it was last read. Only looked up here; the
+                    // window it is restored into does not exist yet.
+                    self.find_reading_position();
                     // Every warning is said once, before the first edit, which
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {
@@ -4455,6 +4514,14 @@ impl App {
                         },
                     };
                     self.journal(entry);
+                }
+                crate::reader_link::Told::FormRefused => {
+                    self.form_move_answered();
+                }
+                crate::reader_link::Told::FormChanged { page, result } => {
+                    // The worker is free: the newest waiting move goes out now.
+                    self.form_move_answered();
+                    self.form_changed(page, *result);
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
                     self.reader.set_annotations(page, &summaries);
@@ -4737,6 +4804,19 @@ impl App {
         let Some((document, generation)) = self.reader_render_source() else {
             return;
         };
+        // A crop changes what a picture of a page *contains* without changing
+        // the document it came from, so no generation moves and the frames
+        // already in the cache are of the wrong thing. They go — otherwise the
+        // "any frame beats a blank sheet" fallback (A7) paints the uncropped
+        // page into a cropped sheet, stretched to fit.
+        let window = self.reader.controls().crop.window();
+        if self.reader_crop != window {
+            self.reader_crop = window;
+            self.cache.evict_kind(FrameKind::Page);
+            for evicted in self.cache.take_evicted() {
+                self.handles.remove(&evicted);
+            }
+        }
         let scale = self.presenter_scale_factor();
         let plan = self.reader.render_plan(scale);
 
@@ -4771,7 +4851,7 @@ impl App {
             } else {
                 Priority::Adjacent
             };
-            jobs.push((key, priority));
+            jobs.push((key, priority, entry.region));
         }
 
         // A page render still in flight for a page the reader has scrolled
@@ -4801,14 +4881,14 @@ impl App {
             }
         }
 
-        for (key, priority) in jobs {
+        for (key, priority, region) in jobs {
             let id = supervisor.next_request_id();
             supervisor.submit(RenderJob {
                 id,
                 generation,
                 document,
                 page: key.slide,
-                region: pulpit_core::notes::Region::FULL,
+                region,
                 width: key.width,
                 height: key.height,
                 priority,
@@ -4862,6 +4942,22 @@ impl App {
         let [page] = applied.dirty_pages[..] else {
             return;
         };
+        self.ask_patch_of(page, dirty, applied.document_revision);
+    }
+
+    /// Ask for one rectangle of one page, at the revision it should contain.
+    ///
+    /// Shared by the two things that dirty a rectangle without the render pool
+    /// knowing: an applied annotation transaction, and a form field being
+    /// typed into (§9.4). A keystroke reaches here through the same path a
+    /// stroke does, because it is the same problem — the picture on screen was
+    /// drawn from a snapshot that predates the edit.
+    fn ask_patch_of(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        dirty: pulpit_core::page::PageRect,
+        revision: pulpit_render::document::DocumentRevision,
+    ) {
         let Some((surface_width, _)) = self.page_surface_size() else {
             return;
         };
@@ -4898,8 +4994,285 @@ impl App {
                 region,
                 width,
                 height,
-                expected_revision: applied.document_revision,
+                expected_revision: revision,
             });
+        }
+    }
+
+    /// Follow the pointer over a form, at the rate the worker can answer.
+    ///
+    /// Coalesced rather than throttled on a clock: the newest position always
+    /// goes out next, so the rollover follows the hand as closely as the round
+    /// trip allows and never lags by a queue of stale samples.
+    fn ask_form_move(&mut self) {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        if !self.reader.press_belongs_to_the_form() {
+            return;
+        }
+        let Some((page, at)) = self.reader.cursor_position() else {
+            return;
+        };
+        if self.form_move_in_flight {
+            self.form_move_waiting = Some((page, at));
+            return;
+        }
+        if let Some(link) = self.reader_link.as_mut() {
+            if link.ask(crate::reader_link::Ask::FormEvent {
+                page,
+                event: FormInputEvent::PointerMove { at },
+            }) {
+                self.form_move_in_flight = true;
+            }
+        }
+    }
+
+    /// A move was answered: the newest waiting position, if any, goes out now.
+    fn form_move_answered(&mut self) {
+        self.form_move_in_flight = false;
+        let Some((page, at)) = self.form_move_waiting.take() else {
+            return;
+        };
+        if !self.reader.press_belongs_to_the_form() {
+            return;
+        }
+        if let Some(link) = self.reader_link.as_mut() {
+            if link.ask(crate::reader_link::Ask::FormEvent {
+                page,
+                event: pulpit_render::document::protocol::FormInputEvent::PointerMove { at },
+            }) {
+                self.form_move_in_flight = true;
+            }
+        }
+    }
+
+    /// Send one pointer event to the document's own form, if it has one.
+    ///
+    /// Returns whether it was sent, so the caller can tell "the form took this"
+    /// from "there was no form to take it".
+    ///
+    /// Only the two ends of the gesture, never the moves between. PDFium wants
+    /// `FORM_OnMouseMove` for hover effects on buttons; the worker is serial,
+    /// and a round trip per pointer sample would queue in front of the page
+    /// renders the reader is waiting on. A caret that does not change shape
+    /// over a field is a smaller loss than a page that stutters while the hand
+    /// moves across it.
+    fn ask_form_pointer(&mut self, which: FormPointer) -> bool {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        if !self.reader.press_belongs_to_the_form() {
+            return false;
+        }
+        let Some((page, at)) = self.reader.cursor_position() else {
+            return false;
+        };
+        let event = match which {
+            FormPointer::Down => FormInputEvent::PointerDown { at },
+            FormPointer::Up => FormInputEvent::PointerUp { at },
+        };
+        match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
+            None => false,
+        }
+    }
+
+    /// Move a focused combo box's selection by one, if there is one to move to.
+    ///
+    /// The key is consumed either way. An arrow at the end of the list does
+    /// nothing rather than falling through to scroll the page, which is what a
+    /// combo box does everywhere else — and a page that jumped because someone
+    /// held the down arrow at the bottom of a list would be worse than a key
+    /// that did nothing.
+    fn form_choice_step(&mut self, forward: bool) -> Option<Task<Message>> {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        if let Some(index) = self.reader.choice_step(forward) {
+            self.ask_form_key(FormInputEvent::SelectOption {
+                index,
+                selected: true,
+            });
+        }
+        Some(Task::none())
+    }
+
+    /// Route one key press to the field that holds the caret (§8.6).
+    ///
+    /// `None` means the key was not the field's and should carry on to the
+    /// keymap. Everything a text box uses is the field's; the shortcuts a
+    /// reader would still expect while typing are not.
+    fn form_key(
+        &mut self,
+        key: Option<&str>,
+        text: Option<&str>,
+        control: bool,
+    ) -> Option<Task<Message>> {
+        use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+
+        // Ctrl-anything is a shortcut, not text. Undo, Save As and the rest
+        // keep working with the caret in a field, which is what every other
+        // editor does — and PDFium's environment has no clipboard of its own
+        // for a Ctrl-V to reach anyway.
+        if control {
+            return None;
+        }
+
+        // The named keys a field uses. Escape is deliberately absent: it is
+        // forwarded below *and* allowed to continue, so it both abandons the
+        // field edit and remains the global way out.
+        let named = match key {
+            Some("Backspace") => Some(FormKey::Backspace),
+            Some("Delete") => Some(FormKey::Delete),
+            Some("Enter") => Some(FormKey::Enter),
+            Some("Tab") => Some(FormKey::Tab),
+            Some("ArrowLeft") | Some("Left") => Some(FormKey::Left),
+            Some("ArrowRight") | Some("Right") => Some(FormKey::Right),
+            // A *list* box moves its own selection on an arrow key, so those
+            // go straight through. A closed combo box ignores them — in a real
+            // viewer the key would be travelling to a dropdown that is not
+            // open — so for one of those the arrow becomes the selection
+            // change PDFium does answer to (§8.6).
+            Some("ArrowUp") | Some("Up") if self.reader.focused_choice().is_some() => {
+                return self.form_choice_step(false)
+            }
+            Some("ArrowDown") | Some("Down") if self.reader.focused_choice().is_some() => {
+                return self.form_choice_step(true)
+            }
+            Some("ArrowUp") | Some("Up") => Some(FormKey::Up),
+            Some("ArrowDown") | Some("Down") => Some(FormKey::Down),
+            Some("Home") => Some(FormKey::Home),
+            Some("End") => Some(FormKey::End),
+            _ => None,
+        };
+        if let Some(named) = named {
+            self.ask_form_key(FormInputEvent::KeyDown { key: named });
+            return Some(Task::none());
+        }
+        if key == Some("Escape") {
+            self.ask_form_key(FormInputEvent::KeyDown {
+                key: FormKey::Escape,
+            });
+            // …and on to the keymap, which is what makes Escape always work.
+            return None;
+        }
+
+        // Anything that produced text is text. Taken from the toolkit's own
+        // `text` rather than from the key name, because that is what has been
+        // through the keyboard layout and the dead keys: the key named "2" on
+        // one layout is the character that layout puts there, and a field that
+        // read the key name would spell a French keyboard wrong.
+        let text = text?;
+        let mut sent = false;
+        for character in text.chars() {
+            // Control characters are not text. The named keys above already
+            // carry the ones a field acts on, and forwarding the rest as
+            // characters is how a stray \u{7f} ends up in someone's name.
+            if character.is_control() {
+                continue;
+            }
+            self.ask_form_key(FormInputEvent::Char { character });
+            sent = true;
+        }
+        sent.then(Task::none)
+    }
+
+    /// Send one keyboard event to the field that holds the caret.
+    ///
+    /// Only reached when the worker has said a field has focus, so an ordinary
+    /// reader of an ordinary deck never takes this path and every letter still
+    /// means what the keymap says it means.
+    fn ask_form_key(&mut self, event: pulpit_render::document::protocol::FormInputEvent) -> bool {
+        let Some((page, _)) = self.reader.cursor_position() else {
+            // The caret is in a field, so the page it is on is known even if
+            // the pointer has since left the surface. Falling back to the page
+            // the reader is looking at keeps typing working after the mouse
+            // has been moved away, which is most of the time.
+            let Some(page) = self.reader.current_page() else {
+                return false;
+            };
+            return match self.reader_link.as_mut() {
+                Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
+                None => false,
+            };
+        };
+        match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
+            None => false,
+        }
+    }
+
+    /// A form event came back from the worker (§8.6).
+    ///
+    /// Three separable things arrive together, because one keystroke produces
+    /// all three and splitting them across messages would let the caret and
+    /// the picture disagree:
+    ///
+    /// * **Where the caret is.** Taken as fact, never inferred. Until this
+    ///   says a field has it, letters are shortcuts.
+    /// * **What to redraw.** PDFium holds the typed characters in its own
+    ///   environment; the frame on screen was drawn from a snapshot that
+    ///   predates them. Without the patch the reader types and sees nothing
+    ///   until the snapshot behind it lands.
+    /// * **What was committed.** A committed field value is a document change
+    ///   like any other — one revision, one undo entry, in the same history as
+    ///   the annotations (§9.1).
+    fn form_changed(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        result: pulpit_render::document::protocol::FormEventResult,
+    ) {
+        self.reader.set_form_typing(result.text_focus);
+        self.reader.set_focused_choice(result.focused_choice);
+        // What this field wants, said once as the caret arrives in it. A date
+        // field is a plain box with a caret in it and no calendar; the pattern
+        // its own format script names is the only thing that says what to
+        // type, and repeating it on every keystroke would be a stream of
+        // identical lines rather than a hint.
+        // Open the calendar when the caret lands in a date field, and put it
+        // away when it leaves. The clock is read here, at the edge, because
+        // the reader's state deliberately reads none.
+        self.reader.set_date_language(self.date_language);
+        self.reader
+            .set_focused_date(result.focused_date.as_ref(), today());
+        if self.reader.take_form_hint(result.focused_hint.as_deref()) {
+            if let Some(hint) = &result.focused_hint {
+                self.diagnostics.note(format!("this field takes a {hint}"));
+            }
+        }
+
+        // Anything the document's own JavaScript asked for. Refused in the
+        // worker already; said out loud here, because a refusal nobody is told
+        // about looks exactly like a document that asked for nothing.
+        for request in &result.requests {
+            self.diagnostics.note(describe_host_request(request));
+        }
+
+        let revision = result
+            .committed
+            .as_ref()
+            .map(|committed| committed.revision)
+            .unwrap_or_else(|| self.reader.revision());
+        if let Some(committed) = &result.committed {
+            // The same bookkeeping an applied transaction gets: the document
+            // has moved, nothing on screen or on disk reflects it yet, and the
+            // snapshot the render pool reads from is now stale.
+            self.reader.field_committed(committed);
+            self.reader_render.edited_at = Some(Instant::now());
+            self.reader_render.urgency = self
+                .reader_render
+                .urgency
+                .max(crate::reader::RasterUrgency::Prompt);
+        }
+
+        // One patch, covering everything the event dirtied. The worker already
+        // coalesced its rectangles; this unions what is left, because two
+        // round trips for one keystroke is worse than one slightly larger one.
+        let dirty = result
+            .invalidated
+            .iter()
+            .copied()
+            .reduce(|all, one| all.union(&one));
+        if let Some(dirty) = dirty {
+            self.ask_patch_of(page, dirty, revision);
         }
     }
 
@@ -5116,6 +5489,7 @@ impl App {
     fn document_key(
         &mut self,
         key: Option<&str>,
+        text: Option<&str>,
         control: bool,
         shift: bool,
     ) -> Option<Task<Message>> {
@@ -5126,6 +5500,27 @@ impl App {
         if !self.reader.is_open() || LayoutMode::of(&self.active_layout) != LayoutMode::Document {
             return None;
         }
+        // The calendar takes Escape first, because Escape closes the nearest
+        // open thing and a calendar over a field is nearer than anything else.
+        if key == Some("Escape") && self.reader.date_picker().is_some() {
+            self.reader.close_date_picker();
+            return Some(Task::none());
+        }
+
+        // A field has the caret: the keyboard belongs to the document, not to
+        // the toolbar (§8.6). This comes before everything, including Page
+        // Down and Ctrl-Z, because a field being typed into is a text box and
+        // a text box takes the keys a text box takes.
+        //
+        // The one key held back is Escape, which is always the way out of
+        // whatever is open — a caret in a field included. It reaches the field
+        // as well, so PDFium can abandon the edit, and then falls through.
+        if self.reader.form_has_keyboard() {
+            if let Some(task) = self.form_key(key, text, control) {
+                return Some(task);
+            }
+        }
+
         let key = key?;
 
         // Scrolling first: it is what the keys were bound to before anything
@@ -5317,12 +5712,23 @@ impl App {
                 if let Some((page, selection)) = self.reader.pending_selection() {
                     self.ask_select_text(page, selection, false);
                 }
+                // …and if the document has fields, PDFium wants to know where
+                // the pointer is, so a button under it can draw its rollover.
+                self.ask_form_move();
                 Task::none()
             }
             ReadCommand::PagePressed => {
                 // A press an armed tool does not take belongs to the
                 // document's own links and fields, and is not this path's.
                 if self.reader.pointer_pressed() {
+                    return Task::none();
+                }
+                // …and if the document has fields, "the document's own" means
+                // exactly that: the press goes to PDFium, which decides
+                // whether it landed in one. Sent for a press on bare page too,
+                // because that is what takes the caret back *out* of a field
+                // and commits what was typed into it (§8.6).
+                if self.ask_form_pointer(FormPointer::Down) {
                     return Task::none();
                 }
                 // …unless the armed tool *places* a mark rather than drawing
@@ -5338,6 +5744,27 @@ impl App {
                         editing: None,
                     });
                 }
+                Task::none()
+            }
+            ReadCommand::PickDate(date) => {
+                // A chosen day becomes an ordinary field edit: the same
+                // `SetField` an undo uses, so it goes through PDFium's own
+                // editor, gets the field's format script run over it, and
+                // lands in the shared undo history like any other change
+                // (§9.1). pulpit chooses the *text*; PDFium still decides what
+                // it looks like in the field.
+                let Some(picker) = self.reader.date_picker() else {
+                    return Task::none();
+                };
+                let value = date.format(&picker.pattern, self.date_language);
+                let transaction = pulpit_render::document::DocumentTransaction::one(
+                    pulpit_render::document::DocumentCommand::SetField {
+                        name: picker.field.clone(),
+                        value,
+                    },
+                );
+                self.reader.close_date_picker();
+                self.commit_to_document(transaction);
                 Task::none()
             }
             ReadCommand::DeleteSelected => {
@@ -5397,7 +5824,9 @@ impl App {
                         // more and the answer is what commits.
                         self.ask_select_text(page, selection, true);
                     }
-                    crate::reader::Released::Nothing => {}
+                    crate::reader::Released::Nothing => {
+                        self.ask_form_pointer(FormPointer::Up);
+                    }
                 }
                 Task::none()
             }
@@ -5413,9 +5842,28 @@ impl App {
                 let origin = (!self.navigating_history
                     && matches!(command, ReadCommand::GoToPage(_) | ReadCommand::CommitPage))
                 .then(|| self.current_place());
+                // Arming a tool ends any field edit that was open. The worker
+                // has to hear about it: losing focus is what commits the
+                // half-typed value, and PDFium would otherwise keep the caret
+                // — and the uncommitted text — waiting for a click that is
+                // never coming (§8.6).
+                if matches!(command, ReadCommand::Arm(_)) && self.reader.form_has_keyboard() {
+                    self.ask_form_key(pulpit_render::document::protocol::FormInputEvent::Focus {
+                        gained: false,
+                    });
+                }
                 let _needs_render = self.reader.apply(&command);
                 if let Some(origin) = origin {
                     self.nav_history.record_jump(origin, self.current_place());
+                }
+                // The surface has just said how big its window is, which is
+                // the first moment a remembered page and a fraction of it
+                // mean a scroll offset. After the command rather than before:
+                // this same report carries the offset the widget opened at,
+                // and applying the restore first would be undone by it.
+                if matches!(command, ReadCommand::ScrollTo { .. }) && self.apply_pending_position()
+                {
+                    return self.scroll_surface_to_reader();
                 }
                 // A page jump or a zoom moves the session's offset, and the
                 // scrollable has no way of knowing that: it is told. A scroll
@@ -5430,6 +5878,11 @@ impl App {
                         | ReadCommand::SetZoom(_)
                         | ReadCommand::ZoomIn
                         | ReadCommand::ZoomOut
+                        // Taking a crop and clearing one both move the
+                        // viewport — one fills the window with a rectangle,
+                        // the other puts the reader back where it was taken.
+                        | ReadCommand::TakeCrop(_)
+                        | ReadCommand::ArmCrop(_)
                 ) {
                     return self.scroll_surface_to_reader();
                 }
@@ -5661,6 +6114,78 @@ impl App {
             if chosen { "remembered" } else { "detected" }
         ));
         self.mount_layout(layout);
+    }
+
+    /// Record where the reader is in the open document, so that reopening it
+    /// opens there.
+    ///
+    /// Called when a document is put down — replaced by another, or the
+    /// process quits — and from the tick, so that a session that ends without
+    /// either still leaves a position behind. Writing is throttled by
+    /// `persist`: this costs a comparison per tick and a TOML write every few
+    /// seconds at worst, which is why it can be called as often as it is.
+    fn record_reading_position(&mut self) {
+        if !self.settings.reading.remember {
+            return;
+        }
+        let Some((page, zoom, fraction)) = self.reader.reading_position() else {
+            return;
+        };
+        let position = crate::settings::ReadingPosition {
+            hash: self.document_hash.clone(),
+            path: self.documents.path().to_path_buf(),
+            page: page.get(),
+            zoom: stored_zoom(zoom),
+            fraction,
+        };
+        // Nothing to write when nothing moved, which is most ticks: the
+        // settings are only dirtied by a position that is actually new.
+        if self.settings.reading.positions.front() == Some(&position) {
+            return;
+        }
+        self.settings.reading.remember_position(position);
+        self.persist();
+    }
+
+    /// Look up where this document was left, and hold it until there is a
+    /// window to restore it into.
+    ///
+    /// How much of the record is believed depends on which key matched. Same
+    /// bytes: all of it. Same path, different bytes — the recompiled paper —
+    /// the page number only, because a fraction into a page whose text has
+    /// moved is a precision the record no longer has, and because the zoom
+    /// was chosen for a document that may not be this shape.
+    fn find_reading_position(&mut self) {
+        self.pending_position = None;
+        if !self.settings.reading.remember {
+            return;
+        }
+        self.pending_position = self
+            .settings
+            .reading
+            .position_for(self.document_hash.as_deref(), self.documents.path());
+    }
+
+    /// Apply the held position, now that the surface has reported a window.
+    ///
+    /// Returns whether anything moved, so the caller knows whether the
+    /// scrollable has to be told where the session now is.
+    fn apply_pending_position(&mut self) -> bool {
+        let Some(position) = self.pending_position.take() else {
+            return false;
+        };
+        use crate::settings::RestoredPosition;
+        let (page, zoom, fraction) = match position {
+            RestoredPosition::Exact {
+                page,
+                zoom,
+                fraction,
+            } => (page, Some(reader_zoom(zoom)), fraction),
+            RestoredPosition::PageOnly { page } => (page, None, 0.0),
+        };
+        self.reader
+            .restore_position(pulpit_core::page::PageIndex(page), zoom, fraction);
+        true
     }
 
     /// Move between reading the document and presenting it (§2.3).
@@ -9016,6 +9541,69 @@ fn display_key(key: &str) -> String {
 
 /// A stable, human-readable name for a logical key, matching the strings the
 /// keymap uses.
+/// Today, for the calendar to open on and to mark.
+///
+/// The one clock read in the form path, and it is here rather than in the
+/// reader's state because that state is tested and a test cannot argue with a
+/// clock.
+fn today() -> crate::datefield::Date {
+    use chrono::Datelike;
+    let now = chrono::Local::now().date_naive();
+    crate::datefield::Date::new(now.year(), now.month(), now.day())
+}
+
+/// Which end of a pointer gesture is being handed to the form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormPointer {
+    Down,
+    Up,
+}
+
+/// What to tell the reader about something a form's JavaScript asked for.
+///
+/// Every one of these was refused in the worker before this line runs, so the
+/// wording says what the document *wanted*, in the past tense, rather than
+/// offering a choice. A dialog would be worse: these arrive mid-keystroke, and
+/// a form that alerts on every field would stop the typing it interrupted.
+fn describe_host_request(request: &pulpit_render::document::protocol::HostRequest) -> String {
+    use pulpit_render::document::protocol::HostRequest;
+    // Bounded: these strings come out of a hostile document, and a diagnostic
+    // line is not the place to discover a megabyte of it (A8).
+    const MOST: usize = 200;
+    let clip = |text: &str| -> String {
+        let mut out: String = text.chars().take(MOST).collect();
+        if text.chars().count() > MOST {
+            out.push('…');
+        }
+        out
+    };
+    match request {
+        HostRequest::Alert { message, .. } => format!("this form says: {}", clip(message)),
+        HostRequest::Beep => "this form asked to sound an alert".into(),
+        HostRequest::Response { question, .. } => {
+            format!(
+                "this form asked a question pulpit cannot put to you: {}",
+                clip(question)
+            )
+        }
+        HostRequest::FilePath => "this form asked where on disk it is; it was not told".into(),
+        HostRequest::Mail { to, .. } => {
+            format!("this form tried to email itself to {}", clip(to))
+        }
+        HostRequest::Print => "this form tried to print itself".into(),
+        HostRequest::SubmitForm { url, .. } => {
+            format!("this form tried to submit itself to {}", clip(url))
+        }
+        HostRequest::GotoPage { page } => {
+            format!("this form asked to go to page {}", page.saturating_add(1))
+        }
+        HostRequest::Browse => "this form asked to open a file chooser".into(),
+        HostRequest::NamedAction { name } => {
+            format!("this form asked pulpit to {}", clip(name))
+        }
+    }
+}
+
 fn describe_key(key: &iced::keyboard::Key) -> Option<String> {
     use iced::keyboard::key::Named;
     use iced::keyboard::Key;
@@ -9311,6 +9899,40 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
 /// would sharpen in front of the room for no reason.
 fn wants_stand_in(holding: Option<FrameKey>, wanted_slide: usize) -> bool {
     holding.is_some_and(|key| key.slide != wanted_slide)
+}
+
+/// The reader's zoom in the settings schema's vocabulary, and back.
+///
+/// Two enums that say the same thing, because one is a widget's business and
+/// the other is a file format with a compatibility obligation; this pair is
+/// the only place that has to know they correspond.
+fn stored_zoom(zoom: crate::widgets::document::model::Zoom) -> crate::settings::StoredZoom {
+    use crate::settings::StoredZoom;
+    use crate::widgets::document::model::Zoom;
+    match zoom {
+        Zoom::FitWidth => StoredZoom::FitWidth,
+        Zoom::FitPage => StoredZoom::FitPage,
+        Zoom::FitHeight => StoredZoom::FitHeight,
+        Zoom::Fixed(scale) => StoredZoom::Fixed(scale),
+    }
+}
+
+fn reader_zoom(zoom: crate::settings::StoredZoom) -> crate::widgets::document::model::Zoom {
+    use crate::settings::StoredZoom;
+    use crate::widgets::document::model::Zoom;
+    match zoom {
+        StoredZoom::FitWidth => Zoom::FitWidth,
+        StoredZoom::FitPage => Zoom::FitPage,
+        StoredZoom::FitHeight => Zoom::FitHeight,
+        // A scale written by a future version, or by a hand-edited file, is
+        // held to the range the control itself can reach: a page at 400× is a
+        // window of one white pixel and no way back to the document.
+        StoredZoom::Fixed(scale) if scale.is_finite() => Zoom::Fixed(scale.clamp(
+            crate::widgets::document::model::MIN_ZOOM,
+            crate::widgets::document::model::MAX_ZOOM,
+        )),
+        StoredZoom::Fixed(_) => Zoom::default(),
+    }
 }
 
 /// Move a display slot only when the complete candidate is for its wanted

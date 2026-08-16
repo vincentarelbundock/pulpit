@@ -19,7 +19,9 @@ use pulpit_render::document::{
 };
 
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
-use crate::widgets::document::model::{Column, PageSpread, PlacedPage, ReaderControls, Zoom};
+use crate::widgets::document::model::{
+    Column, CropChoice, CropState, PageSpread, PlacedPage, ReaderControls, Zoom,
+};
 use crate::widgets::event::ReadCommand;
 
 /// A text mark that can be reopened for editing (§8.5).
@@ -144,6 +146,28 @@ pub enum AppliedKind {
     Redo,
 }
 
+/// A calendar open over one date field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatePicker {
+    /// The field the chosen date goes into, by name — the same name a
+    /// `SetField` names, so picking a date is an ordinary edit with an
+    /// ordinary undo entry (§9.1).
+    pub field: String,
+    /// The Acrobat pattern to write the date in. Empty when the field's format
+    /// script named a numbered preset instead, in which case an ISO date is
+    /// written: PDFium's own keystroke script parses that whatever the pattern
+    /// says, so the field is filled rather than left empty.
+    pub pattern: String,
+    pub page: PageIndex,
+    /// The widget, in canonical page space, so the calendar opens beside the
+    /// field rather than in the middle of the page.
+    pub bounds: pulpit_core::page::PageRect,
+    /// The month on show, which the reader can page through.
+    pub month: crate::datefield::CalendarMonth,
+    /// Today, so the calendar can mark it. Passed in rather than read here:
+    /// this type is state, and state that reads a clock cannot be tested.
+    pub today: crate::datefield::Date,
+}
 /// What the reader is looking at.
 #[derive(Debug, Default)]
 #[allow(dead_code)]
@@ -183,6 +207,26 @@ pub struct ReaderSession {
     /// letter is bound to, which is the difference between typing a name and
     /// turning the page.
     form_typing: bool,
+    /// The combo box holding the focus, when one does (§8.6).
+    ///
+    /// A closed combo box ignores an arrow key, so the application turns one
+    /// into the selection change PDFium does answer to. Knowing which option
+    /// is on and how many there are is what makes that possible without
+    /// asking for the field list on every press.
+    form_choice: Option<pulpit_render::document::protocol::FocusedChoice>,
+    /// What the field holding the caret expects, so it is said once rather
+    /// than once per keystroke.
+    form_hint: Option<String>,
+    /// The calendar open over a date field (§8.6).
+    ///
+    /// A PDF names a date field and its pattern and stops there; the calendar
+    /// is the viewer's to draw, which is why Acrobat and PDF Studio each have
+    /// one of their own.
+    date_picker: Option<DatePicker>,
+    /// The language a picked date is written in, set once from the
+    /// environment. Held here so drawing the calendar needs no argument
+    /// threaded through every view function that stands between.
+    date_language: crate::datefield::Locale,
     /// What is being typed into the page box, while it is being typed.
     page_entry: Option<String>,
     dirty: bool,
@@ -233,6 +277,25 @@ pub struct ReaderSession {
     summaries: HashMap<PageIndex, Vec<pulpit_render::document::AnnotationSummary>>,
     /// Where a transform started, so movement can be measured from it.
     transform_origin: Option<PagePoint>,
+    /// The marquee in flight: the page it started on, where it started, and
+    /// where the pointer is now, in that page's own points.
+    ///
+    /// Here rather than on the controls because it changes with every pointer
+    /// sample and the controls are diffed on every view pass; the rectangle
+    /// the reader is asked about *is* on the controls, because by then it has
+    /// stopped moving.
+    marquee: Option<(PageIndex, PagePoint, PagePoint)>,
+    /// Which page the rectangle being chosen about was drawn on, so it is
+    /// still drawn where it was drawn while the question is being answered.
+    marquee_page: Option<PageIndex>,
+    /// Where the reader was before a crop took hold, restored when it is
+    /// cleared.
+    ///
+    /// A crop rewrites the zoom and both offsets, and none of the three is
+    /// recoverable from the cropped state — so clearing one without this
+    /// would put the reader back at a different place in the document from
+    /// the one they cropped at.
+    crop_restore: Option<(Zoom, f32, f32)>,
     /// Has the surface said how tall its window is? Until it has, the
     /// layout's estimate stands in.
     viewport_reported: bool,
@@ -258,7 +321,7 @@ pub struct ReaderSession {
 /// been asked for. The same entry can appear tick after tick and cost
 /// nothing: a satisfied request is dropped against the cache before it is
 /// submitted, exactly as the slide plan's are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlannedRender {
     pub page: PageIndex,
     pub width: u32,
@@ -266,6 +329,13 @@ pub struct PlannedRender {
     pub quality: pulpit_render::protocol::Quality,
     /// On screen right now, as opposed to warming in the margin.
     pub visible: bool,
+    /// Which part of the page to draw: the whole of it, or the crop window
+    /// the reader is reading through.
+    ///
+    /// Asked of the renderer rather than cut out of a finished frame, so the
+    /// pixels are spent on what is on the sheet instead of on margins that
+    /// are not drawn.
+    pub region: pulpit_core::notes::Region,
 }
 
 // A few readers of this state are the recovery path's, which §11 has yet to
@@ -344,15 +414,244 @@ impl ReaderSession {
         self.has_form
     }
 
-    /// Whether a field is holding the caret, so a letter is text and not a
-    /// shortcut.
-    pub fn form_is_typing(&self) -> bool {
-        self.has_form && self.form_typing
+    /// Whether the keyboard belongs to a field rather than to the toolbar.
+    ///
+    /// Two ways in, because PDFium reports them differently. A text field
+    /// announces itself through `FFI_SetTextFieldFocus`, which is what
+    /// `form_typing` records. A combo box may not — it is not a text field —
+    /// so a focused one is evidence in its own right. Missing that second case
+    /// meant the arrow keys never reached a combo box at all: they were still
+    /// the toolbar's, and scrolled the page.
+    pub fn form_has_keyboard(&self) -> bool {
+        self.has_form && (self.form_typing || self.form_choice.is_some())
     }
 
     /// Take the worker's word for where the caret is.
     pub fn set_form_typing(&mut self, typing: bool) {
         self.form_typing = typing;
+    }
+
+    /// The calendar open over a date field, if one is.
+    pub fn date_picker(&self) -> Option<&DatePicker> {
+        self.date_picker.as_ref()
+    }
+
+    /// Open, move or close the calendar as the caret moves between fields.
+    ///
+    /// Opening is not the same as re-opening: a caret that stays in the field
+    /// it was already in must not throw away the month the reader navigated
+    /// to, or paging back to last December would be undone by the next
+    /// keystroke.
+    pub fn set_focused_date(
+        &mut self,
+        focused: Option<&pulpit_render::document::protocol::FocusedDate>,
+        today: crate::datefield::Date,
+    ) {
+        let Some(focused) = focused else {
+            self.date_picker = None;
+            return;
+        };
+        if self
+            .date_picker
+            .as_ref()
+            .is_some_and(|open| open.field == focused.field)
+        {
+            return;
+        }
+        self.date_picker = Some(DatePicker {
+            field: focused.field.clone(),
+            pattern: focused.pattern.clone(),
+            page: focused.page,
+            bounds: focused.bounds,
+            month: crate::datefield::CalendarMonth::of(today),
+            today,
+        });
+    }
+
+    /// Step the open calendar a month forward or back.
+    pub fn step_date_picker(&mut self, forward: bool) {
+        if let Some(picker) = self.date_picker.as_mut() {
+            picker.month = if forward {
+                picker.month.next()
+            } else {
+                picker.month.previous()
+            };
+        }
+    }
+
+    /// Set the language dates are written in. Called once, at startup.
+    pub fn set_date_language(&mut self, language: crate::datefield::Locale) {
+        self.date_language = language;
+    }
+
+    pub fn close_date_picker(&mut self) {
+        self.date_picker = None;
+    }
+
+    /// Whether `hint` is new, and record it if it is.
+    ///
+    /// Every form event carries the focused field's hint, including the ones
+    /// that changed nothing — so a date field would announce itself once per
+    /// keystroke. This says yes the first time the caret is in a field that
+    /// wants something, and no until the caret moves to a different one.
+    pub fn take_form_hint(&mut self, hint: Option<&str>) -> bool {
+        if self.form_hint.as_deref() == hint {
+            return false;
+        }
+        self.form_hint = hint.map(str::to_owned);
+        hint.is_some()
+    }
+
+    /// The combo box holding the focus, as the worker last reported it.
+    pub fn focused_choice(&self) -> Option<pulpit_render::document::protocol::FocusedChoice> {
+        self.form_choice
+    }
+
+    pub fn set_focused_choice(
+        &mut self,
+        choice: Option<pulpit_render::document::protocol::FocusedChoice>,
+    ) {
+        self.form_choice = choice;
+    }
+
+    /// Which option an arrow key should move a focused combo box to.
+    ///
+    /// `None` when there is nowhere to go — no combo focused, no options, or
+    /// already at the end. Stopping at the ends rather than wrapping is what
+    /// every native combo box does, and a list that silently jumped from the
+    /// last entry back to the first would be a way to pick the wrong one.
+    pub fn choice_step(&self, forward: bool) -> Option<u32> {
+        let choice = self.form_choice?;
+        if choice.options == 0 {
+            return None;
+        }
+        match choice.selected {
+            Some(index) if forward => (index + 1 < choice.options).then_some(index + 1),
+            Some(index) => index.checked_sub(1),
+            // Nothing chosen yet — which happens for a combo holding a value
+            // that is not in its own option list. Either arrow starts at the
+            // near end rather than doing nothing.
+            None if forward => Some(0),
+            None => Some(choice.options - 1),
+        }
+    }
+
+    /// A field value was committed, at the revision the worker stamped it.
+    ///
+    /// Not routed through [`ReaderSession::applied`], because a form commit
+    /// carries no `Applied`: PDFium owns the edit and hands back a revision
+    /// rather than an inverse. The document has still moved and is still
+    /// unsaved, which is what this records.
+    ///
+    /// The undo entry is built here from the field's before-image, and it goes
+    /// on the same stack as the annotations in the same order, which is what
+    /// §8.6 asks for: a field edit followed by an ink stroke undoes the stroke
+    /// first. Like any ordinary edit it makes a new future, so the redo stack
+    /// is discarded and the epoch moves.
+    pub fn field_committed(
+        &mut self,
+        committed: &pulpit_render::document::protocol::CommittedField,
+    ) {
+        use pulpit_render::document::{DocumentUndo, UndoOperation};
+
+        let restores = self.revision;
+        self.revision = committed.revision;
+        self.dirty = true;
+        // A commit the engine could not name has no inverse that could be
+        // applied — putting a value back needs a field to put it in. The
+        // revision still moves, because the document did.
+        if committed.name.is_empty() {
+            return;
+        }
+        self.undo_stack.push(DocumentUndo {
+            operations: vec![UndoOperation::SetField {
+                name: committed.name.clone(),
+                value: committed.previous.clone(),
+            }],
+            restores,
+            label: format!("Fill {}", committed.name),
+        });
+        self.redo_stack.clear();
+        self.history_epoch = self.history_epoch.wrapping_add(1);
+    }
+
+    /// Where the pointer last was, on which page.
+    pub fn cursor_position(&self) -> Option<(PageIndex, PagePoint)> {
+        self.cursor
+    }
+
+    /// Where the reader is, in terms that outlive this window and this zoom.
+    ///
+    /// The page, the zoom, and how far down that page the window sits as a
+    /// fraction of the page's own height. `None` before the column has been
+    /// laid out against a real cell, when the offset is a number about a
+    /// window that never existed.
+    pub fn reading_position(&self) -> Option<(PageIndex, Zoom, f32)> {
+        if !self.cell_known || self.pages.is_empty() {
+            return None;
+        }
+        let placed = self
+            .column
+            .pages
+            .iter()
+            .find(|placed| placed.page == self.controls.page)?;
+        // A page of no height is not a page anybody is a fraction of the way
+        // down; the top of it is the honest answer.
+        let fraction = if placed.height > 0.0 {
+            ((self.controls.offset - placed.top) / placed.height).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some((self.controls.page, self.controls.zoom, fraction))
+    }
+
+    /// Put the reader back where [`ReaderSession::reading_position`] said it
+    /// was.
+    ///
+    /// `zoom` is optional because a position recovered by path alone carries
+    /// only a page number: the caller decides how much of the record it
+    /// believes, and this applies exactly what it is given.
+    ///
+    /// The page is clamped to the document that actually opened, so a record
+    /// from a longer draft lands on the last page rather than nowhere.
+    pub fn restore_position(&mut self, page: PageIndex, zoom: Option<Zoom>, fraction: f32) {
+        if self.pages.is_empty() {
+            return;
+        }
+        let page = PageIndex(page.get().min(self.pages.len() - 1));
+        // Before the zoom, not after: a fit is fitted to the page the reader
+        // is on, and `set_zoom` holds whatever page that is under the window.
+        // Zooming first would fit the page the document opened on and then
+        // move away from it.
+        self.controls.page = page;
+        if let Some(zoom) = zoom {
+            self.set_zoom(zoom);
+        }
+        // After the zoom, because the column's geometry depends on it and the
+        // fraction is a fraction of the page as laid out at that zoom.
+        let Some(placed) = self
+            .column
+            .pages
+            .iter()
+            .find(|placed| placed.page == page)
+            .copied()
+        else {
+            return;
+        };
+        let fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.controls.offset = self
+            .column
+            .clamp_offset(placed.top + placed.height * fraction, self.cell.1);
+    }
+
+    /// The page a keystroke belongs to when the pointer has wandered off the
+    /// surface: the first one on screen.
+    pub fn current_page(&self) -> Option<PageIndex> {
+        self.visible_pages().first().map(|placed| placed.page)
     }
 
     /// Whether a press on the page belongs to the document's own fields.
@@ -740,13 +1039,28 @@ impl ReaderSession {
     /// on one page and continues onto the next has to mean one continuous
     /// movement rather than two.
     fn document_y(&self, page: PageIndex, y: f32) -> Option<f32> {
-        Some(self.column.offset_of(page)? + y * self.scale)
+        Some(self.column.offset_of(page)? + (y - self.crop_origin(page).1) * self.scale)
+    }
+
+    /// Where the drawn sheet's top-left corner is on the page it is a picture
+    /// of, in that page's own points.
+    ///
+    /// The origin of the crop window, or the page's own origin when there is
+    /// no crop. Everything that converts between a page point and a place on
+    /// the sheet goes through this: without it a crop would leave every pan,
+    /// every mark and every hit test off by the margin it trimmed.
+    fn crop_origin(&self, page: PageIndex) -> (f32, f32) {
+        let window = self.controls.crop.window();
+        let Some(geometry) = self.pages.get(page.get()) else {
+            return (0.0, 0.0);
+        };
+        (geometry.width * window.x, geometry.height * window.y)
     }
 
     /// The same across the column: a page point's distance from the column's
     /// left edge, in layout points.
     fn document_x(&self, page: PageIndex, x: f32) -> Option<f32> {
-        Some(self.column.left_of(page)? + x * self.scale)
+        Some(self.column.left_of(page)? + (x - self.crop_origin(page).0) * self.scale)
     }
 
     /// The whole grabbed point, when the column can place it.
@@ -761,6 +1075,20 @@ impl ReaderSession {
 
     /// The pointer moved over a page, at a canonical page point (A4).
     pub fn pointer_moved(&mut self, page: PageIndex, x: f32, y: f32) {
+        // The marquee owns the pointer while it is armed: the far corner
+        // follows the hand, and nothing else on the page hears about it.
+        if self.controls.crop.takes_the_pointer() {
+            if let Some((started_on, _, corner)) = self.marquee.as_mut() {
+                // Clamped to the page the drag started on. A rectangle that
+                // ran onto the next sheet would describe a region that exists
+                // on neither.
+                if *started_on == page {
+                    *corner = PagePoint::new(x, y);
+                }
+            }
+            self.cursor = Some((page, PagePoint::new(x, y)));
+            return;
+        }
         // The hand drags the document rather than marking it: the spot that
         // was grabbed is put back under the pointer, which is what makes a
         // page feel like a sheet of paper being pushed about (§8.1).
@@ -1136,6 +1464,16 @@ impl ReaderSession {
         let Some((page, at)) = self.cursor else {
             return false;
         };
+        // A press with the marquee armed starts a rectangle and reaches
+        // nothing else — not a tool, not a link, not a form field. A press
+        // while one is being chosen about abandons that choice and starts
+        // over, so redrawing a mis-drawn rectangle is one gesture rather than
+        // a dismissal followed by a gesture.
+        if self.controls.crop.takes_the_pointer() {
+            self.controls.crop = CropState::Armed;
+            self.marquee = Some((page, at, at));
+            return true;
+        }
         // Nothing armed is the hand, and the hand takes hold of whatever is
         // under it: a mark, which it picks up to move or resize, or else the
         // page, which it pans. A mark that overlaps a link therefore wins the
@@ -1423,6 +1761,14 @@ impl ReaderSession {
     /// resolved to nothing — a selection with no text under it, an eraser
     /// sweep that touched nothing — returns `None` and is not an error.
     pub fn pointer_released(&mut self) -> Released {
+        // A marquee comes up as a question rather than as an edit: the
+        // rectangle is frozen and the reader is asked what it means. Nothing
+        // is committed either way — a crop is a zoom control (§8.1) and never
+        // touches the document.
+        if self.controls.crop.takes_the_pointer() {
+            self.finish_marquee();
+            return Released::Nothing;
+        }
         // Letting go of the hand ends the pan and commits nothing: the
         // document was moved, not marked.
         if self.pan.take().is_some() {
@@ -1532,10 +1878,78 @@ impl ReaderSession {
     /// The gesture was abandoned — the pointer left the page, or Escape was
     /// pressed. Nothing is committed and nothing is reported (§8.1).
     pub fn pointer_cancelled(&mut self) {
+        // The pointer leaving the sheet mid-drag ends the marquee where it
+        // was, rather than dropping it: a rectangle dragged off the bottom of
+        // a figure is the rectangle the reader meant, and losing it at the
+        // page edge would make the tool unusable for anything that reaches
+        // one.
+        if self.marquee.is_some() {
+            self.finish_marquee();
+        }
         self.interaction.cancel();
         self.cursor = None;
         self.transform_origin = None;
         self.pan = None;
+    }
+
+    /// Take the drawn rectangle as far as a proposal: frozen on the page, and
+    /// waiting to be told what it means.
+    ///
+    /// A rectangle too small to read a page through is a click rather than a
+    /// drag, and leaves the tool armed for the drag that was meant.
+    fn finish_marquee(&mut self) {
+        let Some((page, start, end)) = self.marquee.take() else {
+            return;
+        };
+        let Some(geometry) = self.pages.get(page.get()).copied() else {
+            self.controls.crop = CropState::Armed;
+            return;
+        };
+        let region = crate::widgets::document::model::crop_between(
+            (start.x, start.y),
+            (end.x, end.y),
+            &geometry,
+        );
+        if crate::widgets::document::model::is_usable_crop(&region) {
+            self.controls.crop = CropState::Choosing(region);
+            self.marquee_page = Some(page);
+        } else {
+            self.controls.crop = CropState::Armed;
+            self.marquee_page = None;
+        }
+    }
+
+    /// The marquee as the surface draws it: the page it is on and the
+    /// rectangle it covers, in that page's own points.
+    ///
+    /// The open drag first, and the frozen proposal after it — the reader
+    /// being asked about a rectangle must still be able to see the rectangle.
+    pub fn marquee(&self) -> Option<(PageIndex, pulpit_core::page::PageRect)> {
+        if let Some((page, start, end)) = self.marquee {
+            return Some((
+                page,
+                pulpit_core::page::PageRect::new(
+                    start.x.min(end.x),
+                    start.y.min(end.y),
+                    start.x.max(end.x),
+                    start.y.max(end.y),
+                ),
+            ));
+        }
+        let CropState::Choosing(region) = self.controls.crop else {
+            return None;
+        };
+        let page = self.marquee_page?;
+        let geometry = self.pages.get(page.get())?;
+        Some((
+            page,
+            pulpit_core::page::PageRect::new(
+                region.x * geometry.width,
+                region.y * geometry.height,
+                (region.x + region.width) * geometry.width,
+                (region.y + region.height) * geometry.height,
+            ),
+        ))
     }
 
     /// Is a gesture open? The page surface draws its own preview while one is.
@@ -1658,6 +2072,10 @@ impl ReaderSession {
         self.last_render_offset = self.controls.offset;
 
         use pulpit_render::protocol::Quality;
+        // One window for every page: a crop is a statement about margins, and
+        // margins are the same fraction of a letter page and of the A4
+        // appendix behind it.
+        let window = self.controls.crop.window();
         for (placed, visible) in on_screen
             .into_iter()
             .map(|placed| (placed, true))
@@ -1674,6 +2092,7 @@ impl ReaderSession {
                 height: preview.1,
                 quality: Quality::Coarse,
                 visible,
+                region: window,
             });
             // The sharp frame only once the reader has settled: rendered
             // mid-scroll it would be finished for a page already left, and
@@ -1685,6 +2104,7 @@ impl ReaderSession {
                     height: full.1,
                     quality: Quality::Refined,
                     visible,
+                    region: window,
                 });
             }
         }
@@ -1774,10 +2194,18 @@ impl ReaderSession {
 
     /// Recompute the scale and the column from the pages and the zoom.
     fn relayout(&mut self) {
-        let reference = self
+        // Every page as it is read through the crop, which is every page
+        // itself until one is taken. The fit fits what is on the sheet: the
+        // point of trimming margins is that the text then fills the window.
+        let window = self.controls.crop.window();
+        let pages: Vec<PageGeometry> = self
             .pages
+            .iter()
+            .map(|page| crate::widgets::document::model::cropped(page, window))
+            .collect();
+        let reference = pages
             .get(self.controls.page.get())
-            .or_else(|| self.pages.first())
+            .or_else(|| pages.first())
             .copied()
             .unwrap_or_default();
         // A fit fits what is actually across the window: in a two-page spread
@@ -1791,7 +2219,7 @@ impl ReaderSession {
             ),
         };
         self.scale = self.controls.zoom.scale(&reference, cell);
-        self.column = Column::lay_out(&self.pages, self.scale, self.cell.0, self.controls.spread);
+        self.column = Column::lay_out(&pages, self.scale, self.cell.0, self.controls.spread);
         self.controls.offset = self.column.clamp_offset(self.controls.offset, self.cell.1);
         // A zoom out that makes the page fit across the window again takes the
         // sideways offset with it, rather than leaving the sheet parked off
@@ -1917,6 +2345,17 @@ impl ReaderSession {
                 self.controls.outline_collapsed = *collapsed;
                 false
             }
+            ReadCommand::StepDatePicker(forward) => {
+                self.step_date_picker(*forward);
+                false
+            }
+            ReadCommand::CloseDatePicker => {
+                self.close_date_picker();
+                false
+            }
+            // The pick itself is a document edit and belongs to the layer that
+            // can post one; nothing about the viewport changes here.
+            ReadCommand::PickDate(_) => false,
             ReadCommand::Arm(tool) => {
                 self.controls.tool = *tool;
                 // The toolbar and the gesture state are one choice, not two:
@@ -1927,6 +2366,14 @@ impl ReaderSession {
                 // Choosing a tool is an answer to the toolbar; a popover left
                 // open past it would be a question nobody is asking any more.
                 self.controls.tool_options = None;
+                // Picking up a pen takes the caret out of whatever field had
+                // it. Recorded here so the keyboard goes back to the toolbar
+                // in the same beat; the *worker* is told separately, because
+                // only it can commit what was half-typed (§8.6).
+                self.form_typing = false;
+                self.form_choice = None;
+                self.form_hint = None;
+                self.date_picker = None;
                 false
             }
             ReadCommand::ToolOptions(tool) => {
@@ -1987,6 +2434,19 @@ impl ReaderSession {
                 self.clear_selection();
                 false
             }
+            ReadCommand::ArmCrop(on) => self.arm_crop(*on),
+            ReadCommand::TakeCrop(choice) => self.take_crop(*choice),
+            ReadCommand::CancelCrop => {
+                // Armed, not off: the reader who mis-drew a rectangle wants
+                // to draw another one, and dropping the tool would make them
+                // press the button again first.
+                self.marquee = None;
+                self.marquee_page = None;
+                if self.controls.crop.takes_the_pointer() {
+                    self.controls.crop = CropState::Armed;
+                }
+                false
+            }
             // The rest are the application's to route to the worker: a page
             // gesture, a field edit, an undo or a save is not a viewport
             // change, and this type owns only the viewport.
@@ -2013,6 +2473,126 @@ impl ReaderSession {
             // so both go to the worker rather than being answered here.
             | ReadCommand::DeleteSelected
             | ReadCommand::EditSelected => false,
+        }
+    }
+
+    /// Arm the marquee, or put it away — clearing whatever crop it left.
+    ///
+    /// Returns whether the viewport moved, which is what tells the
+    /// application to take the surface with it.
+    fn arm_crop(&mut self, on: bool) -> bool {
+        self.marquee = None;
+        self.marquee_page = None;
+        if on {
+            // One pointer owner at a time: a marquee and an armed pen would
+            // both take the same press, and the reader would find out which
+            // won by pressing.
+            self.controls.tool = None;
+            self.controls.tool_options = None;
+            self.interaction.cancel();
+            self.interaction.arm(None);
+            self.controls.crop = CropState::Armed;
+            return false;
+        }
+        let was_cropped = matches!(self.controls.crop, CropState::Cropped(_));
+        self.controls.crop = CropState::Off;
+        if !was_cropped {
+            return false;
+        }
+        // Back to the zoom and the place the crop replaced, re-clamped
+        // against the column the uncropped pages make: the window may have
+        // been resized while the crop was on, and the old offset may no
+        // longer exist.
+        let restore = self.crop_restore.take();
+        self.relayout();
+        if let Some((zoom, offset, offset_x)) = restore {
+            self.controls.zoom = zoom;
+            self.relayout();
+            self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
+            self.controls.offset_x = self.column.clamp_offset_x(offset_x, self.cell.0);
+            if let Some(page) = self.column.current(self.controls.offset, self.cell.1) {
+                self.controls.page = page;
+            }
+        }
+        true
+    }
+
+    /// Take the rectangle the reader drew as a zoom, or as a crop.
+    fn take_crop(&mut self, choice: CropChoice) -> bool {
+        let CropState::Choosing(region) = self.controls.crop else {
+            return false;
+        };
+        let page = self.marquee_page.unwrap_or(self.controls.page);
+        self.marquee = None;
+        self.marquee_page = None;
+        match choice {
+            CropChoice::Zoom => {
+                // A one-shot: after this the reader is at an ordinary fixed
+                // zoom, the latch is off, and the next press of zoom-out is
+                // an ordinary press of zoom-out.
+                self.controls.crop = CropState::Off;
+                self.zoom_into(page, region);
+                true
+            }
+            CropChoice::Pages => {
+                self.crop_restore = Some((
+                    self.controls.zoom,
+                    self.controls.offset,
+                    self.controls.offset_x,
+                ));
+                self.controls.crop = CropState::Cropped(region);
+                // The page the crop was drawn on stays the page being read:
+                // every page has just changed size, and a reader who cropped
+                // a figure should still be looking at that figure.
+                let anchor = self.controls.page;
+                self.relayout();
+                if let Some(offset) = self.column.offset_of(anchor) {
+                    self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
+                    self.controls.page = anchor;
+                }
+                self.controls.offset_x = self
+                    .column
+                    .clamp_offset_x(self.controls.offset_x, self.cell.0);
+                true
+            }
+        }
+    }
+
+    /// Fill the window with `region` of `page`.
+    fn zoom_into(&mut self, page: PageIndex, region: pulpit_core::notes::Region) {
+        let Some(geometry) = self.pages.get(page.get()).copied() else {
+            return;
+        };
+        let (width, height) = (
+            geometry.width * region.width,
+            geometry.height * region.height,
+        );
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        // The smaller of the two fits, so the whole rectangle is on screen:
+        // filling the width of a window with a tall rectangle would put its
+        // foot below the fold, which is not "zoom here".
+        let scale = (self.cell.0 / width).min(self.cell.1 / height);
+        self.controls.zoom = Zoom::Fixed(scale.clamp(
+            crate::widgets::document::model::MIN_ZOOM,
+            crate::widgets::document::model::MAX_ZOOM,
+        ));
+        self.relayout();
+        // The rectangle's centre at the window's centre, in the column the
+        // new scale made.
+        let centre = (
+            (region.x + region.width / 2.0) * geometry.width,
+            (region.y + region.height / 2.0) * geometry.height,
+        );
+        if let Some((x, y)) = self.document_point(page, centre.0, centre.1) {
+            self.controls.offset = self.column.clamp_offset(y - self.cell.1 / 2.0, self.cell.1);
+            self.controls.offset_x = self
+                .column
+                .clamp_offset_x(x - self.cell.0 / 2.0, self.cell.0);
+        }
+        if let Some(page) = self.column.current(self.controls.offset, self.cell.1) {
+            self.controls.page = page;
         }
     }
 
@@ -2094,6 +2674,13 @@ impl ReaderSession {
                     // What the reader has picked up, so a held mark looks
                     // held. Nothing here is in the document (§8.4).
                     selection: self.selection_for(placed.page),
+                    // The crop window, and the rectangle being drawn or asked
+                    // about when it is on this page.
+                    window: self.controls.crop.window(),
+                    marquee: self
+                        .marquee()
+                        .filter(|(page, _)| *page == placed.page)
+                        .map(|(_, rect)| rect),
                     placed,
                 })
                 .collect()
@@ -2109,6 +2696,8 @@ impl ReaderSession {
             controls: &self.controls,
             scale: self.scale,
             outline: &self.outline,
+            date_picker: self.date_picker.as_ref(),
+            date_language: self.date_language,
             level: self.level,
             warnings: &self.warnings,
             dirty: self.dirty,
@@ -2239,9 +2828,90 @@ mod tests {
             vec![PageGeometry::upright(612.0, 792.0); pages],
             CompatibilityLevel::Native,
             Vec::new(),
+            false,
         );
         session.set_cell(612.0, 400.0);
         session
+    }
+
+    #[test]
+    fn a_reading_position_survives_a_different_window_and_a_different_zoom() {
+        let mut session = open(10);
+        session.apply(&ReadCommand::GoToPage(PageIndex(6)));
+        // Half way down page six, the way a wheel leaves it.
+        let placed = session.column.pages[6];
+        session.apply(&ReadCommand::DragScrollHandle(
+            placed.top + placed.height / 2.0,
+        ));
+        let (page, zoom, fraction) = session.reading_position().expect("a laid-out column");
+        assert_eq!(page, PageIndex(6));
+        assert!((fraction - 0.5).abs() < 1e-2, "{fraction}");
+
+        // Reopened in a window of another size, at another zoom: the page and
+        // how far down it the reader was are the same, and the offset in
+        // points is not — which is the whole reason the fraction is stored
+        // and the offset is not.
+        let mut reopened = ReaderSession::new();
+        reopened.opened(
+            vec![PageGeometry::upright(612.0, 792.0); 10],
+            CompatibilityLevel::Native,
+            Vec::new(),
+            false,
+        );
+        reopened.set_cell(900.0, 650.0);
+        reopened.restore_position(page, Some(zoom), fraction);
+
+        assert_eq!(reopened.controls().page, PageIndex(6));
+        let (again, _, fraction_again) = reopened.reading_position().expect("a laid-out column");
+        assert_eq!(again, PageIndex(6));
+        assert!((fraction_again - 0.5).abs() < 1e-2, "{fraction_again}");
+        assert_eq!(reopened.controls().zoom, zoom);
+    }
+
+    #[test]
+    fn a_position_past_the_end_of_a_shorter_document_lands_on_its_last_page() {
+        // The record is from a longer draft: forty pages became twelve.
+        let mut session = open(12);
+        session.restore_position(PageIndex(39), Some(Zoom::FitWidth), 0.5);
+        assert_eq!(session.controls().page, PageIndex(11));
+        // …and inside the column, not past its foot.
+        assert!(session.controls().offset <= session.column.height);
+    }
+
+    #[test]
+    fn restoring_a_page_alone_leaves_the_zoom_the_document_opened_at() {
+        // What a path-only match gets: the page, and no claim about anything
+        // else.
+        let mut session = open(10);
+        session.apply(&ReadCommand::SetZoom(Zoom::FitHeight));
+        session.restore_position(PageIndex(4), None, 0.0);
+        assert_eq!(session.controls().page, PageIndex(4));
+        assert_eq!(session.controls().zoom, Zoom::FitHeight);
+        // The top of the page, since a fraction into it was not restored.
+        let expected = session.column.offset_of(PageIndex(4)).unwrap();
+        assert!((session.controls().offset - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_document_with_no_window_yet_has_no_position_to_record() {
+        let mut session = ReaderSession::new();
+        session.opened(
+            vec![PageGeometry::upright(612.0, 792.0); 4],
+            CompatibilityLevel::Native,
+            Vec::new(),
+            false,
+        );
+        // No cell: the offset is a number about a window that never existed,
+        // and writing it down would be recording a guess as an answer.
+        assert_eq!(session.reading_position(), None);
+    }
+
+    #[test]
+    fn a_nonsense_fraction_reads_as_the_top_of_the_page() {
+        let mut session = open(10);
+        session.restore_position(PageIndex(3), Some(Zoom::FitWidth), f32::NAN);
+        let expected = session.column.offset_of(PageIndex(3)).unwrap();
+        assert!((session.controls().offset - expected).abs() < 1e-3);
     }
 
     /// The margin either side of the screen is planned, and strictly after
@@ -2521,6 +3191,7 @@ mod tests {
             vec![PageGeometry::upright(612.0, 792.0); 2],
             CompatibilityLevel::AnnotateOnly,
             Vec::new(),
+            false,
         );
         assert_eq!(session.controls().page, PageIndex(0));
         assert_eq!(session.revision(), DocumentRevision::INITIAL);
@@ -2974,6 +3645,304 @@ mod tests {
         assert_eq!(transaction.label(), "Add Ink");
     }
 
+    /// The same fixture as [`open`], for a document that has fields in it.
+    fn open_with_form(pages: usize) -> ReaderSession {
+        let mut session = ReaderSession::new();
+        session.opened(
+            vec![PageGeometry::upright(612.0, 792.0); pages],
+            CompatibilityLevel::Native,
+            Vec::new(),
+            true,
+        );
+        session.set_cell(612.0, 400.0);
+        session
+    }
+
+    #[test]
+    fn a_press_reaches_the_form_only_when_the_document_has_one() {
+        // A deck of slides is the common case, and the worker is serial: a
+        // round trip per click on a document with no fields would queue in
+        // front of the page renders the reader is waiting on.
+        let mut plain = open(1);
+        plain.pointer_moved(PageIndex(0), 40.0, 40.0);
+        assert!(
+            !plain.press_belongs_to_the_form(),
+            "a document with no fields must not be sent presses"
+        );
+
+        let mut form = open_with_form(1);
+        form.pointer_moved(PageIndex(0), 40.0, 40.0);
+        assert!(form.press_belongs_to_the_form());
+    }
+
+    #[test]
+    fn an_armed_tool_draws_on_a_form_rather_than_typing_into_it() {
+        // A reader who picked up the pen means to write on the page. The
+        // fields are still there and fillable the moment it is put down (§8.4).
+        let mut session = open_with_form(1);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(!session.press_belongs_to_the_form());
+        session.apply(&ReadCommand::Arm(None));
+        assert!(session.press_belongs_to_the_form());
+    }
+
+    #[test]
+    fn the_caret_is_the_workers_word_and_arming_a_tool_takes_it_back() {
+        let mut session = open_with_form(1);
+        assert!(!session.form_has_keyboard(), "nothing has focus at open");
+
+        // Only the worker can say a click landed in a field: PDFium owns the
+        // caret, and guessing here is how a letter becomes a page turn.
+        session.set_form_typing(true);
+        assert!(session.form_has_keyboard());
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(
+            !session.form_has_keyboard(),
+            "arming a tool must take the keyboard back from the field"
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_form_never_reports_a_caret_in_one() {
+        // Belt and braces. A stale focus left over from a previous document
+        // would otherwise swallow every keystroke into a form that is not
+        // there — silently, since there is nothing on screen to show for it.
+        let mut session = open(1);
+        session.set_form_typing(true);
+        assert!(!session.form_has_keyboard());
+    }
+
+    fn committed(
+        name: &str,
+        value: &str,
+        previous: &str,
+    ) -> pulpit_render::document::protocol::CommittedField {
+        pulpit_render::document::protocol::CommittedField {
+            name: name.into(),
+            value: value.into(),
+            previous: previous.into(),
+            revision: DocumentRevision(4),
+        }
+    }
+
+    #[test]
+    fn a_committed_field_moves_the_revision_and_leaves_the_document_unsaved() {
+        let mut session = open_with_form(1);
+        assert_eq!(session.revision(), DocumentRevision::INITIAL);
+        assert!(!session.is_dirty());
+        session.field_committed(&committed("name", "Ada", ""));
+        assert_eq!(session.revision(), DocumentRevision(4));
+        assert!(
+            session.is_dirty(),
+            "a filled field is an unsaved change like any other"
+        );
+    }
+
+    #[test]
+    fn a_filled_field_joins_the_same_undo_history_as_the_marks() {
+        // §8.6: a field edit followed by a stroke undoes the stroke first.
+        // This was the one mutation with no inverse, so undo used to reach
+        // straight past a typed value to the last annotation edit.
+        let mut session = open_with_form(1);
+        session.field_committed(&committed("name", "Ada", ""));
+
+        let undo = session
+            .undo_operation()
+            .expect("a filled field must be undoable");
+        assert_eq!(undo.label, "Fill name");
+        assert_eq!(
+            undo.operations,
+            vec![pulpit_render::document::UndoOperation::SetField {
+                name: "name".into(),
+                // Back to what was there before, which for a first fill is
+                // an empty field rather than the value just typed.
+                value: String::new(),
+            }]
+        );
+        assert_eq!(
+            undo.restores,
+            DocumentRevision::INITIAL,
+            "the undo names the revision it goes back to"
+        );
+    }
+
+    #[test]
+    fn a_commit_the_engine_could_not_name_moves_the_revision_and_nothing_else() {
+        // A toggle or a choice whose field PDFium would not name has no
+        // inverse that could be applied — there is no field to put a value
+        // back into. The document still moved, so the revision still does.
+        let mut session = open_with_form(1);
+        session.field_committed(&committed("", "", ""));
+        assert_eq!(session.revision(), DocumentRevision(4));
+        assert!(session.is_dirty());
+        assert!(
+            session.undo_operation().is_none(),
+            "an unnamed commit must not push an inverse that cannot be applied"
+        );
+    }
+
+    fn choice(
+        selected: Option<u32>,
+        options: u32,
+    ) -> pulpit_render::document::protocol::FocusedChoice {
+        pulpit_render::document::protocol::FocusedChoice { selected, options }
+    }
+
+    #[test]
+    fn a_focused_combo_box_gives_the_keyboard_to_the_form_without_a_text_caret() {
+        // A combo box is not a text field, so PDFium never calls
+        // `FFI_SetTextFieldFocus` for one. Waiting for a text caret meant the
+        // arrow keys stayed the toolbar's and scrolled the page instead of
+        // moving the selection.
+        let mut session = open_with_form(1);
+        assert!(!session.form_has_keyboard());
+        session.set_focused_choice(Some(choice(Some(0), 3)));
+        assert!(session.form_has_keyboard());
+    }
+
+    #[test]
+    fn stepping_through_a_combo_box_stops_at_both_ends() {
+        // Native combo boxes stop; they do not wrap. A list that jumped from
+        // the last entry back to the first would be a way to pick the wrong
+        // one without noticing.
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(0), 3)));
+        assert_eq!(session.choice_step(true), Some(1));
+        assert_eq!(session.choice_step(false), None, "already at the first");
+
+        session.set_focused_choice(Some(choice(Some(2), 3)));
+        assert_eq!(session.choice_step(true), None, "already at the last");
+        assert_eq!(session.choice_step(false), Some(1));
+    }
+
+    #[test]
+    fn a_combo_box_holding_something_off_its_own_list_starts_at_the_near_end() {
+        // The corpus carries this: a non-editable combo whose `/V` is not in
+        // `/Opt`. Nothing is selected, so neither arrow has a neighbour to
+        // move to — and doing nothing would leave the field unusable.
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(None, 4)));
+        assert_eq!(session.choice_step(true), Some(0));
+        assert_eq!(session.choice_step(false), Some(3));
+    }
+
+    #[test]
+    fn a_combo_box_with_no_options_has_nowhere_to_step() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(None, 0)));
+        assert_eq!(session.choice_step(true), None);
+        assert_eq!(session.choice_step(false), None);
+    }
+
+    #[test]
+    fn arming_a_tool_lets_go_of_a_focused_combo_box_too() {
+        let mut session = open_with_form(1);
+        session.set_focused_choice(Some(choice(Some(1), 3)));
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(session.focused_choice().is_none());
+        assert!(!session.form_has_keyboard());
+    }
+
+    #[test]
+    fn a_field_says_what_it_wants_once_and_not_once_per_keystroke() {
+        // Every form event carries the focused field's hint, including the
+        // ones that changed nothing. Saying it each time would be a line of
+        // diagnostics per character typed.
+        let mut session = open_with_form(1);
+        assert!(session.take_form_hint(Some("date, as dd mmmm yyyy")));
+        assert!(
+            !session.take_form_hint(Some("date, as dd mmmm yyyy")),
+            "the same field must not announce itself twice"
+        );
+
+        // A different field is worth saying.
+        assert!(session.take_form_hint(Some("a number")));
+        // …and a field that wants nothing in particular says nothing, but is
+        // still recorded, so returning to the date field announces it again.
+        assert!(!session.take_form_hint(None));
+        assert!(session.take_form_hint(Some("date, as dd mmmm yyyy")));
+    }
+
+    #[test]
+    fn arming_a_tool_forgets_what_the_field_wanted() {
+        let mut session = open_with_form(1);
+        assert!(session.take_form_hint(Some("a number")));
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(
+            session.take_form_hint(Some("a number")),
+            "coming back to the field should say what it wants again"
+        );
+    }
+
+    fn focused_date(field: &str, pattern: &str) -> pulpit_render::document::protocol::FocusedDate {
+        pulpit_render::document::protocol::FocusedDate {
+            field: field.into(),
+            pattern: pattern.into(),
+            page: PageIndex(0),
+            bounds: pulpit_core::page::PageRect::new(100.0, 100.0, 300.0, 130.0),
+        }
+    }
+
+    #[test]
+    fn a_calendar_opens_over_a_date_field_and_closes_when_the_caret_leaves() {
+        let mut session = open_with_form(1);
+        let today = crate::datefield::Date::new(2026, 8, 16);
+        assert!(session.date_picker().is_none());
+
+        session.set_focused_date(Some(&focused_date("when", "dd mmmm yyyy")), today);
+        let picker = session.date_picker().expect("a calendar over the field");
+        assert_eq!(picker.field, "when");
+        assert_eq!(picker.pattern, "dd mmmm yyyy");
+        assert_eq!(picker.month, crate::datefield::CalendarMonth::new(2026, 8));
+
+        session.set_focused_date(None, today);
+        assert!(session.date_picker().is_none());
+    }
+
+    #[test]
+    fn paging_the_calendar_survives_the_next_keystroke_in_the_same_field() {
+        // Every form event reports the focused field, so a picker rebuilt on
+        // each one would snap back to this month the moment anything is typed
+        // — and paging back to last December would be impossible.
+        let mut session = open_with_form(1);
+        let today = crate::datefield::Date::new(2026, 8, 16);
+        session.set_focused_date(Some(&focused_date("when", "dd mmmm yyyy")), today);
+        session.step_date_picker(false);
+        session.step_date_picker(false);
+        assert_eq!(
+            session.date_picker().unwrap().month,
+            crate::datefield::CalendarMonth::new(2026, 6)
+        );
+
+        session.set_focused_date(Some(&focused_date("when", "dd mmmm yyyy")), today);
+        assert_eq!(
+            session.date_picker().unwrap().month,
+            crate::datefield::CalendarMonth::new(2026, 6),
+            "the month the reader navigated to was thrown away"
+        );
+
+        // A *different* field is a different calendar, and opens on today.
+        session.set_focused_date(Some(&focused_date("other", "dd mmmm yyyy")), today);
+        assert_eq!(
+            session.date_picker().unwrap().month,
+            crate::datefield::CalendarMonth::new(2026, 8)
+        );
+    }
+
+    #[test]
+    fn arming_a_tool_puts_the_calendar_away() {
+        let mut session = open_with_form(1);
+        session.set_focused_date(
+            Some(&focused_date("when", "dd mmmm yyyy")),
+            crate::datefield::Date::new(2026, 8, 16),
+        );
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(
+            session.date_picker().is_none(),
+            "a calendar left open over a page being drawn on is chrome nobody asked for"
+        );
+    }
     #[test]
     fn a_press_with_nothing_armed_belongs_to_the_document() {
         let mut session = open(2);
@@ -4079,6 +5048,7 @@ mod tests {
             vec![PageGeometry::upright(612.0, 792.0)],
             CompatibilityLevel::Unsupported,
             vec![DocumentWarning::Encrypted],
+            false,
         );
         assert!(!session
             .facet(true, &no_frames, &pulpit_core::search::SearchState::new())
@@ -4254,5 +5224,209 @@ mod tests {
                  simplification are not bounding the traffic"
             );
         }
+    }
+
+    /// The marquee is a *view* gesture: while it is armed the pointer draws
+    /// rectangles and nothing on the page — no tool, no link, no field —
+    /// hears about the press.
+    #[test]
+    fn an_armed_marquee_takes_the_press_from_the_tools() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.apply(&ReadCommand::ArmCrop(true));
+        // Arming the crop disarmed the pen: one pointer owner at a time.
+        assert_eq!(session.controls().tool, None);
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        assert!(
+            session.pointer_pressed(),
+            "the marquee did not take the press"
+        );
+        session.pointer_moved(PageIndex(0), 400.0, 500.0);
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+        assert!(!session.is_dirty(), "a crop touched the document");
+    }
+
+    /// Drawn from bottom-right to top-left is the same rectangle as drawn the
+    /// other way, and it is measured in fractions of the page.
+    #[test]
+    fn a_marquee_drawn_backwards_is_the_same_rectangle() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(0), 459.0, 594.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 153.0, 198.0);
+        session.pointer_released();
+        let CropState::Choosing(region) = session.controls().crop else {
+            panic!(
+                "the drag did not become a question: {:?}",
+                session.controls().crop
+            );
+        };
+        assert!((region.x - 0.25).abs() < 1e-3);
+        assert!((region.y - 0.25).abs() < 1e-3);
+        assert!((region.width - 0.5).abs() < 1e-3);
+        assert!((region.height - 0.5).abs() < 1e-3);
+    }
+
+    /// A press that did not travel is a click, not a rectangle: the tool is
+    /// left armed for the drag that was meant, and nothing is asked.
+    #[test]
+    fn a_tap_is_not_a_marquee() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::ArmCrop(true));
+        let before = session.controls().zoom;
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 101.0, 101.0);
+        session.pointer_released();
+        assert_eq!(session.controls().crop, CropState::Armed);
+        assert_eq!(session.controls().zoom, before);
+    }
+
+    /// "Zoom here" fills the window with the rectangle and leaves nothing
+    /// behind: an ordinary fixed zoom, and the latch off.
+    #[test]
+    fn zooming_here_fills_the_window_and_leaves_the_tool_off() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::ArmCrop(true));
+        // The middle quarter of the page: 306 x 396 points.
+        session.pointer_moved(PageIndex(0), 153.0, 198.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 459.0, 594.0);
+        session.pointer_released();
+        session.apply(&ReadCommand::TakeCrop(CropChoice::Zoom));
+        assert_eq!(session.controls().crop, CropState::Off);
+        // The smaller of the two fits, so the whole rectangle is on screen:
+        // 400 / 396 rather than 612 / 306.
+        let Zoom::Fixed(scale) = session.controls().zoom else {
+            panic!("zooming here did not set a scale");
+        };
+        assert!((scale - 400.0 / 396.0).abs() < 1e-3, "scale was {scale}");
+    }
+
+    /// A crop shrinks every page in the column, and a fit then fits what is
+    /// left — which is the whole point of trimming margins.
+    #[test]
+    fn a_crop_shrinks_every_page_in_the_column() {
+        let mut session = open(4);
+        let full = session.column.pages[1].top;
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(0), 0.0, 0.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 612.0, 396.0);
+        session.pointer_released();
+        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
+        assert!(matches!(session.controls().crop, CropState::Cropped(_)));
+        // Half the height, at the same fit-width scale: the second page now
+        // starts half a page plus a gap down the column.
+        let cropped = session.column.pages[1].top;
+        assert!(
+            cropped < full,
+            "the column did not shrink: {cropped} vs {full}"
+        );
+        assert!(
+            (cropped - (full - 792.0 / 2.0)).abs() < 1.0,
+            "the column shrank by the wrong amount: {cropped} vs {full}"
+        );
+        // Every page, not just the one the rectangle was drawn on.
+        for page in &session.column.pages {
+            assert!(
+                (page.height - 396.0).abs() < 1.0,
+                "page {:?} kept its margins",
+                page.page
+            );
+        }
+    }
+
+    /// The same crop trims pages of different sizes in proportion. A
+    /// rectangle in points would be right for one of them and wrong for the
+    /// other, which is why a crop is fractions.
+    #[test]
+    fn a_crop_is_proportional_across_page_sizes() {
+        let mut session = ReaderSession::new();
+        session.opened(
+            vec![
+                PageGeometry::upright(612.0, 792.0),
+                PageGeometry::upright(595.0, 842.0),
+            ],
+            CompatibilityLevel::Native,
+            Vec::new(),
+            false,
+        );
+        session.set_cell(612.0, 400.0);
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(0), 61.2, 79.2);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 550.8, 712.8);
+        session.pointer_released();
+        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
+        let scale = session.scale;
+        assert!((session.column.pages[0].height - 792.0 * 0.8 * scale).abs() < 1.0);
+        assert!((session.column.pages[1].height - 842.0 * 0.8 * scale).abs() < 1.0);
+    }
+
+    /// Unlatching the button puts the reader back where the crop was taken —
+    /// the zoom *and* the place in the document, which is what makes the
+    /// round trip one press rather than a jump back to the top.
+    #[test]
+    fn clearing_a_crop_puts_the_reader_back() {
+        let mut session = open(10);
+        session.apply(&ReadCommand::SetZoom(Zoom::Fixed(1.5)));
+        session.apply(&ReadCommand::GoToPage(PageIndex(4)));
+        let (zoom, offset, page) = (
+            session.controls().zoom,
+            session.controls().offset,
+            session.controls().page,
+        );
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(4), 61.2, 79.2);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(4), 550.8, 712.8);
+        session.pointer_released();
+        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
+        assert_ne!(session.controls().offset, offset);
+        session.apply(&ReadCommand::ArmCrop(false));
+        assert_eq!(session.controls().crop, CropState::Off);
+        assert_eq!(session.controls().zoom, zoom);
+        assert!((session.controls().offset - offset).abs() < 1.0);
+        assert_eq!(session.controls().page, page);
+    }
+
+    /// A cropped page asks the renderer for the crop and not for the page:
+    /// the pixels go on what is on the sheet, not on margins nobody sees.
+    #[test]
+    fn a_cropped_page_asks_for_its_region() {
+        let mut session = open(3);
+        assert!(session
+            .render_plan(1.0)
+            .iter()
+            .all(|entry| entry.region == pulpit_core::notes::Region::FULL));
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(0), 0.0, 0.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 612.0, 396.0);
+        session.pointer_released();
+        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
+        let plan = session.render_plan(1.0);
+        assert!(!plan.is_empty());
+        for entry in plan {
+            assert!((entry.region.height - 0.5).abs() < 1e-3);
+            assert_eq!(entry.region.y, 0.0);
+        }
+    }
+
+    /// Escape's command drops the rectangle and keeps the tool: the reader
+    /// who mis-drew one draws another rather than re-arming first.
+    #[test]
+    fn cancelling_a_rectangle_leaves_the_tool_armed() {
+        let mut session = open(3);
+        session.apply(&ReadCommand::ArmCrop(true));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 500.0, 600.0);
+        session.pointer_released();
+        assert!(matches!(session.controls().crop, CropState::Choosing(_)));
+        session.apply(&ReadCommand::CancelCrop);
+        assert_eq!(session.controls().crop, CropState::Armed);
     }
 }

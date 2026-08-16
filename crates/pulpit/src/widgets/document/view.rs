@@ -8,13 +8,12 @@
 
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, slider, space, text,
-    text_editor, text_input, tooltip, Row,
+    text_editor, text_input, tooltip, Column, Row,
 };
 use iced::{Alignment, Element, Length, Padding};
 
 use pulpit_core::annotation::{AnnotationTool, InkColor};
 use pulpit_core::page::PageIndex;
-use pulpit_render::document::CompatibilityLevel;
 
 use crate::theme;
 use crate::widgets::context::{Mode, ReaderData};
@@ -117,8 +116,11 @@ fn page_surface<'a, Message: Clone + 'static>(
             sheets = sheets.push(space::vertical().height(Length::Fixed(first.placed.top)));
         }
     }
-    let armed = reader.controls.tool;
-    let panning = reader.panning;
+    let pointer = Pointer {
+        armed: reader.controls.tool,
+        marqueeing: reader.controls.crop.takes_the_pointer(),
+        panning: reader.panning,
+    };
     // Pages that share a top are one row, which in a two-page spread is a
     // pair of facing sheets: the column decided that, and this only has to
     // draw what it decided.
@@ -148,7 +150,14 @@ fn page_surface<'a, Message: Clone + 'static>(
                 .as_ref()
                 .filter(|composing| composing.page == page.placed.page);
             facing = facing.push(sheet(
-                page, mode, armed, panning, composing, compose, on_event,
+                page,
+                mode,
+                pointer,
+                composing,
+                compose,
+                reader.date_picker,
+                reader.date_language,
+                on_event,
             ));
         }
         sheets = sheets.push(facing);
@@ -289,16 +298,36 @@ pub fn page_surface_id() -> iced::advanced::widget::Id {
 
 /// One page, drawn at the size the column gave it.
 ///
+/// What the pointer is doing to the document, which is what the sheet needs
+/// to know to say what the cursor is and who a press belongs to.
+#[derive(Debug, Clone, Copy)]
+struct Pointer {
+    /// The armed annotation tool, if any.
+    armed: Option<AnnotationTool>,
+    /// Is the marquee crop armed or waiting on an answer? It outranks the
+    /// armed tool: while it is on, no tool and no link can have the press.
+    marqueeing: bool,
+    /// Is the hand dragging the page about?
+    panning: bool,
+}
+
 /// A page with no frame yet is still drawn, at its full size, as a blank
 /// sheet: the alternative is a column that changes height as frames arrive,
 /// which moves the text under the reader's eye.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a sheet is a page plus every transient thing drawn over it; \
+              bundling them into a struct for one caller would hide which of \
+              them belong to this page and which to the document"
+)]
 fn sheet<'a, Message: Clone + 'static>(
     page: &crate::widgets::context::ReaderPage,
     mode: Mode,
-    armed: Option<AnnotationTool>,
-    panning: bool,
+    pointer: Pointer,
     composing: Option<&crate::widgets::context::ComposingMark>,
     buffer: Option<&'a iced::widget::text_editor::Content>,
+    picker: Option<&crate::reader::DatePicker>,
+    language: crate::datefield::Locale,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
     let inner: Element<'static, Message> = match &page.frame {
@@ -325,11 +354,24 @@ fn sheet<'a, Message: Clone + 'static>(
     // that rasterises it, and does not vanish at release while that round
     // trip runs (A2, §9.2). The retained layers come down the moment a frame
     // containing them arrives, so none of them can duplicate a rendered mark.
+    // Everything drawn over the sheet is placed in the page's own points, and
+    // the sheet is a picture of the crop window: `shown` is the window's size
+    // and `origin` its corner, so one crop-aware conversion serves every
+    // layer instead of each one repeating it.
+    let shown = (
+        page.canonical.0 * page.window.width,
+        page.canonical.1 * page.window.height,
+    );
+    let origin = (
+        page.canonical.0 * page.window.x,
+        page.canonical.1 * page.window.y,
+    );
     let searched = !page.found.is_empty() || !page.found_current.is_empty();
     let sheet: Element<'static, Message> = if page.preview.is_some()
         || !page.retained.is_empty()
         || searched
         || !page.selection.is_empty()
+        || page.marquee.is_some()
     {
         let mut layers = iced::widget::stack![sheet];
         // Search hits go under the marks: they are a way of finding the page,
@@ -353,15 +395,16 @@ fn sheet<'a, Message: Clone + 'static>(
                     opacity,
                     width: 0.0,
                 },
-                page.canonical,
+                shown,
+                origin,
                 drawn,
             ));
         }
         for mark in page.retained.clone() {
-            layers = layers.push(super::preview::layer(mark, page.canonical, drawn));
+            layers = layers.push(super::preview::layer(mark, shown, origin, drawn));
         }
         if let Some(preview) = page.preview.clone() {
-            layers = layers.push(super::preview::layer(preview, page.canonical, drawn));
+            layers = layers.push(super::preview::layer(preview, shown, origin, drawn));
         }
         // The selection goes on top of everything: it is chrome describing
         // what the reader is holding, and chrome that something else can
@@ -370,9 +413,15 @@ fn sheet<'a, Message: Clone + 'static>(
             layers = layers.push(super::preview::selection_layer(
                 selection,
                 theme::ambient::accent(),
-                page.canonical,
+                shown,
+                origin,
                 drawn,
             ));
+        }
+        // The marquee last of all: it is the reader's own rectangle, and
+        // nothing on the page may cover the thing they are drawing.
+        if let Some(rect) = page.marquee {
+            layers = layers.push(super::preview::marquee_layer(rect, shown, origin, drawn));
         }
         layers.into()
     } else {
@@ -391,7 +440,8 @@ fn sheet<'a, Message: Clone + 'static>(
             composing,
             buffer,
             (page.placed.width, page.placed.height),
-            page.canonical,
+            shown,
+            origin,
             on_event,
         )
     });
@@ -403,14 +453,19 @@ fn sheet<'a, Message: Clone + 'static>(
     let index = page.placed.page;
     let (drawn_width, drawn_height) = (page.placed.width, page.placed.height);
     let (canonical_width, canonical_height) = page.canonical;
+    // The sheet is a picture of the crop window, not necessarily of the whole
+    // page, so the conversion starts at the window's own corner. Without this
+    // every mark made under a crop would land a margin's width away from
+    // where the reader put it.
+    let window = page.window;
     let to_page = move |point: iced::Point| -> (f32, f32) {
         let x = if drawn_width > 0.0 {
-            point.x * canonical_width / drawn_width
+            (window.x + point.x * window.width / drawn_width) * canonical_width
         } else {
             0.0
         };
         let y = if drawn_height > 0.0 {
-            point.y * canonical_height / drawn_height
+            (window.y + point.y * window.height / drawn_height) * canonical_height
         } else {
             0.0
         };
@@ -444,22 +499,176 @@ fn sheet<'a, Message: Clone + 'static>(
     // left to mean "this tool marks the page here". With nothing armed the
     // hand is what the pointer is: the cursor is a hand, open until the
     // button goes down and closed while it is dragging the page about (§8.1).
-    let area: Element<'static, Message> = if let Some(tool) = armed {
+    // The marquee is a rectangle drawn on the page, so it wears the crosshair
+    // every rectangle tool wears — and it takes precedence, because while it
+    // is armed no tool and no link can have the press.
+    let area: Element<'static, Message> = if pointer.marqueeing {
+        area.interaction(iced::mouse::Interaction::Crosshair).into()
+    } else if let Some(tool) = pointer.armed {
         let cursor = match tool {
             AnnotationTool::Highlighter => iced::mouse::Interaction::Text,
             _ => iced::mouse::Interaction::Crosshair,
         };
         area.interaction(cursor).into()
-    } else if panning {
+    } else if pointer.panning {
         area.interaction(iced::mouse::Interaction::Grabbing).into()
     } else {
         area.interaction(iced::mouse::Interaction::Grab).into()
     };
 
-    match writing {
-        Some(writing) => iced::widget::stack![area, writing].into(),
-        None => area,
+    // The calendar over a date field, on the page that field is on. Placed
+    // like the writing box and for the same reason: it belongs beside the
+    // field, not in a dialog covering the form it is filling in.
+    let calendar = picker
+        .filter(|picker| picker.page == index)
+        .map(|picker| date_picker_layer(picker, language, shown, origin, drawn, on_event));
+
+    match (writing, calendar) {
+        (Some(writing), Some(calendar)) => iced::widget::stack![area, writing, calendar].into(),
+        (Some(writing), None) => iced::widget::stack![area, writing].into(),
+        (None, Some(calendar)) => iced::widget::stack![area, calendar].into(),
+        (None, None) => area,
     }
+}
+
+/// The calendar pulpit draws over a date field (§8.6).
+///
+/// A PDF says a field holds a date and says what shape the value takes; it
+/// offers no picker, because a picker is a viewer's answer rather than the
+/// file's. Acrobat and PDF Studio each draw one, and this is pulpit's.
+///
+/// What comes out of it is *text*, written the way the field's own pattern
+/// asks for, handed to PDFium's editor like any other typed value — so §8.6's
+/// one editing surface survives a calendar sitting on top of it.
+fn date_picker_layer<Message: Clone + 'static>(
+    picker: &crate::reader::DatePicker,
+    language: crate::datefield::Locale,
+    shown: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    use crate::datefield::{Date, Weekday};
+
+    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
+    /// Wide enough for seven columns and a month name over them.
+    const WIDTH: f32 = 224.0;
+    const HEIGHT: f32 = 248.0;
+    /// One day, square, so the grid reads as a calendar rather than a table.
+    const CELL: f32 = 28.0;
+
+    let scale_x = if shown.0 > 0.0 {
+        drawn.0 / shown.0
+    } else {
+        1.0
+    };
+    let scale_y = if shown.1 > 0.0 {
+        drawn.1 / shown.1
+    } else {
+        1.0
+    };
+
+    // Under the field by preference, which is where a dropdown goes; above it
+    // when there is no room below, so a field near the foot of the page still
+    // opens a calendar the reader can see all of.
+    let left = ((picker.bounds.left - origin.0) * scale_x).clamp(0.0, (drawn.0 - WIDTH).max(0.0));
+    let below = (picker.bounds.bottom - origin.1) * scale_y;
+    let above = (picker.bounds.top - origin.1) * scale_y - HEIGHT;
+    let top = if below + HEIGHT <= drawn.1 || above < 0.0 {
+        below.clamp(0.0, (drawn.1 - HEIGHT).max(0.0))
+    } else {
+        above.max(0.0)
+    };
+
+    let step = |label: &str, forward: bool| {
+        button(text(label.to_string()).size(theme::type_scale::LABEL))
+            .padding(theme::space::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(send(ReadCommand::StepDatePicker(forward)))
+    };
+    let header = row![
+        step("‹", false),
+        container(
+            text(picker.month.title(language))
+                .size(theme::type_scale::LABEL)
+                .align_x(Alignment::Center)
+        )
+        .width(Length::Fill)
+        .align_y(Alignment::Center),
+        step("›", true),
+    ]
+    .align_y(Alignment::Center);
+
+    let mut headings = Row::new();
+    for weekday in Weekday::ALL {
+        headings = headings.push(
+            container(
+                text(language.weekday_initial(weekday))
+                    .size(theme::type_scale::CAPTION)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fixed(CELL)),
+        );
+    }
+
+    let mut grid = Column::new().spacing(1.0);
+    for week in picker.month.grid() {
+        let mut line = Row::new().spacing(1.0);
+        for cell in week {
+            line = line.push(match cell {
+                Some(day) => {
+                    let date = Date::new(picker.month.year, picker.month.month, day);
+                    // Today is marked, because "what is the date" is the
+                    // question a date field usually asks.
+                    let style = if date == picker.today {
+                        theme::ambient::selected_button
+                    } else {
+                        theme::ambient::tool_button
+                    };
+                    Element::from(
+                        button(
+                            text(day.to_string())
+                                .size(theme::type_scale::CAPTION)
+                                .align_x(Alignment::Center),
+                        )
+                        .width(Length::Fixed(CELL))
+                        .padding(2.0)
+                        .style(style)
+                        .on_press(send(ReadCommand::PickDate(date))),
+                    )
+                }
+                // The blanks a month leaves at its corners. Space rather than
+                // an empty button, so nothing there can be pressed.
+                None => Element::from(space::horizontal().width(Length::Fixed(CELL))),
+            });
+        }
+        grid = grid.push(line);
+    }
+
+    let panel = container(
+        column![
+            header,
+            headings,
+            grid,
+            button(text("Close").size(theme::type_scale::CAPTION))
+                .padding(theme::space::XS)
+                .style(theme::ambient::tool_button)
+                .on_press(send(ReadCommand::CloseDatePicker)),
+        ]
+        .spacing(theme::space::XS),
+    )
+    .padding(theme::space::XS)
+    .width(Length::Fixed(WIDTH))
+    .style(theme::ambient::surface);
+
+    let placed = column![
+        space::vertical().height(Length::Fixed(top)),
+        row![space::horizontal().width(Length::Fixed(left)), panel],
+    ];
+    container(placed)
+        .width(Length::Fixed(drawn.0))
+        .height(Length::Fixed(drawn.1))
+        .into()
 }
 
 /// The caret for a mark being written, on the page where it will land (§8.5).
@@ -478,6 +687,9 @@ fn compose_layer<'a, Message: Clone + 'static>(
     buffer: Option<&'a iced::widget::text_editor::Content>,
     drawn: (f32, f32),
     canonical: (f32, f32),
+    // The page point the sheet's corner stands for: the crop window's own, or
+    // the page's origin when nothing is cropped.
+    origin: (f32, f32),
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
     /// How wide the writing box is on screen, in layout points.
@@ -503,8 +715,8 @@ fn compose_layer<'a, Message: Clone + 'static>(
     let lines = buffer.map_or(1, |buffer| buffer.line_count()).clamp(1, 6);
     let height = (COMPOSE_HEIGHT + (lines - 1) as f32 * theme::type_scale::BODY * 1.3)
         .min(drawn.1.max(COMPOSE_HEIGHT));
-    let left = (composing.at.x * scale_x).clamp(0.0, (drawn.0 - width).max(0.0));
-    let top = (composing.at.y * scale_y).clamp(0.0, (drawn.1 - height).max(0.0));
+    let left = ((composing.at.x - origin.0) * scale_x).clamp(0.0, (drawn.0 - width).max(0.0));
+    let top = ((composing.at.y - origin.1) * scale_y).clamp(0.0, (drawn.1 - height).max(0.0));
 
     // A real multi-line editor, so a note can be a paragraph. Return breaks
     // the line, the way it does in every other box that holds prose; the mark
@@ -600,6 +812,68 @@ const COMPOSE_HEIGHT: f32 = 34.0;
 /// moment a spot is chosen. One mark is written at a time, so one id.
 pub fn compose_input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-reader-compose-mark")
+}
+
+/// The crop latch, and the question a drawn rectangle asks.
+///
+/// A latch rather than a momentary press, because what it does is not over
+/// when the press is: while it is down the pointer draws rectangles instead of
+/// reaching the page, and after a crop is taken it is what puts the margins
+/// back. One press on, one press off.
+fn crop_control<Message: Clone + 'static>(
+    reader: &ReaderData<'_>,
+    live: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    use super::model::{CropChoice, CropState};
+
+    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
+    let crop = reader.controls.crop;
+    let control = button(theme::icon::icon(
+        theme::Icon::Crop,
+        theme::type_scale::HEADING,
+    ))
+    .padding(Padding::from([4.0, 8.0]))
+    .style(if crop.is_on() {
+        theme::ambient::selected_button
+    } else {
+        theme::ambient::tool_button
+    });
+    let control = if live {
+        control.on_press(send(ReadCommand::ArmCrop(!crop.is_on())))
+    } else {
+        control
+    };
+    let trigger = hint(control, crop.label());
+
+    // The question, anchored to the button rather than thrown up as a dialog:
+    // the rectangle the reader is being asked about is on the page behind it,
+    // and a dialog in the middle of the window would cover the very thing the
+    // answer is about.
+    // Two choices and no third: Escape takes the rectangle back, and so does a
+    // press on the page — a cancel button would be a control for something
+    // the reader already has two ways of doing.
+    let panel = (live && matches!(crop, CropState::Choosing(_))).then(|| {
+        let choice = |label: &str, command: ReadCommand| -> Element<'static, Message> {
+            button(text(label.to_string()).size(theme::type_scale::LABEL))
+                .padding(Padding::from([6.0, 10.0]))
+                .width(Length::Fixed(180.0))
+                .style(theme::ambient::tool_button)
+                .on_press(send(command))
+                .into()
+        };
+        container(
+            column![
+                choice("Zoom on this page", ReadCommand::TakeCrop(CropChoice::Zoom),),
+                choice("Crop every page", ReadCommand::TakeCrop(CropChoice::Pages)),
+            ]
+            .spacing(theme::space::XS),
+        )
+        .padding(theme::space::XS)
+        .style(theme::ambient::dialog)
+        .into()
+    });
+    crate::widgets::annotations::popover::Popover::new(trigger, panel).into()
 }
 
 /// The navigation band: where you are, and how big the page is.
@@ -721,52 +995,36 @@ fn navigation<Message: Clone + 'static>(
             ReadCommand::SetZoom(Zoom::FitPage),
             true
         ),
+        crop_control(reader, live, on_event),
+        // The spread belongs with the zoom rather than in a group of its own:
+        // how many pages stand across the window is the same question as how
+        // big they are, and the reader who wants two of them is answering it.
+        // One control, not two — the spread has exactly two states, and a
+        // button that shows the one you are not in is a press rather than a
+        // choice between a pressed and an unpressed twin.
+        step(
+            match reader.controls.spread.other() {
+                PageSpread::Single => theme::Icon::SinglePage,
+                PageSpread::Double => theme::Icon::TwoPages,
+            },
+            reader.controls.spread.other().label(),
+            ReadCommand::SetSpread(reader.controls.spread.other()),
+            true
+        ),
     ]);
 
-    // One control, not two: the spread has exactly two states, and a button
-    // that shows the one you are not in is a press rather than a choice
-    // between a pressed and an unpressed twin.
-    let spread = group(row![step(
-        match reader.controls.spread.other() {
-            PageSpread::Single => theme::Icon::SinglePage,
-            PageSpread::Double => theme::Icon::TwoPages,
-        },
-        reader.controls.spread.other().label(),
-        ReadCommand::SetSpread(reader.controls.spread.other()),
-        true
-    )]);
-
-    let band = row![pages, rule(), sizing, rule(), spread]
+    let band = row![pages, rule(), sizing]
         .spacing(theme::space::M)
         .align_y(Alignment::Center);
 
-    // The compatibility level and the dirty mark are the two things a reader
-    // should not have to go looking for: one says what pulpit can honour in
-    // this file (§3.4), the other that there is something unsaved in it.
-    let mut status = row![].spacing(theme::space::XS).align_y(Alignment::Center);
-    if reader.open && reader.level != CompatibilityLevel::Native {
-        status = status.push(
-            text(reader.level.label().to_string())
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        );
-    }
-    if reader.dirty {
-        status = status.push(
-            text("Unsaved changes".to_string())
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::accent()),
-        );
-    }
-
-    container(
-        row![band, space::horizontal().width(Length::Fill), status]
-            .align_y(Alignment::Center)
-            .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .align_y(Alignment::Center)
-    .into()
+    // The band and nothing beside it. The compatibility level and the unsaved
+    // mark used to sit at the far end of this row; they are said elsewhere,
+    // and a line of standing text in the reader's own chrome is a thing the
+    // eye stops seeing long before it stops costing the row.
+    container(band.width(Length::Fill))
+        .width(Length::Fill)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// The outline rail: bookmarks, or the pages themselves.

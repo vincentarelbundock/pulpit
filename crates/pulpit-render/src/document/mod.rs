@@ -40,8 +40,9 @@ pub use limits::LimitExceeded;
 pub use model::{
     AnnotationBeforeImage, AnnotationContents, AnnotationSummary, AnnotationSupport, Applied,
     AppliedEffect, CompatibilityLevel, DocumentCommand, DocumentRevision, DocumentTransaction,
-    DocumentUndo, DocumentWarning, FieldKind, FieldWidget, FormField, OpenDocumentInfo,
-    SaveOptions, SavedDocument, TextSelection, TextSelectionResult, UndoOperation,
+    DocumentUndo, DocumentWarning, FieldFormat, FieldKind, FieldWidget, FormField,
+    OpenDocumentInfo, SaveOptions, SavedDocument, TextSelection, TextSelectionResult,
+    UndoOperation,
 };
 
 /// Why a document operation failed.

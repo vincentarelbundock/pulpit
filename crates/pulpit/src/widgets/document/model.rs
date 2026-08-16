@@ -6,6 +6,7 @@
 //! the one substantial piece of new view code §8.7 calls out, and which is
 //! worth being able to test without a window.
 
+use pulpit_core::notes::Region;
 use pulpit_core::page::{PageGeometry, PageIndex};
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,117 @@ impl Zoom {
     #[allow(dead_code)] // read by the zoom control once it offers a menu
     pub fn is_fit(self) -> bool {
         !matches!(self, Zoom::Fixed(_))
+    }
+}
+
+/// The marquee crop: a rectangle drawn on the page, and what it was taken to
+/// mean.
+///
+/// A zoom control and never a document edit: nothing here sets the dirty flag,
+/// enters the undo stack or reaches `/CropBox`. It changes what is on screen
+/// and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CropState {
+    /// No marquee, no crop: presses reach the page as usual.
+    #[default]
+    Off,
+    /// Armed and waiting for a drag. Nothing is drawn yet.
+    Armed,
+    /// A rectangle has been drawn and the reader is choosing what it means.
+    Choosing(Region),
+    /// A crop is in force: every page is read through this window.
+    Cropped(Region),
+}
+
+impl CropState {
+    /// The window every page is read through, which is the whole page unless
+    /// a crop is in force. Deliberately not the rectangle being *chosen*: a
+    /// rectangle is still a proposal until the reader says what it means.
+    pub fn window(self) -> Region {
+        match self {
+            CropState::Cropped(region) => region,
+            _ => Region::FULL,
+        }
+    }
+
+    /// Does the pointer belong to the marquee rather than to the page?
+    pub fn takes_the_pointer(self) -> bool {
+        matches!(self, CropState::Armed | CropState::Choosing(_))
+    }
+
+    /// Is the control lit — armed, mid-choice, or holding a crop?
+    pub fn is_on(self) -> bool {
+        !matches!(self, CropState::Off)
+    }
+
+    /// What the button's tooltip says. A latch that clears something should
+    /// say so before it is pressed, not after.
+    pub fn label(self) -> &'static str {
+        match self {
+            CropState::Cropped(_) => "Clear crop",
+            _ => "Crop",
+        }
+    }
+}
+
+/// What a drawn rectangle was taken to mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropChoice {
+    /// Fill the window with it, once. A zoom and nothing more.
+    Zoom,
+    /// Read every page through it until the crop is cleared.
+    Pages,
+}
+
+/// The smallest crop worth honouring, as a fraction of the page.
+///
+/// A rectangle thinner than this is a slip of the hand rather than a reading
+/// decision, and a crop made of one would scale the page past anything the
+/// zoom ladder can reach.
+pub const MIN_CROP_FRACTION: f32 = 0.02;
+
+/// Is this region a rectangle a page can actually be read through?
+pub fn is_usable_crop(region: &Region) -> bool {
+    region.x.is_finite()
+        && region.y.is_finite()
+        && region.width >= MIN_CROP_FRACTION
+        && region.height >= MIN_CROP_FRACTION
+        && region.x >= -f32::EPSILON
+        && region.y >= -f32::EPSILON
+        && region.x + region.width <= 1.0 + 1e-3
+        && region.y + region.height <= 1.0 + 1e-3
+}
+
+/// The rectangle two corners describe, in fractions of the page, whichever
+/// way round it was drawn and however far outside the sheet the hand went.
+pub fn crop_between(start: (f32, f32), end: (f32, f32), page: &PageGeometry) -> Region {
+    let fraction = |value: f32, extent: f32| {
+        if extent > 0.0 {
+            (value / extent).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let (x0, x1) = (fraction(start.0, page.width), fraction(end.0, page.width));
+    let (y0, y1) = (fraction(start.1, page.height), fraction(end.1, page.height));
+    Region::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+}
+
+/// The page as it is read through `window`.
+///
+/// Fractions rather than points is what makes one crop right for a document
+/// of mixed page sizes: the same window trims a letter page and the A4
+/// appendix behind it in proportion, where a rectangle in points would be
+/// wrong on one of them.
+pub fn cropped(page: &PageGeometry, window: Region) -> PageGeometry {
+    if window == Region::FULL || !is_usable_crop(&window) {
+        return *page;
+    }
+    PageGeometry {
+        width: page.width * window.width,
+        height: page.height * window.height,
+        ..*page
     }
 }
 
@@ -410,6 +522,8 @@ pub struct ReaderControls {
     pub outline: OutlineView,
     /// One page across the column, or two facing pages.
     pub spread: PageSpread,
+    /// The marquee crop: armed, mid-choice, or in force.
+    pub crop: CropState,
     /// Whether the outline rail is collapsed to its header. The rail keeps the
     /// space the layout gave it — that is the layout's to decide — but hides
     /// everything below the header, so a reader who wants the page and not the
@@ -433,6 +547,7 @@ impl Default for ReaderControls {
             text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),
             spread: PageSpread::default(),
+            crop: CropState::default(),
             outline_collapsed: false,
         }
     }
