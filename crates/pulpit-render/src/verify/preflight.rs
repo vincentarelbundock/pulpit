@@ -712,6 +712,113 @@ mod tests {
         assert!(matches!(result, Err(PreflightRefusal::NoSuchField { .. })));
     }
 
+    // §34.2 Refusal matrix tests
+
+    #[test]
+    fn test_prior_docmdp_p1_no_changes_refuses_signing() {
+        let pdf = create_pdf_with_docmdp_signature(1); // P=1 (NO_CHANGES)
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(matches!(
+            result,
+            Err(PreflightRefusal::DocumentLockedByPriorSignature {
+                level: MdpPerm::NoChanges
+            })
+        ));
+    }
+
+    #[test]
+    fn test_prior_docmdp_p2_fill_forms_allows_signing() {
+        let pdf = create_pdf_with_docmdp_signature(2); // P=2 (FILL_FORMS)
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_prior_docmdp_p3_annotate_allows_signing() {
+        let pdf = create_pdf_with_docmdp_signature(3); // P=3 (ANNOTATE)
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_fieldmdp_action_all_locks_target() {
+        let pdf = create_pdf_with_fieldmdp_signature("Sig1", "All", vec![], None);
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(matches!(
+            result,
+            Err(PreflightRefusal::FieldLockedByPriorSignature {
+                field,
+                locked_by
+            }) if field == "Sig2" && locked_by == "Sig1"
+        ));
+    }
+
+    #[test]
+    fn test_fieldmdp_action_include_names_target_locks() {
+        let pdf =
+            create_pdf_with_fieldmdp_signature("Sig1", "Include", vec!["Sig2".to_string()], None);
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(matches!(
+            result,
+            Err(PreflightRefusal::FieldLockedByPriorSignature {
+                field,
+                locked_by
+            }) if field == "Sig2" && locked_by == "Sig1"
+        ));
+    }
+
+    #[test]
+    fn test_fieldmdp_action_exclude_not_naming_target_locks() {
+        let pdf = create_pdf_with_fieldmdp_signature(
+            "Sig1",
+            "Exclude",
+            vec!["Sig1".to_string()], // Excludes only Sig1, so Sig2 is locked
+            None,
+        );
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(matches!(
+            result,
+            Err(PreflightRefusal::FieldLockedByPriorSignature {
+                field,
+                locked_by
+            }) if field == "Sig2" && locked_by == "Sig1"
+        ));
+    }
+
+    #[test]
+    fn test_fieldmdp_action_include_not_naming_target_allows() {
+        let pdf = create_pdf_with_fieldmdp_signature(
+            "Sig1",
+            "Include",
+            vec!["Other".to_string()], // Includes only Other, Sig2 is not locked
+            None,
+        );
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_fieldmdp_action_exclude_naming_target_allows() {
+        let pdf = create_pdf_with_fieldmdp_signature(
+            "Sig1",
+            "Exclude",
+            vec!["Sig2".to_string()], // Excludes Sig2, so Sig2 is NOT locked
+            None,
+        );
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_seed_value_dictionary_warning() {
+        let pdf = create_pdf_with_seed_value_dict();
+        let result = preflight_sign(&pdf, None);
+        assert!(result.is_ok());
+        if let Ok(ok) = result {
+            assert!(ok.seed_value_ignored);
+        }
+    }
+
     // Test helpers: create minimal PDFs for testing
 
     fn create_minimal_unsigned_pdf() -> Vec<u8> {
@@ -936,6 +1043,238 @@ mod tests {
         output.extend_from_slice(b"trailer\n");
         output.extend_from_slice(b"<<\n");
         output.extend_from_slice(b"/Size 7\n");
+        output.extend_from_slice(b"/Root 1 0 R\n");
+        output.extend_from_slice(
+            b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+        );
+        output.extend_from_slice(b">>\n");
+        output.extend_from_slice(b"startxref\n");
+        output.extend_from_slice(format!("{}\n", xref_start).as_bytes());
+        output.extend_from_slice(b"%%EOF");
+
+        output
+    }
+
+    fn create_pdf_with_docmdp_signature(p_level: u8) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog with /Perms reference
+        let obj1_pos = output.len();
+        output.extend_from_slice(b"1 0 obj\n");
+        output.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R /Perms 7 0 R>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 2: Pages
+        let obj2_pos = output.len();
+        output.extend_from_slice(b"2 0 obj\n");
+        output.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 3: Page
+        let obj3_pos = output.len();
+        output.extend_from_slice(b"3 0 obj\n");
+        output.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 4: AcroForm
+        let obj4_pos = output.len();
+        output.extend_from_slice(b"4 0 obj\n");
+        output.extend_from_slice(b"<</Fields [5 0 R 6 0 R] /SigFlags 3>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 5: Signature field 1 (with /V for certification)
+        let obj5_pos = output.len();
+        output.extend_from_slice(b"5 0 obj\n");
+        output.extend_from_slice(b"<</FT /Sig /T (Sig1) /V 8 0 R>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 6: Signature field 2 (empty)
+        let obj6_pos = output.len();
+        output.extend_from_slice(b"6 0 obj\n");
+        output.extend_from_slice(b"<</FT /Sig /T (Sig2)>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 7: /Perms dictionary
+        let obj7_pos = output.len();
+        output.extend_from_slice(b"7 0 obj\n");
+        output.extend_from_slice(b"<</DocMDP 8 0 R>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 8: Signature dictionary with DocMDP /Reference
+        let obj8_pos = output.len();
+        output.extend_from_slice(b"8 0 obj\n");
+        output.extend_from_slice(
+            b"<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Reference [<</Type /SigRef /TransformMethod /DocMDP /TransformParams <</Type /TransformParams /V /1.2 /P ",
+        );
+        output.extend_from_slice(format!("{}", p_level).as_bytes());
+        output.extend_from_slice(
+            b">>>>/ByteRange [0 100 200 50]/Contents <00000000000000000000000000000000>>>>\n",
+        );
+        output.extend_from_slice(b"endobj\n");
+
+        // xref and trailer
+        let xref_start = output.len();
+        output.extend_from_slice(b"xref\n");
+        output.extend_from_slice(b"0 1\n0000000000 65535 f \n");
+        output.extend_from_slice(format!("1 8\n{:010} 00000 n \n", obj1_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj2_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj3_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj4_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj5_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj6_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj7_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj8_pos).as_bytes());
+        output.extend_from_slice(b"trailer\n");
+        output.extend_from_slice(b"<<\n");
+        output.extend_from_slice(b"/Size 9\n");
+        output.extend_from_slice(b"/Root 1 0 R\n");
+        output.extend_from_slice(
+            b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+        );
+        output.extend_from_slice(b">>\n");
+        output.extend_from_slice(b"startxref\n");
+        output.extend_from_slice(format!("{}\n", xref_start).as_bytes());
+        output.extend_from_slice(b"%%EOF");
+
+        output
+    }
+
+    fn create_pdf_with_fieldmdp_signature(
+        sig_field_name: &str,
+        action: &str,
+        fields: Vec<String>,
+        _p_level: Option<u8>,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let obj1_pos = output.len();
+        output.extend_from_slice(b"1 0 obj\n");
+        output.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 2: Pages
+        let obj2_pos = output.len();
+        output.extend_from_slice(b"2 0 obj\n");
+        output.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 3: Page
+        let obj3_pos = output.len();
+        output.extend_from_slice(b"3 0 obj\n");
+        output.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 4: AcroForm
+        let obj4_pos = output.len();
+        output.extend_from_slice(b"4 0 obj\n");
+        output.extend_from_slice(b"<</Fields [5 0 R 6 0 R] /SigFlags 3>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 5: Signature field 1 (signed)
+        let obj5_pos = output.len();
+        output.extend_from_slice(b"5 0 obj\n");
+        output.extend_from_slice(
+            format!("<</FT /Sig /T ({}) /V 7 0 R>>\n", sig_field_name).as_bytes(),
+        );
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 6: Signature field 2 (empty)
+        let obj6_pos = output.len();
+        output.extend_from_slice(b"6 0 obj\n");
+        output.extend_from_slice(b"<</FT /Sig /T (Sig2)>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 7: Signature dictionary with FieldMDP /Reference
+        let obj7_pos = output.len();
+        output.extend_from_slice(b"7 0 obj\n");
+        output.extend_from_slice(b"<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Reference [<</Type /SigRef /TransformMethod /FieldMDP /Data 1 0 R /TransformParams <</Type /TransformParams /V /1.2 /Action /");
+        output.extend_from_slice(action.as_bytes());
+        output.extend_from_slice(b" /Fields [");
+        for field in fields {
+            output.extend_from_slice(b"(");
+            output.extend_from_slice(field.as_bytes());
+            output.extend_from_slice(b") ");
+        }
+        output.extend_from_slice(
+            b"]>>>>/ByteRange [0 100 200 50]/Contents <00000000000000000000000000000000>>>>\n",
+        );
+        output.extend_from_slice(b"endobj\n");
+
+        // xref and trailer
+        let xref_start = output.len();
+        output.extend_from_slice(b"xref\n");
+        output.extend_from_slice(b"0 1\n0000000000 65535 f \n");
+        output.extend_from_slice(format!("1 7\n{:010} 00000 n \n", obj1_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj2_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj3_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj4_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj5_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj6_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj7_pos).as_bytes());
+        output.extend_from_slice(b"trailer\n");
+        output.extend_from_slice(b"<<\n");
+        output.extend_from_slice(b"/Size 8\n");
+        output.extend_from_slice(b"/Root 1 0 R\n");
+        output.extend_from_slice(
+            b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+        );
+        output.extend_from_slice(b">>\n");
+        output.extend_from_slice(b"startxref\n");
+        output.extend_from_slice(format!("{}\n", xref_start).as_bytes());
+        output.extend_from_slice(b"%%EOF");
+
+        output
+    }
+
+    fn create_pdf_with_seed_value_dict() -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let obj1_pos = output.len();
+        output.extend_from_slice(b"1 0 obj\n");
+        output.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 2: Pages
+        let obj2_pos = output.len();
+        output.extend_from_slice(b"2 0 obj\n");
+        output.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 3: Page
+        let obj3_pos = output.len();
+        output.extend_from_slice(b"3 0 obj\n");
+        output.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 4: AcroForm
+        let obj4_pos = output.len();
+        output.extend_from_slice(b"4 0 obj\n");
+        output.extend_from_slice(b"<</Fields [5 0 R] /SigFlags 3>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // Object 5: Signature field with /SV seed value dictionary
+        let obj5_pos = output.len();
+        output.extend_from_slice(b"5 0 obj\n");
+        output.extend_from_slice(b"<</FT /Sig /T (Sig1) /SV <</Type /SigFieldV>>>\n");
+        output.extend_from_slice(b"endobj\n");
+
+        // xref and trailer
+        let xref_start = output.len();
+        output.extend_from_slice(b"xref\n");
+        output.extend_from_slice(b"0 1\n0000000000 65535 f \n");
+        output.extend_from_slice(format!("1 5\n{:010} 00000 n \n", obj1_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj2_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj3_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj4_pos).as_bytes());
+        output.extend_from_slice(format!("{:010} 00000 n \n", obj5_pos).as_bytes());
+        output.extend_from_slice(b"trailer\n");
+        output.extend_from_slice(b"<<\n");
+        output.extend_from_slice(b"/Size 6\n");
         output.extend_from_slice(b"/Root 1 0 R\n");
         output.extend_from_slice(
             b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",

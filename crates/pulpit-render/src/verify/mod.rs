@@ -23,8 +23,8 @@
 //!
 //! # The module MUST NOT depend on the sign module or PDFium.
 
-pub mod preflight;
 pub mod cms_check;
+pub mod preflight;
 
 pub use cms_check::{
     check_signature, verify_signatures, AlgorithmFinding, CertificateSummary, IdentityAssurance,
