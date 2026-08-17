@@ -18,20 +18,21 @@ use pulpit_core::page::PageIndex;
 use crate::theme;
 use crate::widgets::context::{Mode, ReaderData};
 use crate::widgets::event::ReadCommand;
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
 use super::model::{OutlineView, PageSpread, Zoom};
 
 /// Hand one reader widget its part of the document.
-pub fn view<'a, Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    reader: &ReaderData<'_>,
-    compose: Option<&'a iced::widget::text_editor::Content>,
-    mode: Mode,
-    on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
+    let reader = &ctx.context.reader;
+    let mode = ctx.context.mode;
+    let on_event = ctx.on_event;
     match widget.kind() {
-        WidgetKind::DocumentPage => page_surface(reader, compose, mode, on_event),
+        WidgetKind::DocumentPage => page_surface(reader, ctx.compose, mode, on_event),
         WidgetKind::DocumentNav => navigation(reader, mode, on_event),
         WidgetKind::DocumentOutline => outline(reader, mode, on_event),
         WidgetKind::AnnotationTools => tools(widget, reader, mode, on_event),

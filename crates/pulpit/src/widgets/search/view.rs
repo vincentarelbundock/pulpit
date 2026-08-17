@@ -9,8 +9,9 @@ use iced::widget::{button, column, container, row, scrollable, space, text, text
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
-use crate::widgets::context::{Mode, SearchData};
+use crate::widgets::context::SearchData;
 use crate::widgets::event::FindCommand;
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent};
 
 use super::model::{row_label, row_parts, summary};
@@ -21,12 +22,13 @@ pub fn input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-search-query")
 }
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     _widget: &Widget,
-    search: &SearchData<'_>,
-    mode: Mode,
-    on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let search = &ctx.context.search;
+    let mode = ctx.context.mode;
+    let on_event = ctx.on_event;
     let live = mode.interactive();
     let state = search.state;
 
