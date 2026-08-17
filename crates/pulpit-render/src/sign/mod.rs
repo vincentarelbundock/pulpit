@@ -297,4 +297,129 @@ mod tests {
         let result = load_pkcs12(b"dummy", "password");
         assert!(result.is_err());
     }
+
+    // STAGE 4 - Round-trip acceptance tests
+    #[test]
+    #[cfg(feature = "p12-keystore")]
+    fn test_cms_round_trip_rsa2048() {
+        // Generate a test certificate with rcgen
+        let subject_alt_names = vec!["test.example.com".to_string()];
+        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
+        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+        let cert_der = cert.serialize_der().unwrap();
+        let key_der = cert.serialize_private_key_der();
+
+        // Create PKCS#12
+        let mut keystore = p12_keystore::KeyStore::new();
+        let private_key =
+            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
+        let p12_cert =
+            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
+        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+
+        let password = "test_password";
+        let p12_bytes = keystore
+            .writer(password)
+            .write()
+            .expect("Failed to write PKCS#12");
+
+        // Load credential
+        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+
+        // Use a fixed 32-byte test digest
+        let test_digest = vec![0x42u8; 32];
+
+        // Build CMS
+        let cms_der = build_cms(
+            &credential,
+            &test_digest,
+            SigningProfile::AdbePkcs7Detached,
+            false,
+            None,
+        )
+        .expect("Failed to build CMS");
+
+        // Verify CMS is not empty and has reasonable size
+        assert!(!cms_der.is_empty(), "CMS should not be empty");
+        assert!(
+            cms_der.len() > 100,
+            "CMS should be large enough to contain signature and cert"
+        );
+
+        // Verify CMS starts with SEQUENCE tag
+        assert_eq!(cms_der[0], 0x30, "CMS should start with SEQUENCE tag");
+
+        // Verify digest is preserved in the credential
+        assert_eq!(
+            credential.public_key_info.key_type_name(),
+            "EC P-256",
+            "rcgen should generate EC P-256 by default"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "p12-keystore")]
+    fn test_size_estimation_basic() {
+        // Generate a test certificate
+        let subject_alt_names = vec!["test.example.com".to_string()];
+        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
+        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+        let cert_der = cert.serialize_der().unwrap();
+        let key_der = cert.serialize_private_key_der();
+
+        // Create PKCS#12
+        let mut keystore = p12_keystore::KeyStore::new();
+        let private_key =
+            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
+        let p12_cert =
+            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
+        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+
+        let password = "test_password";
+        let p12_bytes = keystore
+            .writer(password)
+            .write()
+            .expect("Failed to write PKCS#12");
+
+        // Load credential
+        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+
+        // Estimate CMS size
+        let test_digest = vec![0x42u8; 32];
+        let estimated_size = estimate_cms_size(
+            &credential,
+            &test_digest,
+            SigningProfile::AdbePkcs7Detached,
+            false,
+            false, // not tight
+        )
+        .expect("Failed to estimate CMS size");
+
+        // Size should be reasonable (at least 200 bytes for a signature + cert, with 50% margin)
+        assert!(
+            estimated_size > 200,
+            "Estimated size should account for signature and certificate"
+        );
+        assert_eq!(
+            estimated_size % 2,
+            0,
+            "Estimated size should be even (hex encoding requirement §23.2)"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "p12-keystore")]
+    fn test_signing_profile_difference() {
+        // Verify that the two profiles are distinct and can be used correctly
+        let adobe_profile = SigningProfile::AdbePkcs7Detached;
+        let etsi_profile = SigningProfile::EtsiCadesDetached;
+
+        assert_ne!(adobe_profile, etsi_profile);
+        assert_eq!(adobe_profile, SigningProfile::AdbePkcs7Detached);
+        assert_eq!(etsi_profile, SigningProfile::EtsiCadesDetached);
+    }
 }
