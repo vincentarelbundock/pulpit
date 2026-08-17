@@ -46,7 +46,7 @@ The trailer, which contains the /ID array, is cloned in full. There is no code t
 2. Generates 16 fresh random bytes (id2)
 3. Creates a new /ID array with [id1, id2']
 
-**Consequence:** Incremental updates produced by lopdf will have identical /ID arrays in all revisions. This breaks encryption key derivation for subsequent updates (which uses id1 in the key material per RFC 3394 / ISO 32000-1 §7.6.3.3). A second signing operation on a document signed with lopdf would produce incorrect encryption keys.
+**Consequence:** Incremental updates produced by lopdf will have identical /ID arrays in all revisions. This breaks encryption key derivation for subsequent updates (which uses id1 in the key material per ISO 32000-1 §7.6.3.3). A second signing operation on a document signed with lopdf would produce incorrect encryption keys.
 
 **Evidence in source:**
 - `src/writer.rs` (145+ lines): No /ID generation or modification logic
