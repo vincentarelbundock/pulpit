@@ -14,67 +14,13 @@
 use crate::layout::fit::FittedSlide;
 use crate::layout::model::AspectRatio;
 use crate::layout::tree::{self, Divider, Frame, Node, NodeId};
-use crate::widgets::{Family, WidgetKind};
+use crate::widgets::{catalog, Family, WidgetKind};
 
-/// A sketch of one pane's contents, chosen so a glance distinguishes a notes
-/// pane from a clock from a row of buttons.
-///
-/// Deliberately coarse: a thumbnail that tried to be a screenshot would be
-/// unreadable at this size, and would go stale the moment a widget changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Content {
-    /// Nothing placed here yet.
-    Empty,
-    /// A slide surface; the pane's `slide` field says where it lands.
-    Slide,
-    /// Ragged lines of prose, as speaker notes look from across the room.
-    Lines(u8),
-    /// A large figure: a clock, a timer, a slide counter.
-    Readout,
-    /// A row of press targets.
-    Buttons(u8),
-    /// A slider's track and handle.
-    Track,
-    /// A single line of status or title text.
-    Caption,
-    /// Freehand marks over the slide.
-    Marks,
-}
-
-impl Content {
-    /// What a pane holding `kind` should sketch.
-    pub fn of(kind: WidgetKind) -> Content {
-        match kind {
-            WidgetKind::CurrentSlide
-            | WidgetKind::PreviousSlide
-            | WidgetKind::NextSlide
-            | WidgetKind::PreviousCurrentNext => Content::Slide,
-            WidgetKind::SpeakerNotes => Content::Lines(4),
-            WidgetKind::Timer | WidgetKind::Clock => Content::Readout,
-            WidgetKind::SlideCounter => Content::Readout,
-            WidgetKind::SlideButtons => Content::Buttons(2),
-            WidgetKind::PauseResume | WidgetKind::EndPresentation | WidgetKind::MainMenu => {
-                Content::Buttons(1)
-            }
-            WidgetKind::AudienceControls => Content::Buttons(2),
-            // A scrub bar is the most recognisable thing about it, so the
-            // thumbnail sketches the track rather than the button.
-            WidgetKind::SlideSlider | WidgetKind::MediaTransport => Content::Track,
-            WidgetKind::PresentationTitle
-            | WidgetKind::CurrentSection
-            | WidgetKind::AudienceScreenStatus
-            | WidgetKind::ConnectionStatus => Content::Caption,
-            WidgetKind::Annotations | WidgetKind::AnnotationTools => Content::Marks,
-            // The reader.
-            WidgetKind::DocumentPage => Content::Slide,
-            WidgetKind::DocumentNav => Content::Buttons(2),
-            // A rail of bookmark titles and page numbers sketches as lines.
-            WidgetKind::DocumentOutline => Content::Lines(5),
-            // A query field over a short list of what it found.
-            WidgetKind::Search => Content::Lines(3),
-        }
-    }
-}
+/// A sketch of one pane's contents. Alias kept so this module's public API —
+/// `ThumbnailCell::content`, `Thumbnail::cells` — reads in its own
+/// vocabulary; the facts themselves are catalog data, one per
+/// [`crate::widgets::catalog::WidgetDefinition`], not a match here.
+pub type Content = catalog::ThumbnailContent;
 
 /// One pane of a thumbnail.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +81,7 @@ impl Thumbnail {
                     .iter()
                     .find(|(id, _)| *id == placement.id)
                     .map(|(_, widget)| *widget)?;
-                let content = widget.map(Content::of).unwrap_or(Content::Empty);
+                let content = widget.map(thumbnail_of).unwrap_or(Content::Empty);
                 Some(ThumbnailCell {
                     id: placement.id,
                     frame: placement.frame,
@@ -183,6 +129,12 @@ pub fn slide_cells(root: &Node, area: Frame) -> Vec<Frame> {
         })
         .map(|placement| placement.frame)
         .collect()
+}
+
+/// What a pane holding `kind` should sketch. Reads the catalog entry
+/// instead of matching on `kind` itself — see [`catalog::ThumbnailContent`].
+fn thumbnail_of(kind: WidgetKind) -> Content {
+    catalog::definition(kind).thumbnail
 }
 
 fn collect_leaves(node: &Node, into: &mut Vec<(NodeId, Option<WidgetKind>)>) {
@@ -295,13 +247,16 @@ mod tests {
 
     #[test]
     fn each_widget_family_gets_a_distinguishable_sketch() {
-        assert_eq!(Content::of(WidgetKind::CurrentSlide), Content::Slide);
-        assert_eq!(Content::of(WidgetKind::SpeakerNotes), Content::Lines(4));
-        assert_eq!(Content::of(WidgetKind::Timer), Content::Readout);
-        assert_eq!(Content::of(WidgetKind::SlideSlider), Content::Track);
-        assert_eq!(Content::of(WidgetKind::SlideButtons), Content::Buttons(2));
-        assert_eq!(Content::of(WidgetKind::PresentationTitle), Content::Caption);
-        assert_eq!(Content::of(WidgetKind::Annotations), Content::Marks);
+        assert_eq!(thumbnail_of(WidgetKind::CurrentSlide), Content::Slide);
+        assert_eq!(thumbnail_of(WidgetKind::SpeakerNotes), Content::Lines(4));
+        assert_eq!(thumbnail_of(WidgetKind::Timer), Content::Readout);
+        assert_eq!(thumbnail_of(WidgetKind::SlideSlider), Content::Track);
+        assert_eq!(thumbnail_of(WidgetKind::SlideButtons), Content::Buttons(2));
+        assert_eq!(
+            thumbnail_of(WidgetKind::PresentationTitle),
+            Content::Caption
+        );
+        assert_eq!(thumbnail_of(WidgetKind::Annotations), Content::Marks);
     }
 
     #[test]

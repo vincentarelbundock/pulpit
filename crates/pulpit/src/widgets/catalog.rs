@@ -8,6 +8,34 @@
 use super::{WidgetCapability, WidgetGroup, WidgetKind};
 use std::num::NonZeroUsize;
 
+/// A sketch of one pane's contents, chosen so a glance distinguishes a notes
+/// pane from a clock from a row of buttons.
+///
+/// Deliberately coarse: a thumbnail that tried to be a screenshot would be
+/// unreadable at this size, and would go stale the moment a widget changed.
+/// Lives here rather than in `layout::thumbnail` because it is a catalog
+/// fact — what a kind looks like — not a layout decision; that module reads
+/// [`WidgetDefinition::thumbnail`] instead of matching on [`WidgetKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailContent {
+    /// Nothing placed here yet.
+    Empty,
+    /// A slide surface; the pane's `slide` field says where it lands.
+    Slide,
+    /// Ragged lines of prose, as speaker notes look from across the room.
+    Lines(u8),
+    /// A large figure: a clock, a timer, a slide counter.
+    Readout,
+    /// A row of press targets.
+    Buttons(u8),
+    /// A slider's track and handle.
+    Track,
+    /// A single line of status or title text.
+    Caption,
+    /// Freehand marks over the slide.
+    Marks,
+}
+
 /// How many times a widget may appear in one layout.
 ///
 /// Deliberately minimal: this answers "how many", not "which cell claims
@@ -63,6 +91,8 @@ pub struct WidgetDefinition {
     /// at scale 1. Below this the editor warns rather than saving something
     /// unusable.
     pub minimum_size: (f32, f32),
+    /// What a thumbnail should sketch for this kind. See [`ThumbnailContent`].
+    pub thumbnail: ThumbnailContent,
 }
 
 const SLIDE_PARTS: &[WidgetKind] = &[
@@ -74,7 +104,7 @@ const NONE: &[WidgetKind] = &[];
 const NO_CAPS: &[WidgetCapability] = &[];
 
 /// The catalog. Order is the order of the library sidebar within each group.
-pub const CATALOG: [WidgetDefinition; 25] = [
+pub const CATALOG: [WidgetDefinition; 26] = [
     WidgetDefinition {
         kind: WidgetKind::CurrentSlide,
         group: WidgetGroup::Slides,
@@ -85,6 +115,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: &[WidgetCapability::ShowsCurrentSlide],
         minimum_size: (200.0, 120.0),
+        thumbnail: ThumbnailContent::Slide,
     },
     WidgetDefinition {
         kind: WidgetKind::PreviousSlide,
@@ -96,6 +127,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (120.0, 80.0),
+        thumbnail: ThumbnailContent::Slide,
     },
     WidgetDefinition {
         kind: WidgetKind::NextSlide,
@@ -107,6 +139,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (120.0, 80.0),
+        thumbnail: ThumbnailContent::Slide,
     },
     WidgetDefinition {
         kind: WidgetKind::PreviousCurrentNext,
@@ -118,6 +151,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (420.0, 120.0),
+        thumbnail: ThumbnailContent::Slide,
     },
     WidgetDefinition {
         kind: WidgetKind::SpeakerNotes,
@@ -129,6 +163,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::single(),
         capabilities: NO_CAPS,
         minimum_size: (260.0, 120.0),
+        thumbnail: ThumbnailContent::Lines(4),
     },
     WidgetDefinition {
         kind: WidgetKind::Timer,
@@ -140,6 +175,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (140.0, 56.0),
+        thumbnail: ThumbnailContent::Readout,
     },
     WidgetDefinition {
         kind: WidgetKind::Clock,
@@ -151,6 +187,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (110.0, 48.0),
+        thumbnail: ThumbnailContent::Readout,
     },
     WidgetDefinition {
         kind: WidgetKind::SlideButtons,
@@ -163,6 +200,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         capabilities: &[WidgetCapability::NavigatesForward, WidgetCapability::NavigatesBackward],
         // Two hit targets side by side and nothing else.
         minimum_size: (150.0, 40.0),
+        thumbnail: ThumbnailContent::Buttons(2),
     },
     WidgetDefinition {
         kind: WidgetKind::SlideSlider,
@@ -174,6 +212,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::NavigatesForward, WidgetCapability::NavigatesBackward],
         minimum_size: (180.0, 32.0),
+        thumbnail: ThumbnailContent::Track,
     },
     WidgetDefinition {
         kind: WidgetKind::SlideCounter,
@@ -185,6 +224,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (90.0, 28.0),
+        thumbnail: ThumbnailContent::Readout,
     },
     WidgetDefinition {
         kind: WidgetKind::PauseResume,
@@ -196,6 +236,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::ControlsTimer],
         minimum_size: (120.0, 40.0),
+        thumbnail: ThumbnailContent::Buttons(1),
     },
     WidgetDefinition {
         kind: WidgetKind::EndPresentation,
@@ -207,6 +248,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::single(),
         capabilities: NO_CAPS,
         minimum_size: (120.0, 40.0),
+        thumbnail: ThumbnailContent::Buttons(1),
     },
     WidgetDefinition {
         kind: WidgetKind::Annotations,
@@ -223,6 +265,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         // has, so the minimum is the smallest button still worth pressing.
         // Option panels are overlays and cost the cell nothing.
         minimum_size: (300.0, 26.0),
+        thumbnail: ThumbnailContent::Marks,
     },
     WidgetDefinition {
         kind: WidgetKind::MediaTransport,
@@ -238,6 +281,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         // A button, a scrub bar wide enough to be worth dragging, and a
         // time readout in one row.
         minimum_size: (260.0, 34.0),
+        thumbnail: ThumbnailContent::Track,
     },
     WidgetDefinition {
         kind: WidgetKind::MainMenu,
@@ -252,6 +296,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         capabilities: NO_CAPS,
         // One square button and nothing else.
         minimum_size: (40.0, 40.0),
+        thumbnail: ThumbnailContent::Buttons(1),
     },
     WidgetDefinition {
         kind: WidgetKind::AudienceControls,
@@ -264,6 +309,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         capabilities: &[WidgetCapability::ControlsAudience],
         // Start, its display arrow, and Stop side by side.
         minimum_size: (230.0, 40.0),
+        thumbnail: ThumbnailContent::Buttons(2),
     },
     WidgetDefinition {
         kind: WidgetKind::PresentationTitle,
@@ -275,6 +321,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (160.0, 28.0),
+        thumbnail: ThumbnailContent::Caption,
     },
     WidgetDefinition {
         kind: WidgetKind::CurrentSection,
@@ -286,6 +333,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
+        thumbnail: ThumbnailContent::Caption,
     },
     WidgetDefinition {
         kind: WidgetKind::AudienceScreenStatus,
@@ -297,6 +345,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
+        thumbnail: ThumbnailContent::Caption,
     },
     WidgetDefinition {
         kind: WidgetKind::ConnectionStatus,
@@ -308,6 +357,20 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::UNLIMITED,
         capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
+        thumbnail: ThumbnailContent::Caption,
+    },
+    WidgetDefinition {
+        kind: WidgetKind::BlankSpace,
+        group: WidgetGroup::OptionalInformation,
+        label: "Blank Space",
+        short_label: "Blank",
+        tooltip: "An empty, themed panel — a deliberate gap, not a mistake.",
+        parts: NONE,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
+        // A sliver still worth drawing a panel around.
+        minimum_size: (40.0, 24.0),
+        thumbnail: ThumbnailContent::Empty,
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentPage,
@@ -323,6 +386,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         // A page is the artifact; below this there is not enough of it left to
         // read a line of it.
         minimum_size: (240.0, 240.0),
+        thumbnail: ThumbnailContent::Slide,
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentNav,
@@ -335,6 +399,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         capabilities: &[WidgetCapability::ShowsDocument],
         // A counter, a page box and four controls in one row.
         minimum_size: (280.0, 32.0),
+        thumbnail: ThumbnailContent::Buttons(2),
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentOutline,
@@ -348,6 +413,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         // Narrow, because it holds page numbers and bookmark titles rather
         // than prose; every point past that is a point the page is not getting.
         minimum_size: (150.0, 160.0),
+        thumbnail: ThumbnailContent::Lines(5),
     },
     WidgetDefinition {
         kind: WidgetKind::AnnotationTools,
@@ -361,6 +427,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::ShowsDocument],
         minimum_size: (300.0, 26.0),
+        thumbnail: ThumbnailContent::Marks,
     },
     WidgetDefinition {
         kind: WidgetKind::Search,
@@ -376,6 +443,7 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         // A query field with its stepper beside it, and room for a few results
         // beneath: less than this and the list is a single cut-off row.
         minimum_size: (260.0, 120.0),
+        thumbnail: ThumbnailContent::Lines(3),
     },
 ];
 
