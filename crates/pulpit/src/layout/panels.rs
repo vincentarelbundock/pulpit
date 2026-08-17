@@ -23,7 +23,8 @@
 
 use crate::layout::model::Layout;
 use crate::layout::tree::{Direction, Node};
-use crate::widgets::WidgetKind;
+use crate::widgets::plan::PageRef;
+use crate::widgets::registry;
 
 /// Widths are quantised to this many pixels.
 ///
@@ -38,12 +39,6 @@ const BUCKET: u32 = 128;
 /// it: below it a slide is unreadable anyway, and the floor keeps a
 /// pathological layout from asking for a thumbnail-sized audience frame.
 const FLOOR: u32 = 512;
-
-/// The three-up strip divides its own cell, so its panels are not the size of
-/// the cell that holds them. These are the portions in
-/// `widgets::slides::view::strip`.
-const STRIP_CURRENT: f32 = 46.0 / 100.0;
-const STRIP_SIDE: f32 = 27.0 / 100.0;
 
 /// What a slide panel shows: the committed page, or one of its neighbours.
 ///
@@ -128,6 +123,17 @@ pub fn slide_widths(layout: &Layout, window: (f32, f32), scale: f32, aspect: f32
 /// drawn picture in any shipped layout, and treating a tall narrow cell as
 /// though it did would render *narrower* than the panel — the one direction
 /// that shows.
+///
+/// This used to match `WidgetKind` directly — `CurrentSlide` gets
+/// `Role::Current`, `NextSlide`/`PreviousSlide` get `Role::Neighbour`, and
+/// `PreviousCurrentNext` was special-cased with its own strip fractions
+/// baked in here. That match is gone: every placed widget now declares its
+/// frame needs through [`crate::widgets::registry::registration`]'s `plan`
+/// hook (see [`crate::widgets::plan`]), and this walk only asks for the
+/// plan and translates its [`PageRef`]s to the [`Role`] the rest of this
+/// module already understood. A widget that shows the current slide as part
+/// of some future compound panel needs only to declare it in its own
+/// registration — nothing here has to learn a new kind.
 fn walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
     match node {
         Node::Split(split) => {
@@ -143,17 +149,13 @@ fn walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
             let Some(widget) = cell.widget.as_ref() else {
                 return;
             };
-            match widget.kind() {
-                WidgetKind::CurrentSlide => found.push((Role::Current, width)),
-                WidgetKind::NextSlide | WidgetKind::PreviousSlide => {
-                    found.push((Role::Neighbour, width))
-                }
-                // One cell, three panels, and the strip divides it itself.
-                WidgetKind::PreviousCurrentNext => {
-                    found.push((Role::Current, width * STRIP_CURRENT));
-                    found.push((Role::Neighbour, width * STRIP_SIDE));
-                }
-                _ => {}
+            let plan = registry::registration(widget.kind()).plan(widget, width);
+            for need in plan.frames {
+                let role = match need.page {
+                    PageRef::Current => Role::Current,
+                    PageRef::Previous | PageRef::Next => Role::Neighbour,
+                };
+                found.push((role, need.width_fraction));
             }
         }
     }
@@ -171,6 +173,7 @@ fn drawn_width(fraction: f32, window: (f32, f32), scale: f32, aspect: f32) -> u3
 mod tests {
     use super::*;
     use crate::layout::builtin;
+    use crate::widgets::WidgetKind;
 
     /// The window the whole investigation was measured on.
     const WINDOW: (f32, f32) = (1800.0, 1125.0);
@@ -244,6 +247,100 @@ mod tests {
         let a = slide_widths(&layout, (1800.0, 1125.0), SCALE, WIDE);
         let b = slide_widths(&layout, (1810.0, 1131.0), SCALE, WIDE);
         assert_eq!(a, b, "a small drag re-uses the frames already rendered");
+    }
+
+    /// The old, kind-matching walk, kept only in this test as the value the
+    /// plan-aggregating walk above must keep reproducing.
+    fn old_walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
+        use crate::widgets::WidgetKind;
+        const STRIP_CURRENT: f32 = 46.0 / 100.0;
+        const STRIP_SIDE: f32 = 27.0 / 100.0;
+        match node {
+            Node::Split(split) => {
+                for (child, size) in split.children.iter().zip(split.sizes.iter()) {
+                    let (width, height) = match split.direction {
+                        Direction::Horizontal => (width * size, height),
+                        Direction::Vertical => (width, height * size),
+                    };
+                    old_walk(child, width, height, found);
+                }
+            }
+            Node::Leaf(cell) => {
+                let Some(widget) = cell.widget.as_ref() else {
+                    return;
+                };
+                match widget.kind() {
+                    WidgetKind::CurrentSlide => found.push((Role::Current, width)),
+                    WidgetKind::NextSlide | WidgetKind::PreviousSlide => {
+                        found.push((Role::Neighbour, width))
+                    }
+                    WidgetKind::PreviousCurrentNext => {
+                        found.push((Role::Current, width * STRIP_CURRENT));
+                        found.push((Role::Neighbour, width * STRIP_SIDE));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn old_slide_widths(
+        layout: &Layout,
+        window: (f32, f32),
+        scale: f32,
+        aspect: f32,
+    ) -> SlideWidths {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            16.0 / 9.0
+        };
+        let mut found: Vec<(Role, f32)> = Vec::new();
+        old_walk(&layout.root, 1.0, 1.0, &mut found);
+        let widest = |role: Role| -> Option<u32> {
+            found
+                .iter()
+                .filter(|(panel_role, _)| *panel_role == role)
+                .map(|(_, fraction)| drawn_width(*fraction, window, scale, aspect))
+                .max()
+        };
+        let current = widest(Role::Current);
+        let neighbour = widest(Role::Neighbour);
+        let fallback = current.or(neighbour).unwrap_or(FLOOR);
+        SlideWidths {
+            current: current.unwrap_or(fallback),
+            neighbour: neighbour.unwrap_or(fallback),
+        }
+    }
+
+    /// The acceptance bar for the plan-aggregation refactor: for every
+    /// built-in layout, the widths the new registry-driven walk produces are
+    /// identical to what the old `WidgetKind`-matching walk produced, at
+    /// several windows and scales.
+    #[test]
+    fn plan_aggregation_matches_the_old_kind_matching_walk() {
+        let layouts = [
+            builtin::presenter_default(),
+            builtin::reader_default(crate::layout::model::AspectRatio::SixteenNine),
+        ];
+        let probes = [
+            (WINDOW, SCALE, WIDE),
+            ((1280.0, 720.0), 1.0, WIDE),
+            ((3840.0, 2160.0), 2.0, 4.0 / 3.0),
+        ];
+        for layout in &layouts {
+            for (window, scale, aspect) in probes {
+                assert_eq!(
+                    slide_widths(layout, window, scale, aspect),
+                    old_slide_widths(layout, window, scale, aspect),
+                );
+            }
+        }
     }
 
     #[test]

@@ -25,6 +25,7 @@
 //! `dyn Element` trees, and the per-kind mapping to its family's `view` is
 //! generated from the same list that drives [`REGISTRY`].
 
+use super::plan::WidgetPlan;
 use super::view_context::WidgetViewContext;
 use super::{catalog, Widget, WidgetGroup, WidgetKind};
 use iced::Element;
@@ -64,6 +65,9 @@ pub struct WidgetRegistration {
     pub id: WidgetId,
     pub kind: WidgetKind,
     pub definition: &'static catalog::WidgetDefinition,
+    /// What frames this kind needs rendered, given its placed widget and its
+    /// cell's share of the window's width. See [`super::plan`].
+    pub plan: fn(&Widget, f32) -> WidgetPlan,
 }
 
 impl WidgetRegistration {
@@ -104,13 +108,19 @@ impl WidgetRegistration {
     pub fn minimum_size(&self) -> (f32, f32) {
         self.definition.minimum_size
     }
+
+    /// This kind's frame needs, for a placed `widget` occupying `cell_width`
+    /// (its share of the window's width, 0..=1).
+    pub fn plan(&self, widget: &Widget, cell_width: f32) -> WidgetPlan {
+        (self.plan)(widget, cell_width)
+    }
 }
 
 /// Declares the registry, the `WidgetKind -> WidgetId` mapping, the reverse
 /// lookup and the render dispatch from one list, so a new widget touches
 /// this macro invocation and nothing else in this module.
 macro_rules! widget_registry {
-    ( $( $kind:ident => $id:literal => $view:path ),+ $(,)? ) => {
+    ( $( $kind:ident => $id:literal => $view:path => $plan:path ),+ $(,)? ) => {
         /// One entry per [`WidgetKind`], in `WidgetKind::ALL` order.
         ///
         /// `catalog::definition` does a runtime scan (it is not `const fn`),
@@ -125,6 +135,7 @@ macro_rules! widget_registry {
                             id: WidgetId($id),
                             kind: WidgetKind::$kind,
                             definition: catalog::definition(WidgetKind::$kind),
+                            plan: $plan,
                         },
                     )+
                 ]
@@ -167,32 +178,42 @@ macro_rules! widget_registry {
     };
 }
 
+/// A slide panel's plan hook, bound to its own kind so one function works for
+/// `CurrentSlide`, `PreviousSlide` and `NextSlide` alike.
+fn plan_current_slide(widget: &Widget, cell_width: f32) -> WidgetPlan {
+    super::plan::slide_panel(widget.kind(), cell_width)
+}
+
+fn plan_previous_current_next(_widget: &Widget, cell_width: f32) -> WidgetPlan {
+    super::plan::previous_current_next(cell_width)
+}
+
 widget_registry! {
-    CurrentSlide         => "pulpit.slide.current"             => super::slides::view::view,
-    PreviousSlide        => "pulpit.slide.previous"            => super::slides::view::view,
-    NextSlide             => "pulpit.slide.next"                => super::slides::view::view,
-    PreviousCurrentNext  => "pulpit.slide.previous-current-next" => super::slides::view::view,
-    SpeakerNotes          => "pulpit.notes.speaker"             => super::notes::view::view,
-    Timer                 => "pulpit.timer.elapsed"             => super::timing::view::view,
-    Clock                 => "pulpit.timer.clock"               => super::timing::view::view,
-    SlideButtons          => "pulpit.navigation.buttons"        => super::navigation::view::view,
-    SlideSlider           => "pulpit.navigation.slider"         => super::navigation::view::view,
-    SlideCounter          => "pulpit.navigation.counter"        => super::navigation::view::view,
-    PauseResume           => "pulpit.navigation.pause-resume"   => super::navigation::view::view,
-    EndPresentation       => "pulpit.navigation.end"            => super::navigation::view::view,
-    PresentationTitle     => "pulpit.status.title"              => super::status::view::view,
-    CurrentSection        => "pulpit.status.section"            => super::status::view::view,
-    AudienceScreenStatus  => "pulpit.status.audience-screen"    => super::status::view::view,
-    ConnectionStatus      => "pulpit.status.connection"         => super::status::view::view,
-    Annotations           => "pulpit.annotations.palette"       => super::annotations::view::view,
-    MediaTransport        => "pulpit.media.transport"           => super::media::view::view,
-    MainMenu              => "pulpit.chrome.main-menu"          => super::chrome::view::view,
-    AudienceControls      => "pulpit.chrome.audience-controls"  => super::chrome::view::view,
-    DocumentPage          => "pulpit.document.page"             => super::document::view::view,
-    DocumentNav           => "pulpit.document.nav"              => super::document::view::view,
-    DocumentOutline       => "pulpit.document.outline"          => super::document::view::view,
-    AnnotationTools       => "pulpit.document.annotation-tools" => super::document::view::view,
-    Search                => "pulpit.search.query"              => super::search::view::view,
+    CurrentSlide         => "pulpit.slide.current"             => super::slides::view::view => plan_current_slide,
+    PreviousSlide        => "pulpit.slide.previous"            => super::slides::view::view => plan_current_slide,
+    NextSlide             => "pulpit.slide.next"                => super::slides::view::view => plan_current_slide,
+    PreviousCurrentNext  => "pulpit.slide.previous-current-next" => super::slides::view::view => plan_previous_current_next,
+    SpeakerNotes          => "pulpit.notes.speaker"             => super::notes::view::view => super::plan::none,
+    Timer                 => "pulpit.timer.elapsed"             => super::timing::view::view => super::plan::none,
+    Clock                 => "pulpit.timer.clock"               => super::timing::view::view => super::plan::none,
+    SlideButtons          => "pulpit.navigation.buttons"        => super::navigation::view::view => super::plan::none,
+    SlideSlider           => "pulpit.navigation.slider"         => super::navigation::view::view => super::plan::none,
+    SlideCounter          => "pulpit.navigation.counter"        => super::navigation::view::view => super::plan::none,
+    PauseResume           => "pulpit.navigation.pause-resume"   => super::navigation::view::view => super::plan::none,
+    EndPresentation       => "pulpit.navigation.end"            => super::navigation::view::view => super::plan::none,
+    PresentationTitle     => "pulpit.status.title"              => super::status::view::view => super::plan::none,
+    CurrentSection        => "pulpit.status.section"            => super::status::view::view => super::plan::none,
+    AudienceScreenStatus  => "pulpit.status.audience-screen"    => super::status::view::view => super::plan::none,
+    ConnectionStatus      => "pulpit.status.connection"         => super::status::view::view => super::plan::none,
+    Annotations           => "pulpit.annotations.palette"       => super::annotations::view::view => super::plan::none,
+    MediaTransport        => "pulpit.media.transport"           => super::media::view::view => super::plan::none,
+    MainMenu              => "pulpit.chrome.main-menu"          => super::chrome::view::view => super::plan::none,
+    AudienceControls      => "pulpit.chrome.audience-controls"  => super::chrome::view::view => super::plan::none,
+    DocumentPage          => "pulpit.document.page"             => super::document::view::view => super::plan::document_page,
+    DocumentNav           => "pulpit.document.nav"              => super::document::view::view => super::plan::none,
+    DocumentOutline       => "pulpit.document.outline"          => super::document::view::view => super::plan::none,
+    AnnotationTools       => "pulpit.document.annotation-tools" => super::document::view::view => super::plan::none,
+    Search                => "pulpit.search.query"              => super::search::view::view => super::plan::none,
 }
 
 /// The registration for a kind. Total by construction, proved by the tests
