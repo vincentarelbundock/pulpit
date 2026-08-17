@@ -337,6 +337,24 @@ impl<'a> PdfTokenizer<'a> {
                 {
                     self.pos += 2;
                     Ok(Some(b"<<".to_vec()))
+                } else if first_byte == b'<' {
+                    // Hex string: <hex_chars>
+                    // Read until we find the closing >
+                    self.pos += 1; // skip opening <
+                    let mut result = vec![b'<'];
+                    while self.pos < self.data.len() && self.data[self.pos] != b'>' {
+                        result.push(self.data[self.pos]);
+                        self.pos += 1;
+                    }
+                    if self.pos < self.data.len() && self.data[self.pos] == b'>' {
+                        result.push(b'>');
+                        self.pos += 1;
+                        Ok(Some(result))
+                    } else {
+                        // Malformed hex string without closing >
+                        // Return what we have
+                        Ok(Some(result))
+                    }
                 } else if first_byte == b'>'
                     && self.pos + 1 < self.data.len()
                     && self.data[self.pos + 1] == b'>'

@@ -250,15 +250,45 @@ fn sign_spike_create_signed_pdf() {
         "revision map should have at least one revision"
     );
 
-    // TODO: Debug discover_signatures returning 0
-    // PDF structure is correct (validated by pyHanko INTACT signature)
-    // but verify::discover_signatures doesn't find it.
-    // Issue likely in verify module's tokenization of /Contents hex string.
-    let _ = verify::discover_signatures(&output, &rev_map);
+    // Discover signatures in the PDF
+    let signatures =
+        verify::discover_signatures(&output, &rev_map).expect("failed to discover signatures");
+
+    // HARD ASSERTIONS: exactly 1 signature discovered
+    assert_eq!(
+        signatures.len(),
+        1,
+        "expected exactly 1 signature, found {}",
+        signatures.len()
+    );
+
+    let sig = &signatures[0];
+    assert_eq!(
+        sig.coverage,
+        verify::SignatureCoverage::EntireFile,
+        "signature should cover EntireFile, but got {:?}",
+        sig.coverage
+    );
+
+    // Verify that /Contents extent is correct per §28.2:
+    // c_start should be '<', c_end-1 should be '>'
+    assert_eq!(
+        output[sig.contents_extent.c_start as usize], b'<',
+        "byte at c_start should be '<'"
+    );
+    assert_eq!(
+        output[sig.contents_extent.c_end as usize - 1],
+        b'>',
+        "byte at c_end-1 should be '>'"
+    );
 
     println!(
         "SUCCESS: Created signed PDF at {} ({} bytes)",
         fixture_path.display(),
         output.len()
+    );
+    println!(
+        "Discovered signature: field={}, coverage={:?}, c_start={}, c_end={}",
+        sig.field_name, sig.coverage, sig.contents_extent.c_start, sig.contents_extent.c_end
     );
 }
