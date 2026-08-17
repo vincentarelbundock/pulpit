@@ -800,6 +800,16 @@ fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
     Err(VerifyError::SignatureObjectNotFound)
 }
 
+/// Find object offset (file position) by object number.
+fn find_object_offset(bytes: &[u8], obj_num: u32) -> Result<u64> {
+    // Simple search for "obj_num 0 obj"
+    let search = format!("{} 0 obj", obj_num);
+    if let Some(pos) = find_bytes(bytes, search.as_bytes()) {
+        return Ok(pos as u64);
+    }
+    Err(VerifyError::SignatureObjectNotFound)
+}
+
 /// Find a byte sequence in data.
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -833,8 +843,11 @@ fn extract_signature_field(
         }
 
         if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
+            // Only treat '/' names as keys if we don't already have a key
+            if key.is_none() && token_str.starts_with('/') {
+                if let Some(name) = token_str.strip_prefix('/') {
+                    key = Some(name.to_string());
+                }
             } else if let Some(k) = key.take() {
                 match k.as_str() {
                     "FT" => {
@@ -885,7 +898,9 @@ fn extract_signature_field(
     // Extract signature dictionary
     let sig_dict_slice = find_object(bytes, sig_dict_ref.0)?;
     if !sig_dict_slice.is_empty() {
-        if let Ok((br, ce, mdp)) = extract_sig_dict_info(sig_dict_slice) {
+        // Find the absolute position of sig_dict_slice in bytes
+        let sig_dict_offset = find_object_offset(bytes, sig_dict_ref.0)?;
+        if let Ok((br, ce, mdp)) = extract_sig_dict_info(sig_dict_slice, sig_dict_offset) {
             byte_range = Some(br);
             contents_extent = Some(ce);
             declared_docmdp = mdp;
@@ -913,8 +928,10 @@ fn extract_signature_field(
 }
 
 /// Extract /ByteRange, /Contents extent, and /Reference info from signature dictionary.
+/// sig_dict_offset: absolute file position where sig_dict_slice starts
 fn extract_sig_dict_info(
     sig_dict_slice: &[u8],
+    sig_dict_offset: u64,
 ) -> Result<(ByteRange, ContentsExtent, Option<MdpPerm>)> {
     let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
 
@@ -946,10 +963,12 @@ fn extract_sig_dict_info(
                     "Contents" => {
                         if token.starts_with(b"<") && token.ends_with(b">") {
                             // Record the exact byte extent
-                            // Find this token's position in the original bytes
-                            if let Some(contents_start) =
+                            // Find this token's position in the original bytes (relative to slice start)
+                            if let Some(contents_start_rel) =
                                 find_token_in_slice(sig_dict_slice, start_pos, &token)
                             {
+                                // Convert to absolute file position
+                                let contents_start = sig_dict_offset + contents_start_rel;
                                 let contents_end = contents_start + token.len() as u64;
                                 contents_extent = Some(ContentsExtent {
                                     c_start: contents_start,
@@ -994,9 +1013,11 @@ fn extract_sig_dict_info(
         }
     }
 
-    Err(VerifyError::MalformedPdf(
-        "missing or malformed /ByteRange or /Contents".to_string(),
-    ))
+    Err(VerifyError::MalformedPdf(format!(
+        "missing or malformed /ByteRange or /Contents (BR vals: {}, has contents: {})",
+        byte_range_values.len(),
+        contents_extent.is_some()
+    )))
 }
 
 /// Find a token's position in slice, accounting for start position.
@@ -1572,5 +1593,111 @@ mod tests {
         // Should be EntireRevision (not EntireFile) with later_revisions=true
         assert_eq!(cov, SignatureCoverage::EntireRevision);
         assert!(later);
+    }
+
+    #[test]
+    fn test_tokenizer_large_hex_string() {
+        use crate::pdfwrite::PdfTokenizer;
+
+        // Build a sig dict slice with a large hex string
+        let mut sig_dict = Vec::new();
+        sig_dict.extend_from_slice(b"7 0 obj\n");
+        sig_dict.extend_from_slice(
+            b"<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached ",
+        );
+        sig_dict.extend_from_slice(b"/ByteRange [0 100 200 50]");
+        sig_dict.extend_from_slice(b"/Contents <");
+
+        // Add ~5200 hex chars (2600 bytes of data)
+        for i in 0..2600 {
+            sig_dict.extend_from_slice(format!("{:02X}", i % 256).as_bytes());
+        }
+        sig_dict.extend_from_slice(b">");
+
+        sig_dict.extend_from_slice(b"/M (D:20240820220000+00'00')>>\nendobj\n");
+
+        // Now tokenize and see what we get
+        let mut tokenizer = PdfTokenizer::new(&sig_dict);
+        let mut found_hex_start = false;
+        let mut found_contents_key = false;
+
+        while let Ok(Some(token)) = tokenizer.next_token() {
+            if token == b"/Contents" {
+                found_contents_key = true;
+            } else if found_contents_key && token.starts_with(b"<") && token.ends_with(b">") {
+                found_hex_start = true;
+                eprintln!("Found complete hex string token of {} bytes", token.len());
+                break;
+            } else if found_contents_key && token == b"<" {
+                eprintln!("ERROR: Found separate '<' token instead of complete hex string");
+                break;
+            }
+        }
+
+        assert!(
+            found_hex_start,
+            "tokenizer should return complete hex string including < and >"
+        );
+    }
+
+    #[test]
+    fn test_discover_minimal_signature() {
+        // Build a minimal signed PDF
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog with AcroForm
+        let obj1_pos = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<</Type /Catalog /Pages 2 0 R /AcroForm 3 0 R>>\nendobj\n",
+        );
+
+        // Object 2: Pages
+        let obj2_pos = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<</Type /Pages /Kids [4 0 R] /Count 1>>\nendobj\n");
+
+        // Object 3: AcroForm
+        let obj3_pos = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<</Fields [5 0 R] /SigFlags 3>>\nendobj\n");
+
+        // Object 4: Page
+        let obj4_pos = pdf.len();
+        pdf.extend_from_slice(
+            b"4 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\nendobj\n",
+        );
+
+        // Object 5: Signature field
+        let obj5_pos = pdf.len();
+        pdf.extend_from_slice(b"5 0 obj\n<</FT /Sig /T (Sig1) /V 6 0 R>>\nendobj\n");
+
+        // Object 6: Signature dictionary with hex string
+        let obj6_pos = pdf.len();
+        pdf.extend_from_slice(
+            b"6 0 obj\n<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 100 200 50] /Contents <0102030405060708>>>>\nendobj\n",
+        );
+
+        // Trailer
+        let xref_pos = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("1 6\n{:010} 00000 n \n", obj1_pos).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", obj2_pos).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", obj3_pos).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", obj4_pos).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", obj5_pos).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", obj6_pos).as_bytes());
+
+        pdf.extend_from_slice(b"trailer\n<<\n/Size 7\n/Root 1 0 R\n/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n>>\nstartxref\n");
+        pdf.extend_from_slice(format!("{}\n", xref_pos).as_bytes());
+        pdf.extend_from_slice(b"%%EOF");
+        let rev_map = RevisionMap::build(&pdf).expect("failed to build revision map");
+        let signatures =
+            discover_signatures(&pdf, &rev_map).expect("failed to discover signatures");
+
+        assert_eq!(signatures.len(), 1, "should discover exactly 1 signature");
+
+        let sig = &signatures[0];
+        assert_eq!(sig.field_name, "Sig1");
+        // Coverage is Unclear due to test PDF having incorrect ByteRange values,
+        // but signature discovery works correctly.
     }
 }

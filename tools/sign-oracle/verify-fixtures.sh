@@ -38,23 +38,45 @@ echo
 
 # Validate each PDF
 for pdf_file in $pdf_files; do
-    # Use pyHanko's sign validate subcommand
+    # Use pyHanko's sign validate subcommand to check signature validity.
+    # pyHanko outputs a status line with format: <INTEGRITY>:<TRUST>,<MODIFICATION>
+    # Examples: "INTACT:TRUSTED,UNTOUCHED", "INTACT:UNTRUSTED,UNTOUCHED"
     # See: pyHanko sign validate --help
     echo -n "Validating $(basename "$pdf_file")... "
 
-    if pyhanko sign validate "$pdf_file" 2>&1 | tail -1 | grep -q "signature is valid\|valid digital signature"; then
+    # Capture full output and exit code
+    # Use 'set +e' temporarily to allow pyhanko to fail without exiting the script
+    set +e
+    output=$(pyhanko sign validate "$pdf_file" 2>&1)
+    pyhanko_exit=$?
+    set -e
+
+    # Status line format: "Sig1:....:INTACT:UNTRUSTED,UNTOUCHED" or similar
+    # Extract lines containing INTACT status
+    if echo "$output" | grep -q "INTACT:"; then
+        # INTACT means the signature is structurally valid and hasn't been tampered with.
+        # TRUSTED/UNTRUSTED is a separate concern (self-signed certs are untrusted by default).
+        # For testing purposes, INTACT is sufficient (even if the certificate is untrusted).
         echo "PASS"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
-        # Check the actual exit code and output more carefully
-        if pyhanko sign validate "$pdf_file" > /dev/null 2>&1; then
-            echo "PASS"
-            ((PASSED++))
-        else
+        # Check if there's any INVALID/CORRUPT status
+        if echo "$output" | grep -q "INVALID:\|CORRUPT:"; then
             echo "FAIL"
-            echo "  Error details:"
-            pyhanko sign validate "$pdf_file" 2>&1 | sed 's/^/    /'
-            ((FAILED++))
+            echo "  Signature integrity check failed"
+            echo "$output" | sed 's/^/    /'
+            FAILED=$((FAILED + 1))
+        else
+            # No clear status line found; use the exit code
+            if [ $pyhanko_exit -eq 0 ]; then
+                echo "PASS (no INVALID status)"
+                PASSED=$((PASSED + 1))
+            else
+                echo "FAIL (pyhanko exit code: $pyhanko_exit)"
+                echo "  Output:"
+                echo "$output" | sed 's/^/    /'
+                FAILED=$((FAILED + 1))
+            fi
         fi
     fi
 done
