@@ -21,6 +21,7 @@ pub mod media;
 pub mod navigation;
 pub mod notes;
 pub mod patch;
+pub mod registry;
 pub mod sample;
 pub mod search;
 pub mod slides;
@@ -30,7 +31,6 @@ pub mod tokens;
 pub mod view_context;
 
 pub use annotations::model::{AnnotationControls, AnnotationOptions};
-pub use catalog::definition;
 pub use common::{Align, Variant};
 pub use context::{Context, Mode};
 pub use event::WidgetEvent;
@@ -38,6 +38,10 @@ pub use navigation::model::ButtonsOptions;
 pub use notes::model::NotesOptions;
 #[allow(unused_imports)] // see widgets::patch
 pub use patch::{PatchError, WidgetPatch};
+// `WidgetId`, `WidgetRegistration` and `registration` are Phase 3's public
+// surface (persistence by stable id); reachable today via `widgets::registry`
+// and via `WidgetKind::id`/`WidgetKind::from_id`, not yet re-exported at the
+// crate boundary because nothing outside this module needs them yet.
 pub use slides::model::SlideOptions;
 pub use timing::model::{Alarm, AlarmControls, ClockOptions, TimerControls, TimerOptions};
 
@@ -191,34 +195,36 @@ impl WidgetKind {
         }
     }
 
-    // The metadata below is the catalog's, not a second copy of it.
+    // The metadata below is the registry's, not a second copy of it. The
+    // registry itself resolves to the catalog's `WidgetDefinition`, so this
+    // is one hop further from the same single source of truth.
 
     pub fn label(self) -> &'static str {
-        definition(self).label
+        registry::registration(self).label()
     }
 
     pub fn short_label(self) -> &'static str {
-        definition(self).short_label
+        registry::registration(self).short_label()
     }
 
     pub fn tooltip(self) -> &'static str {
-        definition(self).tooltip
+        registry::registration(self).tooltip()
     }
 
     pub fn group(self) -> WidgetGroup {
-        definition(self).group
+        registry::registration(self).group()
     }
 
     pub fn parts(self) -> &'static [WidgetKind] {
-        definition(self).parts
+        registry::registration(self).parts()
     }
 
     pub fn multi_instance(self) -> bool {
-        definition(self).multi_instance
+        registry::registration(self).multi_instance()
     }
 
     pub fn minimum_size(self) -> (f32, f32) {
-        definition(self).minimum_size
+        registry::registration(self).minimum_size()
     }
 
     /// Used by the catalog tests and by anything asking whether a kind

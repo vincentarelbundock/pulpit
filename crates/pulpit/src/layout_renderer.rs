@@ -17,8 +17,9 @@ use crate::layout::{Direction, Layout, Node};
 use crate::theme;
 use crate::widgets::context::Context;
 use crate::widgets::event::WidgetEvent;
+use crate::widgets::registry;
 use crate::widgets::view_context::WidgetViewContext;
-use crate::widgets::{annotations, navigation, notes, slides, status, timing, Family, Widget};
+use crate::widgets::Widget;
 
 /// Draw a whole layout.
 pub fn layout<'a, Message: Clone + 'static>(
@@ -176,18 +177,7 @@ pub fn widget<'a, Message: Clone + 'static>(
     );
     let ctx = WidgetViewContext::new(context, compose, on_event, accent, scale);
 
-    match widget.kind().family() {
-        Family::Slides => slides::view::view(&ctx, widget),
-        Family::Annotations => annotations::view::view(&ctx, widget),
-        Family::Notes => notes::view::view(&ctx, widget),
-        Family::Media => crate::widgets::media::view::view(&ctx, widget),
-        Family::Timing => timing::view::view(&ctx, widget),
-        Family::Navigation => navigation::view::view(&ctx, widget),
-        Family::Document => crate::widgets::document::view::view(&ctx, widget),
-        Family::Search => crate::widgets::search::view::view(&ctx, widget),
-        Family::Chrome => crate::widgets::chrome::view::view(&ctx, widget),
-        Family::Status => status::view::view(&ctx, widget),
-    }
+    registry::dispatch(&ctx, widget)
 }
 
 #[cfg(test)]
