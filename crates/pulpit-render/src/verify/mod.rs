@@ -23,6 +23,8 @@
 //!
 //! # The module MUST NOT depend on the sign module or PDFium.
 
+pub mod preflight;
+
 use crate::pdfwrite::PdfTokenizer;
 use std::collections::BTreeMap;
 
@@ -625,7 +627,7 @@ pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<
 }
 
 /// Parse the catalog reference from the trailer.
-fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
+pub fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
     let startxref = find_startxref(bytes)?;
     let xref_pos = startxref as usize;
     if xref_pos >= bytes.len() {
@@ -684,7 +686,7 @@ fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
 }
 
 /// Find /AcroForm /Fields array references.
-fn find_fields_array(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<(u32, u16)>> {
+pub fn find_fields_array(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<(u32, u16)>> {
     // Find the catalog object
     let catalog_obj_slice = find_object(bytes, catalog_ref.0)?;
     if catalog_obj_slice.is_empty() {
@@ -784,7 +786,7 @@ fn extract_fields_refs(obj_slice: &[u8]) -> Result<Vec<(u32, u16)>> {
 }
 
 /// Find object bytes by object number.
-fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
+pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
     // Simple search for "obj_num 0 obj"
     let search = format!("{} 0 obj", obj_num);
     if let Some(pos) = find_bytes(bytes, search.as_bytes()) {
@@ -801,7 +803,7 @@ fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
 }
 
 /// Find object offset (file position) by object number.
-fn find_object_offset(bytes: &[u8], obj_num: u32) -> Result<u64> {
+pub fn find_object_offset(bytes: &[u8], obj_num: u32) -> Result<u64> {
     // Simple search for "obj_num 0 obj"
     let search = format!("{} 0 obj", obj_num);
     if let Some(pos) = find_bytes(bytes, search.as_bytes()) {
@@ -1078,7 +1080,7 @@ fn extract_docmdp_level(sig_dict_slice: &[u8]) -> Result<Option<MdpPerm>> {
 }
 
 /// Parse a PDF string (both literal and hex formats).
-fn parse_pdf_string(s: &str) -> Option<String> {
+pub fn parse_pdf_string(s: &str) -> Option<String> {
     if s.starts_with('(') && s.ends_with(')') {
         Some(s[1..s.len() - 1].to_string())
     } else if s.starts_with('<') && s.ends_with('>') {
