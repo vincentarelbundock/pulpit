@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 use crate::protocol::{
     read_message, write_message, ImageCommand, InputEvent, MediaError, MediaErrorKind, MediaEvent,
     MediaRequest, PixelFormat, PlaybackProgress, RuntimeId, SessionId, SessionSource, SessionSpec,
-    SurfaceFrame, VideoCommand, WorkerDescription, MEDIA_PROTOCOL_VERSION,
+    SurfaceFrame, VideoCommand, MEDIA_PROTOCOL_VERSION,
 };
 use crate::surface::AttachedRing;
+use crate::worker::reply;
 
 /// How often the loop looks for commands and new frames.
 const TICK: Duration = Duration::from_millis(8);
@@ -581,13 +582,7 @@ pub fn run() {
             let mut failed: Vec<SessionId> = Vec::new();
             for (id, session) in sessions.iter_mut() {
                 if let Err(error) = session.pump(&api, &mut out) {
-                    let _ = write_message(
-                        &mut out,
-                        &MediaEvent::Failed {
-                            session: Some(*id),
-                            error,
-                        },
-                    );
+                    reply::failed(&mut out, Some(*id), error);
                     failed.push(*id);
                 }
             }
@@ -610,16 +605,11 @@ pub fn run() {
         };
         match request {
             MediaRequest::Hello { version } => {
-                if version != MEDIA_PROTOCOL_VERSION {
-                    tracing::warn!(theirs = version, ours = MEDIA_PROTOCOL_VERSION, "version");
-                }
-                let _ = write_message(
+                reply::hello(
                     &mut out,
-                    &MediaEvent::Hello(WorkerDescription {
-                        version: MEDIA_PROTOCOL_VERSION,
-                        runtime: RuntimeId::LibMpv,
-                        features: vec!["libmpv".to_string()],
-                    }),
+                    version,
+                    RuntimeId::LibMpv,
+                    vec!["libmpv".to_string()],
                 );
             }
             MediaRequest::Probe(_) => {
@@ -632,17 +622,11 @@ pub fn run() {
                 let id = spec.session;
                 match Session::open(&api, *spec) {
                     Ok(session) => {
-                        let _ = write_message(&mut out, &MediaEvent::Ready { session: id });
+                        reply::ready(&mut out, id);
                         sessions.insert(id, session);
                     }
                     Err(error) => {
-                        let _ = write_message(
-                            &mut out,
-                            &MediaEvent::Failed {
-                                session: Some(id),
-                                error,
-                            },
-                        );
+                        reply::failed(&mut out, Some(id), error);
                     }
                 }
             }
@@ -653,7 +637,7 @@ pub fn run() {
                         (api.destroy)(state.handle);
                     }
                 }
-                let _ = write_message(&mut out, &MediaEvent::Closed { session });
+                reply::closed(&mut out, session);
             }
             MediaRequest::SetActive { session, active } => {
                 if let Some(state) = sessions.get_mut(&session) {
@@ -720,25 +704,18 @@ fn run_without_library() {
         };
         match request {
             MediaRequest::Hello { .. } => {
-                let _ = write_message(
+                reply::hello(
                     &mut out,
-                    &MediaEvent::Hello(WorkerDescription {
-                        version: MEDIA_PROTOCOL_VERSION,
-                        runtime: RuntimeId::LibMpv,
-                        features: Vec::new(),
-                    }),
+                    MEDIA_PROTOCOL_VERSION,
+                    RuntimeId::LibMpv,
+                    Vec::new(),
                 );
             }
             MediaRequest::Open(spec) => {
-                let _ = write_message(
+                reply::failed(
                     &mut out,
-                    &MediaEvent::Failed {
-                        session: Some(spec.session),
-                        error: MediaError::new(
-                            MediaErrorKind::Unavailable,
-                            "no usable libmpv was found",
-                        ),
-                    },
+                    Some(spec.session),
+                    MediaError::new(MediaErrorKind::Unavailable, "no usable libmpv was found"),
                 );
             }
             MediaRequest::Shutdown => return,

@@ -7582,24 +7582,8 @@ impl App {
             return Task::none();
         };
         let source = document.path.clone();
-        let directory = source
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let stem = source
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "document".to_string());
         Task::perform(
-            async move {
-                rfd::AsyncFileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_directory(directory)
-                    .set_file_name(format!("{stem}-annotated.pdf"))
-                    .save_file()
-                    .await
-                    .map(|handle| handle.path().to_path_buf())
-            },
+            pick_derived_pdf(source, "annotated"),
             Message::SaveDocumentTo,
         )
     }
@@ -7997,26 +7981,9 @@ impl App {
             return Task::none();
         };
         let source = document.path.clone();
-        let directory = source
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let stem = source
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "document".to_string());
-        Task::perform(
-            async move {
-                rfd::AsyncFileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_directory(directory)
-                    .set_file_name(format!("{stem}-signed.pdf"))
-                    .save_file()
-                    .await
-                    .map(|handle| handle.path().to_path_buf())
-            },
-            |path| Message::Sign(SignMsg::DestinationChosen(path)),
-        )
+        Task::perform(pick_derived_pdf(source, "signed"), |path| {
+            Message::Sign(SignMsg::DestinationChosen(path))
+        })
     }
 
     /// §31.1 steps 8–9: sign, then reopen and verify what was produced.
@@ -12060,6 +12027,31 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
 /// for one turn is the flicker this design exists to prevent — and never over
 /// an empty slot, where there is no wrong page to correct and a soft picture
 /// would sharpen in front of the room for no reason.
+/// The Save dialog that writing a derived PDF opens: `{stem}-{suffix}.pdf`,
+/// offered beside the document it came from.
+///
+/// Save As and signing both want that shape, and they want the same answer to
+/// the awkward cases — a source with no parent, a source with no stem — so
+/// the shape lives here once. What the chosen path *means* differs, so each
+/// caller still maps the answer to its own message.
+async fn pick_derived_pdf(source: PathBuf, suffix: &str) -> Option<PathBuf> {
+    let directory = source
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_string());
+    rfd::AsyncFileDialog::new()
+        .add_filter("PDF", &["pdf"])
+        .set_directory(directory)
+        .set_file_name(format!("{stem}-{suffix}.pdf"))
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
 fn wants_stand_in(holding: Option<FrameKey>, wanted_slide: usize) -> bool {
     holding.is_some_and(|key| key.slide != wanted_slide)
 }

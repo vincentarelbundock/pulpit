@@ -323,19 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_profile_adobepkcs7() {
-        let profile = SigningProfile::AdbePkcs7Detached;
-        assert_eq!(profile, SigningProfile::AdbePkcs7Detached);
-    }
-
-    #[test]
-    fn test_signing_profile_etsi_cades() {
-        let profile = SigningProfile::EtsiCadesDetached;
-        assert_eq!(profile, SigningProfile::EtsiCadesDetached);
-        assert_ne!(profile, SigningProfile::AdbePkcs7Detached);
-    }
-
-    #[test]
     fn test_pkcs12_loading_deferred() {
         let result = load_pkcs12(b"dummy", Zeroizing::new("password".to_string()));
         assert!(result.is_err());
@@ -462,18 +449,6 @@ mod tests {
             0,
             "Estimated size should be even (hex encoding requirement §23.2)"
         );
-    }
-
-    #[test]
-    #[cfg(feature = "p12-keystore")]
-    fn test_signing_profile_difference() {
-        // Verify that the two profiles are distinct and can be used correctly
-        let adobe_profile = SigningProfile::AdbePkcs7Detached;
-        let etsi_profile = SigningProfile::EtsiCadesDetached;
-
-        assert_ne!(adobe_profile, etsi_profile);
-        assert_eq!(adobe_profile, SigningProfile::AdbePkcs7Detached);
-        assert_eq!(etsi_profile, SigningProfile::EtsiCadesDetached);
     }
 
     // STAGE 5 - Size estimation validation (§23.5)

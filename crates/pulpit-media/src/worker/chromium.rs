@@ -16,12 +16,13 @@ use pulpit_core::overlay::ContentKind;
 use crate::protocol::{
     read_message, write_message, InputEvent, MediaError, MediaErrorKind, MediaEvent, MediaRequest,
     PixelFormat, PointerButton, RuntimeId, SessionId, SessionSource, SessionSpec, SessionState,
-    SurfaceFrame, Viewport, WebCommand, WorkerCounters, WorkerDescription, MEDIA_PROTOCOL_VERSION,
+    SurfaceFrame, Viewport, WebCommand, WorkerCounters,
 };
 use crate::runtime::chromium::{wrapper_page, AssetServer, CdpPipe, Json, WrapperPlayback};
 use crate::runtime::scale::fit_rgba;
 use crate::runtime::{discover_chromium, probe_external_chromium};
 use crate::surface::AttachedRing;
+use crate::worker::reply;
 
 const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
 const IDLE_TICK: Duration = Duration::from_millis(4);
@@ -1218,13 +1219,7 @@ pub fn run() {
                         Err(error) => Err(error.clone()),
                     };
                     if let Err(error) = outcome {
-                        let _ = write_message(
-                            &mut out,
-                            &MediaEvent::Failed {
-                                session: Some(id),
-                                error,
-                            },
-                        );
+                        reply::failed(&mut out, Some(id), error);
                         if let Some(session) = sessions.remove(&id) {
                             retired_ring_dropped += session.ring.dropped();
                         }
@@ -1267,20 +1262,11 @@ pub fn run() {
 
         match request {
             MediaRequest::Hello { version } => {
-                if version != MEDIA_PROTOCOL_VERSION {
-                    tracing::warn!(
-                        theirs = version,
-                        ours = MEDIA_PROTOCOL_VERSION,
-                        "version mismatch"
-                    );
-                }
-                let _ = write_message(
+                reply::hello(
                     &mut out,
-                    &MediaEvent::Hello(WorkerDescription {
-                        version: MEDIA_PROTOCOL_VERSION,
-                        runtime: RuntimeId::ExternalChromium,
-                        features: vec!["chromium-runtime".to_string()],
-                    }),
+                    version,
+                    RuntimeId::ExternalChromium,
+                    vec!["chromium-runtime".to_string()],
                 );
             }
             MediaRequest::Probe(_) => {
@@ -1302,13 +1288,7 @@ pub fn run() {
                             match Browser::launch(executable, viewport) {
                                 Ok(engine) => browser = Some(engine),
                                 Err(error) => {
-                                    let _ = write_message(
-                                        &mut out,
-                                        &MediaEvent::Failed {
-                                            session: Some(id),
-                                            error,
-                                        },
-                                    );
+                                    reply::failed(&mut out, Some(id), error);
                                     continue;
                                 }
                             }
@@ -1322,7 +1302,7 @@ pub fn run() {
                 };
                 match result {
                     Ok(session) => {
-                        let _ = write_message(&mut out, &MediaEvent::Ready { session: id });
+                        reply::ready(&mut out, id);
                         let _ = write_message(
                             &mut out,
                             &MediaEvent::StateChanged {
@@ -1333,13 +1313,7 @@ pub fn run() {
                         sessions.insert(id, session);
                     }
                     Err(error) => {
-                        let _ = write_message(
-                            &mut out,
-                            &MediaEvent::Failed {
-                                session: Some(id),
-                                error,
-                            },
-                        );
+                        reply::failed(&mut out, Some(id), error);
                     }
                 }
             }
@@ -1352,19 +1326,13 @@ pub fn run() {
                         engine.release_page(state.page.clone());
                     }
                 }
-                let _ = write_message(&mut out, &MediaEvent::Closed { session });
+                reply::closed(&mut out, session);
             }
             MediaRequest::SetActive { session, active } => {
                 if let (Some(state), Some(engine)) = (sessions.get_mut(&session), browser.as_mut())
                 {
                     if let Err(error) = state.set_active(engine, active) {
-                        let _ = write_message(
-                            &mut out,
-                            &MediaEvent::Failed {
-                                session: Some(session),
-                                error,
-                            },
-                        );
+                        reply::failed(&mut out, Some(session), error);
                     }
                 }
             }
@@ -1382,13 +1350,7 @@ pub fn run() {
                 if let (Some(state), Some(engine)) = (sessions.get_mut(&session), browser.as_mut())
                 {
                     if let Err(error) = state.input(engine, event) {
-                        let _ = write_message(
-                            &mut out,
-                            &MediaEvent::Failed {
-                                session: Some(session),
-                                error,
-                            },
-                        );
+                        reply::failed(&mut out, Some(session), error);
                     }
                 }
             }

@@ -698,29 +698,35 @@ impl IncrementalWriter {
         }
         writeln!(writer, "/Size {}", new_size).map_err(PdfWriteError::Io)?;
 
-        // Write /ID array with preserved id1 and new id2
-        if let Some(id_array) = &self.trailer_dict.id {
-            write!(writer, "/ID [").map_err(PdfWriteError::Io)?;
-            if !id_array.is_empty() {
-                writer.write_all(b"<").map_err(PdfWriteError::Io)?;
-                for byte in &id_array[0] {
-                    write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
-                }
-                writer.write_all(b">").map_err(PdfWriteError::Io)?;
-            }
-            writer.write_all(b"<").map_err(PdfWriteError::Io)?;
-            for byte in new_id2 {
-                write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
-            }
-            writer.write_all(b">").map_err(PdfWriteError::Io)?;
-            writeln!(writer, "]").map_err(PdfWriteError::Io)?;
-        }
+        self.write_id_array(writer, new_id2)?;
 
         writeln!(writer, ">>").map_err(PdfWriteError::Io)?;
         writeln!(writer, "startxref").map_err(PdfWriteError::Io)?;
         writeln!(writer, "{}", xref_offset).map_err(PdfWriteError::Io)?;
         writeln!(writer, "%%EOF").map_err(PdfWriteError::Io)?;
 
+        Ok(())
+    }
+
+    /// The `/ID` entry an incremental update carries: the file's first
+    /// element preserved verbatim, a freshly generated second element after
+    /// it.
+    ///
+    /// A classic trailer and an xref stream dictionary disagree about the
+    /// order of everything around this entry, but not about the entry itself,
+    /// so both go through here. Preserving the first element is what lets a
+    /// verifier tie the update back to the file it was made from; a document
+    /// that arrived without an `/ID` gets none, rather than an invented one.
+    fn write_id_array<W: Write>(&self, writer: &mut W, new_id2: &[u8; 16]) -> Result<()> {
+        let Some(id_array) = &self.trailer_dict.id else {
+            return Ok(());
+        };
+        write!(writer, "/ID [").map_err(PdfWriteError::Io)?;
+        if !id_array.is_empty() {
+            write_hex_string(writer, &id_array[0])?;
+        }
+        write_hex_string(writer, new_id2)?;
+        writeln!(writer, "]").map_err(PdfWriteError::Io)?;
         Ok(())
     }
 
@@ -811,23 +817,7 @@ impl IncrementalWriter {
 
         writeln!(writer, "/Prev {}", self.prev_startxref).map_err(PdfWriteError::Io)?;
 
-        // Write /ID array with preserved id1 and new id2
-        if let Some(id_array) = &self.trailer_dict.id {
-            write!(writer, "/ID [").map_err(PdfWriteError::Io)?;
-            if !id_array.is_empty() {
-                writer.write_all(b"<").map_err(PdfWriteError::Io)?;
-                for byte in &id_array[0] {
-                    write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
-                }
-                writer.write_all(b">").map_err(PdfWriteError::Io)?;
-            }
-            writer.write_all(b"<").map_err(PdfWriteError::Io)?;
-            for byte in new_id2 {
-                write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
-            }
-            writer.write_all(b">").map_err(PdfWriteError::Io)?;
-            writeln!(writer, "]").map_err(PdfWriteError::Io)?;
-        }
+        self.write_id_array(writer, new_id2)?;
 
         if let Some((info_num, info_gen)) = self.trailer_dict.info {
             writeln!(writer, "/Info {} {} R", info_num, info_gen).map_err(PdfWriteError::Io)?;
@@ -890,6 +880,16 @@ impl IncrementalWriter {
 }
 
 /// Find the byte offset of the last startxref directive.
+/// One PDF hex string, `<…>`, upper-case and two digits to the byte.
+fn write_hex_string<W: Write>(writer: &mut W, bytes: &[u8]) -> Result<()> {
+    writer.write_all(b"<").map_err(PdfWriteError::Io)?;
+    for byte in bytes {
+        write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
+    }
+    writer.write_all(b">").map_err(PdfWriteError::Io)?;
+    Ok(())
+}
+
 fn find_startxref(bytes: &[u8]) -> Result<u64> {
     // Search backwards from the end for "startxref"
     let search_window = std::cmp::min(bytes.len(), 1024);
@@ -1276,14 +1276,6 @@ mod tests {
         let pdf_bytes = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n60\n%%EOF";
         let result = IncrementalWriter::open(pdf_bytes);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_incremental_append_basic() {
-        // Verify that append_objects requires proper structure
-        // Deferred: full fixture-based test with perfect byte alignment
-        // For now, verify the API exists and type checking works
-        let _session = SigningSession::new();
     }
 
     /// A minimal valid classic-xref PDF, and the offset of its cross-reference

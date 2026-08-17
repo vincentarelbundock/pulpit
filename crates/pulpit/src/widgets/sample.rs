@@ -171,3 +171,87 @@ pub static SEARCH: std::sync::LazyLock<pulpit_core::search::SearchState> =
         }));
         state
     });
+
+/// A complete `Context` for tests that only need every widget to have
+/// something to draw.
+///
+/// Several tests prove the same thing from different angles — that dispatch
+/// reaches every kind, that a whole layout builds, that no arm panics on a
+/// facet it was not given — and each of them needs every field of `Context`
+/// filled in before it can ask. Filling them in is not what any of those
+/// tests is about, so it happens once here. A test that cares about a
+/// particular field should set that field on the value this returns, so the
+/// condition it is proving stays visible at the test.
+///
+/// Frames are deliberately absent: a widget that needs a picture to build at
+/// all is a widget that would fail in front of a room while one renders.
+#[cfg(test)]
+pub fn context(mode: crate::widgets::Mode) -> crate::widgets::context::Context<'static> {
+    use crate::widgets::context::{
+        AudienceData, Context, DocumentData, FrameSource, MediaData, SearchData, SlideData,
+        TimingData,
+    };
+
+    struct NoFrames;
+    impl FrameSource for NoFrames {
+        fn frame(
+            &self,
+            _slide: usize,
+            _kind: pulpit_render::cache::FrameKind,
+            _max_width: u32,
+        ) -> Option<iced::widget::image::Handle> {
+            None
+        }
+    }
+
+    static EMPTY_TEXT: std::sync::LazyLock<
+        std::sync::Arc<std::collections::HashMap<u64, crate::typst_annotation::RenderedText>>,
+    > = std::sync::LazyLock::new(|| std::sync::Arc::new(std::collections::HashMap::new()));
+
+    Context {
+        mode,
+        search: SearchData { state: &SEARCH },
+        slides: SlideData {
+            current: SLIDE,
+            preview: SLIDE,
+            count: SLIDE_COUNT,
+            frames: &NoFrames,
+            preview_width: 640,
+            aspect: 16.0 / 9.0,
+            text_notes: None,
+            has_links: false,
+            link_highlights: Vec::new(),
+            overlays: Vec::new(),
+            crop: pulpit_core::notes::Region::FULL,
+            annotations: &ANNOTATIONS,
+            rendered_text: &EMPTY_TEXT,
+            marks_cache: std::rc::Rc::new(iced::widget::canvas::Cache::new()),
+            annotation_controls: crate::widgets::AnnotationControls::default(),
+            annotation_style: pulpit_core::annotation::AnnotationStyle::default(),
+        },
+        alarms: &ALARMS,
+        timer_controls: &TIMER,
+        timing: TimingData {
+            elapsed: std::time::Duration::from_secs(12 * 60),
+            target: Some(std::time::Duration::from_secs(40 * 60)),
+            running: true,
+            seconds_of_day: 13 * 3600,
+        },
+        document: DocumentData {
+            title: TITLE.to_string(),
+            section: Some("Reconnection".to_string()),
+            sample_notes: NOTES,
+        },
+        reader: closed_reader(),
+        audience: AudienceData {
+            blank: pulpit_core::Blank::Off,
+            connected: true,
+            fullscreen: true,
+            started: true,
+            menu_open: false,
+        },
+        media: MediaData {
+            transport: transport(),
+        },
+    }
+}

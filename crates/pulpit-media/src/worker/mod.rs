@@ -48,6 +48,61 @@ pub fn run_role(flag: &str) -> bool {
     }
 }
 
+/// The replies every worker owes its parent, in the one form they all take.
+///
+/// A session that could not be opened, one that is ready, one that is closed
+/// and a greeting are not runtime-specific events: they say the same thing
+/// whichever runtime is behind them, and the parent reads them with one
+/// decoder. Writing them here rather than at each runtime keeps them
+/// byte-for-byte the same and keeps the ignored-write policy — a parent that
+/// has gone away is not this worker's error to report — in one place.
+///
+/// Only these four live here. Everything that carries a runtime's own
+/// meaning, and the event loops themselves, stay where they are; the two
+/// workers keep clocks and wake for different reasons, and merging them would
+/// hide that.
+pub(crate) mod reply {
+    use super::*;
+    use crate::protocol::MEDIA_PROTOCOL_VERSION;
+    use crate::protocol::{write_message, MediaError, MediaEvent, SessionId, WorkerDescription};
+    use std::io::Write;
+
+    /// The greeting, with this runtime's identity and feature list.
+    ///
+    /// The version the parent announced is logged when it differs from ours
+    /// rather than refused: the parent decides what to do about a mismatch,
+    /// and a worker that hung up here would be harder to diagnose than one
+    /// that answered.
+    pub fn hello<W: Write>(out: &mut W, theirs: u32, runtime: RuntimeId, features: Vec<String>) {
+        if theirs != MEDIA_PROTOCOL_VERSION {
+            tracing::warn!(theirs, ours = MEDIA_PROTOCOL_VERSION, "version mismatch");
+        }
+        let _ = write_message(
+            out,
+            &MediaEvent::Hello(WorkerDescription {
+                version: MEDIA_PROTOCOL_VERSION,
+                runtime,
+                features,
+            }),
+        );
+    }
+
+    /// A session is open and will start producing frames.
+    pub fn ready<W: Write>(out: &mut W, session: SessionId) {
+        let _ = write_message(out, &MediaEvent::Ready { session });
+    }
+
+    /// A session is gone, whether or not it was ever open.
+    pub fn closed<W: Write>(out: &mut W, session: SessionId) {
+        let _ = write_message(out, &MediaEvent::Closed { session });
+    }
+
+    /// Something failed, named against the session it happened to.
+    pub fn failed<W: Write>(out: &mut W, session: Option<SessionId>, error: MediaError) {
+        let _ = write_message(out, &MediaEvent::Failed { session, error });
+    }
+}
+
 /// Wait until stdin has a message or `timeout` elapses.
 ///
 /// Returns true when there is something to read. Polling this way is what

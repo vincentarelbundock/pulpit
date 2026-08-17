@@ -1381,14 +1381,30 @@ mod tests {
 
     #[test]
     fn test_byte_range_wrong_length() {
-        // ByteRange with length != 4 should be handled gracefully
-        // This would be caught during extraction, but coverage classification
-        // assumes 4 elements. Test that we don't panic on edge cases.
-        let _revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
-        // A properly formed 4-element range is required for classification
-        // Malformed ranges are caught during discovery/extraction
+        // Coverage classification assumes four elements, so extraction is
+        // where a range that does not have four has to stop. A short range
+        // that was let through would be read against the wrong fields and
+        // report coverage the signature never had, which is the one kind of
+        // wrong answer verification must not give.
+        for values in ["[0 100 200]", "[0 100]", "[0 100 200 50 400 20]", "[]"] {
+            let dictionary = format!(
+                "<</Type /Sig /ByteRange {values} \
+                 /Contents <00000000000000000000000000000000>>>"
+            );
+            let result = extract_sig_dict_info(dictionary.as_bytes(), 0);
+            assert!(
+                matches!(result, Err(VerifyError::MalformedPdf(_))),
+                "/ByteRange {values} was not refused: {result:?}"
+            );
+        }
+
+        // The same dictionary with four elements is accepted, so the refusals
+        // above are about the length and not about the fixture.
+        let good = "<</Type /Sig /ByteRange [0 100 200 50] \
+                    /Contents <00000000000000000000000000000000>>>";
+        let (br, _, _) = extract_sig_dict_info(good.as_bytes(), 0)
+            .expect("a four-element /ByteRange should be accepted");
+        assert_eq!((br.z, br.len1, br.start2, br.len2), (0, 100, 200, 50));
     }
 
     #[test]

@@ -10,8 +10,6 @@
 
 use iced::widget::{container, space, Column, Row};
 use iced::{Element, Length, Padding};
-#[cfg(test)]
-use pulpit_render::cache::FrameKind;
 
 use crate::layout::{Direction, Layout, Node};
 use crate::theme;
@@ -206,79 +204,8 @@ pub fn widget<'a, Message: Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::context::{AudienceData, DocumentData, SlideData, TimingData};
-    use crate::widgets::{sample, Mode, WidgetKind};
-    use iced::widget::image::Handle;
-    use pulpit_core::Blank;
-
-    /// No pictures: what matters here is that every widget can be built.
-    struct NoFrames;
-
-    impl crate::widgets::context::FrameSource for NoFrames {
-        fn frame(&self, _slide: usize, _kind: FrameKind, _max_width: u32) -> Option<Handle> {
-            None
-        }
-    }
-
-    fn context(mode: Mode) -> Context<'static> {
-        Context {
-            mode,
-            search: crate::widgets::context::SearchData {
-                state: &sample::SEARCH,
-            },
-            slides: SlideData {
-                current: sample::SLIDE,
-                preview: sample::SLIDE,
-                count: sample::SLIDE_COUNT,
-                frames: &NoFrames,
-                preview_width: 640,
-                aspect: 16.0 / 9.0,
-                text_notes: None,
-                has_links: false,
-                link_highlights: Vec::new(),
-                overlays: Vec::new(),
-                crop: pulpit_core::notes::Region::FULL,
-                annotations: &sample::ANNOTATIONS,
-                rendered_text: {
-                    static EMPTY: std::sync::LazyLock<
-                        std::sync::Arc<
-                            std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
-                        >,
-                    > = std::sync::LazyLock::new(|| {
-                        std::sync::Arc::new(std::collections::HashMap::new())
-                    });
-                    &EMPTY
-                },
-                marks_cache: std::rc::Rc::new(iced::widget::canvas::Cache::new()),
-                annotation_controls: crate::widgets::AnnotationControls::default(),
-                annotation_style: pulpit_core::annotation::AnnotationStyle::default(),
-            },
-            alarms: &sample::ALARMS,
-            timer_controls: &sample::TIMER,
-            timing: TimingData {
-                elapsed: std::time::Duration::from_secs(12 * 60),
-                target: Some(std::time::Duration::from_secs(40 * 60)),
-                running: true,
-                seconds_of_day: 13 * 3600,
-            },
-            document: DocumentData {
-                title: sample::TITLE.to_string(),
-                section: Some("Reconnection".to_string()),
-                sample_notes: sample::NOTES,
-            },
-            reader: crate::widgets::sample::closed_reader(),
-            audience: AudienceData {
-                blank: Blank::Off,
-                connected: true,
-                fullscreen: true,
-                started: true,
-                menu_open: false,
-            },
-            media: crate::widgets::context::MediaData {
-                transport: sample::transport(),
-            },
-        }
-    }
+    use crate::widgets::sample::context;
+    use crate::widgets::{Mode, WidgetKind};
 
     #[test]
     fn every_widget_can_be_drawn_in_every_mode() {

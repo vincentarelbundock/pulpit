@@ -320,77 +320,7 @@ mod tests {
         // Exercises the generated match; a kind missing from the macro list
         // would be a compile error (non-exhaustive match), so this mainly
         // proves the function actually returns rather than panicking.
-        use crate::widgets::context::{
-            AudienceData, Context, DocumentData, FrameSource, MediaData, Mode, SearchData,
-            SlideData, TimingData,
-        };
-        use iced::widget::image::Handle;
-        use pulpit_render::cache::FrameKind;
-
-        struct NoFrames;
-        impl FrameSource for NoFrames {
-            fn frame(&self, _slide: usize, _kind: FrameKind, _max_width: u32) -> Option<Handle> {
-                None
-            }
-        }
-
-        let context = Context {
-            mode: Mode::Live,
-            search: SearchData {
-                state: &super::super::sample::SEARCH,
-            },
-            slides: SlideData {
-                current: super::super::sample::SLIDE,
-                preview: super::super::sample::SLIDE,
-                count: super::super::sample::SLIDE_COUNT,
-                frames: &NoFrames,
-                preview_width: 640,
-                aspect: 16.0 / 9.0,
-                text_notes: None,
-                has_links: false,
-                link_highlights: Vec::new(),
-                overlays: Vec::new(),
-                crop: pulpit_core::notes::Region::FULL,
-                annotations: &super::super::sample::ANNOTATIONS,
-                rendered_text: {
-                    static EMPTY: std::sync::LazyLock<
-                        std::sync::Arc<
-                            std::collections::HashMap<u64, crate::typst_annotation::RenderedText>,
-                        >,
-                    > = std::sync::LazyLock::new(|| {
-                        std::sync::Arc::new(std::collections::HashMap::new())
-                    });
-                    &EMPTY
-                },
-                marks_cache: std::rc::Rc::new(iced::widget::canvas::Cache::new()),
-                annotation_controls: super::super::AnnotationControls::default(),
-                annotation_style: pulpit_core::annotation::AnnotationStyle::default(),
-            },
-            alarms: &super::super::sample::ALARMS,
-            timer_controls: &super::super::sample::TIMER,
-            timing: TimingData {
-                elapsed: std::time::Duration::from_secs(12 * 60),
-                target: Some(std::time::Duration::from_secs(40 * 60)),
-                running: true,
-                seconds_of_day: 13 * 3600,
-            },
-            document: DocumentData {
-                title: super::super::sample::TITLE.to_string(),
-                section: Some("Reconnection".to_string()),
-                sample_notes: super::super::sample::NOTES,
-            },
-            reader: super::super::sample::closed_reader(),
-            audience: AudienceData {
-                blank: pulpit_core::Blank::Off,
-                connected: true,
-                fullscreen: true,
-                started: true,
-                menu_open: false,
-            },
-            media: MediaData {
-                transport: super::super::sample::transport(),
-            },
-        };
+        let context = super::super::sample::context(crate::widgets::context::Mode::Live);
         let ctx: WidgetViewContext<'_, '_, ()> =
             WidgetViewContext::new(&context, None, |_| (), iced::Color::BLACK, 1.0);
         for kind in WidgetKind::ALL {
