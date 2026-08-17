@@ -1,180 +1,180 @@
 {
-  "format_version": 1,
-  "name": "Reader",
   "design_ratio": "sixteen-nine",
+  "format_version": 2,
+  "name": "Reader",
   "root": {
-    "type": "split",
-    "id": 0,
-    "name": "Reader",
-    "direction": "vertical",
     "children": [
       {
-        "type": "split",
-        "id": 1,
-        "name": "Navigation and tools",
-        "direction": "horizontal",
         "children": [
           {
-            "type": "leaf",
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel",
             "id": 2,
-            "widget": {
-              "kind": "main-menu",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": "none"
-            },
             "padding": 4.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+            "type": "leaf",
+            "widget": {
+              "config": "none",
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.chrome.main-menu"
+            }
           },
           {
-            "type": "leaf",
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel",
             "id": 3,
-            "widget": {
-              "kind": "document-nav",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": "none"
-            },
             "padding": 12.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+            "type": "leaf",
+            "widget": {
+              "config": "none",
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.document.nav"
+            }
           },
           {
-            "type": "leaf",
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel",
             "id": 4,
+            "padding": 12.0,
+            "type": "leaf",
             "widget": {
-              "kind": "annotation-tools",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
               "config": {
                 "annotations": {
-                  "tool": "ink",
-                  "ink_color": "black",
+                  "audience_visible": true,
+                  "eraser_radius": 0.019999999552965164,
                   "highlight_color": "yellow",
+                  "highlight_width": 0.02500000037252903,
+                  "ink_color": "black",
+                  "ink_width": 0.004000000189989805,
                   "pointer_color": "red",
-                  "text_color": "black",
+                  "pointer_radius": 0.012000000104308128,
                   "pointer_spotlight": false,
-                  "ink_width": 0.004,
-                  "highlight_width": 0.025,
-                  "eraser_radius": 0.02,
-                  "text_size": 0.025,
-                  "pointer_radius": 0.012,
-                  "spotlight_radius": 0.08,
-                  "audience_visible": true
+                  "spotlight_radius": 0.07999999821186066,
+                  "text_color": "black",
+                  "text_size": 0.02500000037252903,
+                  "tool": "ink"
                 }
-              }
-            },
-            "padding": 12.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+              },
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.document.annotation-tools"
+            }
           }
         ],
-        "sizes": [
-          0.06,
-          0.47,
-          0.47
-        ],
+        "direction": "horizontal",
         "gap": 8.0,
-        "min_child": 0.05
+        "id": 1,
+        "min_child": 0.05000000074505806,
+        "name": "Navigation and tools",
+        "sizes": [
+          0.05999999865889549,
+          0.4699999988079071,
+          0.4699999988079071
+        ],
+        "type": "split"
       },
       {
-        "type": "split",
-        "id": 5,
-        "name": "Document",
-        "direction": "horizontal",
         "children": [
           {
-            "type": "split",
-            "id": 6,
-            "name": "Outline and search",
-            "direction": "vertical",
             "children": [
               {
-                "type": "leaf",
-                "id": 7,
-                "widget": {
-                  "kind": "document-outline",
-                  "style": {
-                    "variant": "standard",
-                    "scale": 1.0,
-                    "alignment": "center"
-                  },
-                  "config": "none"
-                },
-                "padding": 12.0,
                 "background": "panel",
                 "border": "none",
-                "empty_behavior": "show-blank-panel"
+                "empty_behavior": "show-blank-panel",
+                "id": 7,
+                "padding": 12.0,
+                "type": "leaf",
+                "widget": {
+                  "config": "none",
+                  "style": {
+                    "alignment": "center",
+                    "scale": 1.0,
+                    "variant": "standard"
+                  },
+                  "widget_id": "pulpit.document.outline"
+                }
               },
               {
-                "type": "leaf",
-                "id": 8,
-                "widget": {
-                  "kind": "search",
-                  "style": {
-                    "variant": "standard",
-                    "scale": 1.0,
-                    "alignment": "center"
-                  },
-                  "config": "none"
-                },
-                "padding": 12.0,
                 "background": "panel",
                 "border": "none",
-                "empty_behavior": "show-blank-panel"
+                "empty_behavior": "show-blank-panel",
+                "id": 8,
+                "padding": 12.0,
+                "type": "leaf",
+                "widget": {
+                  "config": "none",
+                  "style": {
+                    "alignment": "center",
+                    "scale": 1.0,
+                    "variant": "standard"
+                  },
+                  "widget_id": "pulpit.search.query"
+                }
               }
             ],
-            "sizes": [
-              0.65,
-              0.35
-            ],
+            "direction": "vertical",
             "gap": 8.0,
-            "min_child": 0.05
+            "id": 6,
+            "min_child": 0.05000000074505806,
+            "name": "Outline and search",
+            "sizes": [
+              0.6499999761581421,
+              0.3499999940395355
+            ],
+            "type": "split"
           },
           {
-            "type": "leaf",
-            "id": 9,
-            "widget": {
-              "kind": "document-page",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": "none"
-            },
-            "padding": 0.0,
             "background": "canvas",
             "border": "none",
-            "empty_behavior": "show-blank-panel"
+            "empty_behavior": "show-blank-panel",
+            "id": 9,
+            "padding": 0.0,
+            "type": "leaf",
+            "widget": {
+              "config": "none",
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.document.page"
+            }
           }
         ],
-        "sizes": [
-          0.18,
-          0.82
-        ],
+        "direction": "horizontal",
         "gap": 8.0,
-        "min_child": 0.05
+        "id": 5,
+        "min_child": 0.05000000074505806,
+        "name": "Document",
+        "sizes": [
+          0.18000000715255737,
+          0.8199999928474426
+        ],
+        "type": "split"
       }
     ],
-    "sizes": [
-      0.07,
-      0.93
-    ],
+    "direction": "vertical",
     "gap": 8.0,
-    "min_child": 0.05
+    "id": 0,
+    "min_child": 0.05000000074505806,
+    "name": "Reader",
+    "sizes": [
+      0.07000000029802322,
+      0.9300000071525574
+    ],
+    "type": "split"
   }
 }

@@ -1,277 +1,277 @@
 {
-  "format_version": 1,
-  "name": "Presenter Default",
   "design_ratio": "sixteen-nine",
+  "format_version": 2,
+  "name": "Presenter Default",
   "root": {
-    "type": "split",
-    "id": 0,
-    "name": "Presenter screen",
-    "direction": "vertical",
     "children": [
       {
-        "type": "split",
-        "id": 1,
-        "name": "Stage",
-        "direction": "horizontal",
         "children": [
           {
-            "type": "leaf",
+            "background": "none",
+            "border": "none",
+            "empty_behavior": "show-blank-panel",
             "id": 2,
+            "padding": 0.0,
+            "type": "leaf",
             "widget": {
-              "kind": "current-slide",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
               "config": {
                 "slide": {
                   "fit": "fit"
                 }
-              }
-            },
-            "padding": 0.0,
-            "background": "none",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+              },
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.slide.current"
+            }
           },
           {
-            "type": "split",
-            "id": 3,
-            "name": "Look-ahead rail",
-            "direction": "vertical",
             "children": [
               {
-                "type": "split",
-                "id": 4,
-                "name": "Time",
-                "direction": "horizontal",
                 "children": [
                   {
-                    "type": "leaf",
-                    "id": 5,
-                    "widget": {
-                      "kind": "clock",
-                      "style": {
-                        "variant": "standard",
-                        "scale": 1.0,
-                        "alignment": "center"
-                      },
-                      "config": {
-                        "clock": {
-                          "twenty_four_hour": true,
-                          "show_seconds": false,
-                          "show_alarms": true
-                        }
-                      }
-                    },
-                    "padding": 12.0,
                     "background": "panel",
                     "border": "none",
-                    "empty_behavior": "show-blank-panel"
+                    "empty_behavior": "show-blank-panel",
+                    "id": 5,
+                    "padding": 12.0,
+                    "type": "leaf",
+                    "widget": {
+                      "config": {
+                        "clock": {
+                          "show_alarms": true,
+                          "show_seconds": false,
+                          "twenty_four_hour": true
+                        }
+                      },
+                      "style": {
+                        "alignment": "center",
+                        "scale": 1.0,
+                        "variant": "standard"
+                      },
+                      "widget_id": "pulpit.timer.clock"
+                    }
                   },
                   {
-                    "type": "leaf",
+                    "background": "panel",
+                    "border": "none",
+                    "empty_behavior": "show-blank-panel",
                     "id": 6,
+                    "padding": 12.0,
+                    "type": "leaf",
                     "widget": {
-                      "kind": "timer",
-                      "style": {
-                        "variant": "standard",
-                        "scale": 1.0,
-                        "alignment": "center"
-                      },
                       "config": {
                         "timer": {
                           "warning_minutes": 5
                         }
-                      }
-                    },
-                    "padding": 12.0,
-                    "background": "panel",
-                    "border": "none",
-                    "empty_behavior": "show-blank-panel"
+                      },
+                      "style": {
+                        "alignment": "center",
+                        "scale": 1.0,
+                        "variant": "standard"
+                      },
+                      "widget_id": "pulpit.timer.elapsed"
+                    }
                   }
                 ],
+                "direction": "horizontal",
+                "gap": 8.0,
+                "id": 4,
+                "min_child": 0.05000000074505806,
+                "name": "Time",
                 "sizes": [
                   0.5,
                   0.5
                 ],
-                "gap": 8.0,
-                "min_child": 0.05
+                "type": "split"
               },
               {
-                "type": "leaf",
+                "background": "none",
+                "border": "none",
+                "empty_behavior": "show-blank-panel",
                 "id": 7,
+                "padding": 0.0,
+                "type": "leaf",
                 "widget": {
-                  "kind": "next-slide",
-                  "style": {
-                    "variant": "standard",
-                    "scale": 1.0,
-                    "alignment": "center"
-                  },
                   "config": {
                     "slide": {
                       "fit": "fit"
                     }
-                  }
-                },
-                "padding": 0.0,
-                "background": "none",
-                "border": "none",
-                "empty_behavior": "show-blank-panel"
+                  },
+                  "style": {
+                    "alignment": "center",
+                    "scale": 1.0,
+                    "variant": "standard"
+                  },
+                  "widget_id": "pulpit.slide.next"
+                }
               },
               {
-                "type": "leaf",
+                "background": "panel",
+                "border": "none",
+                "empty_behavior": "show-blank-panel",
                 "id": 8,
+                "padding": 12.0,
+                "type": "leaf",
                 "widget": {
-                  "kind": "speaker-notes",
-                  "style": {
-                    "variant": "standard",
-                    "scale": 1.0,
-                    "alignment": "center"
-                  },
                   "config": {
                     "notes": {
                       "font_size": 18.0,
                       "line_spacing": 1.5,
                       "source": "current-slide"
                     }
-                  }
-                },
-                "padding": 12.0,
-                "background": "panel",
-                "border": "none",
-                "empty_behavior": "show-blank-panel"
+                  },
+                  "style": {
+                    "alignment": "center",
+                    "scale": 1.0,
+                    "variant": "standard"
+                  },
+                  "widget_id": "pulpit.notes.speaker"
+                }
               },
               {
-                "type": "leaf",
-                "id": 9,
-                "widget": {
-                  "kind": "search",
-                  "style": {
-                    "variant": "standard",
-                    "scale": 1.0,
-                    "alignment": "center"
-                  },
-                  "config": "none"
-                },
-                "padding": 12.0,
                 "background": "panel",
                 "border": "none",
-                "empty_behavior": "show-blank-panel"
+                "empty_behavior": "show-blank-panel",
+                "id": 9,
+                "padding": 12.0,
+                "type": "leaf",
+                "widget": {
+                  "config": "none",
+                  "style": {
+                    "alignment": "center",
+                    "scale": 1.0,
+                    "variant": "standard"
+                  },
+                  "widget_id": "pulpit.search.query"
+                }
               }
             ],
+            "direction": "vertical",
+            "gap": 8.0,
+            "id": 3,
+            "min_child": 0.05000000074505806,
+            "name": "Look-ahead rail",
             "sizes": [
               0.125,
               0.25,
               0.375,
               0.25
             ],
-            "gap": 8.0,
-            "min_child": 0.05
+            "type": "split"
           }
         ],
-        "sizes": [
-          0.72,
-          0.28
-        ],
+        "direction": "horizontal",
         "gap": 8.0,
-        "min_child": 0.05
+        "id": 1,
+        "min_child": 0.05000000074505806,
+        "name": "Stage",
+        "sizes": [
+          0.7200000286102295,
+          0.2800000011920929
+        ],
+        "type": "split"
       },
       {
-        "type": "split",
-        "id": 10,
-        "name": "Navigation and tools",
-        "direction": "horizontal",
         "children": [
           {
-            "type": "leaf",
-            "id": 11,
-            "widget": {
-              "kind": "slide-slider",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": "none"
-            },
-            "padding": 12.0,
             "background": "panel",
             "border": "none",
-            "empty_behavior": "show-blank-panel"
+            "empty_behavior": "show-blank-panel",
+            "id": 11,
+            "padding": 12.0,
+            "type": "leaf",
+            "widget": {
+              "config": "none",
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.navigation.slider"
+            }
           },
           {
-            "type": "leaf",
+            "background": "panel",
+            "border": "none",
+            "empty_behavior": "show-blank-panel",
             "id": 12,
+            "padding": 12.0,
+            "type": "leaf",
             "widget": {
-              "kind": "slide-buttons",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
               "config": {
                 "buttons": {
                   "back": true,
                   "forward": true,
                   "labels": true
                 }
-              }
-            },
-            "padding": 12.0,
-            "background": "panel",
-            "border": "none",
-            "empty_behavior": "show-blank-panel"
+              },
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.navigation.buttons"
+            }
           },
           {
-            "type": "leaf",
-            "id": 13,
-            "widget": {
-              "kind": "annotations",
-              "style": {
-                "variant": "standard",
-                "scale": 1.0,
-                "alignment": "center"
-              },
-              "config": {
-                "annotations": {
-                  "tool": "ink",
-                  "ink_color": "black",
-                  "highlight_color": "yellow",
-                  "pointer_color": "red",
-                  "text_color": "black",
-                  "pointer_spotlight": false,
-                  "ink_width": 0.004,
-                  "highlight_width": 0.025,
-                  "eraser_radius": 0.02,
-                  "text_size": 0.025,
-                  "pointer_radius": 0.012,
-                  "spotlight_radius": 0.08,
-                  "audience_visible": true
-                }
-              }
-            },
-            "padding": 12.0,
             "background": "panel",
             "border": "none",
-            "empty_behavior": "show-blank-panel"
+            "empty_behavior": "show-blank-panel",
+            "id": 13,
+            "padding": 12.0,
+            "type": "leaf",
+            "widget": {
+              "config": {
+                "annotations": {
+                  "audience_visible": true,
+                  "eraser_radius": 0.019999999552965164,
+                  "highlight_color": "yellow",
+                  "highlight_width": 0.02500000037252903,
+                  "ink_color": "black",
+                  "ink_width": 0.004000000189989805,
+                  "pointer_color": "red",
+                  "pointer_radius": 0.012000000104308128,
+                  "pointer_spotlight": false,
+                  "spotlight_radius": 0.07999999821186066,
+                  "text_color": "black",
+                  "text_size": 0.02500000037252903,
+                  "tool": "ink"
+                }
+              },
+              "style": {
+                "alignment": "center",
+                "scale": 1.0,
+                "variant": "standard"
+              },
+              "widget_id": "pulpit.annotations.palette"
+            }
           }
         ],
-        "sizes": [
-          0.33333334,
-          0.33333334,
-          0.33333334
-        ],
+        "direction": "horizontal",
         "gap": 8.0,
-        "min_child": 0.05
+        "id": 10,
+        "min_child": 0.05000000074505806,
+        "name": "Navigation and tools",
+        "sizes": [
+          0.3333333432674408,
+          0.3333333432674408,
+          0.3333333432674408
+        ],
+        "type": "split"
       }
     ],
-    "sizes": [
-      0.92,
-      0.08
-    ],
+    "direction": "vertical",
     "gap": 8.0,
-    "min_child": 0.05
+    "id": 0,
+    "min_child": 0.05000000074505806,
+    "name": "Presenter screen",
+    "sizes": [
+      0.9200000166893005,
+      0.07999999821186066
+    ],
+    "type": "split"
   }
 }

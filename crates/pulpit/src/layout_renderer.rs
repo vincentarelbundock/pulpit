@@ -39,9 +39,10 @@ fn node<'a, Message: Clone + 'static>(
 ) -> Element<'a, Message> {
     match node {
         Node::Leaf(cell) => {
-            let content: Element<'a, Message> = match &cell.widget {
-                Some(widget) => self::widget(widget, context, compose, on_event),
-                None => blank_panel(),
+            let content: Element<'a, Message> = match (&cell.widget, &cell.unavailable) {
+                (Some(widget), _) => self::widget(widget, context, compose, on_event),
+                (None, Some(unavailable)) => unavailable_panel(unavailable),
+                (None, None) => blank_panel(),
             };
             // Every widget sits in the middle of its cell, both ways.
             // Anything that wants the whole cell still takes it: filling
@@ -158,6 +159,28 @@ fn blank_panel<Message: 'static>() -> Element<'static, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// A cell whose saved widget id this build does not know. Static and inert:
+/// it names what was there rather than pretending to be a working widget or
+/// silently discarding it.
+fn unavailable_panel<'a, Message: 'static>(
+    unavailable: &crate::layout::UnavailableWidget,
+) -> Element<'a, Message> {
+    use iced::widget::text;
+
+    container(
+        text(format!("Unknown widget\n{}", unavailable.widget_id))
+            .size(theme::tokens::type_scale::CAPTION)
+            .align_x(iced::Alignment::Center),
+    )
+    .padding(crate::theme::space::S)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::Alignment::Center)
+    .align_y(iced::Alignment::Center)
+    .style(theme::ambient::notice)
+    .into()
 }
 
 /// Hand one widget to the family that implements it.

@@ -28,5 +28,7 @@ pub mod validate;
 pub use history::History;
 pub use model::{AspectRatio, Change, Layout, LayoutId, Origin, Side};
 pub use store::LayoutStore;
-pub use tree::{Cell, CellBackground, Direction, Divider, EmptyBehavior, Frame, Node, NodeId};
+pub use tree::{
+    Cell, CellBackground, Direction, Divider, EmptyBehavior, Frame, Node, NodeId, UnavailableWidget,
+};
 pub use validate::{validate, Issue, Severity};
