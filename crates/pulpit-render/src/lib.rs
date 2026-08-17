@@ -13,6 +13,11 @@ pub mod shm;
 pub mod supervisor;
 pub mod worker;
 
+// Signing and verification modules (per SPEC-signing.md §22.2)
+pub mod pdfwrite;
+pub mod sign;
+pub mod verify;
+
 pub use cache::{CacheStats, Frame, FrameCache, FrameKey, FrameKind, DEFAULT_BUDGET_BYTES};
 pub use pdf::capabilities::{CapabilityFinding, DocumentCapabilities, FindingKind};
 pub use protocol::{Priority, Quality, RenderJob, Request, RequestId, Response, PROTOCOL_VERSION};
