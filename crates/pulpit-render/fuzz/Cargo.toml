@@ -1,0 +1,42 @@
+[package]
+name = "pulpit-render-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pulpit-render]
+path = ".."
+
+[[bin]]
+name = "fuzz_revision_map"
+path = "fuzz_targets/fuzz_revision_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_discover"
+path = "fuzz_targets/fuzz_discover.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_verify_full"
+path = "fuzz_targets/fuzz_verify_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cms"
+path = "fuzz_targets/fuzz_cms.rs"
+test = false
+doc = false
+bench = false
