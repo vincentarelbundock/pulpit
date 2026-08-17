@@ -100,6 +100,7 @@ pub enum Message {
         shift: bool,
         control: bool,
         alt: bool,
+        captured: bool,
     },
     /// Text read asynchronously after Paste while a label is active.
     PasteAnnotationText {
@@ -1596,6 +1597,7 @@ impl App {
                 shift: modifiers.shift(),
                 control: modifiers.command() || modifiers.control(),
                 alt: modifiers.alt(),
+                captured: status == iced::event::Status::Captured,
             }),
             // Letting go of the button ends a scrub, wherever the pointer
             // happens to be. The slider's own release only arrives when the
@@ -1980,6 +1982,7 @@ impl App {
                 shift,
                 control,
                 alt,
+                captured,
             } => {
                 if self.annotations.is_typing() {
                     match key.as_deref() {
@@ -2026,6 +2029,12 @@ impl App {
                     if key.as_deref() == Some("Escape") {
                         self.composing_mark = None;
                     }
+                    return Task::none();
+                }
+                // A widget that captured the event owns the keyboard. Its
+                // own message handles the press; the application keymap is
+                // only the fallback for an otherwise-unclaimed event.
+                if captured {
                     return Task::none();
                 }
                 if key.as_deref() == Some("Escape") && self.confirm_reset_colors {
@@ -2128,8 +2137,9 @@ impl App {
                         return task;
                     }
                 }
-                // A focused overlay may take the key — but never a global
-                // shortcut, and never Escape, which is always the way out.
+                // A focused overlay owns every key. Escape is interpreted by
+                // the overlay router as releasing focus; no press falls
+                // through to the application keymap while it owns input.
                 if self.input_router.focused().is_some() {
                     if let Some(name) = key.as_deref() {
                         let routed = self.input_router.key_pressed(name, None);
@@ -2141,11 +2151,10 @@ impl App {
                             // Escape has already given the focus back inside
                             // the router; nothing else needs to happen.
                             crate::media::Routed::ReleaseFocus => return Task::none(),
-                            // A global shortcut falls through to the keymap
-                            // below, focus or no focus.
-                            _ => {}
+                            _ => return Task::none(),
                         }
                     }
+                    return Task::none();
                 }
                 // Reading a document, Page Down means the next screenful of
                 // this document — not the next slide. The presenter's
@@ -3446,6 +3455,21 @@ impl App {
         }
     }
 
+    /// Apply an action whose meaning exists only with a Reader layout.
+    ///
+    /// The binding remains global: layouts do not carry separate keymaps.
+    /// Applicability belongs to the semantic action, so the same press is a
+    /// deliberate no-op when there is no Reader on screen.
+    fn on_reader_action(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
+        use crate::layout::builtin::LayoutMode;
+
+        if self.reader.is_open() && LayoutMode::of(&self.active_layout) == LayoutMode::Document {
+            self.on_read_command(command)
+        } else {
+            Task::none()
+        }
+    }
+
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::ToggleReader => self.toggle_reader(),
@@ -3467,6 +3491,26 @@ impl App {
             Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
             Action::FindPrevious => {
                 self.on_find_command(crate::widgets::event::FindCommand::Previous)
+            }
+            Action::ZoomIn => self.on_reader_action(crate::widgets::event::ReadCommand::ZoomIn),
+            Action::ZoomOut => self.on_reader_action(crate::widgets::event::ReadCommand::ZoomOut),
+            Action::ZoomReset => {
+                self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                    crate::widgets::document::model::Zoom::Fixed(1.0),
+                ))
+            }
+            Action::FitPage => self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                crate::widgets::document::model::Zoom::FitPage,
+            )),
+            Action::FitWidth => self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                crate::widgets::document::model::Zoom::FitWidth,
+            )),
+            Action::RotateReader => {
+                self.on_reader_action(crate::widgets::event::ReadCommand::RotateView)
+            }
+            Action::ToggleDualPage => {
+                let spread = self.reader.controls().spread.other();
+                self.on_reader_action(crate::widgets::event::ReadCommand::SetSpread(spread))
             }
             Action::Next => self.update(Message::Nav(Nav::Next)),
             Action::Previous => self.update(Message::Nav(Nav::Previous)),
@@ -5479,9 +5523,9 @@ impl App {
 
     /// Route one key press to the field that holds the caret (§8.6).
     ///
-    /// `None` means the key was not the field's and should carry on to the
-    /// keymap. Everything a text box uses is the field's; the shortcuts a
-    /// reader would still expect while typing are not.
+    /// Once a form owns the keyboard, every press is consumed here. A key the
+    /// field does not understand is inert rather than falling through to the
+    /// application keymap and firing an unrelated action.
     fn form_key(
         &mut self,
         key: Option<&str>,
@@ -5490,13 +5534,10 @@ impl App {
     ) -> Option<Task<Message>> {
         use pulpit_render::document::protocol::{FormInputEvent, FormKey};
 
-        // Ctrl-anything is a shortcut, not text. Undo, Save As and the rest
-        // keep working with the caret in a field, which is what every other
-        // editor does.
-        //
-        // The four exceptions are the clipboard, which is a shortcut a *text
-        // box* owns: with a caret in a field, Ctrl-C means the field's
-        // selection and nothing else. PDFium's form environment has no
+        // Ctrl-anything belongs to the field while it owns the keyboard. The
+        // clipboard combinations have local meanings; every other modified
+        // press is consumed without consulting the global keymap. PDFium's
+        // form environment has no
         // clipboard of its own — it has `FORM_GetSelectedText`,
         // `FORM_ReplaceSelection` and `FORM_SelectAllText`, and the host is
         // expected to be the clipboard — so this is where the two are joined.
@@ -5506,7 +5547,7 @@ impl App {
                     return Some(task);
                 }
             }
-            return None;
+            return Some(Task::none());
         }
 
         // An open option list takes the keys a list takes, and it takes them
@@ -5553,9 +5594,7 @@ impl App {
             }
         }
 
-        // The named keys a field uses. Escape is deliberately absent: it is
-        // forwarded below *and* allowed to continue, so it both abandons the
-        // field edit and remains the global way out.
+        // The named keys a field uses.
         let named = match key {
             Some("Backspace") => Some(FormKey::Backspace),
             Some("Delete") => Some(FormKey::Delete),
@@ -5589,8 +5628,7 @@ impl App {
             self.ask_form_key(FormInputEvent::KeyDown {
                 key: FormKey::Escape,
             });
-            // …and on to the keymap, which is what makes Escape always work.
-            return None;
+            return Some(Task::none());
         }
 
         // Anything that produced text is text. Taken from the toolkit's own
@@ -5598,8 +5636,9 @@ impl App {
         // through the keyboard layout and the dead keys: the key named "2" on
         // one layout is the character that layout puts there, and a field that
         // read the key name would spell a French keyboard wrong.
-        let text = text?;
-        let mut sent = false;
+        let Some(text) = text else {
+            return Some(Task::none());
+        };
         for character in text.chars() {
             // Control characters are not text. The named keys above already
             // carry the ones a field acts on, and forwarding the rest as
@@ -5608,15 +5647,14 @@ impl App {
                 continue;
             }
             self.ask_form_key(FormInputEvent::Char { character });
-            sent = true;
         }
-        sent.then(Task::none)
+        Some(Task::none())
     }
 
     /// The clipboard shortcuts, with the caret in a text field (§8.6).
     ///
-    /// `None` for a Ctrl-press that is not one of them, which carries on to
-    /// the keymap exactly as every other Ctrl-press does.
+    /// `None` for a Ctrl-press that is not one of them; the caller still
+    /// consumes it because the focused form owns the keyboard.
     ///
     /// Copy and cut cannot answer here: what is selected is PDFium's to
     /// report, so the event goes out and the clipboard is written when the
@@ -6208,6 +6246,10 @@ impl App {
             if key == Some("Enter") {
                 return Some(self.commit_focused_time());
             }
+            return Some(Task::none());
+        }
+        if self.reader.date_picker().is_some() {
+            return Some(Task::none());
         }
 
         // Tab walks the form's own fields, and it does so whether or not one
@@ -6250,18 +6292,20 @@ impl App {
             }
         }
 
-        // A field has the caret: the keyboard belongs to the document, not to
-        // the toolbar (§8.6). This comes before everything, including Page
-        // Down and Ctrl-Z, because a field being typed into is a text box and
-        // a text box takes the keys a text box takes.
-        //
-        // The one key held back is Escape, which is always the way out of
-        // whatever is open — a caret in a field included. It reaches the field
-        // as well, so PDFium can abandon the edit, and then falls through.
+        // A field has the keyboard: the press belongs to the document, not to
+        // the toolbar or global keymap (§8.6). This comes before everything,
+        // including Page Down, Escape and Ctrl-Z.
         if self.reader.form_has_keyboard() {
             if let Some(task) = self.form_key(key, text, control) {
                 return Some(task);
             }
+        }
+
+        // Buttons and other non-text widgets take focus without a caret. Tab
+        // traversal and their local activation keys were handled above; any
+        // other press is still theirs and must not escape into the keymap.
+        if self.reader.focused_widget().is_some() {
+            return Some(Task::none());
         }
 
         let key = key?;

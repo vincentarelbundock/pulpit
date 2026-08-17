@@ -82,12 +82,19 @@ pub enum Action {
     /// The next and the previous match, without leaving the page.
     FindNext,
     FindPrevious,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    FitPage,
+    FitWidth,
+    RotateReader,
+    ToggleDualPage,
     Quit,
 }
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 34] = [
+    pub const ALL: [Action; 41] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -121,6 +128,13 @@ impl Action {
         Action::FocusSearch,
         Action::FindNext,
         Action::FindPrevious,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomReset,
+        Action::FitPage,
+        Action::FitWidth,
+        Action::RotateReader,
+        Action::ToggleDualPage,
         Action::Quit,
     ];
 
@@ -159,6 +173,13 @@ impl Action {
             Action::FocusSearch => "Search",
             Action::FindNext => "Next match",
             Action::FindPrevious => "Previous match",
+            Action::ZoomIn => "Zoom in",
+            Action::ZoomOut => "Zoom out",
+            Action::ZoomReset => "Actual size",
+            Action::FitPage => "Fit page",
+            Action::FitWidth => "Fit width",
+            Action::RotateReader => "Rotate pages",
+            Action::ToggleDualPage => "One or two pages across",
             Action::Quit => "Quit",
         }
     }
@@ -460,6 +481,21 @@ impl Default for Keymap {
                 named("/", Action::FocusSearch),
                 named("f3", Action::FindNext),
                 with("f3", Mods::shift(), Action::FindPrevious),
+                named("?", Action::FindPrevious),
+                // Reader transforms keep both Acrobat and Zathura muscle
+                // memory. One semantic action may have several bindings; a
+                // physical combination still resolves to only one action.
+                named("+", Action::ZoomIn),
+                with("=", Mods::ctrl(), Action::ZoomIn),
+                named("-", Action::ZoomOut),
+                with("-", Mods::ctrl(), Action::ZoomOut),
+                named("=", Action::ZoomReset),
+                with("1", Mods::ctrl(), Action::ZoomReset),
+                named("a", Action::FitPage),
+                with("0", Mods::ctrl(), Action::FitPage),
+                with("2", Mods::ctrl(), Action::FitWidth),
+                with("r", Mods::shift(), Action::RotateReader),
+                named("d", Action::ToggleDualPage),
                 with("r", Mods::ctrl(), Action::ReloadDocument),
                 named("F5", Action::ReloadDocument),
                 named("f", Action::ToggleAudienceFullscreen),
