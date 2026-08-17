@@ -7655,8 +7655,8 @@ impl App {
                             &bytes,
                             pulpit_render::sign::Zeroizing::new(passphrase),
                         )
-                            .map(std::sync::Arc::new)
-                            .map_err(|e| format!("{e}; the credential was not loaded"))
+                        .map(std::sync::Arc::new)
+                        .map_err(|e| format!("{e}; the credential was not loaded"))
                     },
                     |result| Message::Sign(SignMsg::CredentialLoaded(result)),
                 )

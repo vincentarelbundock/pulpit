@@ -1916,7 +1916,7 @@ impl<'a> PdfiumDocument<'a> {
         // RGBA, so the channels are swapped into a buffer this function owns
         // for as long as PDFium is looking at it.
         let mut bgra = Vec::with_capacity(rgba.len());
-        for chunk in rgba.chunks_exact(4) {
+        for chunk in rgba.as_chunks::<4>().0 {
             bgra.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
         }
 
@@ -2780,8 +2780,10 @@ fn form_string(
 
 fn decode_utf16(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|unit| *unit != 0)
         .collect();
     String::from_utf16_lossy(&units)

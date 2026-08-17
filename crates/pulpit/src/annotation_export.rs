@@ -142,7 +142,7 @@ fn rasterise(mark: &TextMark, region_points: f32) -> Result<Option<StampImage>, 
 /// the colour back out is what keeps a half-transparent glyph from arriving
 /// in the file half black.
 fn demultiply(mut pixels: Vec<u8>) -> Vec<u8> {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = pixel[3];
         if alpha == 0 {
             pixel[0] = 0;

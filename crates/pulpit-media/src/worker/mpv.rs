@@ -435,7 +435,7 @@ impl Session {
             ];
             let drawn = unsafe { (api.render)(self.render, params.as_mut_ptr()) };
             if drawn >= 0 {
-                for pixel in self.scratch.chunks_exact_mut(4) {
+                for pixel in self.scratch.as_chunks_mut::<4>().0 {
                     pixel[3] = 0xFF;
                 }
                 self.sequence += 1;

@@ -427,8 +427,10 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
             .expect("the form renders while it is being typed into");
 
         let changed = empty
-            .chunks_exact(4)
-            .zip(typed.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(typed.as_chunks::<4>().0)
             .filter(|(before, after)| before != after)
             .count();
         assert!(

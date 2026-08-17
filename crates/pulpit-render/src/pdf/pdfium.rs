@@ -428,8 +428,10 @@ impl PdfiumBackend {
             }
             // PDFium returns UTF-16LE including a trailing NUL.
             let utf16: Vec<u16> = buffer
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .take_while(|unit| *unit != 0)
                 .collect();
             if let Ok(text) = String::from_utf16(&utf16) {
@@ -745,8 +747,10 @@ impl OutlineSource for Bookmarks<'_> {
 /// Decode a PDFium UTF-16LE byte buffer, stopping at the terminating NUL.
 fn utf16le_text(buffer: &[u8]) -> Option<String> {
     let units: Vec<u16> = buffer
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|unit| *unit != 0)
         .collect();
     String::from_utf16(&units)

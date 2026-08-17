@@ -335,7 +335,7 @@ pub fn draw_page(page: usize, region: Region, width: u32, height: u32) -> Render
         base.saturating_add(((page * 37 + channel * 53) % 60) as u8)
     };
     let background = [tint(0), tint(1), tint(2), 255];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&background);
     }
 

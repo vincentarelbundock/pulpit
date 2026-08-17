@@ -757,8 +757,10 @@ impl Session {
                 self.rgba_scratch.resize(pixels * 4, 0xFF);
                 for (source, target) in image
                     .as_raw()
-                    .chunks_exact(3)
-                    .zip(self.rgba_scratch.chunks_exact_mut(4))
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(self.rgba_scratch.as_chunks_mut::<4>().0)
                 {
                     target[..3].copy_from_slice(source);
                     target[3] = 0xFF;

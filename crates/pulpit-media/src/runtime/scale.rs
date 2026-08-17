@@ -114,7 +114,7 @@ pub fn fit_rgba(
         inner_height,
     );
     let mut out = vec![0u8; target_width as usize * target_height as usize * 4];
-    for pixel in out.chunks_exact_mut(4) {
+    for pixel in out.as_chunks_mut::<4>().0 {
         pixel[3] = 0xFF;
     }
     let left = (target_width - inner_width) as usize / 2;

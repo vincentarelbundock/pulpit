@@ -482,8 +482,10 @@ fn unescape(text: &str) -> String {
 fn decode_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
             .collect();
         return String::from_utf16_lossy(&units);
     }

@@ -76,7 +76,9 @@ fn opens_and_renders_a_real_pdf() {
     // The fixture draws a red border on white; there must be non-white pixels.
     assert!(
         page.pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[0] != 255 || p[1] != 255 || p[2] != 255),
         "the page rendered actual content"
     );
