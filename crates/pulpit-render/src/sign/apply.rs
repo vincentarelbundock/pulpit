@@ -84,6 +84,9 @@ pub struct SignRequest {
     pub id2: [u8; 16],
     /// Reserve exactly the estimated size instead of the 50% margin (§23.5).
     pub tight_size_estimates: bool,
+    /// A visible signature appearance (§25.5). `None` keeps the current
+    /// invisible-field behaviour unchanged.
+    pub appearance: Option<SignAppearance>,
 }
 
 impl Default for SignRequest {
@@ -97,8 +100,55 @@ impl Default for SignRequest {
             contact: None,
             id2: [0u8; 16],
             tight_size_estimates: false,
+            appearance: None,
         }
     }
+}
+
+/// A visible appearance drawn into the signature widget's `/AP /N` form
+/// XObject (§25.5).
+///
+/// This is decoration, not proof: the drawn ink or text is never consulted by
+/// the §32 verification gate, and a document with a drawn appearance and no
+/// valid CMS is not a signature. Nothing here changes what is cryptographically
+/// asserted; it only changes what a viewer renders inside the widget rect.
+#[derive(Debug, Clone)]
+pub struct SignAppearance {
+    /// The widget's rect in PDF page coordinates: `[x0, y0, x1, y1]`.
+    pub rect: [f64; 4],
+    /// Which page carries the widget. Only `0` is currently supported;
+    /// anything else is a typed [`SignApplyError::Unsupported`], never a
+    /// silently wrong page.
+    pub page_index: usize,
+    pub content: AppearanceContent,
+}
+
+/// What is drawn inside the appearance's bounding box.
+#[derive(Debug, Clone)]
+pub enum AppearanceContent {
+    /// Freehand strokes, normalized to `0.0..=1.0` within the rect (origin at
+    /// the rect's bottom-left, matching PDF user space).
+    Ink {
+        strokes: Vec<Vec<(f64, f64)>>,
+        stroke_width: f64,
+    },
+    /// A two-line text block: signer name, then a time label.
+    ///
+    /// Drawn with the built-in Helvetica name only, with no font metrics
+    /// available to this crate: text is not measured against the rect width,
+    /// so a long name or label can overflow the box. Callers that need exact
+    /// fit should keep the strings short or size the rect generously.
+    Text {
+        signer_name: String,
+        time_label: String,
+    },
+    /// Ink strokes composited with the same two-line text block.
+    InkAndText {
+        strokes: Vec<Vec<(f64, f64)>>,
+        stroke_width: f64,
+        signer_name: String,
+        time_label: String,
+    },
 }
 
 /// What a successful signing operation produced.
@@ -473,7 +523,21 @@ fn assemble_revision(
         n
     };
 
+    if let Some(appearance) = &request.appearance {
+        if appearance.page_index != 0 {
+            return Err(SignApplyError::Unsupported(format!(
+                "signature appearance requested on page_index {}, but only page_index 0 \
+                 is currently supported for visible signature appearances",
+                appearance.page_index
+            )));
+        }
+    }
+
     let signature_object = allocate(&mut next_object);
+    let appearance_object = request
+        .appearance
+        .as_ref()
+        .map(|_| allocate(&mut next_object));
     let mut objects: Vec<(u32, u16, PdfObject)> = Vec::new();
 
     match plan.existing_field {
@@ -489,6 +553,10 @@ fn assemble_revision(
                     gen_num: 0,
                 },
             );
+            if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object)
+            {
+                apply_appearance_to_widget(&mut entries, appearance, xobject_num);
+            }
             objects.push((field_object, 0, PdfObject::Dictionary(entries)));
         }
         None => {
@@ -545,7 +613,7 @@ fn assemble_revision(
 
             // Field and widget merged into one dictionary, which is what most
             // producers write and most consumers expect (§25.1).
-            let field_dict = PdfObject::Dictionary(vec![
+            let mut field_entries = vec![
                 ("FT".into(), PdfObject::Name("Sig".into())),
                 (
                     "T".into(),
@@ -579,13 +647,25 @@ fn assemble_revision(
                         gen_num: 0,
                     },
                 ),
-            ]);
+            ];
+            if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object)
+            {
+                apply_appearance_to_widget(&mut field_entries, appearance, xobject_num);
+            }
 
             objects.push((catalog.0, 0, PdfObject::Dictionary(catalog_entries)));
             objects.push((acroform_object, 0, PdfObject::Dictionary(acroform_entries)));
             objects.push((page_object, 0, PdfObject::Dictionary(page_entries)));
-            objects.push((field_object, 0, field_dict));
+            objects.push((field_object, 0, PdfObject::Dictionary(field_entries)));
         }
+    }
+
+    if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object) {
+        objects.push((
+            xobject_num,
+            0,
+            PdfObject::Raw(build_appearance_xobject(appearance)),
+        ));
     }
 
     objects.push((
@@ -656,6 +736,178 @@ fn signature_dictionary(request: &SignRequest, bytes_reserved: usize) -> PdfObje
     ));
 
     PdfObject::Dictionary(entries)
+}
+
+// --- Appearances (§25.5) ---------------------------------------------------
+
+/// Set `/Rect` to the appearance's rect, point `/AP /N` at the freshly
+/// appended form XObject, and delete `/AS` if present — required whenever a
+/// widget carries an appearance stream (§25.5).
+fn apply_appearance_to_widget(
+    entries: &mut Vec<(String, PdfObject)>,
+    appearance: &SignAppearance,
+    xobject_num: u32,
+) {
+    set_entry(
+        entries,
+        "Rect",
+        PdfObject::Array(
+            appearance
+                .rect
+                .iter()
+                .map(|v| PdfObject::Real(*v))
+                .collect(),
+        ),
+    );
+    set_entry(
+        entries,
+        "AP",
+        PdfObject::Dictionary(vec![(
+            "N".into(),
+            PdfObject::IndirectRef {
+                obj_num: xobject_num,
+                gen_num: 0,
+            },
+        )]),
+    );
+    entries.retain(|(k, _)| k != "AS");
+}
+
+/// Build the bytes of the appearance's form XObject: `<< dict >>\nstream\n...\nendstream`.
+/// The caller wraps this with the `N 0 obj` header and `endobj` trailer via
+/// [`PdfObject::Raw`], the same convention `IncrementalWriter::append_objects`
+/// uses for every other appended object.
+fn build_appearance_xobject(appearance: &SignAppearance) -> Vec<u8> {
+    let width = appearance.rect[2] - appearance.rect[0];
+    let height = appearance.rect[3] - appearance.rect[1];
+    let (content, has_text) = appearance_content_stream(&appearance.content, width, height);
+
+    let mut dict = Vec::new();
+    dict.extend_from_slice(b"<< /Type /XObject /Subtype /Form /BBox [0 0 ");
+    dict.extend_from_slice(fmt_num(width).as_bytes());
+    dict.push(b' ');
+    dict.extend_from_slice(fmt_num(height).as_bytes());
+    dict.extend_from_slice(b"] /Resources <<");
+    if has_text {
+        dict.extend_from_slice(
+            b" /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>",
+        );
+    }
+    dict.extend_from_slice(b" >> /Length ");
+    dict.extend_from_slice(content.len().to_string().as_bytes());
+    dict.extend_from_slice(b" >>\nstream\n");
+    dict.extend_from_slice(&content);
+    dict.extend_from_slice(b"\nendstream");
+    dict
+}
+
+fn appearance_content_stream(
+    content: &AppearanceContent,
+    width: f64,
+    height: f64,
+) -> (Vec<u8>, bool) {
+    match content {
+        AppearanceContent::Ink {
+            strokes,
+            stroke_width,
+        } => (ink_ops(strokes, *stroke_width, width, height), false),
+        AppearanceContent::Text {
+            signer_name,
+            time_label,
+        } => (text_ops(signer_name, time_label, height), true),
+        AppearanceContent::InkAndText {
+            strokes,
+            stroke_width,
+            signer_name,
+            time_label,
+        } => {
+            let mut ops = ink_ops(strokes, *stroke_width, width, height);
+            ops.extend_from_slice(&text_ops(signer_name, time_label, height));
+            (ops, true)
+        }
+    }
+}
+
+/// `1 J 1 j <w> w` then, for each stroke, an `m`/`l` path terminated with `S`.
+/// Coordinates are normalized `0.0..=1.0` within the rect and mapped to
+/// `[0, width] x [0, height]` BBox space.
+fn ink_ops(strokes: &[Vec<(f64, f64)>], stroke_width: f64, width: f64, height: f64) -> Vec<u8> {
+    let mut out = String::new();
+    out.push_str("1 J 1 j ");
+    out.push_str(&fmt_num(stroke_width));
+    out.push_str(" w\n");
+    for stroke in strokes {
+        for (i, (nx, ny)) in stroke.iter().enumerate() {
+            let x = nx * width;
+            let y = ny * height;
+            out.push_str(&fmt_num(x));
+            out.push(' ');
+            out.push_str(&fmt_num(y));
+            out.push_str(if i == 0 { " m\n" } else { " l\n" });
+        }
+        if !stroke.is_empty() {
+            out.push_str("S\n");
+        }
+    }
+    out.into_bytes()
+}
+
+/// Two lines of Helvetica text: signer name, then the time label. Font size
+/// is `min(bbox_height / 3, 12)`, floored at `4`. This crate has no font
+/// metrics for Helvetica, so the text is never measured against the BBox
+/// width — a long name or time label can overflow the box; that is a named
+/// limitation, not a bug to chase here.
+fn text_ops(signer_name: &str, time_label: &str, height: f64) -> Vec<u8> {
+    let size = (height / 3.0).clamp(4.0, 12.0);
+    let line_gap = size + 2.0;
+    let x = 2.0;
+    let y = (height - size - 2.0).max(0.0);
+
+    let mut out = String::new();
+    out.push_str("BT\n");
+    out.push_str("/F0 ");
+    out.push_str(&fmt_num(size));
+    out.push_str(" Tf\n");
+    out.push_str(&fmt_num(x));
+    out.push(' ');
+    out.push_str(&fmt_num(y));
+    out.push_str(" Td\n");
+    out.push('(');
+    out.push_str(&escape_pdf_string(signer_name));
+    out.push_str(") Tj\n");
+    out.push_str("0 ");
+    out.push_str(&fmt_num(-line_gap));
+    out.push_str(" Td\n");
+    out.push('(');
+    out.push_str(&escape_pdf_string(time_label));
+    out.push_str(") Tj\n");
+    out.push_str("ET\n");
+    out.into_bytes()
+}
+
+/// Escape `(`, `)` and `\` for a PDF literal string, the same rule
+/// [`PdfObject::String`] serialization uses.
+fn escape_pdf_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '(' || c == ')' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Render a coordinate/length as fixed-point PDF syntax, trimming trailing
+/// zeros, matching [`PdfObject::Real`]'s own formatting.
+fn fmt_num(v: f64) -> String {
+    let s = format!("{:.3}", v);
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Find the placeholders in the assembled bytes. They are unique within the

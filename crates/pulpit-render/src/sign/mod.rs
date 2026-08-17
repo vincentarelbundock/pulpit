@@ -13,7 +13,10 @@ mod credential;
 mod errors;
 mod mechanism;
 
-pub use apply::{sign_document_file, SignApplyError, SignReport, SignRequest, SignTarget};
+pub use apply::{
+    sign_document_file, AppearanceContent, SignAppearance, SignApplyError, SignReport, SignRequest,
+    SignTarget,
+};
 pub use credential::{Credential, CredentialSummary};
 pub use errors::SigningError;
 pub use mechanism::{DigestAlgorithm, SigningMechanism};
