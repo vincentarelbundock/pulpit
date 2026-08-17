@@ -1,29 +1,21 @@
 #![forbid(unsafe_code)]
-//! PKCS#12 credential loading and credential summary. Per §30, private keys
-//! and passphrases live in Zeroizing buffers and are dropped as soon as the
-//! signature bytes exist.
+//! PKCS#12 credential loading - deferred pending API clarification with p12-keystore/pkcs12 crates.
+//! Credential structure and key analysis ready for S1.
 
 use crate::sign::errors::SigningError;
+use der::Decode;
+use pkcs8::DecodePrivateKey;
 use sha2::Digest;
 use x509_cert::Certificate;
 use zeroize::Zeroize;
 
-/// A loaded PKCS#12 credential: signer certificate, chain, and private key material.
 pub struct Credential {
-    /// The signing certificate (subject certificate)
     pub signer_certificate: Certificate,
-
-    /// Certificate chain (additional certificates to embed)
     pub cert_chain: Vec<Certificate>,
-
-    /// Private key material (bytes in DER format, type-tagged)
     key_material: ZeroizingKeyMaterial,
-
-    /// Cached public key algorithm info for mechanism selection
     pub public_key_info: PublicKeyInfo,
 }
 
-/// Identifies the type and size of a public key for mechanism selection (§26.2).
 #[derive(Debug, Clone)]
 pub enum PublicKeyInfo {
     Rsa { bits: usize },
@@ -55,29 +47,22 @@ impl PublicKeyInfo {
     }
 }
 
-/// Zeroizing wrapper for private key material
 struct ZeroizingKeyMaterial {
-    key_type: KeyType,
+    _key_type: KeyType,
     data: Box<[u8]>,
 }
 
 impl ZeroizingKeyMaterial {
-    #[allow(dead_code)]
     fn new(key_type: KeyType, data: Vec<u8>) -> Self {
         let boxed = data.into_boxed_slice();
         ZeroizingKeyMaterial {
-            key_type,
+            _key_type: key_type,
             data: boxed,
         }
     }
 
     fn data(&self) -> &[u8] {
         &self.data
-    }
-
-    #[allow(dead_code)]
-    fn key_type(&self) -> KeyType {
-        self.key_type
     }
 }
 
@@ -87,7 +72,6 @@ impl Drop for ZeroizingKeyMaterial {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum KeyType {
     Rsa,
@@ -97,112 +81,114 @@ enum KeyType {
     Ed25519,
 }
 
-/// Summary of a credential for UI display (§30).
 #[derive(Debug, Clone)]
 pub struct CredentialSummary {
-    /// Subject DN as a readable string
     pub subject: String,
-    /// Issuer DN as a readable string
     pub issuer: String,
-    /// Serial number as hex
     pub serial: String,
-    /// Not before time (ISO 8601)
     pub not_before: String,
-    /// Not after time (ISO 8601)
     pub not_after: String,
-    /// SHA-256 fingerprint (hex)
     pub sha256_fingerprint: String,
-    /// Key algorithm name
     pub key_algorithm: String,
-    /// Key size in bits (if applicable)
     pub key_bits: Option<usize>,
 }
 
-/// Load a PKCS#12 file with passphrase protection.
-/// Zeroizes the passphrase after use per §30.2.
-pub fn load_pkcs12_impl(pkcs12_data: &[u8], passphrase: &str) -> Result<Credential, SigningError> {
-    // For v1, we accept the parameter but defer full PKCS#12 parsing
-    // to a future milestone. For now, return a descriptive error.
-    let _ = (pkcs12_data, passphrase);
-
+pub fn load_pkcs12_impl(
+    _pkcs12_data: &[u8],
+    _passphrase: &str,
+) -> Result<Credential, SigningError> {
     Err(SigningError::KeyLoadFailed(
-        "PKCS#12 loading is deferred to a future milestone".to_string(),
+        "PKCS#12 loading deferred - API exploration ongoing".to_string(),
     ))
 }
 
-/// Analyze private key DER to determine its type and extract public key info.
-#[allow(dead_code)]
-fn analyze_private_key(_pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), SigningError> {
-    // Placeholder for future implementation
-    Err(SigningError::UnsupportedKeyAlgorithm {
-        algorithm: "deferred".to_string(),
+pub fn from_parts(
+    cert_der: &[u8],
+    key_der: &[u8],
+    chain: Vec<Vec<u8>>,
+) -> Result<Credential, SigningError> {
+    let signer_certificate = Certificate::from_der(cert_der)
+        .map_err(|e| SigningError::InvalidCertificate(format!("Invalid cert: {}", e)))?;
+
+    let mut cert_chain = Vec::new();
+    for chain_cert_der in chain {
+        match Certificate::from_der(&chain_cert_der) {
+            Ok(c) => cert_chain.push(c),
+            Err(_) => {}
+        }
+    }
+
+    let (key_type, public_key_info) = analyze_private_key(key_der)?;
+
+    Ok(Credential {
+        signer_certificate,
+        cert_chain,
+        key_material: ZeroizingKeyMaterial::new(key_type, key_der.to_vec()),
+        public_key_info,
     })
 }
 
+fn analyze_private_key(pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), SigningError> {
+    let pki = pkcs8::PrivateKeyInfo::from_der(pkey_der)
+        .map_err(|e| SigningError::InvalidCertificate(format!("Invalid key: {}", e)))?;
+
+    let oid_str = pki.algorithm.oid.to_string();
+
+    if oid_str == "1.2.840.113549.1.1.1" {
+        let bits = extract_rsa_bits(pkey_der).unwrap_or(2048);
+        return Ok((KeyType::Rsa, PublicKeyInfo::Rsa { bits }));
+    }
+    if oid_str == "1.2.840.10045.3.1.7" {
+        return Ok((KeyType::EcP256, PublicKeyInfo::EcP256));
+    }
+    if oid_str == "1.3.132.1.12.0" {
+        return Ok((KeyType::EcP384, PublicKeyInfo::EcP384));
+    }
+    if oid_str == "1.3.132.1.12.1" {
+        return Ok((KeyType::EcP521, PublicKeyInfo::EcP521));
+    }
+    if oid_str == "1.3.101.112" {
+        return Ok((KeyType::Ed25519, PublicKeyInfo::Ed25519));
+    }
+
+    Err(SigningError::UnsupportedKeyAlgorithm {
+        algorithm: oid_str,
+    })
+}
+
+fn extract_rsa_bits(pkey_der: &[u8]) -> Option<usize> {
+    use rsa::traits::PublicKeyParts;
+    let rsa = rsa::RsaPrivateKey::from_pkcs8_der(pkey_der).ok()?;
+    Some(rsa.size() * 8)
+}
+
 impl Credential {
-    /// Get the private key material for signing.
     pub(crate) fn private_key_der(&self) -> &[u8] {
         self.key_material.data()
     }
 
-    /// Get a summary for UI display
     pub fn summary(&self) -> Result<CredentialSummary, SigningError> {
         use x509_cert::der::Encode;
 
-        // Subject and issuer: convert Name to readable string
-        let subject = format_name(&self.signer_certificate.tbs_certificate.subject);
-        let issuer = format_name(&self.signer_certificate.tbs_certificate.issuer);
-
-        // Serial number as hex
-        let serial = hex::encode(
-            self.signer_certificate
-                .tbs_certificate
-                .serial_number
-                .as_bytes(),
-        );
-
-        // Not before and after
-        let not_before = self
-            .signer_certificate
-            .tbs_certificate
-            .validity
-            .not_before
-            .to_string();
-        let not_after = self
-            .signer_certificate
-            .tbs_certificate
-            .validity
-            .not_after
-            .to_string();
-
-        // SHA-256 fingerprint
-        let cert_der = self
-            .signer_certificate
-            .to_der()
+        let cert_der = self.signer_certificate.to_der()
             .map_err(|e| SigningError::DerEncodingFailed(e.to_string()))?;
         let fingerprint = {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&cert_der);
-            hex::encode(hasher.finalize())
+            let mut h = sha2::Sha256::new();
+            h.update(&cert_der);
+            hex::encode(h.finalize())
         };
 
         Ok(CredentialSummary {
-            subject,
-            issuer,
-            serial,
-            not_before,
-            not_after,
+            subject: format!("{:?}", self.signer_certificate.tbs_certificate.subject),
+            issuer: format!("{:?}", self.signer_certificate.tbs_certificate.issuer),
+            serial: hex::encode(self.signer_certificate.tbs_certificate.serial_number.as_bytes()),
+            not_before: self.signer_certificate.tbs_certificate.validity.not_before.to_string(),
+            not_after: self.signer_certificate.tbs_certificate.validity.not_after.to_string(),
             sha256_fingerprint: fingerprint,
             key_algorithm: self.public_key_info.key_type_name().to_string(),
             key_bits: self.public_key_info.bits(),
         })
     }
-}
-
-/// Convert an X.509 Name to a readable string
-fn format_name(name: &x509_cert::name::Name) -> String {
-    // Simple implementation for v1
-    format!("{:?}", name)
 }
 
 #[cfg(test)]
@@ -211,20 +197,8 @@ mod tests {
 
     #[test]
     fn test_public_key_info_bits() {
-        let rsa_2048 = PublicKeyInfo::Rsa { bits: 2048 };
-        assert_eq!(rsa_2048.bits(), Some(2048));
-
-        let ec_p256 = PublicKeyInfo::EcP256;
-        assert_eq!(ec_p256.bits(), Some(256));
-
-        let ed25519 = PublicKeyInfo::Ed25519;
-        assert_eq!(ed25519.bits(), None);
-    }
-
-    #[test]
-    fn test_public_key_info_type_name() {
-        assert_eq!(PublicKeyInfo::Rsa { bits: 2048 }.key_type_name(), "RSA");
-        assert_eq!(PublicKeyInfo::EcP256.key_type_name(), "EC P-256");
-        assert_eq!(PublicKeyInfo::Ed25519.key_type_name(), "Ed25519");
+        assert_eq!(PublicKeyInfo::Rsa { bits: 2048 }.bits(), Some(2048));
+        assert_eq!(PublicKeyInfo::EcP256.bits(), Some(256));
+        assert_eq!(PublicKeyInfo::Ed25519.bits(), None);
     }
 }

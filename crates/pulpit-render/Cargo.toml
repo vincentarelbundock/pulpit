@@ -12,11 +12,13 @@ name = "pulpit-render-worker"
 path = "src/bin/worker.rs"
 
 [features]
-default = ["pdfium"]
+default = ["pdfium", "p12-keystore"]
 # PDFium is loaded dynamically at run time; the binary is not linked in, so a
 # build without libpdfium present still succeeds and falls back with a clear
 # diagnostic (see `scripts/fetch-pdfium.sh`).
 pdfium = ["dep:pdfium-render"]
+# p12-keystore provides PKCS#12 loading and decryption
+p12-keystore = ["dep:p12-keystore"]
 
 [dependencies]
 pulpit-core = { workspace = true }
@@ -46,6 +48,7 @@ zeroize = { workspace = true }
 signature = { workspace = true }
 ecdsa = { workspace = true }
 hex = { workspace = true }
+p12-keystore = { version = "0.3.1", optional = true }
 
 [dev-dependencies]
 pulpit-testkit = { workspace = true }
