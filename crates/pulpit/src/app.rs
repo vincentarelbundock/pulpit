@@ -7972,6 +7972,7 @@ impl App {
             contact: non_empty(&options.contact),
             id2,
             tight_size_estimates: false,
+            appearance: None,
         };
         let destination_for_task = destination.clone();
 
