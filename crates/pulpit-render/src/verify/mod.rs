@@ -795,11 +795,32 @@ fn extract_fields_refs(obj_slice: &[u8]) -> Result<Vec<(u32, u16)>> {
     Ok(refs)
 }
 
+/// Find the byte offset of the *last* definition of `obj_num`.
+///
+/// The last definition is the effective one: an incremental update appends a
+/// replacement object after every earlier copy, so scanning from the end is
+/// what makes a re-emitted catalog, page or field visible to discovery. The
+/// preceding byte is checked so that `4 0 obj` does not match inside
+/// `14 0 obj`.
+fn find_object_definition(bytes: &[u8], obj_num: u32) -> Option<usize> {
+    let search = format!("{} 0 obj", obj_num);
+    let needle = search.as_bytes();
+    let mut candidate = None;
+    let mut from = 0usize;
+    while let Some(offset) = find_bytes(&bytes[from..], needle) {
+        let pos = from + offset;
+        let boundary = pos == 0 || !bytes[pos - 1].is_ascii_digit();
+        if boundary {
+            candidate = Some(pos);
+        }
+        from = pos + 1;
+    }
+    candidate
+}
+
 /// Find object bytes by object number.
 pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
-    // Simple search for "obj_num 0 obj"
-    let search = format!("{} 0 obj", obj_num);
-    if let Some(pos) = find_bytes(bytes, search.as_bytes()) {
+    if let Some(pos) = find_object_definition(bytes, obj_num) {
         let obj_start = pos;
         // Find corresponding "endobj"
         if let Some(endobj_pos) = find_bytes(&bytes[obj_start..], b"endobj") {
@@ -814,9 +835,7 @@ pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
 
 /// Find object offset (file position) by object number.
 pub fn find_object_offset(bytes: &[u8], obj_num: u32) -> Result<u64> {
-    // Simple search for "obj_num 0 obj"
-    let search = format!("{} 0 obj", obj_num);
-    if let Some(pos) = find_bytes(bytes, search.as_bytes()) {
+    if let Some(pos) = find_object_definition(bytes, obj_num) {
         return Ok(pos as u64);
     }
     Err(VerifyError::SignatureObjectNotFound)

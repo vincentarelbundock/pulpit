@@ -219,6 +219,13 @@ pub enum PdfObject {
         gen_num: u16,
     },
     HexString(Vec<u8>),
+    /// Bytes emitted verbatim, with no escaping or reformatting.
+    ///
+    /// This exists so that a caller can place a fixed-width placeholder — a
+    /// padded `/ByteRange` array or a `/Contents` hex reservation (§23.2) —
+    /// inside an otherwise ordinary dictionary, and then find and back-patch
+    /// it by offset afterwards.
+    Raw(Vec<u8>),
 }
 
 impl PdfObject {
@@ -285,6 +292,7 @@ impl PdfObject {
             PdfObject::IndirectRef { obj_num, gen_num } => {
                 write!(writer, "{} {} R", obj_num, gen_num).map_err(PdfWriteError::Io)?
             }
+            PdfObject::Raw(bytes) => writer.write_all(bytes).map_err(PdfWriteError::Io)?,
         }
         Ok(())
     }
@@ -586,6 +594,17 @@ impl IncrementalWriter {
             xref_kind,
             trailer_dict,
         })
+    }
+
+    /// The trailer dictionary of the revision being extended.
+    pub fn trailer(&self) -> &TrailerDict {
+        &self.trailer_dict
+    }
+
+    /// The first object number that is free to allocate, taken from the
+    /// trailer's `/Size`.
+    pub fn next_object_number(&self) -> u32 {
+        self.trailer_dict.size.max(1)
     }
 
     /// Append multiple objects and finalize the PDF with proper xref.
