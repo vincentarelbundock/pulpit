@@ -11,7 +11,6 @@ pub mod pdf;
 pub mod pdfwrite;
 pub mod protocol;
 pub mod shm;
-pub mod sign;
 pub mod supervisor;
 pub mod verify;
 pub mod worker;
