@@ -161,6 +161,38 @@ fn walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
     }
 }
 
+/// Whether any placed panel in `layout` actually declares a need for the
+/// committed page's own role, or for a neighbour's.
+///
+/// Drawn at the same granularity as [`SlideWidths`] — `Role::Current` versus
+/// `Role::Neighbour`, not Previous versus Next — because that is the
+/// granularity the render plan's prefetch step has always worked at: a
+/// neighbour page is asked for at `widths.neighbour` regardless of which
+/// side it is on, and `SlideWidths` itself cannot tell Previous and Next
+/// panels apart (a layout with only a Next panel still reports a `neighbour`
+/// width). Answering "is there a neighbour panel at all" at the same
+/// granularity keeps this exactly the flag that reproduces today's
+/// behaviour: the shipped presenter layout has a Next panel and no Previous
+/// one, and today's `live_slide_plan` prefetches both directions anyway,
+/// because the two sides were never actually distinguished — only "is there
+/// a neighbour panel, or not".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PanelDemand {
+    pub current: bool,
+    pub neighbour: bool,
+}
+
+/// Collect which roles `layout`'s panels declare, reusing [`walk`] rather
+/// than a second traversal.
+pub fn demand(layout: &Layout) -> PanelDemand {
+    let mut found: Vec<(Role, f32)> = Vec::new();
+    walk(&layout.root, 1.0, 1.0, &mut found);
+    PanelDemand {
+        current: found.iter().any(|(role, _)| *role == Role::Current),
+        neighbour: found.iter().any(|(role, _)| *role == Role::Neighbour),
+    }
+}
+
 /// The physical width of the picture a panel of this fraction draws.
 fn drawn_width(fraction: f32, window: (f32, f32), scale: f32, aspect: f32) -> u32 {
     let _ = aspect;
@@ -341,6 +373,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_shipped_layout_wants_a_current_and_a_neighbour_panel() {
+        // The shipped presenter layout has a Current panel and a Next panel
+        // (no Previous one) — both register as `Role::Neighbour`.
+        let demand = demand(&builtin::presenter_default());
+        assert_eq!(
+            demand,
+            PanelDemand {
+                current: true,
+                neighbour: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_layout_with_only_a_current_slide_wants_no_neighbour() {
+        let mut layout = builtin::presenter_default();
+        layout.root = Node::Leaf(crate::layout::tree::Cell {
+            widget: Some(crate::widgets::Widget::new(WidgetKind::CurrentSlide)),
+            ..crate::layout::tree::Cell::new(crate::layout::tree::NodeId(1))
+        });
+        let demand = demand(&layout);
+        assert_eq!(
+            demand,
+            PanelDemand {
+                current: true,
+                neighbour: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_strip_wants_both_roles_too() {
+        let mut layout = builtin::presenter_default();
+        layout.root = Node::Leaf(crate::layout::tree::Cell {
+            widget: Some(crate::widgets::Widget::new(WidgetKind::PreviousCurrentNext)),
+            ..crate::layout::tree::Cell::new(crate::layout::tree::NodeId(1))
+        });
+        assert_eq!(
+            demand(&layout),
+            PanelDemand {
+                current: true,
+                neighbour: true,
+            }
+        );
     }
 
     #[test]
