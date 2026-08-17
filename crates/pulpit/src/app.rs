@@ -10732,11 +10732,13 @@ impl App {
         // actually be shown. Asked for on every turn it would be a render and
         // a texture bought on the overwhelming majority of turns, where the
         // page is already prefetched and the stand-in is never displayed.
+        let demand = crate::layout::panels::demand(&self.active_layout);
         let mut wanted = live_slide_plan(
             committed,
             self.state.slide_count(),
             audience_width,
             widths,
+            demand,
             (coarse_width < audience_width && self.wants_coarse_stand_in()).then_some(coarse_width),
         );
         // The pages on either side of the committed one, at audience size, so
@@ -11754,6 +11756,7 @@ fn live_slide_plan(
     count: usize,
     audience: u32,
     widths: crate::layout::panels::SlideWidths,
+    demand: crate::layout::panels::PanelDemand,
     coarse: Option<u32>,
 ) -> Vec<RenderWant> {
     let mut wanted: Vec<RenderWant> = coarse
@@ -11793,7 +11796,9 @@ fn live_slide_plan(
         }
         wanted.push((slide, FrameKind::Slide, priority, Quality::Refined, width));
     };
-    push(committed, widths.current, Priority::Presenter, &mut wanted);
+    if demand.current {
+        push(committed, widths.current, Priority::Presenter, &mut wanted);
+    }
 
     // Each neighbour twice, and deliberately: at the width the neighbour
     // panel draws it now, and at the current-slide width it will need the
@@ -11803,13 +11808,26 @@ fn live_slide_plan(
     //
     // When a layout makes both panels the same size the two collapse into one
     // request, so a strip of equal panels costs exactly what it did before.
-    for (slide, priority) in [
-        (Some(committed + 1), Priority::Presenter),
-        (committed.checked_sub(1), Priority::Next),
-    ] {
-        let Some(slide) = slide else { continue };
-        push(slide, widths.neighbour, priority, &mut wanted);
-        push(slide, widths.current, Priority::Adjacent, &mut wanted);
+    //
+    // Gated on `demand.neighbour`: a layout with no Previous or Next panel —
+    // say, a single-current-slide layout — has nothing to draw a neighbour
+    // page into, so there is nothing to prefetch. Requesting it anyway used
+    // to be unconditional, on the (usually true, but not layout-derived)
+    // assumption that a neighbour panel always exists. `demand.neighbour` is
+    // one flag for both sides, at the same granularity `widths.neighbour`
+    // already is: the shipped presenter layout has a Next panel and no
+    // Previous one, and this still prefetches both directions, exactly as
+    // before, because `SlideWidths` itself never distinguished the two
+    // sides either.
+    if demand.neighbour {
+        for (slide, priority) in [
+            (Some(committed + 1), Priority::Presenter),
+            (committed.checked_sub(1), Priority::Next),
+        ] {
+            let Some(slide) = slide else { continue };
+            push(slide, widths.neighbour, priority, &mut wanted);
+            push(slide, widths.current, Priority::Adjacent, &mut wanted);
+        }
     }
     wanted
 }
@@ -11940,9 +11958,17 @@ mod canonical_frame_tests {
         neighbour: 1024,
     };
 
+    /// A layout that wants a current panel and a neighbour panel, which is
+    /// every shipped presenter layout — the demand these older tests were
+    /// written against before `live_slide_plan` learned to ask.
+    const FULL_DEMAND: crate::layout::panels::PanelDemand = crate::layout::panels::PanelDemand {
+        current: true,
+        neighbour: true,
+    };
+
     #[test]
     fn the_live_plan_has_no_progressive_presenter_ladder() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, None);
         assert!(plan.iter().all(|request| request.3 == Quality::Refined));
         assert_eq!(
             plan.iter()
@@ -11963,7 +11989,7 @@ mod canonical_frame_tests {
     /// asking after it is what makes a turn wait for a render.
     #[test]
     fn a_neighbour_is_asked_for_at_both_widths_before_the_turn() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, None);
         let for_next: Vec<u32> = plan
             .iter()
             .filter(|request| request.0 == 5)
@@ -11981,14 +12007,31 @@ mod canonical_frame_tests {
             current: 1536,
             neighbour: 1536,
         };
-        let plan = super::live_slide_plan(4, 100, 3840, equal, None);
+        let plan = super::live_slide_plan(4, 100, 3840, equal, FULL_DEMAND, None);
         let for_next = plan.iter().filter(|request| request.0 == 5).count();
         assert_eq!(for_next, 1);
     }
 
+    /// The demand-driven part of this refactor: a layout with no Previous
+    /// or Next panel — the only demand a real layout ever declares this way
+    /// is `current`-only, e.g. a single `CurrentSlide` panel — has no
+    /// neighbour page to prefetch, and the plan must not invent one.
+    #[test]
+    fn a_layout_with_no_neighbour_panel_prefetches_no_neighbour() {
+        let current_only = crate::layout::panels::PanelDemand {
+            current: true,
+            neighbour: false,
+        };
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, current_only, None);
+        assert!(
+            plan.iter().all(|request| request.0 == 4),
+            "every request is for the committed page: {plan:?}"
+        );
+    }
+
     #[test]
     fn one_coarse_stand_in_is_asked_for_first_and_serves_both_windows() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, Some(640));
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, Some(640));
         let coarse = plan.first().expect("a plan");
         assert_eq!(coarse.3, Quality::Coarse);
         assert_eq!(coarse.4, 640);
