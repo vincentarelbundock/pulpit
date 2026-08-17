@@ -284,6 +284,8 @@ pub enum ReadCommand {
     /// Write the annotated document somewhere else. Never over the source
     /// (A6), which is why there is no plain "Save".
     SaveAs,
+    /// Open the Sign dialog (SPEC-signing.md §31.1).
+    Sign,
 }
 
 /// What the timer's menu can ask for.

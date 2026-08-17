@@ -130,6 +130,23 @@ pub enum Message {
     /// Where the reader's annotated document should be written. `None` when
     /// the chooser was dismissed, which is not a failure.
     SaveDocumentTo(Option<PathBuf>),
+    /// The Sign dialog (SPEC-signing.md §31.1); grouped the way `Timer` and
+    /// `Read` already group their own popups' messages.
+    Sign(crate::signing::SignMsg),
+    /// Structural signature discovery on a document that just opened
+    /// (§31.3): does it already carry a signature, and if so, which fields
+    /// exist. Cheap and supervisor-side; run once per open.
+    DocumentSignaturesDiscovered(Vec<pulpit_render::verify::SignatureVerification>),
+    /// The reader accepted or declined the append-only offer (§31.3, A9).
+    AcceptAppendOnly,
+    EditAnyway,
+    /// The signature panel (§31.4): opened, closed, or one entry's detail
+    /// view expanded or collapsed.
+    ToggleSignaturePanel,
+    ToggleSignatureDetail(usize),
+    /// Copy the fingerprint, or the plain-text report, of one entry.
+    CopySignatureFingerprint(usize),
+    CopySignatureReport(usize),
     /// The media runtime probes, run on a helper thread at startup.
     MediaProbed(Vec<pulpit_media::RuntimeProbe>),
     WindowOpened {
@@ -809,6 +826,33 @@ pub struct App {
     /// exists. Still never enforcement — "Save anyway" is one of the two
     /// answers, and pulpit only writes copies.
     pub pending_save_review: Option<SaveReview>,
+    /// The Sign dialog (SPEC-signing.md §31.1), or `None` when it is closed.
+    /// Its own module so the state machine can be unit-tested without a
+    /// display (§30.2: signing always runs supervisor-side, never in the
+    /// render worker, which is why this lives on `App` rather than being
+    /// routed through `reader_link`).
+    pub signing: Option<crate::signing::SigningFlow>,
+    /// Whether the document open right now is being kept append-only
+    /// (SPEC-signing.md §31.3), because it was found to already carry a
+    /// signature. `None` when the question has not been answered yet, or
+    /// when nothing is open.
+    pub append_only: Option<crate::signing::AppendOnlyMode>,
+    /// A document was just opened and its bytes contain a signature; the
+    /// append-only offer is waiting for an answer before any mutation is
+    /// permitted (§31.3, A9).
+    pub pending_append_only_offer: bool,
+    /// What structural discovery found in the open document at open time
+    /// (§31.3, §31.4): the signature panel's data, and the append-only
+    /// offer's trigger. Re-verified (not just re-discovered) each time the
+    /// panel is opened would be more current, but discovery already reads
+    /// the whole file once per open and the panel is about the document as
+    /// it was opened, not a live view of a file nothing here is editing.
+    pub document_signatures: Vec<pulpit_render::verify::SignatureVerification>,
+    /// Whether the signature panel (§31.4) is open.
+    pub signature_panel_open: bool,
+    /// Which entry in `document_signatures`, if any, has its detail view
+    /// expanded.
+    pub signature_panel_expanded: Option<usize>,
     /// A Save As that is waiting for the caret to leave the field it is in.
     ///
     /// Losing focus is what commits an in-progress form edit, so a save asked
@@ -1203,6 +1247,13 @@ fn annotation_options_in(layout: &Layout) -> crate::widgets::AnnotationOptions {
         .unwrap_or_default()
 }
 
+/// `None` for a field the reader left blank, so `SignRequest`'s optional
+/// reason/location/contact stay `None` rather than `Some(String::new())`.
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 impl App {
     pub fn new(
         initial: Option<PathBuf>,
@@ -1356,6 +1407,12 @@ impl App {
             form_clipboard: None,
             form_clipboard_text: None,
             pending_save_review: None,
+            signing: None,
+            append_only: None,
+            pending_append_only_offer: false,
+            document_signatures: Vec::new(),
+            signature_panel_open: false,
+            signature_panel_expanded: None,
             save_waits_for_form_commit: false,
             resume_save_after_form_commit: false,
             save_reviewed: false,
@@ -2522,6 +2579,65 @@ impl App {
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
             Message::SaveDocumentTo(None) => Task::none(),
+            Message::Sign(msg) => self.handle_sign(msg),
+            Message::DocumentSignaturesDiscovered(found) => {
+                self.handle_signatures_discovered(found)
+            }
+            Message::AcceptAppendOnly => {
+                self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
+                self.pending_append_only_offer = false;
+                Task::none()
+            }
+            Message::EditAnyway => {
+                self.append_only = Some(crate::signing::AppendOnlyMode::EditAnyway);
+                self.pending_append_only_offer = false;
+                Task::none()
+            }
+            Message::ToggleSignaturePanel => {
+                self.signature_panel_open = !self.signature_panel_open;
+                Task::none()
+            }
+            Message::ToggleSignatureDetail(index) => {
+                self.signature_panel_expanded = if self.signature_panel_expanded == Some(index) {
+                    None
+                } else {
+                    Some(index)
+                };
+                Task::none()
+            }
+            Message::CopySignatureFingerprint(index) => {
+                let Some(entry) = self.document_signatures.get(index) else {
+                    return Task::none();
+                };
+                let fingerprint = match entry {
+                    pulpit_render::verify::SignatureVerification::Checked(status) => {
+                        status.signer_cert.sha256_fingerprint.clone()
+                    }
+                    pulpit_render::verify::SignatureVerification::Broken { .. } => {
+                        return Task::none();
+                    }
+                };
+                iced::clipboard::write(fingerprint)
+            }
+            Message::CopySignatureReport(index) => {
+                let Some(entry) = self.document_signatures.get(index) else {
+                    return Task::none();
+                };
+                let (field_name, coverage) = match entry {
+                    pulpit_render::verify::SignatureVerification::Checked(status) => {
+                        (status.field_name.clone(), format!("{:?}", status.coverage))
+                    }
+                    pulpit_render::verify::SignatureVerification::Broken { field_name, .. } => {
+                        (field_name.clone(), "unknown".to_string())
+                    }
+                };
+                let line = crate::signing::signature_line_for_verification(entry);
+                iced::clipboard::write(crate::signing::plain_text_report(
+                    &field_name,
+                    &line,
+                    &coverage,
+                ))
+            }
             Message::Alarm(command) => self.on_alarm_command(command),
             Message::Timer(command) => self.on_timer_command(command),
             Message::Transport(request) => {
@@ -4664,6 +4780,14 @@ impl App {
         // touch them, and taken here rather than in `open_for_reading` so it
         // exists even when document mode is switched off or fails to start.
         self.document_hash = crate::session::content_hash(&path);
+        // A fresh document starts with no signing question answered yet;
+        // discovery below decides whether one needs asking (§31.3, A9).
+        self.append_only = None;
+        self.pending_append_only_offer = false;
+        self.signing = None;
+        self.document_signatures.clear();
+        self.signature_panel_open = false;
+        self.signature_panel_expanded = None;
         // Slide 7 of one deck has nothing to do with slide 7 of another, so
         // opening a document starts with a clean sheet. The new document's own
         // marks arrive from its engine once it has described itself.
@@ -4675,7 +4799,46 @@ impl App {
             self.open_for_reading(&path);
         }
         let actions = self.documents.open_initial(self.now);
-        self.run_document_actions(actions)
+        let mut task = self.run_document_actions(actions);
+        task = Task::batch([task, self.discover_signatures_task(&path)]);
+        task
+    }
+
+    /// §31.3: a cheap structural pass over the just-opened bytes, so the
+    /// append-only offer can be made before anything mutates the document.
+    /// Not the same check as §28 verification — it only asks "does at least
+    /// one `/Sig` field exist with a non-null `/V`", which is exactly what
+    /// deciding append-only-or-not needs.
+    fn discover_signatures_task(&self, path: &std::path::Path) -> Task<Message> {
+        let path = path.to_path_buf();
+        Task::perform(
+            async move {
+                // Synchronous: this reads the document that was just opened,
+                // so its bytes are already resident in the page cache, and
+                // the alternative (a `tokio::fs` dependency for one read) is
+                // not worth the extra dependency for v1.
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Vec::new(),
+                };
+                pulpit_render::verify::verify_signatures(&bytes).unwrap_or_default()
+            },
+            Message::DocumentSignaturesDiscovered,
+        )
+    }
+
+    /// What discovery found: offer append-only mode when a signature exists,
+    /// and leave the question unset — not "no" — for a document with none,
+    /// so nothing here ever implies a signed document is unsigned.
+    fn handle_signatures_discovered(
+        &mut self,
+        found: Vec<pulpit_render::verify::SignatureVerification>,
+    ) -> Task<Message> {
+        if !found.is_empty() {
+            self.pending_append_only_offer = true;
+        }
+        self.document_signatures = found;
+        Task::none()
     }
 
     /// Open the same file for the reader: a document worker of its own,
@@ -6584,6 +6747,24 @@ impl App {
     fn on_read_command(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
         use crate::widgets::event::ReadCommand;
 
+        // §31.3, A9: append-only mode refuses every content-mutating path —
+        // annotation, form-filling and the rewriting Save As — while leaving
+        // viewing, the signature panel and countersigning (Sign, which the
+        // append-only rules govern themselves via preflight) available.
+        if self
+            .append_only
+            .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
+            && Self::read_command_mutates(&command)
+        {
+            self.notify(
+                "This document is open in append-only mode because it already carries a \
+                 signature. Choose \"Edit anyway\" from the signature notice to make content \
+                 changes."
+                    .to_string(),
+            );
+            return Task::none();
+        }
+
         match &command {
             // Handled above the session: the history is the application's,
             // and where these land may not even be a page in this document.
@@ -6658,6 +6839,7 @@ impl App {
                 task
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
+            ReadCommand::Sign => self.handle_sign(crate::signing::SignMsg::Start),
             // Writing a mark on the page is the same four steps the dialog
             // used to be, minus the dialog (§8.5).
             ReadCommand::ComposeMark(action) => {
@@ -7390,6 +7572,436 @@ impl App {
             None => self.notify("There is no document open to save.".to_string()),
         }
         Task::none()
+    }
+
+    // --- Signing (SPEC-signing.md §31) --------------------------------
+
+    /// The Sign flow's state machine, driven from `Message::Sign`.
+    ///
+    /// Signing always runs here, in the supervisor process, and never in the
+    /// document worker or a render worker (§30.2): the private key exists
+    /// only for the span of this flow, in a `Credential` whose key material
+    /// is zeroized on drop, and it is never sent across the `reader_link`
+    /// pipe.
+    fn handle_sign(&mut self, msg: crate::signing::SignMsg) -> Task<Message> {
+        use crate::signing::{SignMsg, SigningFlow};
+
+        match msg {
+            SignMsg::Start => {
+                // §31.1 step 3: unsaved edits are saved first, and the
+                // signature is applied to the saved bytes. A document kept
+                // append-only by construction has no unsaved edits, so this
+                // only ever fires the ordinary Save As path.
+                if self.reader.unfilled_required_fields().is_empty() && self.has_unsaved_edits() {
+                    self.signing = Some(SigningFlow::SavingFirst);
+                    return self.ask_where_to_save_document();
+                }
+                self.signing = Some(SigningFlow::start());
+                Task::none()
+            }
+            SignMsg::Cancel => {
+                self.signing = None;
+                Task::none()
+            }
+            SignMsg::ChooseCredentialFile => Task::perform(
+                async move {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("PKCS#12 credential", &["p12", "pfx"])
+                        .pick_file()
+                        .await
+                        .map(|handle| handle.path().to_path_buf())
+                },
+                |path| Message::Sign(SignMsg::CredentialFileChosen(path)),
+            ),
+            SignMsg::CredentialFileChosen(Some(credential_path)) => {
+                self.signing = Some(SigningFlow::EnterPassphrase {
+                    credential_path,
+                    passphrase: String::new(),
+                    error: None,
+                });
+                Task::none()
+            }
+            SignMsg::CredentialFileChosen(None) => Task::none(),
+            SignMsg::PassphraseChanged(typed) => {
+                if let Some(SigningFlow::EnterPassphrase { passphrase, .. }) = self.signing.as_mut()
+                {
+                    *passphrase = typed;
+                }
+                Task::none()
+            }
+            SignMsg::PassphraseSubmit => {
+                let Some(SigningFlow::EnterPassphrase {
+                    credential_path,
+                    passphrase,
+                    ..
+                }) = self.signing.as_ref()
+                else {
+                    return Task::none();
+                };
+                let credential_path = credential_path.clone();
+                let passphrase = passphrase.clone();
+                self.signing = Some(SigningFlow::LoadingCredential {
+                    credential_path: credential_path.clone(),
+                });
+                Task::perform(
+                    async move {
+                        let bytes = std::fs::read(&credential_path).map_err(|e| {
+                            format!(
+                                "could not read {}: {e}; the credential file is unchanged",
+                                credential_path.display()
+                            )
+                        })?;
+                        pulpit_render::sign::load_pkcs12(&bytes, &passphrase)
+                            .map(std::sync::Arc::new)
+                            .map_err(|e| format!("{e}; the credential was not loaded"))
+                    },
+                    |result| Message::Sign(SignMsg::CredentialLoaded(result)),
+                )
+            }
+            SignMsg::CredentialLoaded(Ok(credential)) => {
+                let Some(SigningFlow::LoadingCredential { credential_path }) = self.signing.take()
+                else {
+                    return Task::none();
+                };
+                let summary = match credential.summary() {
+                    Ok(summary) => summary,
+                    Err(e) => {
+                        self.signing = Some(SigningFlow::Failed {
+                            detail: format!("{e}; the credential was not loaded"),
+                        });
+                        return Task::none();
+                    }
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let info = crate::signing::CredentialInfo::from_summary(summary, now);
+                self.signing = Some(SigningFlow::CredentialSummary {
+                    credential_path,
+                    credential,
+                    info,
+                });
+                Task::none()
+            }
+            SignMsg::CredentialLoaded(Err(detail)) => {
+                if let Some(SigningFlow::LoadingCredential { credential_path }) =
+                    self.signing.take()
+                {
+                    self.signing = Some(SigningFlow::EnterPassphrase {
+                        credential_path,
+                        passphrase: String::new(),
+                        error: Some(detail),
+                    });
+                }
+                Task::none()
+            }
+            SignMsg::OverrideValidity => {
+                if let Some(SigningFlow::CredentialSummary { info, .. }) = self.signing.as_mut() {
+                    info.override_validity = true;
+                }
+                Task::none()
+            }
+            SignMsg::ContinueToOptions => {
+                let Some(SigningFlow::CredentialSummary {
+                    credential_path,
+                    credential,
+                    info,
+                }) = self.signing.take()
+                else {
+                    return Task::none();
+                };
+                if !info.may_proceed() {
+                    self.signing = Some(SigningFlow::CredentialSummary {
+                        credential_path,
+                        credential,
+                        info,
+                    });
+                    return Task::none();
+                }
+                let target = self.default_sign_target();
+                self.signing = Some(SigningFlow::Options {
+                    credential,
+                    info,
+                    options: crate::signing::SigningOptions {
+                        target,
+                        ..Default::default()
+                    },
+                });
+                Task::none()
+            }
+            SignMsg::ReasonChanged(value) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    options.reason = value;
+                }
+                Task::none()
+            }
+            SignMsg::LocationChanged(value) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    options.location = value;
+                }
+                Task::none()
+            }
+            SignMsg::ContactChanged(value) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    options.contact = value;
+                }
+                Task::none()
+            }
+            SignMsg::TargetChosen(choice) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    options.target = Some(choice);
+                }
+                Task::none()
+            }
+            SignMsg::ContinueToConfirm => {
+                let Some(SigningFlow::Options {
+                    credential,
+                    info,
+                    options,
+                }) = self.signing.take()
+                else {
+                    return Task::none();
+                };
+                if options.target.is_none() {
+                    self.signing = Some(SigningFlow::Failed {
+                        detail: "No signature field is available to sign into: the document \
+                                 has no empty signature field to countersign, and already \
+                                 carries one if it is not offering a new field."
+                            .to_string(),
+                    });
+                    return Task::none();
+                }
+                self.signing = Some(SigningFlow::Confirm {
+                    credential,
+                    info,
+                    options,
+                });
+                Task::none()
+            }
+            SignMsg::BackToOptions => {
+                let Some(SigningFlow::Confirm {
+                    credential,
+                    info,
+                    options,
+                }) = self.signing.take()
+                else {
+                    return Task::none();
+                };
+                self.signing = Some(SigningFlow::Options {
+                    credential,
+                    info,
+                    options,
+                });
+                Task::none()
+            }
+            SignMsg::Confirm => self.sign_pick_destination(),
+            SignMsg::ChooseDestination => self.sign_pick_destination(),
+            SignMsg::DestinationChosen(None) => Task::none(),
+            SignMsg::DestinationChosen(Some(destination)) => self.sign_execute(destination),
+            SignMsg::Completed(Ok(outcome)) => {
+                self.signing = Some(SigningFlow::Result {
+                    report: (*outcome.report).clone(),
+                    destination: outcome.destination,
+                    verification: (*outcome.verification).clone(),
+                });
+                Task::none()
+            }
+            SignMsg::Completed(Err(detail)) => {
+                self.signing = Some(SigningFlow::Failed { detail });
+                Task::none()
+            }
+            SignMsg::Done => {
+                self.signing = None;
+                Task::none()
+            }
+        }
+    }
+
+    /// §31.3's forbidden list, in terms of the commands the toolbar and the
+    /// page surface actually send: arming a drawing tool, placing or editing
+    /// a mark, filling any form control, and Save As (which routes through
+    /// PDFium's full rewriting save and would flatten signature history).
+    /// `Sign` is deliberately not here — countersigning is the one addition
+    /// append-only mode exists to permit, and `sign_execute`'s own preflight
+    /// pass enforces the rest of §25.4 no matter what this check misses.
+    fn read_command_mutates(command: &crate::widgets::event::ReadCommand) -> bool {
+        use crate::widgets::event::ReadCommand;
+        matches!(
+            command,
+            ReadCommand::Arm(Some(_))
+                | ReadCommand::PagePressed
+                | ReadCommand::PageReleased
+                | ReadCommand::CommitMark
+                | ReadCommand::ComposeMark(_)
+                | ReadCommand::DeleteSelected
+                | ReadCommand::EditSelected
+                | ReadCommand::PickDate(_)
+                | ReadCommand::PickTime
+                | ReadCommand::PickOption(_)
+                | ReadCommand::ToggleOption(_)
+                | ReadCommand::SaveAs
+        )
+    }
+
+    /// Whether the open document has edits that Save As has not yet written
+    /// — the condition §31.1 step 3 checks before signing.
+    fn has_unsaved_edits(&self) -> bool {
+        self.reader.can_undo()
+    }
+
+    /// §31.1 step 5's target field, computed from a cheap preflight pass over
+    /// the document as it stands on disk.
+    ///
+    /// `None` when countersigning is required (the document already carries
+    /// a signature, per append-only mode) but no empty field is left to sign
+    /// into — the caller reports that as [`SignApplyError::Refused`] would.
+    ///
+    /// v1 offers exactly one target rather than a picker over every
+    /// candidate: `preflight_sign` already disambiguates when there is one
+    /// unambiguous empty field, which is the overwhelmingly common shape
+    /// (a sender leaves one signature field for the recipient). A document
+    /// with several empty fields reports `AmbiguousSignatureField`, and this
+    /// falls back to the first — a real gap, noted in the delivery report.
+    fn default_sign_target(&self) -> Option<crate::signing::TargetChoice> {
+        use crate::signing::{AppendOnlyMode, TargetChoice};
+        use pulpit_render::verify::preflight::{preflight_sign, PreflightRefusal};
+
+        if self.append_only != Some(AppendOnlyMode::AppendOnly) {
+            return Some(TargetChoice::NewField);
+        }
+        let path = self.documents.active()?.path.clone();
+        let bytes = std::fs::read(&path).ok()?;
+        match preflight_sign(&bytes, None) {
+            Ok(ok) => Some(TargetChoice::ExistingField(ok.target_field)),
+            Err(PreflightRefusal::AmbiguousSignatureField { candidates }) => candidates
+                .into_iter()
+                .next()
+                .map(TargetChoice::ExistingField),
+            Err(_) => None,
+        }
+    }
+
+    /// §31.1 step 8's destination chooser: `{stem}-signed.pdf` beside the
+    /// source, the same shape Save As already uses.
+    fn sign_pick_destination(&mut self) -> Task<Message> {
+        use crate::signing::SignMsg;
+
+        let Some(document) = self.documents.active() else {
+            return Task::none();
+        };
+        let source = document.path.clone();
+        let directory = source
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".to_string());
+        Task::perform(
+            async move {
+                rfd::AsyncFileDialog::new()
+                    .add_filter("PDF", &["pdf"])
+                    .set_directory(directory)
+                    .set_file_name(format!("{stem}-signed.pdf"))
+                    .save_file()
+                    .await
+                    .map(|handle| handle.path().to_path_buf())
+            },
+            |path| Message::Sign(SignMsg::DestinationChosen(path)),
+        )
+    }
+
+    /// §31.1 steps 8–9: sign, then reopen and verify what was produced.
+    fn sign_execute(&mut self, destination: PathBuf) -> Task<Message> {
+        use crate::signing::{SignMsg, SignOutcome, SigningFlow};
+        use pulpit_render::sign::{SignRequest, SigningProfile};
+
+        let Some(SigningFlow::Confirm {
+            credential,
+            options,
+            ..
+        }) = self.signing.take()
+        else {
+            return Task::none();
+        };
+        let Some(document) = self.documents.active() else {
+            self.signing = Some(SigningFlow::Failed {
+                detail: "There is no document open to sign.".to_string(),
+            });
+            return Task::none();
+        };
+        let source = document.path.clone();
+        let Some(target) = options
+            .target
+            .as_ref()
+            .map(pulpit_render::sign::SignTarget::from)
+        else {
+            self.signing = Some(SigningFlow::Failed {
+                detail: "No signature field was selected.".to_string(),
+            });
+            return Task::none();
+        };
+        self.signing = Some(SigningFlow::Signing {
+            credential: credential.clone(),
+            options: options.clone(),
+            destination: destination.clone(),
+        });
+
+        let signing_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut id2 = [0u8; 16];
+        // §23: a random second element for the trailer's /ID. This crate
+        // never draws randomness inside `pulpit-render` (§22.3); the
+        // supervisor is where the RNG lives.
+        if getrandom::getrandom(&mut id2).is_err() {
+            // Fall back to a value derived from the signing time rather than
+            // failing the whole flow over an RNG that could not be reached:
+            // the ID only has to be unlikely to collide, not secret.
+            id2[..8].copy_from_slice(&signing_time.to_le_bytes());
+        }
+        let request = SignRequest {
+            profile: SigningProfile::AdbePkcs7Detached,
+            signing_time,
+            field: target,
+            reason: non_empty(&options.reason),
+            location: non_empty(&options.location),
+            contact: non_empty(&options.contact),
+            id2,
+            tight_size_estimates: false,
+        };
+        let destination_for_task = destination.clone();
+
+        Task::perform(
+            async move {
+                pulpit_render::sign::sign_document_file(
+                    &source,
+                    &destination_for_task,
+                    &credential,
+                    &request,
+                )
+                .map_err(|e| format!("{e}"))
+                .and_then(|report| {
+                    let bytes = std::fs::read(&destination_for_task).map_err(|e| {
+                        format!(
+                            "signed {} but could not reopen it to verify: {e}",
+                            destination_for_task.display()
+                        )
+                    })?;
+                    let verification = pulpit_render::verify::verify_signatures(&bytes)
+                        .map_err(|e| format!("signed the document but verification failed: {e}"))?;
+                    Ok(SignOutcome {
+                        report: std::sync::Arc::new(report),
+                        destination: destination_for_task.clone(),
+                        verification: std::sync::Arc::new(verification),
+                    })
+                })
+            },
+            |result| Message::Sign(SignMsg::Completed(result)),
+        )
     }
 
     /// Where the slide the presenter is annotating sits on which page.

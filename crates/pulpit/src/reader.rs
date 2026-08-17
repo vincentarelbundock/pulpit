@@ -553,7 +553,12 @@ impl ReaderSession {
             .iter()
             .filter_map(|field| {
                 let label = if field.kind == FieldKind::Signature {
-                    "signature — not supported"
+                    // §20.2: a signature field is not a form field pulpit can
+                    // fill, but it is not "unsupported" either — Sign (the
+                    // toolbar action) reaches it. This label is read-only
+                    // form-field text, not a signature status; the
+                    // signature panel is where status language lives.
+                    "signature field — sign from the toolbar, not by typing"
                 } else if field.file_select {
                     "file field — not fillable"
                 } else {
@@ -3090,6 +3095,9 @@ impl ReaderSession {
             | ReadCommand::Undo
             | ReadCommand::Redo
             | ReadCommand::SaveAs
+            // The Sign flow is the application's own dialog (§31.1); the
+            // reader session has nothing to lay out for it.
+            | ReadCommand::Sign
             // Back and forward are resolved against the application's
             // navigation history and arrive here, if at all, as the
             // `GoToPage` they turned into.
@@ -3601,7 +3609,10 @@ mod tests {
             .iter()
             .map(|field| field.label)
             .collect();
-        assert_eq!(second, vec!["signature — not supported"]);
+        assert_eq!(
+            second,
+            vec!["signature field — sign from the toolbar, not by typing"]
+        );
     }
 
     #[test]
