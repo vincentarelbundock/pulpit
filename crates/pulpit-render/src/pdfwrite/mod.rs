@@ -727,12 +727,7 @@ impl IncrementalWriter {
         writeln!(writer, "]").map_err(PdfWriteError::Io)?;
 
         if let Some((root_num, root_gen)) = self.trailer_dict.root {
-            writeln!(
-                writer,
-                "/Root {} {} R",
-                root_num, root_gen
-            )
-            .map_err(PdfWriteError::Io)?;
+            writeln!(writer, "/Root {} {} R", root_num, root_gen).map_err(PdfWriteError::Io)?;
         }
 
         writeln!(writer, "/Prev {}", self.prev_startxref).map_err(PdfWriteError::Io)?;
@@ -756,8 +751,7 @@ impl IncrementalWriter {
         }
 
         if let Some((info_num, info_gen)) = self.trailer_dict.info {
-            writeln!(writer, "/Info {} {} R", info_num, info_gen)
-                .map_err(PdfWriteError::Io)?;
+            writeln!(writer, "/Info {} {} R", info_num, info_gen).map_err(PdfWriteError::Io)?;
         }
 
         writeln!(writer, "/Length {}", xref_data.len()).map_err(PdfWriteError::Io)?;
@@ -1097,12 +1091,13 @@ mod tests {
 
     #[test]
     fn test_pdf_object_dictionary_ordered() {
-        let mut dict = Vec::new();
-        dict.push(("Type".to_string(), PdfObject::Name("Sig".to_string())));
-        dict.push((
-            "Contents".to_string(),
-            PdfObject::HexString(vec![0xAB, 0xCD]),
-        ));
+        let dict = vec![
+            ("Type".to_string(), PdfObject::Name("Sig".to_string())),
+            (
+                "Contents".to_string(),
+                PdfObject::HexString(vec![0xAB, 0xCD]),
+            ),
+        ];
 
         let obj = PdfObject::Dictionary(dict);
         let mut result = Vec::new();
@@ -1242,11 +1237,11 @@ mod tests {
         buf.extend_from_slice(b"xref\n");
         buf.extend_from_slice(b"0 1\n");
         buf.extend_from_slice(b"0000000000 65535 f \n");
-        buf.extend_from_slice(format!("{} 1\n", obj1_offset as u64).as_bytes());
+        buf.extend_from_slice(format!("{} 1\n", obj1_offset).as_bytes());
         buf.extend_from_slice(b"0000000000 00000 n \n");
-        buf.extend_from_slice(format!("{} 1\n", obj2_offset as u64).as_bytes());
+        buf.extend_from_slice(format!("{} 1\n", obj2_offset).as_bytes());
         buf.extend_from_slice(b"0000000000 00000 n \n");
-        buf.extend_from_slice(format!("{} 1\n", obj3_offset as u64).as_bytes());
+        buf.extend_from_slice(format!("{} 1\n", obj3_offset).as_bytes());
         buf.extend_from_slice(b"0000000000 00000 n \n");
 
         // trailer
