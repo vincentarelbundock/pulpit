@@ -137,7 +137,6 @@ pub enum Ask {
         /// dropped — which would take the typed characters off the screen.
         frame_width: u32,
         frame_height: u32,
-        expected_revision: DocumentRevision,
     },
 }
 
@@ -258,6 +257,20 @@ pub struct ReaderLink {
     /// Set when the worker is gone. The link is not restarted here: reopening
     /// is a decision about the journal, not about a channel (§11.5).
     lost: bool,
+    /// How many requests have been sent and not yet answered.
+    ///
+    /// One number rather than a flag per kind of request, because every [`Ask`]
+    /// is answered exactly once — [`handle`] returns one [`Told`] per ask, and
+    /// [`describe`] folds its several round trips into one answer too. So
+    /// "something is in flight" is arithmetic here rather than a list of
+    /// conditions somewhere else that a new kind of request can be forgotten
+    /// from; that omission is what once made typing in a form settle to the
+    /// slow tick between keystrokes.
+    ///
+    /// It cannot be forced to zero and it cannot latch: it is incremented only
+    /// where a send succeeded and decremented only where an answer was taken,
+    /// and when the worker is lost the count goes with the link.
+    outstanding: usize,
 }
 
 impl std::fmt::Debug for ReaderLink {
@@ -294,6 +307,7 @@ impl ReaderLink {
             told: told_receiver,
             source: source.to_path_buf(),
             lost: false,
+            outstanding: 0,
         })
     }
 
@@ -313,9 +327,17 @@ impl ReaderLink {
         }
         if self.asks.send(ask).is_err() {
             self.lost = true;
+            self.outstanding = 0;
             return false;
         }
+        self.outstanding += 1;
         true
+    }
+
+    /// Is the worker owed an answer? What [`crate::app::App::is_live`] asks
+    /// instead of enumerating every kind of request that might be out.
+    pub fn is_busy(&self) -> bool {
+        self.outstanding > 0
     }
 
     /// Everything the worker has said since the last time it was asked.
@@ -327,14 +349,20 @@ impl ReaderLink {
         loop {
             match self.told.try_recv() {
                 Ok(told) => {
+                    // One answer per ask, so one answer is one request no
+                    // longer outstanding.
+                    self.outstanding = self.outstanding.saturating_sub(1);
                     if matches!(&told, Told::Failed { fatal: true, .. }) {
                         self.lost = true;
+                        self.outstanding = 0;
                     }
                     answers.push(told);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    // Nothing that was out will ever be answered now.
                     self.lost = true;
+                    self.outstanding = 0;
                     break;
                 }
             }
@@ -402,13 +430,11 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             height,
             frame_width,
             frame_height,
-            expected_revision,
         } => vec![match session.request(DocumentRequest::Render(
             pulpit_render::document::protocol::DocumentRenderRequest {
                 page,
                 width,
                 height,
-                expected_revision,
                 region,
                 full_width: frame_width,
                 full_height: frame_height,
@@ -662,6 +688,68 @@ mod tests {
                 assert!(!link.ask(Ask::Describe { pages: 0 }) || link.collect().is_empty());
             }
         }
+    }
+
+    /// A link with nobody on the other end, so the counting can be exercised
+    /// without a worker: the channels are the whole mechanism.
+    fn detached_link() -> (ReaderLink, Sender<Told>, Receiver<Ask>) {
+        let (ask_sender, ask_receiver) = std::sync::mpsc::channel::<Ask>();
+        let (told_sender, told_receiver) = std::sync::mpsc::channel::<Told>();
+        (
+            ReaderLink {
+                asks: ask_sender,
+                told: told_receiver,
+                source: PathBuf::from("nowhere.pdf"),
+                lost: false,
+                outstanding: 0,
+            },
+            told_sender,
+            ask_receiver,
+        )
+    }
+
+    #[test]
+    fn the_link_is_busy_until_every_ask_is_answered() {
+        let (mut link, told, _asks) = detached_link();
+        assert!(!link.is_busy());
+        assert!(link.ask(Ask::ListFields));
+        assert!(link.ask(Ask::ListFields));
+        assert!(link.is_busy());
+
+        told.send(Told::Fields(Vec::new())).unwrap();
+        assert_eq!(link.collect().len(), 1);
+        // One answered, one still owed.
+        assert!(link.is_busy());
+
+        told.send(Told::Fields(Vec::new())).unwrap();
+        assert_eq!(link.collect().len(), 1);
+        assert!(!link.is_busy());
+    }
+
+    #[test]
+    fn a_lost_worker_owes_nothing() {
+        let (mut link, told, asks) = detached_link();
+        assert!(link.ask(Ask::ListFields));
+        told.send(Told::Failed {
+            message: "gone".into(),
+            fatal: true,
+        })
+        .unwrap();
+        assert_eq!(link.collect().len(), 1);
+        assert!(link.is_lost());
+        // The count died with the link: nothing is owed by a worker that is
+        // not there, and a count left standing would hold the fast tick for
+        // the rest of the session.
+        assert!(!link.is_busy());
+
+        // …and a send with nobody listening is not a request in flight.
+        drop(asks);
+        drop(told);
+        let (mut link, told, asks) = detached_link();
+        drop(asks);
+        drop(told);
+        assert!(!link.ask(Ask::ListFields));
+        assert!(!link.is_busy());
     }
 
     #[test]

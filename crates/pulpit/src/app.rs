@@ -490,6 +490,11 @@ struct ReaderPatch {
     /// patch down: the frame was drawn without the typed characters, and
     /// removing the patch makes them vanish until the next keystroke.
     uncommitted: bool,
+    /// The full-page frame size this crop was rendered against — see
+    /// [`PendingReaderPatch::frame_size`]. A zoom or a resize while a field is
+    /// open leaves the rectangle stretched, and the page asks again at the new
+    /// size rather than living with it.
+    frame_size: (u32, u32),
 }
 
 /// A patch a page wants and has not been able to ask for yet.
@@ -499,10 +504,6 @@ struct WaitingReaderPatch {
     /// [`App::reader_patch_scope`] so the request that finally goes out asks
     /// for the same rectangle it would have asked for at the time.
     dirty: pulpit_core::page::PageRect,
-    /// The revision the *newest* deferred event expected. An older one's is of
-    /// no use: one render answers all of them, and it draws what the document
-    /// holds once they have all been applied.
-    revision: pulpit_render::document::DocumentRevision,
     /// Whether the newest deferred event left form state uncommitted.
     ///
     /// The newest wins, not the strongest. One render answers the whole run, so
@@ -525,6 +526,14 @@ struct PendingReaderPatch {
     /// one request out at a time, so in practice the queue holds one — the
     /// order is still what matches an answer to the request that meant it.
     uncommitted: bool,
+    /// The full-page frame size the crop was rendered against.
+    ///
+    /// Kept so the page can notice that it has since been zoomed or resized:
+    /// the patch that lands is scaled into place rather than dropped, which is
+    /// slightly soft, and the cure is to ask again at the size the page is now
+    /// drawn at. Nothing is lost while that round trip is out — the soft
+    /// rectangle is on screen the whole time.
+    frame_size: (u32, u32),
 }
 
 /// Where the reader's pages are rendered from.
@@ -1157,11 +1166,17 @@ pub struct App {
     /// the whole backlog: the highlighter "eventually worked". With it there
     /// is one query in flight and one waiting, and the waiting one is always
     /// the newest.
-    selection_query_in_flight: bool,
-    selection_query_waiting: Option<(
+    selection_query: crate::coalesce::Coalesced<(
         pulpit_core::page::PageIndex,
         pulpit_render::document::TextSelection,
     )>,
+    /// The language dates are written in, from the environment at startup.
+    ///
+    /// Acrobat formats a date field in the viewer's locale, so the same file
+    /// reads "16 août 2026" to one person and "16 August 2026" to another.
+    /// Read once: it cannot change while the application is running, and
+    /// reading it per keystroke would be a syscall in the typing path.
+    date_language: crate::datefield::Locale,
     /// The same guard, for the pointer moving over a form (§8.6).
     ///
     /// PDFium wants `FORM_OnMouseMove` so a button under the pointer draws its
@@ -1170,20 +1185,26 @@ pub struct App {
     /// renders, so at most one move is in flight and at most one waits — and
     /// the one that waits is always the newest, because an intermediate
     /// position the pointer has already left is not worth drawing.
-    /// The language dates are written in, from the environment at startup.
+    form_move:
+        crate::coalesce::Coalesced<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
+    /// How many form events that *may* commit a value are out with no answer.
     ///
-    /// Acrobat formats a date field in the viewer's locale, so the same file
-    /// reads "16 août 2026" to one person and "16 August 2026" to another.
-    /// Read once: it cannot change while the application is running, and
-    /// reading it per keystroke would be a syscall in the typing path.
-    date_language: crate::datefield::Locale,
-    form_move_in_flight: bool,
-    form_move_waiting: Option<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
-    /// How many form events have been sent and not yet answered. Counted, not
-    /// flagged, because a click is two events and a commit follows a keystroke;
-    /// and consulted by [`App::is_live`], because the answers are drained from
-    /// the tick.
-    form_events_in_flight: usize,
+    /// A form event's answer says whether it committed; nothing said before it
+    /// can. So an annotation posted while one of these is in flight cannot
+    /// know what revision it will meet, and [`App::expected_revision`] would
+    /// name one revision too few — a spurious conflict, and the mark is
+    /// refused. Rather than guess, the transaction waits here until the form
+    /// has answered; the wait is one round trip and only ever happens when a
+    /// mark is drawn in the same instant a field is being typed into.
+    ///
+    /// One entry per form event in flight, oldest first, saying whether that
+    /// event could commit. A queue rather than a count because the answers
+    /// come back over one link in the order they were asked for, so an answer
+    /// retires the oldest entry and nothing has to guess which.
+    form_events_in_flight: std::collections::VecDeque<bool>,
+    /// Transactions held back for exactly that reason, in the order they were
+    /// made. Sent from the pump as soon as the form is quiet.
+    deferred_commits: Vec<pulpit_render::document::DocumentTransaction>,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -1548,12 +1569,11 @@ impl App {
             reader_crop: pulpit_core::notes::Region::FULL,
             reader_link: None,
             reader_pending: std::collections::VecDeque::new(),
-            selection_query_in_flight: false,
-            selection_query_waiting: None,
+            selection_query: Default::default(),
             date_language: crate::datefield::Locale::from_environment(),
-            form_move_in_flight: false,
-            form_move_waiting: None,
-            form_events_in_flight: 0,
+            form_move: Default::default(),
+            form_events_in_flight: std::collections::VecDeque::new(),
+            deferred_commits: Vec::new(),
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
@@ -1702,26 +1722,25 @@ impl App {
             // polled from the tick, so at the settled tick a placed mark waits
             // a quarter of a second per step for no reason other than the
             // clock — which is what "it takes a long time to appear" is.
-            || !self.reader_pending.is_empty()
-            // A text selection being swept out. The answer that says where
-            // the text is comes back on a round trip drained from the tick,
-            // so at the settled tick the quads follow the hand at four frames
-            // a second — which is what "selecting text lags" is.
-            || self.selection_query_in_flight
-            || self.selection_query_waiting.is_some()
-            // A keystroke on its way to the form: the answer and the partial
-            // repaint that carries the typed character are both drained from
-            // the tick, so at the settled tick typing renders at four
-            // characters a second — which is what "the form is slow to type
-            // in" is.
-            || self.form_events_in_flight > 0
-            || !self.reader_patch_pending.is_empty()
+            //
+            // Asked of the link rather than enumerated here: every kind of
+            // request — a mutation, a selection query, a keystroke, a partial
+            // repaint, a pointer move over a form — is answered on the same
+            // link, and the link counts what it is owed. A list of conditions
+            // is a list a new kind of request gets left out of, and the
+            // symptom of being left out is a keystroke answered a quarter of
+            // a second late: "the form is slow to type in".
+            || self
+                .reader_link
+                .as_ref()
+                .is_some_and(crate::reader_link::ReaderLink::is_busy)
+            // …and what is held back rather than sent. Nothing is owed for
+            // these yet, so the link does not know about them; the tick that
+            // sends them has to keep running.
+            || self.selection_query.is_waiting()
+            || self.form_move.is_waiting()
             || !self.reader_patch_waiting.is_empty()
-            // The pointer over a form, for the same reason the sweep of a text
-            // selection is on this list: one round trip per position, drained
-            // from the tick.
-            || self.form_move_in_flight
-            || self.form_move_waiting.is_some()
+            || !self.deferred_commits.is_empty()
             // An edit the page cannot show yet. An edit the previews *do*
             // show is not on this list: it is already on screen, and its
             // snapshot is two seconds away, which the settled tick notices
@@ -2385,7 +2404,7 @@ impl App {
                 if text.is_empty() {
                     return Task::none();
                 }
-                self.ask_focused_form_event(
+                self.ask_form_key(
                     pulpit_render::document::protocol::FormInputEvent::ReplaceSelection { text },
                 );
                 Task::none()
@@ -4915,6 +4934,11 @@ impl App {
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_journal = None;
+        // Everything the last document left half-done. A reload used to leave
+        // the pointer-move guard latched — the form then stopped following the
+        // pointer for the rest of the session — and a mutation record standing,
+        // which the *new* document's first answer popped and was read as.
+        self.forget_per_document_edit_state();
 
         // Anything the last run left unsaved for *this* file, before a new
         // journal replaces it. The offer is inert: nothing is applied without
@@ -4992,6 +5016,45 @@ impl App {
         }
     }
 
+    /// The worker is gone: nothing in flight will ever be answered.
+    ///
+    /// One routine for both fatal answers — a refused mutation and a generic
+    /// failure — because "the link died" is one fact and the state it
+    /// invalidates is the same either way. The two paths used to clear
+    /// different halves of it, and the half `EditFailed` left standing was the
+    /// half that stops the form following the pointer.
+    fn reader_link_died(&mut self) {
+        self.reader.closed();
+        self.reset_reader_rendering();
+        self.reader_link = None;
+        self.forget_per_document_edit_state();
+    }
+
+    /// Everything that describes edits to *this* document and means nothing
+    /// once the document or the worker holding it is gone.
+    ///
+    /// One place, because these were cleared in three and never the same
+    /// three: a reload left the move guard latched shut, and a `reader_pending`
+    /// entry that outlived its document was popped by the next document's
+    /// first answer and read as that edit's record.
+    fn forget_per_document_edit_state(&mut self) {
+        self.reader_patches.clear();
+        self.reader_patch_scope.clear();
+        self.reader_patch_pending.clear();
+        self.reader_patch_waiting.clear();
+        self.reader_pending.clear();
+        self.form_move.abandon();
+        self.selection_query.abandon();
+        self.form_events_in_flight.clear();
+        self.deferred_commits.clear();
+        self.form_clipboard = None;
+        self.form_clipboard_text = None;
+        self.pending_form_goto = None;
+        self.save_waits_for_form_commit = false;
+        // A new document gets to explain its own refusals once.
+        self.form_refusal_told = false;
+    }
+
     /// Collect whatever the document worker has said, and ask for whatever the
     /// reader now needs drawn.
     ///
@@ -5021,16 +5084,10 @@ impl App {
                     self.reader_recovery = self.pending_reader_recovery.take();
                     // A different document: page numbers mean something else
                     // now, and a repaint of page three of the last one is not
-                    // a repaint of anything.
-                    self.reader_patches.clear();
-                    self.reader_patch_scope.clear();
-                    self.reader_patch_pending.clear();
-                    self.reader_patch_waiting.clear();
+                    // a repaint of anything. Answers owed by the document that
+                    // is gone are owed by nobody.
+                    self.forget_per_document_edit_state();
                     self.wash_cache.borrow_mut().clear();
-                    // Answers owed by the document that is gone are owed by
-                    // nobody. A count left standing here would hold the fast
-                    // tick for the rest of the session.
-                    self.form_events_in_flight = 0;
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
                     // What the form contains, for the navigator. Asked only
@@ -5066,8 +5123,6 @@ impl App {
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
                     }
-                    // A new document gets to explain its own refusals once.
-                    self.form_refusal_told = false;
                 }
                 crate::reader_link::Told::Found { generation, chunk } => {
                     // Stale chunks land nowhere: the model compares the
@@ -5161,7 +5216,9 @@ impl App {
                     self.journal(entry);
                 }
                 crate::reader_link::Told::FormRefused { refusal, moved } => {
-                    self.form_events_in_flight = self.form_events_in_flight.saturating_sub(1);
+                    // Nothing was committed, so the mutation this event might
+                    // have been in front of can go.
+                    self.form_event_answered();
                     // The move slot is released by a move and by nothing else
                     // (§8.6) — see `Told::FormChanged` below.
                     if moved {
@@ -5188,7 +5245,7 @@ impl App {
                     result,
                     moved,
                 } => {
-                    self.form_events_in_flight = self.form_events_in_flight.saturating_sub(1);
+                    self.form_event_answered();
                     // The move slot is released by a move and by nothing else:
                     // a key or a clipboard answer arriving while a move is
                     // still out says nothing about that move (§8.6).
@@ -5312,13 +5369,7 @@ impl App {
                     // picture of a document that does not exist.
                     self.reader.commit_refused();
                     if fatal {
-                        self.reader.closed();
-                        self.reset_reader_rendering();
-                        self.reader_link = None;
-                        // Nothing in flight will ever be answered now.
-                        self.reader_pending.clear();
-                        self.reader_patch_pending.clear();
-                        self.reader_patch_waiting.clear();
+                        self.reader_link_died();
                         return;
                     }
                 }
@@ -5336,28 +5387,28 @@ impl App {
                     // …and if it answered a commit, the mark the UI is still
                     // drawing for it is a mark the document will never hold.
                     self.reader.commit_refused();
-                    // A selection query that failed is answered too, as far
-                    // as the in-flight guard is concerned.
-                    self.selection_query_in_flight = false;
-                    self.selection_query_waiting = None;
-                    // Likewise a form event: a count of answers that will
-                    // never come would hold the fast tick for the rest of the
-                    // session, and a latched move guard would stop the form
-                    // following the pointer.
-                    self.form_events_in_flight = 0;
-                    self.form_move_in_flight = false;
-                    self.form_move_waiting = None;
+                    // A generic failure does not say which request it
+                    // answered, so the two slots that would *latch* are
+                    // released: a selection query that never answers stops the
+                    // highlighter, and a latched move guard stops the form
+                    // following the pointer. Releasing one that was not this
+                    // answer's costs at most one extra request; not releasing
+                    // one that was costs the feature for the session.
+                    self.selection_query.abandon();
+                    self.form_move.abandon();
+                    // Nothing is retired from the form queue here, and that is
+                    // deliberate: a form event that the worker would not take
+                    // is answered by `FormRefused`, and the only way one ends
+                    // up here is a protocol confusion or a lost worker, both
+                    // of which are fatal and clear the queue below. Popping an
+                    // entry that some *other* request's failure answered would
+                    // let a mutation go out in front of a commit still in
+                    // flight, which is the conflict this queue exists to stop.
                     // If the refusal answered a snapshot request, nothing
                     // will confirm it either.
                     self.reader_render.snapshot_in_flight = None;
                     if fatal {
-                        self.reader.closed();
-                        self.reset_reader_rendering();
-                        self.reader_link = None;
-                        // Nothing in flight will ever be answered now.
-                        self.reader_pending.clear();
-                        self.reader_patch_pending.clear();
-                        self.reader_patch_waiting.clear();
+                        self.reader_link_died();
                         return;
                     }
                 }
@@ -5370,6 +5421,16 @@ impl App {
         // how a layout loop starts.
         if let Some(cell) = self.page_surface_size() {
             self.reader.set_cell(cell.0, cell.1);
+        }
+        self.reask_resized_patches();
+
+        // Mutations held back while a form event that might commit was out.
+        // The form has answered by now or it has not; if it has not, they wait
+        // one more tick rather than being sent against a revision nobody knows.
+        if !self.deferred_commits.is_empty() && !self.a_form_commit_may_be_in_flight() {
+            for transaction in std::mem::take(&mut self.deferred_commits) {
+                self.commit_to_document(transaction);
+            }
         }
 
         // Whatever is on screen and out of date. Bounded by the window: a
@@ -5688,7 +5749,7 @@ impl App {
         let [page] = applied.dirty_pages[..] else {
             return;
         };
-        self.ask_patch_of(page, dirty, applied.document_revision, false);
+        self.ask_patch_of(page, dirty, false);
     }
 
     /// Ask for one rectangle of one page, at the revision it should contain.
@@ -5707,9 +5768,17 @@ impl App {
         &mut self,
         page: pulpit_core::page::PageIndex,
         dirty: pulpit_core::page::PageRect,
-        revision: pulpit_render::document::DocumentRevision,
         uncommitted: bool,
     ) {
+        // Cover everything patched since the frame last caught up, not only
+        // what this event dirtied. The next patch will *replace* the one on
+        // screen, and a combo box's open list — drawn into the page by PDFium,
+        // then invalidated two rows at a time as the pointer moves — must not
+        // be narrowed back down to two rows of popup over a frame that has no
+        // popup at all. The scope resets when a full frame takes the page's
+        // patch down. Grown before anything below can return, so a request
+        // that cannot go out now is still covered by the one that does.
+        let dirty = self.grow_patch_scope(page, dirty);
         let Some((surface_width, _)) = self.page_surface_size() else {
             return;
         };
@@ -5729,39 +5798,10 @@ impl App {
         // lost — the scope only grows, so the request that goes out when the
         // outstanding one lands covers every rectangle it stood in for.
         if self.reader_patch_pending.contains_key(&page) {
-            let grown = match self.reader_patch_scope.entry(page) {
-                std::collections::hash_map::Entry::Occupied(mut scope) => {
-                    let grown = scope.get().union(&dirty);
-                    scope.insert(grown);
-                    grown
-                }
-                std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
-            };
-            self.reader_patch_waiting.insert(
-                page,
-                WaitingReaderPatch {
-                    dirty: grown,
-                    revision,
-                    uncommitted,
-                },
-            );
+            self.reader_patch_waiting
+                .insert(page, WaitingReaderPatch { dirty, uncommitted });
             return;
         }
-        // Cover everything patched since the frame last caught up, not only
-        // what this event dirtied. The next patch will *replace* the one on
-        // screen, and a combo box's open list — drawn into the page by PDFium,
-        // then invalidated two rows at a time as the pointer moves — must not
-        // be narrowed back down to two rows of popup over a frame that has no
-        // popup at all. The scope resets when a full frame takes the page's
-        // patch down.
-        let dirty = match self.reader_patch_scope.entry(page) {
-            std::collections::hash_map::Entry::Occupied(mut scope) => {
-                let grown = scope.get().union(&dirty);
-                scope.insert(grown);
-                grown
-            }
-            std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
-        };
         // A margin, in page points, so the edge of a mark's antialiasing is
         // inside the patch rather than split down the middle of a pixel by it.
         const MARGIN: f32 = 2.0;
@@ -5778,48 +5818,122 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        // One queued entry per request, so an answer is read with the form
-        // state *its own* request meant rather than a later one's. The queue
-        // holds a single entry while a page keeps one request out at a time;
-        // it is a queue because the matching rule is the order they were asked
-        // in, not the count.
-        self.reader_patch_pending
-            .entry(page)
-            .or_default()
-            .push_back(PendingReaderPatch { uncommitted });
-        if let Some(link) = self.reader_link.as_mut() {
-            link.ask(crate::reader_link::Ask::RenderPatch {
+        let sent = match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::RenderPatch {
                 page,
                 region,
                 width,
                 height,
                 frame_width: key.width,
                 frame_height: key.height,
-                expected_revision: revision,
-            });
+            }),
+            None => false,
+        };
+        // Outstanding only if it actually went out. Marking it before the send
+        // latched the page shut when there was no link to send on: the entry
+        // was never answered, every later patch for that page was held back
+        // behind it for ever, and the fast tick was pinned waiting for it.
+        //
+        // One queued entry per request, so an answer is read with the form
+        // state *its own* request meant rather than a later one's. The queue
+        // holds a single entry while a page keeps one request out at a time;
+        // it is a queue because the matching rule is the order they were asked
+        // in, not the count.
+        if sent {
+            self.reader_patch_pending
+                .entry(page)
+                .or_default()
+                .push_back(PendingReaderPatch {
+                    uncommitted,
+                    frame_size: (key.width, key.height),
+                });
+        }
+    }
+
+    /// Ask again for any patch that was drawn against a frame size the page
+    /// has since left.
+    ///
+    /// Zooming or resizing mid-edit used to take the typed characters off the
+    /// screen: the request was sized from the cell and the answer was dropped
+    /// when it did not match what was drawn. Nothing is dropped now — a patch
+    /// is placed by its region and scaled — so the failure is a soft
+    /// rectangle instead, and this is what ends it. The rectangle stays on
+    /// screen for the round trip; only its sharpness is at stake.
+    fn reask_resized_patches(&mut self) {
+        let Some((surface_width, _)) = self.page_surface_size() else {
+            return;
+        };
+        let stale: Vec<(pulpit_core::page::PageIndex, bool)> = self
+            .reader_patches
+            .iter()
+            .filter(|(page, patch)| {
+                self.ready_reader_frame_key(**page, surface_width)
+                    .is_some_and(|key| (key.width, key.height) != patch.frame_size)
+            })
+            .map(|(page, patch)| (*page, patch.uncommitted))
+            .collect();
+        for (page, uncommitted) in stale {
+            // The scope is what the page is showing, which is exactly what has
+            // to be redrawn at the new size.
+            let Some(dirty) = self.reader_patch_scope.get(&page).copied() else {
+                continue;
+            };
+            self.ask_patch_of(page, dirty, uncommitted);
+        }
+    }
+
+    /// Everything patched on a page since its frame last caught up, with
+    /// `dirty` added to it. Monotone: one rectangle replaces the last one
+    /// drawn, so it must keep covering what that one covered.
+    fn grow_patch_scope(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        dirty: pulpit_core::page::PageRect,
+    ) -> pulpit_core::page::PageRect {
+        match self.reader_patch_scope.entry(page) {
+            std::collections::hash_map::Entry::Occupied(mut scope) => {
+                let grown = scope.get().union(&dirty);
+                scope.insert(grown);
+                grown
+            }
+            std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
         }
     }
 
     /// Send one event to the document's own form and remember an answer is
     /// owed.
     ///
-    /// The one route out for form events, so the count [`App::is_live`] reads
-    /// cannot drift from what was actually sent. Returns whether the worker
-    /// took it, so a caller can tell "the form has this" from "there was no
-    /// form to take it".
+    /// The one route out for form events, so what is owed for them is counted
+    /// where it is sent. Returns whether the worker took it, so a caller can
+    /// tell "the form has this" from "there was no form to take it".
     fn ask_form_event_on(
         &mut self,
         page: pulpit_core::page::PageIndex,
         event: pulpit_render::document::protocol::FormInputEvent,
     ) -> bool {
+        // Whether this one *could* commit is known before it is sent; whether
+        // it *did* is only known from the answer. See
+        // [`App::form_commits_possible_in_flight`].
+        let may_commit = event.can_change_the_document();
         let sent = match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
             None => false,
         };
         if sent {
-            self.form_events_in_flight += 1;
+            self.form_events_in_flight.push_back(may_commit);
         }
         sent
+    }
+
+    /// One form event answered, whatever it answered with.
+    fn form_event_answered(&mut self) {
+        self.form_events_in_flight.pop_front();
+    }
+
+    /// Could a form event still in flight move the revision? A mutation posted
+    /// while one can does not know what revision it will meet.
+    fn a_form_commit_may_be_in_flight(&self) -> bool {
+        self.form_events_in_flight.iter().any(|may| *may)
     }
 
     /// Follow the pointer over a form, at the rate the worker can answer.
@@ -5836,19 +5950,17 @@ impl App {
         let Some((page, at)) = self.reader.cursor_position() else {
             return;
         };
-        if self.form_move_in_flight {
-            self.form_move_waiting = Some((page, at));
+        let Some((page, at)) = self.form_move.offer((page, at)) else {
             return;
-        }
+        };
         if self.ask_form_event_on(page, FormInputEvent::PointerMove { at }) {
-            self.form_move_in_flight = true;
+            self.form_move.sent();
         }
     }
 
     /// A move was answered: the newest waiting position, if any, goes out now.
     fn form_move_answered(&mut self) {
-        self.form_move_in_flight = false;
-        let Some((page, at)) = self.form_move_waiting.take() else {
+        let Some((page, at)) = self.form_move.answered() else {
             return;
         };
         if !self.reader.press_belongs_to_the_form() {
@@ -5858,7 +5970,7 @@ impl App {
             page,
             pulpit_render::document::protocol::FormInputEvent::PointerMove { at },
         ) {
-            self.form_move_in_flight = true;
+            self.form_move.sent();
         }
     }
 
@@ -6104,7 +6216,7 @@ impl App {
             // Named before the event goes out, because the answer comes back
             // a turn later and the caret is free to move in between.
             let focus = self.form_focus();
-            if !self.ask_focused_form_event(FormInputEvent::CopySelection) {
+            if !self.ask_form_key(FormInputEvent::CopySelection) {
                 // Nothing will answer, so nothing is left waiting for one.
                 return None;
             }
@@ -6124,7 +6236,7 @@ impl App {
             );
         }
         if key.eq_ignore_ascii_case("a") {
-            self.ask_focused_form_event(FormInputEvent::SelectAll);
+            self.ask_form_key(FormInputEvent::SelectAll);
             return Some(Task::none());
         }
         None
@@ -6148,17 +6260,12 @@ impl App {
         })
     }
 
-    fn ask_focused_form_event(
-        &mut self,
-        event: pulpit_render::document::protocol::FormInputEvent,
-    ) -> bool {
-        // One route, now that every focus-owned event takes it: see
-        // [`Self::ask_form_key`], which prefers the focused widget's page and
-        // falls back to the pointer's only when nothing is focused.
-        self.ask_form_key(event)
-    }
-
     /// Send one keyboard event to the field that holds the caret.
+    ///
+    /// The one route for every focus-owned event — a key, a copy, a select-all
+    /// — because they all answer the same question about where the event
+    /// belongs: the focused widget's page, and the pointer's only when nothing
+    /// is focused.
     ///
     /// Only reached when the worker has said a field has focus, so an ordinary
     /// reader of an ordinary deck never takes this path and every letter still
@@ -6324,7 +6431,7 @@ impl App {
                         // The other half of a cut: what was taken is removed
                         // through the engine's own replacement, in one edit,
                         // rather than by a run of synthesised backspaces.
-                        self.ask_focused_form_event(
+                        self.ask_form_key(
                             pulpit_render::document::protocol::FormInputEvent::ReplaceSelection {
                                 text: String::new(),
                             },
@@ -6384,11 +6491,6 @@ impl App {
             self.host_request_needs_the_reader(request);
         }
 
-        let revision = result
-            .committed
-            .as_ref()
-            .map(|committed| committed.revision)
-            .unwrap_or_else(|| self.reader.revision());
         if let Some(committed) = &result.committed {
             // The same bookkeeping an applied transaction gets: the document
             // has moved, nothing on screen or on disk reflects it yet, and the
@@ -6425,7 +6527,7 @@ impl App {
             // rule: uncommitted means an interaction is *being held open* —
             // a caret in a text field, or an open choice list.
             let editing = result.text_focus || editing_choice;
-            self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
+            self.ask_patch_of(page, dirty, result.committed.is_none() && editing);
         }
 
         // A Save As is waiting on this answer. Everything above has run — the
@@ -6482,7 +6584,7 @@ impl App {
         let Some(waiting) = self.reader_patch_waiting.remove(&page) else {
             return;
         };
-        self.ask_patch_of(page, waiting.dirty, waiting.revision, waiting.uncommitted);
+        self.ask_patch_of(page, waiting.dirty, waiting.uncommitted);
     }
 
     /// Hold a partial repaint over the page's frame, if the page can take it.
@@ -6495,11 +6597,29 @@ impl App {
             return;
         }
         // Only usable if the previews on the page can be reconciled with it.
-        if !self
+        match self
             .reader
             .patch_landed(frame.page, frame.region, frame.revision)
         {
-            return;
+            crate::reader::PatchOutcome::Taken => {}
+            crate::reader::PatchOutcome::Unplaceable => return,
+            // A retained preview straddles the rectangle: half of it would be
+            // drawn twice and half not at all, so this crop is unusable. The
+            // cure is a bigger crop rather than giving up — with a monotone
+            // scope, a page that refused once would refuse every patch for the
+            // rest of the session, and the form would stop showing typing.
+            //
+            // Only when the scope actually grew, which is what makes this
+            // terminate: a preview the patch cannot be made to contain (one
+            // that falls outside the page) grows nothing and is asked for once.
+            crate::reader::PatchOutcome::Straddled { preview } => {
+                let before = self.reader_patch_scope.get(&frame.page).copied();
+                let grown = self.grow_patch_scope(frame.page, preview);
+                if before != Some(grown) {
+                    self.ask_patch_of(frame.page, grown, asked.uncommitted);
+                }
+                return;
+            }
         }
         // The crop becomes its own texture here, once, rather than being
         // memcpy'd into a clone of the page every time the page is drawn.
@@ -6513,6 +6633,7 @@ impl App {
                 image,
                 revision: frame.revision,
                 uncommitted: asked.uncommitted,
+                frame_size: asked.frame_size,
             },
         );
     }
@@ -6764,9 +6885,9 @@ impl App {
                 self.reader.focused_field_kind(),
                 Some(FieldKind::Checkbox | FieldKind::RadioGroup)
             ) {
-                self.ask_focused_form_event(
-                    pulpit_render::document::protocol::FormInputEvent::Char { character: ' ' },
-                );
+                self.ask_form_key(pulpit_render::document::protocol::FormInputEvent::Char {
+                    character: ' ',
+                });
                 return Some(Task::none());
             }
         }
@@ -8565,19 +8686,21 @@ impl App {
         selection: pulpit_render::document::TextSelection,
         finalising: bool,
     ) {
-        if finalising {
-            self.selection_query_waiting = None;
-        } else if self.selection_query_in_flight {
-            self.selection_query_waiting = Some((page, selection));
+        let offered = if finalising {
+            Some(self.selection_query.offer_now((page, selection)))
+        } else {
+            self.selection_query.offer((page, selection))
+        };
+        let Some((page, selection)) = offered else {
             return;
-        }
+        };
         if let Some(link) = self.reader_link.as_mut() {
             if link.ask(crate::reader_link::Ask::SelectText {
                 page,
                 selection,
                 finalising,
             }) {
-                self.selection_query_in_flight = true;
+                self.selection_query.sent();
             }
         }
     }
@@ -8585,8 +8708,7 @@ impl App {
     /// A selection query was answered (or will never be): the next waiting
     /// sample, if any, goes out now.
     fn selection_query_answered(&mut self) {
-        self.selection_query_in_flight = false;
-        if let Some((page, selection)) = self.selection_query_waiting.take() {
+        if let Some((page, selection)) = self.selection_query.answered() {
             self.ask_select_text(page, selection, false);
         }
     }
@@ -8865,6 +8987,16 @@ impl App {
     ) -> bool {
         if transaction.is_empty() {
             return false;
+        }
+        // A form event in flight may commit a value, and a commit is a
+        // revision. Whether it will is only known from its answer, so a
+        // mutation sent now would name a revision it cannot know — and be
+        // refused for a conflict that is nobody's mistake. It waits for the
+        // form to answer instead, which is one round trip and only ever
+        // happens when a mark is made in the same instant a field is edited.
+        if self.a_form_commit_may_be_in_flight() {
+            self.deferred_commits.push(transaction);
+            return true;
         }
         let expected = self.expected_revision();
         // Keep drawing what this commit creates until a frame containing it
@@ -10440,17 +10572,10 @@ impl App {
             if let Some(patch) = &drawn.patch {
                 composites.push(patch.image.clone());
             }
-            // A composite: hold it in the base frame's place. Holding both
-            // would grow this window's atlas by a whole extra page for a
-            // picture nothing draws. An unwashed page draws its base frame,
-            // which is named by key exactly as before.
-            if key
-                .and_then(|key| self.handles.get(&key))
-                .is_none_or(|base| base.id() != drawn.image.id())
-            {
-                composites.push(drawn.image);
-            } else {
-                keys.push(key);
+            let base = key.and_then(|key| self.handles.get(&key));
+            match page_residency(key, base, &drawn.image) {
+                PageResidency::Composite(image) => composites.push(image),
+                PageResidency::Base(key) => keys.push(key),
             }
         }
         self.wanted_frames(composites, keys, ahead)
@@ -11768,6 +11893,64 @@ mod form_routing_tests {
 }
 
 #[cfg(test)]
+mod residency_tests {
+    use super::{page_residency, FrameKey, PageResidency};
+    use pulpit_core::RenderGeneration;
+    use pulpit_render::cache::FrameKind;
+    use pulpit_render::protocol::Quality;
+
+    fn handle(fill: u8) -> iced::widget::image::Handle {
+        iced::widget::image::Handle::from_rgba(1, 1, vec![fill, fill, fill, 255])
+    }
+
+    fn key() -> FrameKey {
+        FrameKey {
+            generation: RenderGeneration(1),
+            slide: 0,
+            kind: FrameKind::Page,
+            quality: Quality::Refined,
+            width: 100,
+            height: 130,
+        }
+    }
+
+    #[test]
+    fn a_page_drawing_its_own_frame_is_kept_resident_by_key() {
+        let base = handle(1);
+        let residency = page_residency(Some(key()), Some(&base), &base.clone());
+        assert!(matches!(residency, PageResidency::Base(Some(_))));
+    }
+
+    #[test]
+    fn a_washed_page_is_kept_resident_as_the_picture_that_is_drawn() {
+        // The page draws a composite — its frame with a retained wash
+        // multiplied in — which has no frame key. Naming the key would keep
+        // the picture nothing draws resident and leave the one on screen to
+        // be uploaded mid-pass.
+        let base = handle(1);
+        let composite = handle(2);
+        let PageResidency::Composite(drawn) = page_residency(Some(key()), Some(&base), &composite)
+        else {
+            panic!("a composite is not named by the base frame's key")
+        };
+        assert_eq!(drawn.id(), composite.id());
+    }
+
+    #[test]
+    fn a_page_whose_frame_this_window_has_no_handle_for_names_the_picture() {
+        let drawn = handle(3);
+        assert!(matches!(
+            page_residency(Some(key()), None, &drawn),
+            PageResidency::Composite(_)
+        ));
+        assert!(matches!(
+            page_residency(None, None, &drawn),
+            PageResidency::Composite(_)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod save_review_tests {
     use super::SaveReview;
 
@@ -12074,6 +12257,37 @@ fn stand_in_note(stand_in: Option<Duration>) -> String {
 /// would sharpen in front of the room for no reason.
 fn wants_stand_in(holding: Option<FrameKey>, wanted_slide: usize) -> bool {
     holding.is_some_and(|key| key.slide != wanted_slide)
+}
+
+/// How one reader page is kept resident: by its frame key, or as a picture.
+#[derive(Debug)]
+enum PageResidency {
+    /// What is drawn is the frame under this key, so naming the key is enough.
+    Base(Option<FrameKey>),
+    /// What is drawn is a picture with no key of its own — a frame with a
+    /// retained wash multiplied into it. The only way to keep the thing
+    /// actually on screen resident is to hand its handle over as it is.
+    Composite(iced::widget::image::Handle),
+}
+
+/// Which of the two a page is, given the frame its key names and the picture
+/// the view will actually draw.
+///
+/// A free function so the choice can be tested without an application: it is
+/// the difference between the picture on screen being uploaded and this
+/// window's atlas growing by a whole extra page for one nothing draws.
+fn page_residency(
+    key: Option<FrameKey>,
+    base: Option<&iced::widget::image::Handle>,
+    drawn: &iced::widget::image::Handle,
+) -> PageResidency {
+    match base {
+        Some(base) if base.id() == drawn.id() => PageResidency::Base(key),
+        // A composite, or a frame this window has no handle for: either way
+        // what is drawn is not the frame under the key, and holding both would
+        // be a page of atlas for a picture nothing draws.
+        _ => PageResidency::Composite(drawn.clone()),
+    }
 }
 
 /// The reader's zoom in the settings schema's vocabulary, and back.

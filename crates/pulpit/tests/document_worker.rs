@@ -157,7 +157,6 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
             page: PageIndex(0),
             width: 200,
             height: 260,
-            expected_revision: DocumentRevision(1),
             region: pulpit_core::notes::Region::FULL,
             full_width: 0,
             full_height: 0,

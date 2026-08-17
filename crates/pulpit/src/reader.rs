@@ -134,6 +134,28 @@ pub enum Released {
     },
 }
 
+/// What a page did with a partial repaint that arrived for it.
+///
+/// Three answers rather than a bare yes-or-no, because "no" alone is what made
+/// this latch: the caller's patch scope only grows, so a refusal with no way
+/// forward is a refusal of every patch for the rest of the session.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PatchOutcome {
+    /// Held over the page's frame. Previews it contains have come down.
+    Taken,
+    /// A retained preview lies half inside the rectangle and half outside, so
+    /// the crop cannot be reconciled with what is drawn: keeping the preview
+    /// would draw the overlap twice and dropping it would take the outside
+    /// half off the page. `preview` is what it straddled, so the next request
+    /// can be grown to contain it and be usable.
+    Straddled {
+        preview: pulpit_core::page::PageRect,
+    },
+    /// The page cannot place a crop at all — it has no geometry yet. Nothing a
+    /// different rectangle would fix.
+    Unplaceable,
+}
+
 /// Which stack an applied transaction's undo operation belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppliedKind {
@@ -1478,17 +1500,23 @@ impl ReaderSession {
     /// cannot be reconciled: half of it is in the patch and half is not, so
     /// neither keeping it (the overlap would be drawn twice, and a highlight
     /// drawn twice is visibly darker) nor dropping it (the outside half would
-    /// vanish) is right. The patch is refused, and the page waits for the
-    /// snapshot it would have waited for anyway.
+    /// vanish) is right. The patch is refused — and the answer says *what it
+    /// straddled*, because refusing is not enough on its own: the caller's
+    /// patch scope only ever grows, so a page that refused once would refuse
+    /// every patch for the rest of the session and the form would stop showing
+    /// what was typed into it. Given the preview's bounds the caller can ask
+    /// again for a rectangle that contains it, and that retry succeeds.
     #[must_use]
     pub fn patch_landed(
         &mut self,
         page: PageIndex,
         region: pulpit_core::notes::Region,
         revision: pulpit_render::document::DocumentRevision,
-    ) -> bool {
+    ) -> PatchOutcome {
         let Some(geometry) = self.page_geometry(page) else {
-            return false;
+            // Nothing to place the crop against, and nothing a bigger crop
+            // would fix.
+            return PatchOutcome::Unplaceable;
         };
         let patched = pulpit_core::page::PageRect::new(
             region.x * geometry.width,
@@ -1506,19 +1534,21 @@ impl ReaderSession {
                 .bounds()
                 .is_some_and(|bounds| patched.intersects(&bounds))
         };
-        if self
+        let straddled = self
             .retained
             .iter()
-            .any(|mark| mark.page == page && overlaps(mark) && !covered(mark))
-        {
-            return false;
+            .filter(|mark| mark.page == page && overlaps(mark) && !covered(mark))
+            .filter_map(|mark| mark.preview.bounds())
+            .reduce(|all, one| all.union(&one));
+        if let Some(preview) = straddled {
+            return PatchOutcome::Straddled { preview };
         }
         self.retained.retain(|mark| {
             mark.page != page
                 || !covered(mark)
                 || mark.revision.map(|at| at > revision).unwrap_or(true)
         });
-        true
+        PatchOutcome::Taken
     }
 
     /// What is on a page, for hit-testing. Replaced wholesale, because the
@@ -6140,7 +6170,10 @@ mod tests {
 
         // The top-left quarter of the page, which holds the whole stroke.
         let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.5, 0.5);
-        assert!(session.patch_landed(PageIndex(0), region, DocumentRevision(2)));
+        assert_eq!(
+            session.patch_landed(PageIndex(0), region, DocumentRevision(2)),
+            PatchOutcome::Taken
+        );
         assert_eq!(
             session.retained_count(),
             0,
@@ -6158,7 +6191,10 @@ mod tests {
         // A band that cuts the stroke in half down its length.
         let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.25, 1.0);
         assert!(
-            !session.patch_landed(PageIndex(0), region, DocumentRevision(2)),
+            matches!(
+                session.patch_landed(PageIndex(0), region, DocumentRevision(2)),
+                PatchOutcome::Straddled { .. }
+            ),
             "half a stroke inside the patch is not a usable patch"
         );
         assert_eq!(
@@ -6168,13 +6204,48 @@ mod tests {
         );
     }
 
+    /// …and the refusal says what to ask for instead. Without that, the
+    /// caller's scope only grows and every later patch straddles the same
+    /// preview: the page would refuse partial repaints for the rest of the
+    /// session and typing would stop appearing until a snapshot landed.
+    #[test]
+    fn a_refused_patch_says_what_a_usable_one_would_have_to_contain() {
+        let mut session = session_with_a_retained_stroke();
+
+        let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.25, 1.0);
+        let PatchOutcome::Straddled { preview } =
+            session.patch_landed(PageIndex(0), region, DocumentRevision(2))
+        else {
+            panic!("half a stroke inside the patch is not a usable patch")
+        };
+
+        // What it named is the preview's own bounds, so a rectangle grown to
+        // contain it is one the page can take.
+        let geometry = session.page_geometry(PageIndex(0)).expect("a page");
+        let retry = pulpit_core::notes::Region::new(
+            preview.left / geometry.width,
+            preview.top / geometry.height,
+            (preview.right - preview.left) / geometry.width,
+            (preview.bottom - preview.top) / geometry.height,
+        );
+        assert_eq!(
+            session.patch_landed(PageIndex(0), retry, DocumentRevision(2)),
+            PatchOutcome::Taken,
+            "the rectangle the refusal asked for is one the page accepts"
+        );
+        assert_eq!(session.retained_count(), 0);
+    }
+
     /// A patch older than the mark says nothing about it: the mark was
     /// committed after the patch was drawn, so the patch cannot contain it.
     #[test]
     fn a_patch_older_than_a_preview_leaves_it_alone() {
         let mut session = session_with_a_retained_stroke();
         let region = pulpit_core::notes::Region::new(0.0, 0.0, 0.5, 0.5);
-        assert!(session.patch_landed(PageIndex(0), region, DocumentRevision(1)));
+        assert_eq!(
+            session.patch_landed(PageIndex(0), region, DocumentRevision(1)),
+            PatchOutcome::Taken
+        );
         assert_eq!(session.retained_count(), 1);
     }
 
@@ -6193,7 +6264,10 @@ mod tests {
         let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
 
         let whole = pulpit_core::notes::Region::FULL;
-        assert!(session.patch_landed(PageIndex(1), whole, DocumentRevision(2)));
+        assert_eq!(
+            session.patch_landed(PageIndex(1), whole, DocumentRevision(2)),
+            PatchOutcome::Taken
+        );
         assert_eq!(session.retained_count(), 1);
     }
 
