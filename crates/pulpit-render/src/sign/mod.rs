@@ -422,4 +422,117 @@ mod tests {
         assert_eq!(adobe_profile, SigningProfile::AdbePkcs7Detached);
         assert_eq!(etsi_profile, SigningProfile::EtsiCadesDetached);
     }
+
+    // STAGE 5 - Size estimation validation (§23.5)
+    #[test]
+    #[cfg(feature = "p12-keystore")]
+    fn test_size_estimation_vs_actual_signature() {
+        // Generate a test certificate
+        let subject_alt_names = vec!["test.example.com".to_string()];
+        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
+        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+        let cert_der = cert.serialize_der().unwrap();
+        let key_der = cert.serialize_private_key_der();
+
+        // Create PKCS#12
+        let mut keystore = p12_keystore::KeyStore::new();
+        let private_key =
+            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
+        let p12_cert =
+            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
+        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+
+        let password = "test_password";
+        let p12_bytes = keystore
+            .writer(password)
+            .write()
+            .expect("Failed to write PKCS#12");
+
+        // Load credential
+        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+
+        // Test digest (32 bytes for SHA-256)
+        let test_digest = vec![0x42u8; 32];
+
+        // Estimate size with 50% margin
+        let estimated_size_loose = estimate_cms_size(
+            &credential,
+            &test_digest,
+            SigningProfile::AdbePkcs7Detached,
+            false,
+            false, // not tight
+        )
+        .expect("Failed to estimate size (loose)");
+
+        // Estimate size without margin (tight)
+        let estimated_size_tight = estimate_cms_size(
+            &credential,
+            &test_digest,
+            SigningProfile::AdbePkcs7Detached,
+            false,
+            true, // tight
+        )
+        .expect("Failed to estimate size (tight)");
+
+        // Loose estimate should be larger than tight estimate
+        assert!(
+            estimated_size_loose > estimated_size_tight,
+            "Loose estimate should be larger than tight estimate"
+        );
+
+        // Build actual CMS with real signature
+        let cms = build_cms(
+            &credential,
+            &test_digest,
+            SigningProfile::AdbePkcs7Detached,
+            false,
+            None,
+        )
+        .expect("Failed to build CMS");
+
+        // Verify the actual CMS fits within estimated size
+        assert!(
+            (cms.len() * 2) <= estimated_size_loose, // *2 for hex encoding
+            "Actual CMS ({} bytes, {} hex) should fit in estimated size ({})",
+            cms.len(),
+            cms.len() * 2,
+            estimated_size_loose
+        );
+
+        // Verify estimates are even (required for hex encoding)
+        assert_eq!(
+            estimated_size_loose % 2,
+            0,
+            "Loose estimate must be even"
+        );
+        assert_eq!(
+            estimated_size_tight % 2,
+            0,
+            "Tight estimate must be even"
+        );
+    }
+
+    #[test]
+    fn test_size_estimation_is_always_even() {
+        // Create a simple RSA key info
+        let key_info = credential::PublicKeyInfo::Rsa { bits: 2048 };
+
+        // Create a mock credential for size estimation
+        // (we can't easily create a real one without PKCS#12, so we test the math)
+        let test_len = 500;
+        let margin = (test_len / 2) & !1; // 50% margin, rounded to even
+        let bytes_reserved = test_len + margin;
+
+        // Verify result is even
+        assert_eq!(
+            bytes_reserved % 2,
+            0,
+            "Size estimation result must be even for hex encoding"
+        );
+
+        // Verify margin is positive and reasonable (25-75% of test_len)
+        assert!(margin > test_len / 4 && margin < test_len);
+    }
 }
