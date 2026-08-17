@@ -170,25 +170,30 @@ PDFium remains in the loop for two things: rendering the signed result for the
 post-save verification pass (`SPEC-document.md` §11.3 steps 3–7), and rendering the signature
 widget's appearance for on-screen display.
 
-### 22.2 New crates
+### 22.2 Modules, not crates
+
+**No new crate is added for this feature.** The signing code lives in the
+existing `pulpit-render` crate — the crate that already owns the PDF domain —
+as three top-level modules:
 
 ```text
-crates/
-  pulpit-sign/       cryptography: CMS, X.509 parsing, TSA, key sources
-  pulpit-pdfwrite/   minimal PDF object model + incremental update writer
-  pulpit-verify/     signature discovery, coverage, integrity, status
+crates/pulpit-render/src/
+  sign/       cryptography: CMS, X.509 parsing, TSA, key sources
+  pdfwrite/   minimal PDF object model + incremental update writer
+  verify/     signature discovery, coverage, integrity, status
 ```
 
-`pulpit-sign` has no PDF knowledge beyond "here is a digest, here is a CMS
-blob". `pulpit-pdfwrite` has no cryptographic knowledge beyond "reserve this
+The `sign` module has no PDF knowledge beyond "here is a digest, here is a CMS
+blob". The `pdfwrite` module has no cryptographic knowledge beyond "reserve this
 many bytes and tell me the offsets". This separation is what makes the
 interruption protocol of §29 possible, and it mirrors pyHanko's split between
 `pdf_byterange.py` and `pdf_cms.py`.
 
-Whether these ship as three crates or as modules of one signing crate is
-settled at Milestone S0 under the workspace's consolidation preference
-(`SPEC-document.md` §5.1). The knowledge separation above is normative; the
-crate graph is not.
+The knowledge separation is normative at the module boundary: `sign` MUST NOT
+depend on `pdfwrite` or `verify`, and `pdfwrite` MUST NOT depend on `sign`.
+Module placement inside `pulpit-render` does not change process placement —
+§22.4 still applies: these modules run in the supervisor, never in the PDFium
+worker, and none of them may touch the PDFium bindings.
 
 ### 22.3 Dependencies
 
@@ -210,7 +215,8 @@ signing path.
 | Secret hygiene | `zeroize` | Apache-2.0 OR MIT |
 
 `cms` is at `0.3.0-pre` at time of writing; pin `0.2.x` until 0.3 is released,
-and isolate its use behind `pulpit-sign`'s own types so the upgrade is local.
+and isolate its use behind the `sign` module's own types so the upgrade is
+local.
 
 Two gaps the table does not cover:
 
@@ -226,16 +232,18 @@ Note what is *absent*: no path validation crate, no OCSP crate, no PKCS#11. See
 
 ### 22.4 Process placement
 
-`pulpit-verify` — signature discovery, the xref/`startxref` bookkeeping of
+The `verify` module — signature discovery, the xref/`startxref` bookkeeping of
 §28.2, and CMS parsing — runs in the **supervisor**, not the PDFium worker. It
 is a parser of hostile input (§34.4 calls it attacker-reachable on any opened
 file), and the worker boundary of `SPEC-document.md` §12 exists precisely to contain
 such parsers, so this placement needs justification rather than silence:
 
 1. The worker boundary contains *native* code that crashes on malformed input.
-   `pulpit-verify` and the parsing paths of `pulpit-sign` are 100% safe Rust:
-   both crates carry `#![forbid(unsafe_code)]`, and their failure mode is a
-   typed error, not memory corruption.
+   The `verify` module and the parsing paths of `sign` are 100% safe Rust:
+   `pulpit-render` as a whole cannot forbid unsafe code (the PDFium bindings
+   need it), so each of the three modules carries a module-level
+   `#![forbid(unsafe_code)]` inner attribute instead, and their failure mode
+   is a typed error, not memory corruption.
 2. §30.2's rule — a process that parses hostile input must not hold keys — is
    satisfied by *ordering*, not by process separation: verification of a
    third-party file involves no key material at all, and the post-sign
@@ -243,7 +251,7 @@ such parsers, so this placement needs justification rather than silence:
    key. At no instant does the supervisor both hold a private key and parse
    bytes it did not itself just write.
 
-Both crates are fuzzed per §34.4; that is the load-bearing mitigation and the
+Both modules are fuzzed per §34.4; that is the load-bearing mitigation and the
 reason the `forbid(unsafe_code)` attributes are a requirement, not a style
 preference.
 
@@ -362,7 +370,7 @@ reservation, at most twice, before surfacing an error.
 
 ## 24. Incremental update writer
 
-`pulpit-pdfwrite` must produce a byte-exact append. Its input is always a file
+The `pdfwrite` module must produce a byte-exact append. Its input is always a file
 pulpit itself just wrote via PDFium (Invariant S2), which bounds the structures
 it must handle.
 
@@ -492,7 +500,11 @@ never be trusted on read.
 
 ### 25.4 DocMDP and FieldMDP
 
-pulpit **writes** these; it does not **enforce** them on read (§28.4). Other
+In v1, pulpit **reads** these — the three pre-flight checks below are load-
+bearing for countersigning — but does not **write** them: producing
+certification signatures and authoring DocMDP/FieldMDP transforms is deferred
+(§36.7). The writing requirements in this section are normative for that
+future work. pulpit does not **enforce** them on read either (§28.4). Other
 viewers do enforce them, which is the point: they are how a signer communicates
 intent to Acrobat and its peers.
 
@@ -641,7 +653,7 @@ certificate's public key (`pyhanko: sign/signers/pdf_cms.py:395`):
 
 | Key | Mechanism | Notes |
 |---|---|---|
-| RSA | `<md>_rsa` (PKCS#1 v1.5) | `rsassa_pss` when PSS is preferred; PSS params derived from key size and digest |
+| RSA | `<md>_rsa` (PKCS#1 v1.5) | `rsassa_pss` when PSS is preferred is deferred (§36.8); PSS params derived from key size and digest |
 | EC | `<md>_ecdsa` | RFC 5753 requires the digest be encoded into the mechanism OID |
 | Ed25519 | `ed25519` | digest fixed at SHA-512 |
 | Ed448 | `ed448` | digest fixed at SHAKE256, encoded as `shake256_len` with parameter 512 (RFC 8419) |
@@ -668,9 +680,9 @@ requested one, fail rather than silently reconcile
 SHA-1 is never offered for signing. It is accepted on read with a prominent
 "weak algorithm" finding.
 
-Ed448/SHAKE256 support is optional in Milestone S1 and may be dropped if the
-crate ecosystem makes it awkward; the table records the correct behaviour for
-whenever it is added.
+Ed448/SHAKE256 and RSA-PSS signing are deferred out of v1 (§36.8); the tables
+record the correct behaviour for whenever they are added. Both are accepted on
+read.
 
 ### 26.3 Signed attributes
 
@@ -973,9 +985,9 @@ document produced in an earlier process.
 | Source | Notes |
 |---|---|
 | PKCS#12 (`.p12`/`.pfx`) | Passphrase prompted, never stored, zeroized after use |
-| PEM/DER key + certificate + chain | For users with OpenSSL-shaped material |
 
-Hardware tokens and platform keychains are deferred (§36.4).
+PEM/DER key material is deferred (§36.8); hardware tokens and platform
+keychains are deferred (§36.4).
 
 ### 30.2 Handling rules
 
@@ -1009,8 +1021,8 @@ Hardware tokens and platform keychains are deferred (§36.4).
 4. Credential chooser: subject, issuer, validity window, key usage, SHA-256
    fingerprint, and a prominent warning for anything expired or not yet valid.
 5. Options: reason, location, contact, visible or invisible, page and position if
-   visible, ink or text appearance, certify vs approve, DocMDP level, timestamp
-   authority.
+   visible, ink or text appearance, timestamp authority. (Certify vs approve and
+   DocMDP level return with §36.7; v1 always produces an approval signature.)
 6. Placement, if visible: the same box-drawing interaction as other
    annotations (`SPEC-document.md` §8.4).
 7. Confirmation summarising exactly what will be produced, including the profile
@@ -1055,7 +1067,7 @@ Permitted:
 "Export unsigned copy" is the one operation that routes a signed document back
 through PDFium's rewriting save path, and Invariant S1 permits it because the
 *output* carries no signature — S1 protects signed bytes, and the copy has
-none. Mechanism: `pulpit-pdfwrite` first appends an incremental update to a
+none. Mechanism: the `pdfwrite` module first appends an incremental update to a
 temporary copy that sets each signature field's `/V` to null and deletes
 `Root /Perms /DocMDP` (catalog surgery PDFium's API does not expose); PDFium
 then opens that copy and performs a full rewriting save, which flattens the
@@ -1225,7 +1237,8 @@ override is explicit and recorded in the status.
   mature implementation of the same standards.
 - Round trip for B-B and B-T against a local TSA.
 - Certification at each DocMDP level; assert the dictionaries match what pyHanko
-  writes for the same request.
+  writes for the same request. (Deferred with §36.7; until then the
+  certification-reading tests below run against pyHanko-produced fixtures.)
 - Sign an encrypted document; assert `/Contents` is not encrypted and the
   signature verifies.
 - Hybrid-xref input is refused.
@@ -1285,13 +1298,23 @@ documents is refused in S1 rather than half-supported. Produce a signed fixture
 by any means and verify it with pyHanko's CLI. This de-risks the rest before
 any UI work.
 
-### Milestone S1 — B-B
+### Milestone S1 — B-B (v1)
 
-Byte-range mechanics; signature field and dictionary; CMS with PKCS#12 and
-PEM/DER keys; invisible and ink-appearance visible signatures; verification with
+Byte-range mechanics; signature field and dictionary; CMS with PKCS#12
+credentials; invisible and ink-appearance visible signatures; verification with
 coverage, integrity, and the §28.4 fallback; post-export verification; signing UI
-with the §31.2 disclosures; append-only mode for signed documents, including
-countersigning into an existing empty field (§31.3).
+with the §31.2 identity disclosure; append-only mode for signed documents,
+including countersigning into an existing empty field (§31.3).
+
+S1 is the v1 release of the feature. Deliberately *not* in it, each recorded
+in §36 so the deferral stays a decision:
+
+- producing certification signatures and authoring DocMDP/FieldMDP transforms
+  (§36.7) — v1 writes approval signatures only, though it still *reads* prior
+  certifications and field locks for the §25.4 pre-flight checks;
+- PEM/DER key loading, Ed448, and RSA-PSS (§36.8) — PKCS#12 with RSA PKCS#1
+  v1.5, ECDSA, and Ed25519 covers the actual user base;
+- timestamps (S2, below).
 
 ### Milestone S2 — B-T
 
@@ -1316,8 +1339,8 @@ Extending `SPEC-document.md` §16:
     tool is disabled.
 24. A document with one signature and one empty signature field can be
     countersigned, and pyHanko validates both signatures afterwards.
-25. Certification is refused on an already-signed document, and all signing is
-    refused when a prior certification declares `NO_CHANGES`.
+25. Certification is not offered in v1 (§36.7), and all signing is refused
+    when a prior certification declares `NO_CHANGES`.
 26. No failure path of the signing feature modifies the source document or a
     previously saved file.
 27. An ink mark is never described as a digital signature anywhere in the UI,
@@ -1440,3 +1463,41 @@ the change stayed within that level.
 **Consequence of deferring:** the case named at the end of §31.3 — a sender who
 certifies a form and expects the recipient to both fill and sign it. pulpit can
 do the signing half only.
+
+### 36.7 Certification signatures and MDP authoring
+
+**What:** producing certification signatures, and writing the DocMDP and
+FieldMDP transforms of §25.4 — including the two Acrobat quirks and the
+`NO_CHANGES` irreversibility dialog of §31.2. v1 produces approval signatures
+only.
+
+**Cost:** small in code — the dictionaries are specified in §25.4 and the tests
+in §34 — but not in surface: certification adds a certify-vs-approve choice, a
+DocMDP level choice, and a destructive-action confirmation to the signing flow,
+and its value accrues mostly to the *sender* side of the countersigning
+workflow, which is not the §20.3 user.
+
+**What v1 keeps:** the read side in full. The three §25.4 pre-flight checks,
+the display of a prior signature's declared DocMDP level (§28.4), and refusal
+to sign under a prior `NO_CHANGES` certification are all in v1, because
+countersigning is.
+
+**Consequence of deferring:** pulpit can be the recipient in a
+certify-then-countersign workflow, but not the sender.
+
+### 36.8 Additional key sources and algorithms
+
+**What:** PEM/DER key + certificate + chain loading; Ed448/SHAKE256 signing;
+RSA-PSS signing.
+
+**Cost:** PEM/DER is small and purely additive. Ed448 is blocked on the crate
+ecosystem (§22.3). PSS is parameter plumbing plus interop testing against
+viewers that handle it unevenly.
+
+**What v1 keeps:** PKCS#12 with RSA PKCS#1 v1.5, ECDSA (P-256/384/521), and
+Ed25519 for signing; everything in §26.2's tables accepted on read, with SHA-1
+reported as weak.
+
+**Consequence of deferring:** users with OpenSSL-shaped material must repackage
+it (`openssl pkcs12 -export`) — an acceptable ask, stated on the help page —
+and the §26.2 tables remain the normative reference for the deferred rows.
