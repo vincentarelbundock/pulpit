@@ -8,6 +8,7 @@
 pub mod cache;
 pub mod document;
 pub mod pdf;
+pub mod pdfwrite;
 pub mod protocol;
 pub mod shm;
 pub mod supervisor;
