@@ -26,6 +26,12 @@ iced = { workspace = true, features = ["image", "tokio", "advanced", "wgpu", "ca
 iced_core = "0.14"
 iced_widget = { version = "0.14.2", features = ["canvas"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "unstable-locales"] }
+# Parses the RFC-3339-shaped validity strings pulpit-render's
+# `CredentialSummary` reports (§31.1 step 4), and the `SignRequest::id2`
+# random ID pulpit generates for a signing revision (§23) never needs a
+# clock or a CSPRNG heavier than this crate already pulls in transitively.
+time = { version = "0.3", default-features = false, features = ["parsing", "formatting"] }
+getrandom = "0.2"
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"

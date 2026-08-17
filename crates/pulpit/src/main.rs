@@ -25,6 +25,7 @@ mod reader_link;
 mod residency;
 mod session;
 mod settings;
+mod signing;
 mod theme;
 mod thumbnails;
 mod toast;
