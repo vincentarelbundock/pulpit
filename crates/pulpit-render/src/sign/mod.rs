@@ -7,11 +7,13 @@
 
 // Cryptographic signing module
 
+pub mod apply;
 mod cms_builder;
 mod credential;
 mod errors;
 mod mechanism;
 
+pub use apply::{sign_document_file, SignApplyError, SignReport, SignRequest, SignTarget};
 pub use credential::{Credential, CredentialSummary};
 pub use errors::SigningError;
 pub use mechanism::{DigestAlgorithm, SigningMechanism};
@@ -49,6 +51,14 @@ pub fn credential_from_parts(
     chain: Vec<Vec<u8>>,
 ) -> Result<Credential, SigningError> {
     credential::from_parts(cert_der, key_der, chain)
+}
+
+/// The digest algorithm this credential's key implies (§26.2).
+///
+/// The caller hashes the document itself — this crate never sees the file —
+/// so it has to be told which hash [`build_cms`] will declare.
+pub fn digest_algorithm_for(credential: &Credential) -> Result<DigestAlgorithm, SigningError> {
+    Ok(mechanism::select_mechanism(&credential.public_key_info, None)?.digest_algorithm())
 }
 
 /// Estimate the size needed to reserve for CMS bytes.
