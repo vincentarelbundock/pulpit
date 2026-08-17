@@ -69,6 +69,9 @@ p384 = "0.13"
 p521 = "0.13"
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 sha2 = { version = "0.10", features = ["oid"] }
+# SHA-1 is never offered for signing; it is accepted on read with a weak-
+# algorithm finding (SPEC-signing.md §26.2), and reading it needs a verifier.
+sha1 = { version = "0.10", features = ["oid"] }
 spki = "0.7"
 pkcs8 = "0.10"
 pkcs12 = "0.1"

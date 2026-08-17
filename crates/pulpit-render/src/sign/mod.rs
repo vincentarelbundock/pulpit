@@ -40,6 +40,17 @@ pub fn load_pkcs12(pkcs12_data: &[u8], passphrase: &str) -> Result<Credential, S
     credential::load_pkcs12_impl(pkcs12_data, passphrase)
 }
 
+/// Build a credential from a DER certificate, a PKCS#8 private key and an
+/// optional DER chain. The key never leaves the returned [`Credential`], whose
+/// key material is zeroized on drop (§30.2).
+pub fn credential_from_parts(
+    cert_der: &[u8],
+    key_der: &[u8],
+    chain: Vec<Vec<u8>>,
+) -> Result<Credential, SigningError> {
+    credential::from_parts(cert_der, key_der, chain)
+}
+
 /// Estimate the size needed to reserve for CMS bytes.
 /// §23.5: dry-run with placeholder signature, then add 50% margin (or tight if requested).
 pub fn estimate_cms_size(

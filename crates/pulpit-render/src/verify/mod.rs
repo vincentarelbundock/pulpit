@@ -24,6 +24,12 @@
 //! # The module MUST NOT depend on the sign module or PDFium.
 
 pub mod preflight;
+pub mod cms_check;
+
+pub use cms_check::{
+    check_signature, verify_signatures, AlgorithmFinding, CertificateSummary, IdentityAssurance,
+    PadesProfile, SignatureStatus, SignatureVerification,
+};
 
 use crate::pdfwrite::PdfTokenizer;
 use std::collections::BTreeMap;
@@ -537,6 +543,10 @@ pub struct StructuralReport {
     pub byte_range: ByteRange,
     pub sig_dict_revision: u64,
     pub declared_docmdp: Option<MdpPerm>,
+    /// The signature dictionary's /SubFilter name, without the leading slash.
+    pub sub_filter: Option<String>,
+    /// The signature dictionary's /M value, as written (a PDF date string).
+    pub mod_date: Option<String>,
 }
 
 /// Classify signature coverage per §28.2 algorithm.
@@ -899,6 +909,7 @@ fn extract_signature_field(
 
     // Extract signature dictionary
     let sig_dict_slice = find_object(bytes, sig_dict_ref.0)?;
+    let (sub_filter, mod_date) = extract_subfilter_and_mod_date(sig_dict_slice);
     if !sig_dict_slice.is_empty() {
         // Find the absolute position of sig_dict_slice in bytes
         let sig_dict_offset = find_object_offset(bytes, sig_dict_ref.0)?;
@@ -923,10 +934,56 @@ fn extract_signature_field(
             byte_range: br,
             sig_dict_revision: sig_dict_rev,
             declared_docmdp,
+            sub_filter,
+            mod_date,
         }));
     }
 
     Ok(None)
+}
+
+/// Extract the signature dictionary's `/SubFilter` name (without its leading
+/// slash) and its `/M` date string. Both are transcription for the status
+/// model (§28.5): `/SubFilter` names the profile, `/M` the claimed time.
+///
+/// A dedicated pass rather than a branch of [`extract_sig_dict_info`], because
+/// the value of `/SubFilter` is itself a name token and would otherwise be
+/// mistaken for the next key.
+fn extract_subfilter_and_mod_date(sig_dict_slice: &[u8]) -> (Option<String>, Option<String>) {
+    let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
+    let mut sub_filter = None;
+    let mut mod_date = None;
+    let mut pending: Option<String> = None;
+
+    while let Ok(Some(token)) = tokenizer.next_token() {
+        if token == b"endobj" {
+            break;
+        }
+        let Ok(text) = std::str::from_utf8(&token) else {
+            pending = None;
+            continue;
+        };
+        match pending.take() {
+            Some(key) if key == "SubFilter" => {
+                if let Some(name) = text.strip_prefix('/') {
+                    sub_filter = Some(name.to_string());
+                    continue;
+                }
+            }
+            Some(key) if key == "M" => {
+                if let Some(date) = parse_pdf_string(text) {
+                    mod_date = Some(date);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        if let Some(name) = text.strip_prefix('/') {
+            pending = Some(name.to_string());
+        }
+    }
+
+    (sub_filter, mod_date)
 }
 
 /// Extract /ByteRange, /Contents extent, and /Reference info from signature dictionary.

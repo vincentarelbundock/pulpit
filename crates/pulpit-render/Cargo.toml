@@ -42,6 +42,7 @@ p384 = { workspace = true }
 p521 = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
+sha1 = { workspace = true }
 spki = { workspace = true }
 pkcs8 = { workspace = true }
 pkcs12 = { workspace = true }
