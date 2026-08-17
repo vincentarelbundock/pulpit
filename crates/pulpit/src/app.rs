@@ -7719,7 +7719,8 @@ impl App {
                     });
                     return Task::none();
                 }
-                let target = self.default_sign_target();
+                let candidates = self.sign_target_candidates();
+                let target = candidates.first().cloned();
                 self.signing = Some(SigningFlow::Options {
                     credential,
                     info,
@@ -7727,6 +7728,7 @@ impl App {
                         target,
                         ..Default::default()
                     },
+                    candidates,
                 });
                 Task::none()
             }
@@ -7754,11 +7756,47 @@ impl App {
                 }
                 Task::none()
             }
+            SignMsg::VisibleChanged(requested) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    // §25.5's engine constraint is page_index == 0; rather
+                    // than let the user place a box that Sign would then
+                    // refuse, Visible is only ever turned on while page 0 is
+                    // showing (the view also disables the control, so this
+                    // is a second, cheap guard, not the only one).
+                    let on_page_zero = self
+                        .reader
+                        .current_page()
+                        .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
+                    if requested && !on_page_zero {
+                        // Ignored: nothing to undo, nothing was armed.
+                    } else {
+                        options.set_visible(requested);
+                    }
+                }
+                Task::none()
+            }
+            SignMsg::PlacementPositionChosen(position) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    if let Some(placement) = options.placement.as_mut() {
+                        placement.position = position;
+                    }
+                }
+                Task::none()
+            }
+            SignMsg::PlacementSizeChosen(size) => {
+                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                    if let Some(placement) = options.placement.as_mut() {
+                        placement.size = size;
+                    }
+                }
+                Task::none()
+            }
             SignMsg::ContinueToConfirm => {
                 let Some(SigningFlow::Options {
                     credential,
                     info,
                     options,
+                    candidates,
                 }) = self.signing.take()
                 else {
                     return Task::none();
@@ -7776,6 +7814,7 @@ impl App {
                     credential,
                     info,
                     options,
+                    candidates,
                 });
                 Task::none()
             }
@@ -7784,6 +7823,7 @@ impl App {
                     credential,
                     info,
                     options,
+                    candidates,
                 }) = self.signing.take()
                 else {
                     return Task::none();
@@ -7792,6 +7832,7 @@ impl App {
                     credential,
                     info,
                     options,
+                    candidates,
                 });
                 Task::none()
             }
@@ -7850,35 +7891,40 @@ impl App {
         self.reader.can_undo()
     }
 
-    /// §31.1 step 5's target field, computed from a cheap preflight pass over
-    /// the document as it stands on disk.
+    /// §31.1 step 5's target field candidates, computed from a cheap
+    /// preflight pass over the document as it stands on disk.
     ///
-    /// `None` when countersigning is required (the document already carries
-    /// a signature, per append-only mode) but no empty field is left to sign
-    /// into — the caller reports that as [`SignApplyError::Refused`] would.
+    /// Empty when countersigning is required (the document already carries a
+    /// signature, per append-only mode) but no empty field is left to sign
+    /// into — the caller reports that the same way a `None` target already
+    /// does.
     ///
-    /// v1 offers exactly one target rather than a picker over every
-    /// candidate: `preflight_sign` already disambiguates when there is one
-    /// unambiguous empty field, which is the overwhelmingly common shape
-    /// (a sender leaves one signature field for the recipient). A document
-    /// with several empty fields reports `AmbiguousSignatureField`, and this
-    /// falls back to the first — a real gap, noted in the delivery report.
-    fn default_sign_target(&self) -> Option<crate::signing::TargetChoice> {
+    /// `preflight_sign` returns exactly one target when there is an
+    /// unambiguous empty field, which is the overwhelmingly common shape (a
+    /// sender leaves one signature field for the recipient); a document with
+    /// several empty fields reports `AmbiguousSignatureField`, whose
+    /// `candidates` all come back here for the Options step's target picker
+    /// to offer, rather than silently picking the first one.
+    fn sign_target_candidates(&self) -> Vec<crate::signing::TargetChoice> {
         use crate::signing::{AppendOnlyMode, TargetChoice};
         use pulpit_render::verify::preflight::{preflight_sign, PreflightRefusal};
 
         if self.append_only != Some(AppendOnlyMode::AppendOnly) {
-            return Some(TargetChoice::NewField);
+            return vec![TargetChoice::NewField];
         }
-        let path = self.documents.active()?.path.clone();
-        let bytes = std::fs::read(&path).ok()?;
+        let Some(path) = self.documents.active().map(|d| d.path.clone()) else {
+            return Vec::new();
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Vec::new();
+        };
         match preflight_sign(&bytes, None) {
-            Ok(ok) => Some(TargetChoice::ExistingField(ok.target_field)),
+            Ok(ok) => vec![TargetChoice::ExistingField(ok.target_field)],
             Err(PreflightRefusal::AmbiguousSignatureField { candidates }) => candidates
                 .into_iter()
-                .next()
-                .map(TargetChoice::ExistingField),
-            Err(_) => None,
+                .map(TargetChoice::ExistingField)
+                .collect(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -7926,6 +7972,26 @@ impl App {
         else {
             return Task::none();
         };
+        // §25.5: build a visible appearance when requested. The engine only
+        // accepts page_index 0, and the Options step only lets Visible be
+        // turned on while page 0 is showing (SignMsg::VisibleChanged), so
+        // page 0's geometry is always the right one to size the box against.
+        let appearance = options.placement.and_then(|_| {
+            let geometry = self.reader.page_geometry(pulpit_core::page::PageIndex(0))?;
+            let signer_cn =
+                crate::signing::subject_common_name(&credential.summary().ok()?.subject)
+                    .to_string();
+            let signing_time_label = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            crate::signing::appearance_for(
+                &options,
+                &signer_cn,
+                &signing_time_label,
+                geometry.width as f64,
+                geometry.height as f64,
+            )
+        });
         let Some(document) = self.documents.active() else {
             self.signing = Some(SigningFlow::Failed {
                 detail: "There is no document open to sign.".to_string(),
@@ -7972,7 +8038,7 @@ impl App {
             contact: non_empty(&options.contact),
             id2,
             tight_size_estimates: false,
-            appearance: None,
+            appearance,
         };
         let destination_for_task = destination.clone();
 

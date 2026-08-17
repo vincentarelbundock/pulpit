@@ -10,11 +10,20 @@
 //!
 //! ## Scope of this v1
 //!
-//! - Visible signatures are **out of scope**: `pulpit_render::sign::SignRequest`
-//!   has no `appearance` field to carry a box, ink or text into. The Options
-//!   step below offers only invisible signatures; the visible choice is a
-//!   disabled control, labelled as unavailable, wherever the UI draws the
-//!   step.
+//! - Visible signatures place a text-only appearance (§25.5's default
+//!   template) via a small set of position/size presets rather than a
+//!   free-form box-drawing interaction — see [`Placement`]'s doc comment for
+//!   why the annotation system's rubber-band gesture (`SPEC-document.md`
+//!   §8.4) is not reused here. No ink is composited: there is no
+//!   signature-mark capture UI (a single freehand glyph scoped to a
+//!   signature widget, distinct from the page-lifetime annotation ink
+//!   tool) to draw it from, so `AppearanceContent::InkAndText` is never
+//!   built by this module.
+//! - The engine only accepts `page_index == 0` (`pulpit-render`'s
+//!   `SignApplyError::Unsupported`), so v1 offers the Visible choice only
+//!   while the reader is showing the first page; elsewhere it is disabled
+//!   with the reason shown, rather than letting the user place a box that
+//!   would then be refused at Sign time.
 //! - No certification (`NO_CHANGES`) and no timestamp authority: v1 always
 //!   produces an approval signature with no TSA call, matching
 //!   `pulpit-render`'s current `sign_document_file`.
@@ -89,11 +98,209 @@ pub struct SigningOptions {
     pub location: String,
     pub contact: String,
     pub target: Option<TargetChoice>,
-    /// Always `false` in v1: no `appearance` field exists to carry a visible
-    /// signature into. Kept as a field so the Options view has something to
-    /// bind its (disabled) visible/invisible choice to, rather than a
-    /// literal `false` sprinkled through the view.
+    /// `true` once the user has chosen Visible over the default Invisible.
+    /// Only meaningful together with `placement`, which is `Some` exactly
+    /// when this is `true` (see [`SigningOptions::set_visible`]).
     pub visible_requested: bool,
+    /// The page-relative box, set together with `visible_requested`. `None`
+    /// for an invisible signature.
+    pub placement: Option<Placement>,
+}
+
+impl SigningOptions {
+    /// Turn the visible/invisible choice on or off, keeping `placement` in
+    /// lock-step so a caller can never observe `visible_requested: true`
+    /// with `placement: None` or vice versa. Turning it on for the first
+    /// time seeds [`Placement::default`]; turning it off drops whatever
+    /// preset was chosen, so re-enabling starts fresh rather than resurfacing
+    /// a stale box.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible_requested = visible;
+        self.placement = if visible {
+            Some(self.placement.unwrap_or_default())
+        } else {
+            None
+        };
+    }
+}
+
+/// A page-relative placement preset for a visible signature (§31.1 step 6).
+///
+/// §31.1 step 6 calls for "the same box-drawing interaction as other
+/// annotations (`SPEC-document.md` §8.4)". `SPEC-document.md` §8.4's
+/// rubber-band interaction is `AnnotationTool::Select`: it drags over the
+/// page to *pick up existing marks* for deletion, driven by pointer events
+/// the reader surface already routes for that purpose. Placing a *new* box
+/// for a signature widget while a modal Sign dialog is open is a different
+/// gesture — it would need the reader's pointer pipeline taught a second,
+/// placement-shaped meaning it has no other user, purely for this one v1
+/// dialog. That is more interaction-system surface than this task's scope
+/// justifies, so v1 takes the fallback named in the task: a small set of
+/// position and size presets, computed directly into PDF coordinates by
+/// [`Placement::rect`]. Revisit reuse if `SPEC-document.md` ever grows a
+/// general "place a new object" drag that both callers can share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center,
+}
+
+impl PlacementPosition {
+    pub const ALL: [PlacementPosition; 5] = [
+        PlacementPosition::TopLeft,
+        PlacementPosition::TopRight,
+        PlacementPosition::BottomLeft,
+        PlacementPosition::BottomRight,
+        PlacementPosition::Center,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlacementPosition::TopLeft => "Top left",
+            PlacementPosition::TopRight => "Top right",
+            PlacementPosition::BottomLeft => "Bottom left",
+            PlacementPosition::BottomRight => "Bottom right",
+            PlacementPosition::Center => "Center",
+        }
+    }
+}
+
+/// A signature box size, in points, before margin clamping in
+/// [`Placement::rect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl PlacementSize {
+    pub const ALL: [PlacementSize; 3] = [
+        PlacementSize::Small,
+        PlacementSize::Medium,
+        PlacementSize::Large,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlacementSize::Small => "Small",
+            PlacementSize::Medium => "Medium",
+            PlacementSize::Large => "Large",
+        }
+    }
+
+    fn dims_pt(self) -> (f64, f64) {
+        match self {
+            PlacementSize::Small => (150.0, 50.0),
+            PlacementSize::Medium => (200.0, 70.0),
+            PlacementSize::Large => (260.0, 90.0),
+        }
+    }
+}
+
+/// Margin kept clear around a placed box: half an inch.
+const PLACEMENT_MARGIN_PT: f64 = 36.0;
+
+/// Where a visible signature's box lands: a corner or the center, at one of
+/// three sizes. See [`PlacementPosition`]'s doc comment for why this is a
+/// preset choice rather than a drawn rectangle in v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub position: PlacementPosition,
+    pub size: PlacementSize,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Placement {
+            position: PlacementPosition::BottomRight,
+            size: PlacementSize::Medium,
+        }
+    }
+}
+
+impl Placement {
+    /// The widget rect in PDF page coordinates, `[x0, y0, x1, y1]`, for a
+    /// page whose displayed size (`PageGeometry::width`/`height`) is
+    /// `page_width` by `page_height` points. The box is clamped to fit
+    /// inside the margin on pages too small for the chosen preset, rather
+    /// than producing a rect that overhangs the page.
+    pub fn rect(&self, page_width: f64, page_height: f64) -> [f64; 4] {
+        let (preset_w, preset_h) = self.size.dims_pt();
+        let w = preset_w.min((page_width - 2.0 * PLACEMENT_MARGIN_PT).max(1.0));
+        let h = preset_h.min((page_height - 2.0 * PLACEMENT_MARGIN_PT).max(1.0));
+        let (x0, y0) = match self.position {
+            PlacementPosition::TopLeft => {
+                (PLACEMENT_MARGIN_PT, page_height - PLACEMENT_MARGIN_PT - h)
+            }
+            PlacementPosition::TopRight => (
+                page_width - PLACEMENT_MARGIN_PT - w,
+                page_height - PLACEMENT_MARGIN_PT - h,
+            ),
+            PlacementPosition::BottomLeft => (PLACEMENT_MARGIN_PT, PLACEMENT_MARGIN_PT),
+            PlacementPosition::BottomRight => {
+                (page_width - PLACEMENT_MARGIN_PT - w, PLACEMENT_MARGIN_PT)
+            }
+            PlacementPosition::Center => ((page_width - w) / 2.0, (page_height - h) / 2.0),
+        };
+        [x0, y0, x0 + w, y0 + h]
+    }
+}
+
+/// The `CN=` component of a subject distinguished name, or the whole string
+/// if none is found. `pulpit-render`'s `CredentialSummary::subject` hands
+/// back the DN already formatted as text rather than parsed RDNs, so this is
+/// a best-effort split on `,`/`CN=` rather than a real ASN.1 walk — good
+/// enough for a label, never used for anything security-relevant.
+pub fn subject_common_name(subject: &str) -> &str {
+    subject
+        .split(',')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("CN="))
+        .unwrap_or(subject)
+}
+
+/// §25.5's default text template, verbatim, split across the two lines
+/// `AppearanceContent::Text` draws:
+///
+/// ```text
+/// Digitally signed by %(signer)s.
+/// Timestamp: %(ts)s.
+/// ```
+///
+/// No ink is composited (`AppearanceContent::InkAndText` is not built here)
+/// — see this module's top-level doc comment for why.
+pub fn text_appearance_content(
+    signer_cn: &str,
+    signing_time_label: &str,
+) -> pulpit_render::sign::AppearanceContent {
+    pulpit_render::sign::AppearanceContent::Text {
+        signer_name: format!("Digitally signed by {signer_cn}."),
+        time_label: format!("Timestamp: {signing_time_label}."),
+    }
+}
+
+/// Build the `SignAppearance` for `options`, or `None` for an invisible
+/// signature. `page_width`/`page_height` are the current page's displayed
+/// size in points (`PageGeometry::width`/`height`); the caller is
+/// responsible for only calling this when the target page is page 0 — the
+/// only page index `pulpit-render` accepts (§25.5).
+pub fn appearance_for(
+    options: &SigningOptions,
+    signer_cn: &str,
+    signing_time_label: &str,
+    page_width: f64,
+    page_height: f64,
+) -> Option<pulpit_render::sign::SignAppearance> {
+    let placement = options.placement?;
+    Some(pulpit_render::sign::SignAppearance {
+        rect: placement.rect(page_width, page_height),
+        page_index: 0,
+        content: text_appearance_content(signer_cn, signing_time_label),
+    })
 }
 
 /// Everything the credential step has learned about the loaded PKCS#12.
@@ -174,6 +381,12 @@ pub enum SigningFlow {
         credential: std::sync::Arc<Credential>,
         info: CredentialInfo,
         options: SigningOptions,
+        /// Every empty `/Sig` field a preflight pass over the document
+        /// found, for the target picker. One entry (`NewField` or a single
+        /// `ExistingField`) in the ordinary case; more than one when
+        /// countersigning a document preflight reported
+        /// `AmbiguousSignatureField` for.
+        candidates: Vec<TargetChoice>,
     },
     /// Step 7: the confirmation dialog. Non-dismissable except its own
     /// Cancel/Sign buttons.
@@ -181,6 +394,7 @@ pub enum SigningFlow {
         credential: std::sync::Arc<Credential>,
         info: CredentialInfo,
         options: SigningOptions,
+        candidates: Vec<TargetChoice>,
     },
     /// Step 8, in progress. `credential` and `options` are held rather than
     /// dropped so a failed attempt could retry without reloading the
@@ -231,12 +445,14 @@ pub enum SignMsg {
     ReasonChanged(String),
     LocationChanged(String),
     ContactChanged(String),
-    /// Not sent by the shipped Options view, which offers exactly the one
-    /// target `App::default_sign_target` computes. A picker over several
-    /// candidate empty fields is real remaining scope, and this is where its
-    /// message already waits.
-    #[allow(dead_code)]
+    /// Sent by the Options view's target picker when more than one
+    /// candidate field exists (see `SigningFlow::Options::candidates`).
     TargetChosen(TargetChoice),
+    /// Visible/invisible toggle. Refused by the app when the reader is not
+    /// showing page 0 — see `crate::signing`'s module doc comment.
+    VisibleChanged(bool),
+    PlacementPositionChosen(PlacementPosition),
+    PlacementSizeChosen(PlacementSize),
     ContinueToConfirm,
     BackToOptions,
     Confirm,
@@ -491,6 +707,127 @@ mod tests {
         assert_eq!(
             line.summary_text(),
             "Signature is not valid: the signed bytes do not match what was signed"
+        );
+    }
+
+    #[test]
+    fn set_visible_keeps_placement_in_lock_step() {
+        let mut options = SigningOptions::default();
+        assert!(!options.visible_requested);
+        assert_eq!(options.placement, None);
+
+        options.set_visible(true);
+        assert!(options.visible_requested);
+        assert_eq!(options.placement, Some(Placement::default()));
+
+        options.set_visible(false);
+        assert!(!options.visible_requested);
+        assert_eq!(options.placement, None);
+    }
+
+    #[test]
+    fn set_visible_true_twice_keeps_the_chosen_preset() {
+        let mut options = SigningOptions::default();
+        options.set_visible(true);
+        options.placement = Some(Placement {
+            position: PlacementPosition::TopLeft,
+            size: PlacementSize::Large,
+        });
+        // Re-toggling on (a no-op in the view, but exercised here directly)
+        // must not reset a preset the user already chose.
+        options.set_visible(true);
+        assert_eq!(
+            options.placement,
+            Some(Placement {
+                position: PlacementPosition::TopLeft,
+                size: PlacementSize::Large,
+            })
+        );
+    }
+
+    #[test]
+    fn placement_rect_sits_inside_the_margin_at_each_corner() {
+        let page_w = 612.0;
+        let page_h = 792.0;
+        for position in PlacementPosition::ALL {
+            let placement = Placement {
+                position,
+                size: PlacementSize::Medium,
+            };
+            let [x0, y0, x1, y1] = placement.rect(page_w, page_h);
+            assert!(x0 >= PLACEMENT_MARGIN_PT - 1e-9, "{position:?} x0={x0}");
+            assert!(y0 >= PLACEMENT_MARGIN_PT - 1e-9, "{position:?} y0={y0}");
+            assert!(
+                x1 <= page_w - PLACEMENT_MARGIN_PT + 1e-9,
+                "{position:?} x1={x1}"
+            );
+            assert!(
+                y1 <= page_h - PLACEMENT_MARGIN_PT + 1e-9,
+                "{position:?} y1={y1}"
+            );
+            assert!(x1 > x0);
+            assert!(y1 > y0);
+        }
+    }
+
+    #[test]
+    fn placement_rect_clamps_to_a_tiny_page_without_overhanging() {
+        let placement = Placement {
+            position: PlacementPosition::Center,
+            size: PlacementSize::Large,
+        };
+        let [x0, y0, x1, y1] = placement.rect(100.0, 100.0);
+        assert!(x0 >= 0.0);
+        assert!(y0 >= 0.0);
+        assert!(x1 <= 100.0);
+        assert!(y1 <= 100.0);
+    }
+
+    #[test]
+    fn subject_common_name_extracts_cn_from_a_dn() {
+        assert_eq!(
+            subject_common_name("CN=Jane Doe,O=Example,C=US"),
+            "Jane Doe"
+        );
+        assert_eq!(subject_common_name("O=Example, CN=Jane Doe"), "Jane Doe");
+    }
+
+    #[test]
+    fn subject_common_name_falls_back_to_the_whole_subject() {
+        assert_eq!(subject_common_name("O=Example,C=US"), "O=Example,C=US");
+    }
+
+    #[test]
+    fn text_appearance_content_matches_section_25_5_verbatim() {
+        use pulpit_render::sign::AppearanceContent;
+        let content = text_appearance_content("Jane Doe", "2026-08-16T00:00:00Z");
+        let AppearanceContent::Text {
+            signer_name,
+            time_label,
+        } = content
+        else {
+            panic!("expected Text content");
+        };
+        assert_eq!(signer_name, "Digitally signed by Jane Doe.");
+        assert_eq!(time_label, "Timestamp: 2026-08-16T00:00:00Z.");
+    }
+
+    #[test]
+    fn appearance_for_is_none_without_a_placement() {
+        let options = SigningOptions::default();
+        assert!(appearance_for(&options, "Jane Doe", "now", 612.0, 792.0).is_none());
+    }
+
+    #[test]
+    fn appearance_for_targets_page_zero_with_the_chosen_rect() {
+        let mut options = SigningOptions::default();
+        options.set_visible(true);
+        let appearance = appearance_for(&options, "Jane Doe", "now", 612.0, 792.0)
+            .expect("visible options produce an appearance");
+        assert_eq!(appearance.page_index, 0);
+        assert_eq!(
+            appearance.rect,
+            options.placement.unwrap().rect(612.0, 792.0)
         );
     }
 
