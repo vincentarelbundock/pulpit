@@ -74,6 +74,94 @@ pub fn generate_self_signed_credential() -> sign::Credential {
     sign::credential_from_parts(&cert_der, &key_der, Vec::new()).expect("credential from parts")
 }
 
+/// Assemble a single-revision PDF from object bodies given in order, starting
+/// at object 1, with a classic cross-reference table and a fixed `/ID`.
+pub fn assemble_single_revision(objects: &[String]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"%PDF-1.7\n");
+
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(output.len());
+        output.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+
+    let xref_start = output.len();
+    output.extend_from_slice(b"xref\n");
+    output.extend_from_slice(b"0 1\n0000000000 65535 f \n");
+    output.extend_from_slice(format!("1 {}\n", objects.len()).as_bytes());
+    for offset in &offsets {
+        output.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+    }
+    output.extend_from_slice(b"trailer\n<<\n");
+    output.extend_from_slice(format!("/Size {}\n", objects.len() + 1).as_bytes());
+    output.extend_from_slice(b"/Root 1 0 R\n");
+    output.extend_from_slice(
+        b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+    );
+    output.extend_from_slice(b">>\nstartxref\n");
+    output.extend_from_slice(format!("{}\n", xref_start).as_bytes());
+    output.extend_from_slice(b"%%EOF");
+    output
+}
+
+/// An unsigned single-page PDF carrying `fields` empty `/Sig` fields.
+///
+/// With no field names it has no AcroForm at all, which is the shape the
+/// "create a new invisible field" path has to cope with.
+pub fn build_unsigned_pdf(fields: &[&str]) -> Vec<u8> {
+    let field_first = 5u32;
+    let refs: Vec<String> = (0..fields.len())
+        .map(|i| format!("{} 0 R", field_first + i as u32))
+        .collect();
+
+    let mut objects = Vec::new();
+    if fields.is_empty() {
+        objects.push("<</Type /Catalog /Pages 2 0 R>>".to_string());
+    } else {
+        objects.push("<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>".to_string());
+    }
+    objects.push("<</Type /Pages /Kids [3 0 R] /Count 1>>".to_string());
+    if fields.is_empty() {
+        objects.push("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>".to_string());
+    } else {
+        objects.push(format!(
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}]>>",
+            refs.join(" ")
+        ));
+        // Object 4 is the AcroForm even when unused, so that field object
+        // numbers do not shift between the two shapes.
+        objects.push(format!("<</Fields [{}] /SigFlags 3>>", refs.join(" ")));
+        for name in fields {
+            objects.push(format!(
+                "<</FT /Sig /T ({}) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] /F 132 /P 3 0 R>>",
+                name
+            ));
+        }
+    }
+    assemble_single_revision(&objects)
+}
+
+/// An unsigned two-field PDF in which `Sig1` carries a signature dictionary
+/// whose FieldMDP transform locks `Sig2`.
+///
+/// The signature dictionary is a stub: the pre-flight refusal this fixture
+/// exists to trigger happens before any cryptography is consulted.
+pub fn build_pdf_with_fieldmdp_lock() -> Vec<u8> {
+    let objects = vec![
+        "<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>".to_string(),
+        "<</Type /Pages /Kids [3 0 R] /Count 1>>".to_string(),
+        "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R]>>".to_string(),
+        "<</Fields [5 0 R 6 0 R] /SigFlags 3>>".to_string(),
+        "<</FT /Sig /T (Sig1) /V 7 0 R /Type /Annot /Subtype /Widget /Rect [0 0 0 0] /F 132 /P 3 0 R>>".to_string(),
+        "<</FT /Sig /T (Sig2) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] /F 132 /P 3 0 R>>".to_string(),
+        "<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Contents <00> \
+          /ByteRange [0 0 0 0] /Reference [<< /Type /SigRef /TransformMethod /FieldMDP \
+          /TransformParams << /Type /TransformParams /Action /Include /Fields [(Sig2)] /V /1.2 >> >>]>>".to_string(),
+    ];
+    assemble_single_revision(&objects)
+}
+
 /// Build a two-revision PDF whose second revision carries a signature over the
 /// whole file.
 pub fn build_signed_pdf(cred: &sign::Credential) -> SignedFixture {
