@@ -163,6 +163,41 @@ pub enum FormInputEvent {
     SelectAll,
 }
 
+impl FormInputEvent {
+    /// Could this event change what the document holds?
+    ///
+    /// The boundary a permissions check is drawn at (§8.6, and
+    /// `SPEC-document.md` §1213's fail-closed rule for an encrypted file). It
+    /// is deliberately not the same question as
+    /// [`DocumentRequest::is_mutation`], which answers a *replay* question for
+    /// the supervisor and is allowed to be pessimistic about a pointer move.
+    ///
+    /// Everything that can commit a value, type into a field or press a widget
+    /// is a change. Everything a reader needs in order to *read* a form —
+    /// following the pointer, releasing a key, taking or losing focus, naming
+    /// a field, copying a selection — is not, and refusing those would leave a
+    /// read-only document without hover, without a caret and without copy,
+    /// which is a worse answer than the one the permissions asked for.
+    pub fn can_change_the_document(&self) -> bool {
+        match self {
+            // A press or a release lands on a widget: it toggles a checkbox,
+            // moves a radio group, presses a button.
+            FormInputEvent::PointerDown { .. }
+            | FormInputEvent::PointerUp { .. }
+            | FormInputEvent::Char { .. }
+            | FormInputEvent::KeyDown { .. }
+            | FormInputEvent::SelectOption { .. }
+            | FormInputEvent::ReplaceSelection { .. } => true,
+            FormInputEvent::PointerMove { .. }
+            | FormInputEvent::KeyUp { .. }
+            | FormInputEvent::Focus { .. }
+            | FormInputEvent::FocusField { .. }
+            | FormInputEvent::CopySelection
+            | FormInputEvent::SelectAll => false,
+        }
+    }
+}
+
 /// What was held down when a key was pressed or released.
 ///
 /// Carried explicitly rather than folded into [`FormKey`], because the engine
@@ -1201,6 +1236,45 @@ mod tests {
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
             answer
         );
+    }
+
+    #[test]
+    fn only_the_events_that_can_commit_count_as_a_change() {
+        for event in [
+            FormInputEvent::Char { character: 'a' },
+            FormInputEvent::KeyDown {
+                key: FormKey::Enter,
+            },
+            FormInputEvent::ReplaceSelection { text: "Ada".into() },
+            FormInputEvent::SelectOption {
+                index: 1,
+                selected: true,
+            },
+            FormInputEvent::PointerDown {
+                at: PagePoint::new(1.0, 2.0),
+            },
+            FormInputEvent::PointerUp {
+                at: PagePoint::new(1.0, 2.0),
+            },
+        ] {
+            assert!(event.can_change_the_document(), "{event:?}");
+        }
+        for event in [
+            FormInputEvent::PointerMove {
+                at: PagePoint::new(1.0, 2.0),
+            },
+            FormInputEvent::KeyUp {
+                key: FormKey::Enter,
+            },
+            FormInputEvent::Focus { gained: false },
+            FormInputEvent::FocusField {
+                name: "name".into(),
+            },
+            FormInputEvent::CopySelection,
+            FormInputEvent::SelectAll,
+        ] {
+            assert!(!event.can_change_the_document(), "{event:?}");
+        }
     }
 
     #[test]

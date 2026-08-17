@@ -182,9 +182,17 @@ pub enum Told {
         result: Box<pulpit_render::document::protocol::FormEventResult>,
     },
     /// A form event the worker would not take — a document with no fillable
-    /// form, or a page that would not load. Nothing changed, and saying so is
-    /// what keeps the caller's one-in-flight guard from latching shut.
-    FormRefused,
+    /// form, a page that would not load, or permissions that forbid the change.
+    /// Nothing changed, and saying so is what keeps the caller's one-in-flight
+    /// guard from latching shut.
+    ///
+    /// `refusal` carries the document's own reason when there is one — the
+    /// permissions case, which the reader must be *told* about rather than see
+    /// as a field that quietly ignores typing. `None` is the ordinary "nothing
+    /// here to take it", which is not worth a word.
+    FormRefused {
+        refusal: Option<String>,
+    },
     Applied(Box<Applied>),
     /// A mutation — a transaction, an undo or a redo — was not applied.
     ///
@@ -450,7 +458,17 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                     // nothing would latch that guard shut and the form would
                     // stop following the pointer for the rest of the session.
                     tracing::debug!(%error, "a form event was refused");
-                    vec![Told::FormRefused]
+                    // A document that refused the change on its own terms —
+                    // permissions, a read-only field — said so, and that
+                    // sentence belongs on screen. Everything else is the
+                    // ordinary "no form here" and stays at debug level.
+                    let refusal = match &error {
+                        pulpit_render::document::session::SessionError::Refused(
+                            pulpit_render::document::protocol::DocumentFailure::Refused(why),
+                        ) => Some(why.clone()),
+                        _ => None,
+                    };
+                    vec![Told::FormRefused { refusal }]
                 }
                 other => vec![unexpected(other, "a form event result")],
             }
