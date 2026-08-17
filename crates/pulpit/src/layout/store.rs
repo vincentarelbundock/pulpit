@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::builtin::built_in_layouts;
-use crate::layout::model::{AspectRatio, Layout, LayoutId, Origin};
+use crate::layout::model::{AspectRatio, Layout, LayoutId, LayoutPurpose, Origin};
 use crate::layout::tree::{Frame, Node};
 use crate::layout::validate::{is_blocked, validate, Issue};
 use crate::widgets::WidgetKind;
@@ -58,6 +58,13 @@ pub struct LayoutFile {
     pub name: String,
     #[serde(default)]
     pub design_ratio: AspectRatio,
+    /// What the layout is for. Always written on export, so it never needs
+    /// re-deriving after this field was introduced; absent on anything
+    /// written before then (every v1 file and an early v2 one), in which
+    /// case [`LayoutPurpose::infer`] answers the same way the old,
+    /// widget-driven rule did.
+    #[serde(default)]
+    pub purpose: Option<LayoutPurpose>,
     pub root: Node,
 }
 
@@ -67,6 +74,10 @@ impl LayoutFile {
             format_version: FORMAT_VERSION,
             name: layout.name.clone(),
             design_ratio: layout.design_ratio,
+            // Written explicitly, even when the in-memory layout only ever
+            // inferred it: a saved file should not have to re-derive its own
+            // purpose from its widgets every time it is opened.
+            purpose: Some(LayoutPurpose::of(layout)),
             root: layout.root.clone(),
         }
     }
@@ -74,13 +85,15 @@ impl LayoutFile {
     /// An imported layout is always custom, even when exported from a
     /// built-in.
     pub fn into_layout(self) -> Layout {
-        Layout::from_parts(
+        let mut layout = Layout::from_parts(
             LayoutId::from_name(&self.name),
             self.name,
             Origin::Custom,
             self.design_ratio,
             self.root,
-        )
+        );
+        layout.purpose = self.purpose;
+        layout
     }
 }
 
@@ -707,6 +720,49 @@ mod tests {
             "an unversioned file still imports under its own name"
         );
         assert_eq!(layout.widgets()[0].kind(), WidgetKind::SlideSlider);
+    }
+
+    /// A version-1 file predates the `purpose` field entirely, so import
+    /// leaves it absent — and the layout still lands on the right mode,
+    /// inferred from its widgets exactly as `LayoutMode::of` always did.
+    #[test]
+    fn a_v1_file_gains_the_right_purpose_by_inference() {
+        let (_directory, mut store) = store();
+        let legacy = legacy_kind_shape("Legacy", "document-page");
+
+        let (id, _) = store.import(&legacy).unwrap();
+        let layout = store.get(&id).unwrap();
+        assert_eq!(
+            layout.purpose, None,
+            "a v1 file carries no explicit purpose"
+        );
+        assert_eq!(
+            crate::layout::builtin::LayoutMode::of(layout),
+            crate::layout::builtin::LayoutMode::Document
+        );
+    }
+
+    /// An explicit purpose is always written on save and always read back on
+    /// load — it never has to be re-derived from the widgets once a file
+    /// carries it.
+    #[test]
+    fn an_explicit_purpose_round_trips_through_save_and_load() {
+        let (directory, mut store) = store();
+        let id = store.save(&custom_layout("Conference")).unwrap();
+
+        let text =
+            std::fs::read_to_string(directory.path().join(format!("{}.json", id.0))).unwrap();
+        assert!(
+            text.contains("\"purpose\": \"presentation\""),
+            "purpose is written explicitly on save: {text}"
+        );
+
+        let reloaded = LayoutStore::load(directory.path());
+        let layout = reloaded.get(&id).unwrap();
+        assert_eq!(
+            layout.purpose,
+            Some(crate::layout::LayoutPurpose::Presentation)
+        );
     }
 
     #[test]

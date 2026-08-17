@@ -87,8 +87,18 @@ impl WidgetRegistration {
         self.definition.parts
     }
 
+    pub fn placement(&self) -> super::catalog::PlacementPolicy {
+        self.definition.placement
+    }
+
+    /// Thin wrapper kept for existing callers; `placement()` is the real
+    /// policy and knows more than yes/no.
     pub fn multi_instance(&self) -> bool {
-        self.definition.multi_instance
+        self.definition.placement.max_instances.is_none()
+    }
+
+    pub fn capabilities(&self) -> &'static [super::WidgetCapability] {
+        self.definition.capabilities
     }
 
     pub fn minimum_size(&self) -> (f32, f32) {

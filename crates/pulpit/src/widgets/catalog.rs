@@ -5,7 +5,39 @@
 //! are now one table, so adding a widget is one registration rather than a
 //! hunt for the arms somebody forgot.
 
-use super::{WidgetGroup, WidgetKind};
+use super::{WidgetCapability, WidgetGroup, WidgetKind};
+use std::num::NonZeroUsize;
+
+/// How many times a widget may appear in one layout.
+///
+/// Deliberately minimal: this answers "how many", not "which cell claims
+/// it" — a shared/exclusive resource-claims system is a different, larger
+/// feature and out of scope here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementPolicy {
+    /// `None` means unlimited.
+    pub max_instances: Option<NonZeroUsize>,
+}
+
+impl PlacementPolicy {
+    pub const UNLIMITED: PlacementPolicy = PlacementPolicy {
+        max_instances: None,
+    };
+
+    pub const fn single() -> PlacementPolicy {
+        PlacementPolicy {
+            max_instances: NonZeroUsize::new(1),
+        }
+    }
+
+    /// Is this many instances too many?
+    pub fn exceeded_by(self, count: usize) -> bool {
+        match self.max_instances {
+            Some(max) => count > max.get(),
+            None => false,
+        }
+    }
+}
 
 /// The static facts about a widget kind.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,8 +54,11 @@ pub struct WidgetDefinition {
     /// wants forward navigation" and "Slide Navigation and Slide Slider are
     /// mutually exclusive" fall out of one mechanism instead of two.
     pub parts: &'static [WidgetKind],
-    /// May this widget appear more than once in a layout?
-    pub multi_instance: bool,
+    /// How many times this widget may appear in one layout.
+    pub placement: PlacementPolicy,
+    /// What this widget does, on its own — not counting what its `parts`
+    /// contribute. [`WidgetKind::capabilities`] folds those in.
+    pub capabilities: &'static [WidgetCapability],
     /// Smallest size at which this widget is still usable, in layout points
     /// at scale 1. Below this the editor warns rather than saving something
     /// unusable.
@@ -36,6 +71,7 @@ const SLIDE_PARTS: &[WidgetKind] = &[
     WidgetKind::NextSlide,
 ];
 const NONE: &[WidgetKind] = &[];
+const NO_CAPS: &[WidgetCapability] = &[];
 
 /// The catalog. Order is the order of the library sidebar within each group.
 pub const CATALOG: [WidgetDefinition; 25] = [
@@ -46,7 +82,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Current",
         tooltip: "What the audience is seeing right now.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: &[WidgetCapability::ShowsCurrentSlide],
         minimum_size: (200.0, 120.0),
     },
     WidgetDefinition {
@@ -56,7 +93,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Prev",
         tooltip: "The slide you just came from.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (120.0, 80.0),
     },
     WidgetDefinition {
@@ -66,7 +104,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Next",
         tooltip: "What comes next, so you can lead into it.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (120.0, 80.0),
     },
     WidgetDefinition {
@@ -76,7 +115,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "P·C·N",
         tooltip: "All three previews as one strip, with the current slide dominant.",
         parts: SLIDE_PARTS,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (420.0, 120.0),
     },
     WidgetDefinition {
@@ -86,7 +126,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Notes",
         tooltip: "Your talking points for the current slide.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: NO_CAPS,
         minimum_size: (260.0, 120.0),
     },
     WidgetDefinition {
@@ -96,7 +137,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Timer",
         tooltip: "Elapsed time, counting up or down towards a target.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (140.0, 56.0),
     },
     WidgetDefinition {
@@ -106,7 +148,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Clock",
         tooltip: "The wall clock, for keeping to a schedule.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (110.0, 48.0),
     },
     WidgetDefinition {
@@ -116,7 +159,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Buttons",
         tooltip: "The two buttons you press to move through the deck.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::NavigatesForward, WidgetCapability::NavigatesBackward],
         // Two hit targets side by side and nothing else.
         minimum_size: (150.0, 40.0),
     },
@@ -127,7 +171,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Slider",
         tooltip: "Scrub through the deck; the audience follows on release.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::NavigatesForward, WidgetCapability::NavigatesBackward],
         minimum_size: (180.0, 32.0),
     },
     WidgetDefinition {
@@ -137,7 +182,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Count",
         tooltip: "Position in the deck, as “12 / 40”.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (90.0, 28.0),
     },
     WidgetDefinition {
@@ -147,7 +193,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Pause",
         tooltip: "Pause or resume the timer without touching the slides.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ControlsTimer],
         minimum_size: (120.0, 40.0),
     },
     WidgetDefinition {
@@ -157,7 +204,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "End",
         tooltip: "Leave presentation mode and release the projector.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: NO_CAPS,
         minimum_size: (120.0, 40.0),
     },
     WidgetDefinition {
@@ -169,7 +217,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One palette: two would show two different armed tools, and only
         // one of them could be telling the truth.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: NO_CAPS,
         // Eight controls in one row; they grow into whatever height the cell
         // has, so the minimum is the smallest button still worth pressing.
         // Option panels are overlays and cost the cell nothing.
@@ -184,7 +233,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One transport: it always means the media on the current slide, so a
         // second copy would be the same controls twice.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ControlsMedia],
         // A button, a scrub bar wide enough to be worth dragging, and a
         // time readout in one row.
         minimum_size: (260.0, 34.0),
@@ -198,7 +248,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One way in. Two hamburgers would be two buttons opening the same
         // menu, and the open one would have to be told which was pressed.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: NO_CAPS,
         // One square button and nothing else.
         minimum_size: (40.0, 40.0),
     },
@@ -209,7 +260,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Start",
         tooltip: "Open the audience window on a display, and close it again.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ControlsAudience],
         // Start, its display arrow, and Stop side by side.
         minimum_size: (230.0, 40.0),
     },
@@ -220,7 +272,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Title",
         tooltip: "The document title, useful on a shared machine.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (160.0, 28.0),
     },
     WidgetDefinition {
@@ -230,7 +283,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Section",
         tooltip: "The section the current slide belongs to.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
     },
     WidgetDefinition {
@@ -240,7 +294,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Audience",
         tooltip: "Whether the audience output is live or blanked.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
     },
     WidgetDefinition {
@@ -250,7 +305,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Connection",
         tooltip: "Whether a separate audience display is connected.",
         parts: NONE,
-        multi_instance: true,
+        placement: PlacementPolicy::UNLIMITED,
+        capabilities: NO_CAPS,
         minimum_size: (140.0, 24.0),
     },
     WidgetDefinition {
@@ -262,7 +318,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One page surface. Two would be two scroll positions in one document,
         // and the marks would be going into whichever one had the pointer.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ShowsDocument],
         // A page is the artifact; below this there is not enough of it left to
         // read a line of it.
         minimum_size: (240.0, 240.0),
@@ -274,7 +331,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Pages",
         tooltip: "Which page you are on, and the zoom: fit the width, fit the page, set it, or crop to a rectangle.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ShowsDocument],
         // A counter, a page box and four controls in one row.
         minimum_size: (280.0, 32.0),
     },
@@ -285,7 +343,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         short_label: "Outline",
         tooltip: "The document's bookmarks and page thumbnails, for getting somewhere quickly.",
         parts: NONE,
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ShowsDocument],
         // Narrow, because it holds page numbers and bookmark titles rather
         // than prose; every point past that is a point the page is not getting.
         minimum_size: (150.0, 160.0),
@@ -299,7 +358,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One toolbar, for the same reason as the presenter palette: two would
         // show two armed tools and only one of them could be telling the truth.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::ShowsDocument],
         minimum_size: (300.0, 26.0),
     },
     WidgetDefinition {
@@ -311,7 +371,8 @@ pub const CATALOG: [WidgetDefinition; 25] = [
         parts: NONE,
         // One search, for the same reason as one toolbar: two boxes over one
         // model would show two queries and only one of them would be running.
-        multi_instance: false,
+        placement: PlacementPolicy::single(),
+        capabilities: &[WidgetCapability::SearchesDocument],
         // A query field with its stepper beside it, and room for a few results
         // beneath: less than this and the list is a single cut-off row.
         minimum_size: (260.0, 120.0),
@@ -397,7 +458,7 @@ mod tests {
     fn single_instance_widgets_are_exactly_the_documented_ones() {
         let single: Vec<WidgetKind> = CATALOG
             .iter()
-            .filter(|definition| !definition.multi_instance)
+            .filter(|definition| definition.placement.max_instances.is_some())
             .map(|definition| definition.kind)
             .collect();
         assert_eq!(
@@ -426,8 +487,9 @@ mod tests {
         let definition = definition(WidgetKind::Annotations);
         assert_eq!(definition.group, WidgetGroup::PresentationControls);
         assert!(definition.parts.is_empty(), "the palette is not compound");
-        assert!(
-            !definition.multi_instance,
+        assert_eq!(
+            definition.placement.max_instances,
+            std::num::NonZeroUsize::new(1),
             "two palettes could disagree about which tool is armed"
         );
         let (width, height) = definition.minimum_size;
@@ -452,6 +514,58 @@ mod tests {
                 );
                 seen.push(definition.group);
             }
+        }
+    }
+
+    /// The capability table has to reproduce exactly what the old
+    /// hand-written predicates said, for every kind — this is the port of
+    /// those predicates the table is checked against, not a second copy of
+    /// the table itself.
+    #[test]
+    fn capabilities_reproduce_the_old_predicates_for_every_kind() {
+        fn old_shows_current_slide(kind: WidgetKind) -> bool {
+            kind.occupies().contains(&WidgetKind::CurrentSlide)
+        }
+        fn old_family_is_document(kind: WidgetKind) -> bool {
+            matches!(
+                kind,
+                WidgetKind::DocumentPage
+                    | WidgetKind::DocumentNav
+                    | WidgetKind::DocumentOutline
+                    | WidgetKind::AnnotationTools
+            )
+        }
+        // `provides_forward_navigation`/`provides_backward_navigation` also
+        // read widget *configuration*; capability only answers the static
+        // half — "can this kind be configured to do it at all".
+        fn old_can_navigate_forward(kind: WidgetKind) -> bool {
+            matches!(kind, WidgetKind::SlideButtons | WidgetKind::SlideSlider)
+        }
+        fn old_can_navigate_backward(kind: WidgetKind) -> bool {
+            matches!(kind, WidgetKind::SlideButtons | WidgetKind::SlideSlider)
+        }
+
+        for kind in WidgetKind::ALL {
+            assert_eq!(
+                kind.has_capability(WidgetCapability::ShowsCurrentSlide),
+                old_shows_current_slide(kind),
+                "{kind:?}: ShowsCurrentSlide"
+            );
+            assert_eq!(
+                kind.has_capability(WidgetCapability::ShowsDocument),
+                old_family_is_document(kind),
+                "{kind:?}: ShowsDocument"
+            );
+            assert_eq!(
+                kind.has_capability(WidgetCapability::NavigatesForward),
+                old_can_navigate_forward(kind),
+                "{kind:?}: NavigatesForward"
+            );
+            assert_eq!(
+                kind.has_capability(WidgetCapability::NavigatesBackward),
+                old_can_navigate_backward(kind),
+                "{kind:?}: NavigatesBackward"
+            );
         }
     }
 }

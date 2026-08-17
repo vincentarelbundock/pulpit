@@ -80,7 +80,7 @@ pub fn validate(layout: &Layout, area: Frame) -> Vec<Issue> {
         ));
     }
     for (kind, count) in instance_counts(&layout.root) {
-        if !kind.multi_instance() && count > 1 {
+        if kind.placement().exceeded_by(count) {
             issues.push(Issue::blocking(
                 format!("{} appears {count} times", kind.label()),
                 format!(

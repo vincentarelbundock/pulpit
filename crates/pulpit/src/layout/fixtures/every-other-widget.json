@@ -2,6 +2,7 @@
   "design_ratio": "sixteen-nine",
   "format_version": 2,
   "name": "Every other widget",
+  "purpose": "presentation",
   "root": {
     "children": [
       {
