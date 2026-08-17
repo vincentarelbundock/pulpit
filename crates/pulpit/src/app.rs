@@ -961,6 +961,9 @@ pub struct App {
     marks_caches: crate::widgets::annotations::view::MarksCaches,
     /// What the snapshot and caches were last built from.
     marks_signature: Option<MarksSignature>,
+    /// Has this document's own refusal of a form change been said yet? Reset
+    /// when a document is opened, so each one explains itself once.
+    form_refusal_told: bool,
     /// The outline section for (document, page), memoised because the view
     /// asks on every pass. Interior mutability: the view only reads `App`.
     section_cache: SectionCache,
@@ -1379,6 +1382,7 @@ impl App {
             typst_annotations: Default::default(),
             marks_caches: Default::default(),
             marks_signature: None,
+            form_refusal_told: false,
             section_cache: std::cell::RefCell::new(None),
             session_fingerprint: None,
             diagnostics_report_cache: std::cell::RefCell::new(None),
@@ -4714,6 +4718,8 @@ impl App {
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
                     }
+                    // A new document gets to explain its own refusals once.
+                    self.form_refusal_told = false;
                 }
                 crate::reader_link::Told::Found { generation, chunk } => {
                     // Stale chunks land nowhere: the model compares the
@@ -4806,8 +4812,16 @@ impl App {
                     };
                     self.journal(entry);
                 }
-                crate::reader_link::Told::FormRefused => {
+                crate::reader_link::Told::FormRefused { refusal } => {
                     self.form_move_answered();
+                    // Said once per document, not once per keystroke: a locked
+                    // form refuses every letter typed at it, and a banner per
+                    // letter would bury the sentence that explains why.
+                    if let Some(why) = refusal {
+                        if !std::mem::replace(&mut self.form_refusal_told, true) {
+                            self.notify(why);
+                        }
+                    }
                 }
                 crate::reader_link::Told::FormChanged { page, result } => {
                     // The worker is free: the newest waiting move goes out now.

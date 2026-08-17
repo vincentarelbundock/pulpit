@@ -1049,17 +1049,11 @@ impl<'a> PdfiumDocument<'a> {
         }
 
         // A9: an existing signature is detected and warned about *before* the
-        // first mutation, not discovered after a save. PDFium exposes no
-        // accessor for the signature dictionary without a form-fill
-        // environment, so this is a bounded scan of the file's own bytes —
-        // the same technique the capability scan already uses for `/Trans`.
-        if self
-            .source
-            .as_deref()
-            .map(carries_a_signature)
-            .unwrap_or(false)
-        {
-            warnings.push(DocumentWarning::Signed);
+        // first mutation, not discovered after a save.
+        match signature_status(self.backend.bindings(), handle, self.source.as_deref()) {
+            SignatureStatus::Signed => warnings.push(DocumentWarning::Signed),
+            SignatureStatus::Unsigned => {}
+            SignatureStatus::Unknown => warnings.push(DocumentWarning::SignatureUnknown),
         }
 
         let first_page = if page_count > 0 {
@@ -1976,12 +1970,6 @@ impl<'a> PdfiumDocument<'a> {
     }
 }
 
-/// Does this file carry a cryptographic signature?
-///
-/// A byte scan, because the alternative is a form-fill environment that this
-/// engine does not otherwise need. It errs towards saying yes: a false warning
-/// costs the user one dismissal, and a missed one costs them the belief that a
-/// signature survived their edits, which A9 exists to prevent.
 /// What a text field's format script makes of its value.
 ///
 /// PDF has no field type for "date". Acrobat's format categories are entries
@@ -2239,25 +2227,85 @@ fn field_script_reaches_out(
     false
 }
 
-fn carries_a_signature(source: &Path) -> bool {
+/// Whether a document carries a cryptographic signature — including the
+/// answer "pulpit could not tell".
+///
+/// Three states rather than a bool, for the same reason every operation that
+/// leaves the process returns an `Outcome`: "no signature" and "no answer" are
+/// different facts, and collapsing them is how a signed file gets reported as
+/// unsigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignatureStatus {
+    Signed,
+    Unsigned,
+    Unknown,
+}
+
+/// Ask the engine first, and fall back to the file's bytes.
+///
+/// `FPDF_GetSignatureCount` is the structured answer: it reads the parsed
+/// document, so it sees a signature hidden in a compressed object stream,
+/// which no byte scan can. It returns -1 when the build cannot answer, and
+/// only then is the bounded byte scan consulted — and if that cannot answer
+/// either, the status is [`SignatureStatus::Unknown`] rather than a guess.
+fn signature_status(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_DOCUMENT,
+    source: Option<&Path>,
+) -> SignatureStatus {
+    match unsafe { bindings.FPDF_GetSignatureCount(handle) } {
+        count if count > 0 => SignatureStatus::Signed,
+        0 => SignatureStatus::Unsigned,
+        // -1: this PDFium cannot answer. Ask the bytes.
+        _ => match source {
+            Some(source) => scan_for_signature(source),
+            None => SignatureStatus::Unknown,
+        },
+    }
+}
+
+/// Does this file carry a signature, as far as a bounded byte scan can say?
+///
+/// The fallback only. It cannot see into a compressed object stream and it
+/// will not read an unbounded file, so both of those answer
+/// [`SignatureStatus::Unknown`] — an oversize file used to be reported as
+/// unsigned, which is exactly the belief A9 exists to prevent.
+fn scan_for_signature(source: &Path) -> SignatureStatus {
     /// Signature dictionaries live in the trailer's neighbourhood, but an
     /// incrementally updated file can carry them anywhere; 32 MiB covers every
     /// document a person opens by hand and bounds the read.
     const MAX_SCAN_BYTES: u64 = 32 << 20;
 
     let Ok(metadata) = std::fs::metadata(source) else {
-        return false;
+        return SignatureStatus::Unknown;
     };
     if metadata.len() > MAX_SCAN_BYTES {
-        return false;
+        return SignatureStatus::Unknown;
     }
     let Ok(bytes) = std::fs::read(source) else {
-        return false;
+        return SignatureStatus::Unknown;
     };
     // `/Type /Sig` with any amount of whitespace between the two names, and
     // `/FT /Sig` for the field that carries it.
-    contains_pdf_name_pair(&bytes, b"/Type", b"/Sig")
+    if contains_pdf_name_pair(&bytes, b"/Type", b"/Sig")
         || contains_pdf_name_pair(&bytes, b"/FT", b"/Sig")
+    {
+        SignatureStatus::Signed
+    } else if has_compressed_object_streams(&bytes) {
+        // The scan reads what it can see, and an object stream is what it
+        // cannot: a signature inside one leaves no `/Sig` in the raw bytes.
+        SignatureStatus::Unknown
+    } else {
+        SignatureStatus::Unsigned
+    }
+}
+
+/// Does this file put objects inside compressed streams?
+///
+/// If it does, the byte scan's "no signature here" covers only the part of the
+/// file it can read, and the honest answer is that it does not know.
+fn has_compressed_object_streams(bytes: &[u8]) -> bool {
+    contains_pdf_name_pair(bytes, b"/Type", b"/ObjStm")
 }
 
 fn contains_pdf_name_pair(bytes: &[u8], first: &[u8], second: &[u8]) -> bool {
@@ -3726,6 +3774,63 @@ fn expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a file of `bytes` bytes, sparsely where the filesystem allows it,
+    /// so the oversize path can be exercised without a 32 MiB fixture in the
+    /// repository or 32 MiB of writing.
+    fn sparse_file(directory: &Path, name: &str, bytes: u64) -> std::path::PathBuf {
+        let path = directory.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_too_large_to_scan_is_unknown_rather_than_unsigned() {
+        // The bug this replaced: a signed 40 MiB file reported as carrying no
+        // signature, which is the one answer A9 must never give.
+        let directory = tempfile::tempdir().unwrap();
+        let big = sparse_file(directory.path(), "big.pdf", (32 << 20) + 1);
+        assert_eq!(scan_for_signature(&big), SignatureStatus::Unknown);
+    }
+
+    #[test]
+    fn a_scannable_file_is_read_and_answered_either_way() {
+        let directory = tempfile::tempdir().unwrap();
+        let signed = directory.path().join("signed.pdf");
+        std::fs::write(&signed, b"%PDF-1.7\n1 0 obj << /Type /Sig >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&signed), SignatureStatus::Signed);
+
+        let field = directory.path().join("field.pdf");
+        std::fs::write(&field, b"%PDF-1.7\n1 0 obj << /FT/Sig >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&field), SignatureStatus::Signed);
+
+        let plain = directory.path().join("plain.pdf");
+        std::fs::write(&plain, b"%PDF-1.7\n1 0 obj << /Type /Page >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&plain), SignatureStatus::Unsigned);
+    }
+
+    #[test]
+    fn a_compressed_object_stream_is_unknown_because_the_scan_cannot_see_in() {
+        // A signature inside an object stream leaves no `/Sig` in the raw
+        // bytes, so "not found" is not "not there".
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("objstm.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.7\n1 0 obj << /Type /ObjStm /N 4 >> stream\n....\nendstream endobj\n",
+        )
+        .unwrap();
+        assert_eq!(scan_for_signature(&path), SignatureStatus::Unknown);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_unknown() {
+        assert_eq!(
+            scan_for_signature(Path::new("/nowhere/at/all.pdf")),
+            SignatureStatus::Unknown
+        );
+    }
 
     #[test]
     fn acrobats_numbered_date_presets_translate_to_their_patterns() {
