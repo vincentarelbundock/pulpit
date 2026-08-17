@@ -1,381 +1,381 @@
 {
-  "format_version": 1,
-  "name": "Every other widget",
   "design_ratio": "sixteen-nine",
+  "format_version": 2,
+  "name": "Every other widget",
   "root": {
-    "type": "split",
-    "id": 0,
-    "name": "Everything else",
-    "direction": "vertical",
     "children": [
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 1,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "previous-current-next",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "slide": {
               "fit": "fit"
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.slide.previous-current-next"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 2,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "previous-slide",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "slide": {
               "fit": "fit"
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.slide.previous"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 3,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "slide-buttons",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "buttons": {
               "back": true,
               "forward": true,
               "labels": true
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.navigation.buttons"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 4,
-        "widget": {
-          "kind": "slide-slider",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.navigation.slider"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 5,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "timer",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "timer": {
               "warning_minutes": 5
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.timer.elapsed"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 6,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "clock",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "clock": {
-              "twenty_four_hour": true,
+              "show_alarms": true,
               "show_seconds": false,
-              "show_alarms": true
+              "twenty_four_hour": true
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.timer.clock"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 7,
-        "widget": {
-          "kind": "slide-counter",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.navigation.counter"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 8,
-        "widget": {
-          "kind": "pause-resume",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.navigation.pause-resume"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 9,
-        "widget": {
-          "kind": "end-presentation",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.navigation.end"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 10,
-        "widget": {
-          "kind": "presentation-title",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.status.title"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 11,
-        "widget": {
-          "kind": "audience-screen-status",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.status.audience-screen"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 12,
-        "widget": {
-          "kind": "current-section",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.status.section"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 13,
-        "widget": {
-          "kind": "connection-status",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.status.connection"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 14,
+        "padding": 8.0,
+        "type": "leaf",
         "widget": {
-          "kind": "annotations",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
           "config": {
             "annotations": {
-              "tool": "ink",
-              "ink_color": "black",
+              "audience_visible": true,
+              "eraser_radius": 0.019999999552965164,
               "highlight_color": "yellow",
+              "highlight_width": 0.02500000037252903,
+              "ink_color": "black",
+              "ink_width": 0.004000000189989805,
               "pointer_color": "red",
-              "text_color": "black",
+              "pointer_radius": 0.012000000104308128,
               "pointer_spotlight": false,
-              "ink_width": 0.004,
-              "highlight_width": 0.025,
-              "eraser_radius": 0.02,
-              "text_size": 0.025,
-              "pointer_radius": 0.012,
-              "spotlight_radius": 0.08,
-              "audience_visible": true
+              "spotlight_radius": 0.07999999821186066,
+              "text_color": "black",
+              "text_size": 0.02500000037252903,
+              "tool": "ink"
             }
-          }
-        },
-        "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+          },
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.annotations.palette"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 15,
-        "widget": {
-          "kind": "media-transport",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.media.transport"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 16,
-        "widget": {
-          "kind": "main-menu",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.chrome.main-menu"
+        }
       },
       {
-        "type": "leaf",
+        "background": "none",
+        "border": "none",
+        "empty_behavior": "show-blank-panel",
         "id": 17,
-        "widget": {
-          "kind": "audience-controls",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
         "padding": 8.0,
-        "background": "none",
-        "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.chrome.audience-controls"
+        }
       },
       {
-        "type": "leaf",
-        "id": 18,
-        "widget": {
-          "kind": "search",
-          "style": {
-            "variant": "standard",
-            "scale": 1.0,
-            "alignment": "center"
-          },
-          "config": "none"
-        },
-        "padding": 8.0,
         "background": "none",
         "border": "none",
-        "empty_behavior": "show-blank-panel"
+        "empty_behavior": "show-blank-panel",
+        "id": 18,
+        "padding": 8.0,
+        "type": "leaf",
+        "widget": {
+          "config": "none",
+          "style": {
+            "alignment": "center",
+            "scale": 1.0,
+            "variant": "standard"
+          },
+          "widget_id": "pulpit.search.query"
+        }
       }
     ],
-    "sizes": [
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556,
-      0.055555556
-    ],
+    "direction": "vertical",
     "gap": 8.0,
-    "min_child": 0.05
+    "id": 0,
+    "min_child": 0.05000000074505806,
+    "name": "Everything else",
+    "sizes": [
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767,
+      0.0555555559694767
+    ],
+    "type": "split"
   }
 }

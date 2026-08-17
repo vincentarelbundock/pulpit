@@ -127,6 +127,23 @@ impl CellBorder {
     }
 }
 
+/// A placed widget whose id (§ [`crate::widgets::registry::WidgetId`]) is not
+/// known to this build.
+///
+/// Kept instead of dropped or refused: a layout saved by a newer pulpit, or
+/// one hand-edited, must still open. The id, its raw configuration and its
+/// raw style are preserved untouched, so saving the layout again reproduces
+/// the entry exactly rather than losing it or guessing at a shape this build
+/// cannot validate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnavailableWidget {
+    pub widget_id: String,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub style: serde_json::Value,
+}
+
 /// One visible cell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
@@ -136,6 +153,10 @@ pub struct Cell {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<Widget>,
+    /// Set instead of `widget` when the saved widget id does not resolve to
+    /// a kind this build knows. Mutually exclusive with `widget`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<UnavailableWidget>,
     #[serde(default)]
     pub padding: f32,
     #[serde(default)]
@@ -155,6 +176,7 @@ impl Cell {
             id,
             name: None,
             widget: None,
+            unavailable: None,
             padding: 8.0,
             background: CellBackground::None,
             border: CellBorder::None,
@@ -170,15 +192,18 @@ impl Cell {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.widget.is_none()
+        self.widget.is_none() && self.unavailable.is_none()
     }
 
     /// What the tree panel calls this cell.
     pub fn display_name(&self) -> String {
-        self.name.clone().unwrap_or_else(|| match &self.widget {
-            Some(widget) => widget.label().to_string(),
-            None => "Empty cell".to_string(),
-        })
+        self.name
+            .clone()
+            .unwrap_or_else(|| match (&self.widget, &self.unavailable) {
+                (Some(widget), _) => widget.label().to_string(),
+                (None, Some(unavailable)) => format!("Unknown widget ({})", unavailable.widget_id),
+                (None, None) => "Empty cell".to_string(),
+            })
     }
 }
 
