@@ -198,15 +198,34 @@ impl TimeOfDay {
     ///
     /// Deliberately forgiving about the shape and strict about the numbers:
     /// the value in the field was written by the field's own format script in
-    /// a locale that is not necessarily this one, so the digits either side of
-    /// the first colon are the only part worth trusting. A trailing pm marker
-    /// is honoured because a 12-hour field is where one appears.
-    pub fn parse(value: &str) -> Option<TimeOfDay> {
+    /// a shape this code did not choose, so the digits either side of the
+    /// first colon are the only part worth trusting. A pm marker is honoured
+    /// because a 12-hour field is where one appears.
+    ///
+    /// `locale` is the one the helper writes with, so the marker it reads is
+    /// the marker it produced: a helper that could not parse its own output
+    /// would reopen an afternoon `2:05 午後` as two in the morning, half a day
+    /// out. The English forms stay as a fallback, because a field filled
+    /// elsewhere — or by a format script of its own — need not be in this
+    /// reader's language. A locale with no marker at all answers with an empty
+    /// string, which matches nothing rather than everything.
+    pub fn parse(value: &str, locale: Locale) -> Option<TimeOfDay> {
         let trimmed = value.trim();
         let lowered = trimmed.to_lowercase();
-        let afternoon = lowered.ends_with("pm") || lowered.ends_with("p.m.");
-        let morning = lowered.ends_with("am") || lowered.ends_with("a.m.");
-        let digits: String = trimmed
+        // Either end: the pattern decides where `tt` falls, and a locale that
+        // writes its marker first is a locale whose forms put it first.
+        let marked = |marker: String| {
+            let marker = marker.trim().to_lowercase();
+            !marker.is_empty() && (lowered.starts_with(&marker) || lowered.ends_with(&marker))
+        };
+        let afternoon =
+            marked(locale.meridiem(true)) || lowered.ends_with("pm") || lowered.ends_with("p.m.");
+        let morning =
+            marked(locale.meridiem(false)) || lowered.ends_with("am") || lowered.ends_with("a.m.");
+        // From the first digit rather than the first character, so a marker
+        // written in front of the time does not hide it.
+        let first = trimmed.find(|character: char| character.is_ascii_digit())?;
+        let digits: String = trimmed[first..]
             .chars()
             .take_while(|character| character.is_ascii_digit() || *character == ':')
             .collect();
@@ -740,18 +759,86 @@ mod tests {
         // The value was written by the field's own format script, in a shape
         // this code did not choose — so the digits either side of the first
         // colon, and a marker if there is one, are what is trusted.
-        assert_eq!(TimeOfDay::parse("14:05"), Some(TimeOfDay::new(14, 5)));
-        assert_eq!(TimeOfDay::parse(" 9:07 "), Some(TimeOfDay::new(9, 7)));
-        assert_eq!(TimeOfDay::parse("2:05 pm"), Some(TimeOfDay::new(14, 5)));
-        assert_eq!(TimeOfDay::parse("12:00 AM"), Some(TimeOfDay::new(0, 0)));
-        assert_eq!(TimeOfDay::parse("12:00 pm"), Some(TimeOfDay::new(12, 0)));
-        assert_eq!(TimeOfDay::parse("08:30:00"), Some(TimeOfDay::new(8, 30)));
+        let english = locale("en_US");
+        assert_eq!(
+            TimeOfDay::parse("14:05", english),
+            Some(TimeOfDay::new(14, 5))
+        );
+        assert_eq!(
+            TimeOfDay::parse(" 9:07 ", english),
+            Some(TimeOfDay::new(9, 7))
+        );
+        assert_eq!(
+            TimeOfDay::parse("2:05 pm", english),
+            Some(TimeOfDay::new(14, 5))
+        );
+        assert_eq!(
+            TimeOfDay::parse("12:00 AM", english),
+            Some(TimeOfDay::new(0, 0))
+        );
+        assert_eq!(
+            TimeOfDay::parse("12:00 pm", english),
+            Some(TimeOfDay::new(12, 0))
+        );
+        assert_eq!(
+            TimeOfDay::parse("08:30:00", english),
+            Some(TimeOfDay::new(8, 30))
+        );
         // Nothing readable is nothing claimed: the helper then opens on the
         // wall clock rather than on a time invented from half a string.
-        assert_eq!(TimeOfDay::parse(""), None);
-        assert_eq!(TimeOfDay::parse("noon"), None);
-        assert_eq!(TimeOfDay::parse("25:00"), None);
-        assert_eq!(TimeOfDay::parse("10:75"), None);
+        assert_eq!(TimeOfDay::parse("", english), None);
+        assert_eq!(TimeOfDay::parse("noon", english), None);
+        assert_eq!(TimeOfDay::parse("25:00", english), None);
+        assert_eq!(TimeOfDay::parse("10:75", english), None);
+    }
+
+    #[test]
+    fn the_helper_reads_back_the_marker_it_wrote() {
+        // The helper writes the locale's own `%p`, and the value it reopens on
+        // is the value it wrote: a parser that knew only "pm" would put every
+        // localised afternoon half a day out.
+        for tag in ["ja_JP", "ko_KR", "el_GR", "tr_TR", "en_US"] {
+            let language = locale(tag);
+            let afternoon = TimeOfDay::new(14, 5);
+            let written = afternoon.format("h:MM tt", language);
+            assert_eq!(
+                TimeOfDay::parse(&written, language),
+                Some(afternoon),
+                "{tag} wrote {written:?} and could not read it back"
+            );
+            let morning = TimeOfDay::new(9, 7);
+            let written = morning.format("h:MM tt", language);
+            assert_eq!(
+                TimeOfDay::parse(&written, language),
+                Some(morning),
+                "{tag} wrote {written:?} and could not read it back"
+            );
+            // Midnight and noon, where a 12-hour clock goes wrong.
+            for time in [TimeOfDay::new(0, 0), TimeOfDay::new(12, 30)] {
+                let written = time.format("h:MM tt", language);
+                assert_eq!(TimeOfDay::parse(&written, language), Some(time));
+            }
+        }
+        // A marker in front of the time rather than behind it.
+        let japanese = locale("ja_JP");
+        let written = format!("{} 2:05", japanese.meridiem(true));
+        assert_eq!(
+            TimeOfDay::parse(&written, japanese),
+            Some(TimeOfDay::new(14, 5))
+        );
+        // A 24-hour locale has no marker, and an empty one must match nothing
+        // rather than everything.
+        let french = locale("fr_FR");
+        assert_eq!(french.meridiem(true), "");
+        assert_eq!(
+            TimeOfDay::parse("14:05", french),
+            Some(TimeOfDay::new(14, 5))
+        );
+        // The English forms stay as a fallback, for a field filled elsewhere.
+        assert_eq!(
+            TimeOfDay::parse("2:05 pm", french),
+            Some(TimeOfDay::new(14, 5))
+        );
     }
 
     #[test]

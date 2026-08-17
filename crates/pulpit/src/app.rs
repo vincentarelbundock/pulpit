@@ -100,6 +100,7 @@ pub enum Message {
         shift: bool,
         control: bool,
         alt: bool,
+        captured: bool,
     },
     /// Text read asynchronously after Paste while a label is active.
     PasteAnnotationText {
@@ -108,7 +109,13 @@ pub enum Message {
     },
     /// Text read asynchronously after Ctrl-V while a form field holds the
     /// caret. `None` for a clipboard holding something that is not text.
-    PasteFormText(Option<String>),
+    ///
+    /// `focus` is the field the shortcut was typed in, carried so the text
+    /// cannot land anywhere else — see [`FormFocus`].
+    PasteFormText {
+        focus: Option<FormFocus>,
+        value: Option<String>,
+    },
     Do(Action),
     Nav(Nav),
     /// The back button: return to the place the last jump left behind, or —
@@ -196,7 +203,11 @@ pub enum Message {
     SetMotion(crate::platform::MotionSetting),
     /// A key came up. Only interactive overlays care; pulpit's own
     /// bindings all act on the press.
-    KeyReleased(String),
+    KeyReleased {
+        key: String,
+        shift: bool,
+        control: bool,
+    },
     Wheel {
         x: f32,
         y: f32,
@@ -565,6 +576,27 @@ pub enum FormClipboard {
     Cut,
 }
 
+/// Which field a clipboard action was started in (§8.6).
+///
+/// A clipboard action is two turns of the event loop with a wait in the middle
+/// — the toolkit's read for a paste, the worker's answer for a copy or a cut —
+/// and the caret can leave the field, or the reader can click into another
+/// one, while that wait is on. "Some field is focused" is not enough to finish
+/// on: it is what lets a paste land in a field the reader never asked to paste
+/// into, and lets the removal half of a cut delete a selection out of a
+/// different field entirely. So the field is named when the action starts and
+/// the completion is dropped unless the same field still holds the caret.
+///
+/// The page and the field's name, and not the document revision: an edit
+/// between the two halves — a keystroke in the same field, an annotation
+/// committed elsewhere — moves the revision without moving the caret, and a
+/// paste dropped for that would be a paste dropped for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormFocus {
+    page: pulpit_core::page::PageIndex,
+    field: String,
+}
+
 /// What of a clipboard's contents may be put into a form field.
 ///
 /// Control characters are dropped — a field value is text, and the `\u{1b}`
@@ -763,7 +795,9 @@ pub struct App {
     /// is waiting on an answer, which is almost always: only the event a
     /// Ctrl-C or a Ctrl-X sent brings a selection back, and only the shortcut
     /// that sent it knows whether the text is also to be removed.
-    pub form_clipboard: Option<FormClipboard>,
+    /// Paired with the field it was typed in, so the removal half of a cut
+    /// cannot be addressed to a field the caret has since moved to.
+    pub form_clipboard: Option<(FormClipboard, Option<FormFocus>)>,
     /// A field's selection, copied and waiting for a tick to write it out.
     /// The worker pump that receives it has no `Task` to hand back.
     pub form_clipboard_text: Option<String>,
@@ -775,6 +809,18 @@ pub struct App {
     /// exists. Still never enforcement — "Save anyway" is one of the two
     /// answers, and pulpit only writes copies.
     pub pending_save_review: Option<SaveReview>,
+    /// A Save As that is waiting for the caret to leave the field it is in.
+    ///
+    /// Losing focus is what commits an in-progress form edit, so a save asked
+    /// for while a field holds the caret is an ordered operation and not one
+    /// call: defocus, let the commit come back through the ordinary
+    /// [`Self::form_changed`] path — one revision, one undo entry, a refreshed
+    /// field list, a redraw — and only then review and write. Saving first
+    /// would write a file without the characters the reader can see.
+    save_waits_for_form_commit: bool,
+    /// The commit came back and the save can go on. Held rather than run: the
+    /// worker pump has no `Task` to hand back, so the next tick starts it.
+    resume_save_after_form_commit: bool,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -961,6 +1007,9 @@ pub struct App {
     marks_caches: crate::widgets::annotations::view::MarksCaches,
     /// What the snapshot and caches were last built from.
     marks_signature: Option<MarksSignature>,
+    /// Has this document's own refusal of a form change been said yet? Reset
+    /// when a document is opened, so each one explains itself once.
+    form_refusal_told: bool,
     /// The outline section for (document, page), memoised because the view
     /// asks on every pass. Interior mutability: the view only reads `App`.
     section_cache: SectionCache,
@@ -1307,6 +1356,8 @@ impl App {
             form_clipboard: None,
             form_clipboard_text: None,
             pending_save_review: None,
+            save_waits_for_form_commit: false,
+            resume_save_after_form_commit: false,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -1379,6 +1430,7 @@ impl App {
             typst_annotations: Default::default(),
             marks_caches: Default::default(),
             marks_signature: None,
+            form_refusal_told: false,
             section_cache: std::cell::RefCell::new(None),
             session_fingerprint: None,
             diagnostics_report_cache: std::cell::RefCell::new(None),
@@ -1596,6 +1648,7 @@ impl App {
                 shift: modifiers.shift(),
                 control: modifiers.command() || modifiers.control(),
                 alt: modifiers.alt(),
+                captured: status == iced::event::Status::Captured,
             }),
             // Letting go of the button ends a scrub, wherever the pointer
             // happens to be. The slider's own release only arrives when the
@@ -1616,9 +1669,13 @@ impl App {
             ) => Some(Message::PointerReleased),
             // A key held down inside a web overlay needs its release, or the
             // page believes it is still held for the rest of the talk.
-            iced::Event::Keyboard(iced::keyboard::Event::KeyReleased { key, .. }) => {
-                describe_key(&key).map(Message::KeyReleased)
-            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyReleased {
+                key, modifiers, ..
+            }) => describe_key(&key).map(|key| Message::KeyReleased {
+                key,
+                shift: modifiers.shift(),
+                control: modifiers.command() || modifiers.control(),
+            }),
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
                 if status == iced::event::Status::Captured {
                     return None;
@@ -1980,6 +2037,7 @@ impl App {
                 shift,
                 control,
                 alt,
+                captured,
             } => {
                 if self.annotations.is_typing() {
                     match key.as_deref() {
@@ -2026,6 +2084,12 @@ impl App {
                     if key.as_deref() == Some("Escape") {
                         self.composing_mark = None;
                     }
+                    return Task::none();
+                }
+                // A widget that captured the event owns the keyboard. Its
+                // own message handles the press; the application keymap is
+                // only the fallback for an otherwise-unclaimed event.
+                if captured {
                     return Task::none();
                 }
                 if key.as_deref() == Some("Escape") && self.confirm_reset_colors {
@@ -2128,8 +2192,9 @@ impl App {
                         return task;
                     }
                 }
-                // A focused overlay may take the key — but never a global
-                // shortcut, and never Escape, which is always the way out.
+                // A focused overlay owns every key. Escape is interpreted by
+                // the overlay router as releasing focus; no press falls
+                // through to the application keymap while it owns input.
                 if self.input_router.focused().is_some() {
                     if let Some(name) = key.as_deref() {
                         let routed = self.input_router.key_pressed(name, None);
@@ -2141,11 +2206,10 @@ impl App {
                             // Escape has already given the focus back inside
                             // the router; nothing else needs to happen.
                             crate::media::Routed::ReleaseFocus => return Task::none(),
-                            // A global shortcut falls through to the keymap
-                            // below, focus or no focus.
-                            _ => {}
+                            _ => return Task::none(),
                         }
                     }
+                    return Task::none();
                 }
                 // Reading a document, Page Down means the next screenful of
                 // this document — not the next slide. The presenter's
@@ -2188,13 +2252,17 @@ impl App {
                 }
                 Task::none()
             }
-            Message::PasteFormText(value) => {
+            Message::PasteFormText { focus, value } => {
                 // The read is asynchronous, so the caret may have left the
                 // field — or the document — while it was in flight. A paste
                 // with nowhere to land is dropped rather than sent: the worker
                 // would answer an event with no focused field with a refusal,
-                // and a refusal is not what "nothing was selected" means.
-                let Some(value) = value.filter(|_| self.reader.form_holds_the_caret()) else {
+                // and a refusal is not what "nothing was selected" means. And
+                // one whose field has been left is dropped for a stronger
+                // reason: the text belongs to the field it was asked for and
+                // to no other (§8.6).
+                let landing = self.reader.form_holds_the_caret() && self.form_focus() == focus;
+                let Some(value) = value.filter(|_| landing) else {
                     return Task::none();
                 };
                 let text = sanitised_paste(&value);
@@ -2718,10 +2786,27 @@ impl App {
                 self.persist();
                 Task::none()
             }
-            Message::KeyReleased(key) => {
+            Message::KeyReleased {
+                key,
+                shift,
+                control,
+            } => {
                 if self.input_router.focused().is_some() {
                     let routed = self.input_router.key_released(&key);
                     self.deliver(routed);
+                }
+                // A field told a key went down is told it came up: the engine
+                // tracks the key's state, and a press with no release leaves
+                // it believing the key is still held. Only where a field has
+                // the keyboard, so an ordinary deck is untouched.
+                if self.reader.form_has_keyboard() {
+                    if let Some(named) = released_form_key(&key) {
+                        use pulpit_render::document::protocol::{FormInputEvent, KeyModifiers};
+                        self.ask_form_key(FormInputEvent::KeyUp {
+                            key: named,
+                            modifiers: KeyModifiers::new(shift, control),
+                        });
+                    }
                 }
                 Task::none()
             }
@@ -3446,6 +3531,21 @@ impl App {
         }
     }
 
+    /// Apply an action whose meaning exists only with a Reader layout.
+    ///
+    /// The binding remains global: layouts do not carry separate keymaps.
+    /// Applicability belongs to the semantic action, so the same press is a
+    /// deliberate no-op when there is no Reader on screen.
+    fn on_reader_action(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
+        use crate::layout::builtin::LayoutMode;
+
+        if self.reader.is_open() && LayoutMode::of(&self.active_layout) == LayoutMode::Document {
+            self.on_read_command(command)
+        } else {
+            Task::none()
+        }
+    }
+
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::ToggleReader => self.toggle_reader(),
@@ -3467,6 +3567,26 @@ impl App {
             Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
             Action::FindPrevious => {
                 self.on_find_command(crate::widgets::event::FindCommand::Previous)
+            }
+            Action::ZoomIn => self.on_reader_action(crate::widgets::event::ReadCommand::ZoomIn),
+            Action::ZoomOut => self.on_reader_action(crate::widgets::event::ReadCommand::ZoomOut),
+            Action::ZoomReset => {
+                self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                    crate::widgets::document::model::Zoom::Fixed(1.0),
+                ))
+            }
+            Action::FitPage => self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                crate::widgets::document::model::Zoom::FitPage,
+            )),
+            Action::FitWidth => self.on_reader_action(crate::widgets::event::ReadCommand::SetZoom(
+                crate::widgets::document::model::Zoom::FitWidth,
+            )),
+            Action::RotateReader => {
+                self.on_reader_action(crate::widgets::event::ReadCommand::RotateView)
+            }
+            Action::ToggleDualPage => {
+                let spread = self.reader.controls().spread.other();
+                self.on_reader_action(crate::widgets::event::ReadCommand::SetSpread(spread))
             }
             Action::Next => self.update(Message::Nav(Nav::Next)),
             Action::Previous => self.update(Message::Nav(Nav::Previous)),
@@ -3824,6 +3944,12 @@ impl App {
         //       waits for this one.
         if let Some(text) = self.form_clipboard_text.take() {
             tasks.push(iced::clipboard::write(text));
+        }
+
+        // 1b-ii. A Save As that stopped to let a field commit. The commit has
+        //        landed, so the review and the file picker go on from here.
+        if std::mem::take(&mut self.resume_save_after_form_commit) {
+            tasks.push(self.review_then_save_document());
         }
 
         // 1c. Has the overview stopped moving? A grid that scrolls out from
@@ -4714,6 +4840,8 @@ impl App {
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
                     }
+                    // A new document gets to explain its own refusals once.
+                    self.form_refusal_told = false;
                 }
                 crate::reader_link::Told::Found { generation, chunk } => {
                     // Stale chunks land nowhere: the model compares the
@@ -4806,12 +4934,39 @@ impl App {
                     };
                     self.journal(entry);
                 }
-                crate::reader_link::Told::FormRefused => {
-                    self.form_move_answered();
+                crate::reader_link::Told::FormRefused { refusal, moved } => {
+                    // The move slot is released by a move and by nothing else
+                    // (§8.6) — see `Told::FormChanged` below.
+                    if moved {
+                        self.form_move_answered();
+                    }
+                    // A save that was waiting on a commit that will not come
+                    // is a save, not a hang: nothing was committed, so nothing
+                    // is lost by going on to write what the document has.
+                    if self.save_waits_for_form_commit {
+                        self.save_waits_for_form_commit = false;
+                        self.resume_save_after_form_commit = true;
+                    }
+                    // Said once per document, not once per keystroke: a locked
+                    // form refuses every letter typed at it, and a banner per
+                    // letter would bury the sentence that explains why.
+                    if let Some(why) = refusal {
+                        if !std::mem::replace(&mut self.form_refusal_told, true) {
+                            self.notify(why);
+                        }
+                    }
                 }
-                crate::reader_link::Told::FormChanged { page, result } => {
-                    // The worker is free: the newest waiting move goes out now.
-                    self.form_move_answered();
+                crate::reader_link::Told::FormChanged {
+                    page,
+                    result,
+                    moved,
+                } => {
+                    // The move slot is released by a move and by nothing else:
+                    // a key or a clipboard answer arriving while a move is
+                    // still out says nothing about that move (§8.6).
+                    if moved {
+                        self.form_move_answered();
+                    }
                     self.form_changed(page, *result);
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
@@ -5479,24 +5634,26 @@ impl App {
 
     /// Route one key press to the field that holds the caret (§8.6).
     ///
-    /// `None` means the key was not the field's and should carry on to the
-    /// keymap. Everything a text box uses is the field's; the shortcuts a
-    /// reader would still expect while typing are not.
+    /// Once a form owns the keyboard, every press is consumed here. A key the
+    /// field does not understand is inert rather than falling through to the
+    /// application keymap and firing an unrelated action.
     fn form_key(
         &mut self,
         key: Option<&str>,
         text: Option<&str>,
         control: bool,
+        shift: bool,
     ) -> Option<Task<Message>> {
-        use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+        use pulpit_render::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
 
-        // Ctrl-anything is a shortcut, not text. Undo, Save As and the rest
-        // keep working with the caret in a field, which is what every other
-        // editor does.
-        //
-        // The four exceptions are the clipboard, which is a shortcut a *text
-        // box* owns: with a caret in a field, Ctrl-C means the field's
-        // selection and nothing else. PDFium's form environment has no
+        // What the field is told was held down. Shift is what turns an arrow
+        // into a selection, which is what a copy out of the field then reads.
+        let modifiers = KeyModifiers::new(shift, control);
+
+        // Ctrl-anything belongs to the field while it owns the keyboard. The
+        // clipboard combinations have local meanings; every other modified
+        // press is consumed without consulting the global keymap. PDFium's
+        // form environment has no
         // clipboard of its own — it has `FORM_GetSelectedText`,
         // `FORM_ReplaceSelection` and `FORM_SelectAllText`, and the host is
         // expected to be the clipboard — so this is where the two are joined.
@@ -5506,7 +5663,7 @@ impl App {
                     return Some(task);
                 }
             }
-            return None;
+            return Some(Task::none());
         }
 
         // An open option list takes the keys a list takes, and it takes them
@@ -5553,9 +5710,7 @@ impl App {
             }
         }
 
-        // The named keys a field uses. Escape is deliberately absent: it is
-        // forwarded below *and* allowed to continue, so it both abandons the
-        // field edit and remains the global way out.
+        // The named keys a field uses.
         let named = match key {
             Some("Backspace") => Some(FormKey::Backspace),
             Some("Delete") => Some(FormKey::Delete),
@@ -5565,14 +5720,20 @@ impl App {
             Some("ArrowLeft") | Some("Left") => Some(FormKey::Left),
             Some("ArrowRight") | Some("Right") => Some(FormKey::Right),
             // A *list* box moves its own selection on an arrow key, so those
-            // go straight through. A closed combo box ignores them — in a real
-            // viewer the key would be travelling to a dropdown that is not
-            // open — so for one of those the arrow becomes the selection
-            // change PDFium does answer to (§8.6).
-            Some("ArrowUp") | Some("Up") if self.reader.focused_choice().is_some() => {
+            // go straight through, and so does an editable combo box, whose
+            // list is PDFium's own. A closed, non-editable combo box ignores
+            // them — in a real viewer the key would be travelling to a
+            // dropdown that is not open — so for one of those, and only one
+            // of those, the arrow becomes the selection change PDFium does
+            // answer to (§8.6).
+            Some("ArrowUp") | Some("Up")
+                if !arrow_reaches_the_engine(self.reader.focused_choice()) =>
+            {
                 return self.form_choice_step(false)
             }
-            Some("ArrowDown") | Some("Down") if self.reader.focused_choice().is_some() => {
+            Some("ArrowDown") | Some("Down")
+                if !arrow_reaches_the_engine(self.reader.focused_choice()) =>
+            {
                 return self.form_choice_step(true)
             }
             Some("ArrowUp") | Some("Up") => Some(FormKey::Up),
@@ -5582,15 +5743,18 @@ impl App {
             _ => None,
         };
         if let Some(named) = named {
-            self.ask_form_key(FormInputEvent::KeyDown { key: named });
+            self.ask_form_key(FormInputEvent::KeyDown {
+                key: named,
+                modifiers,
+            });
             return Some(Task::none());
         }
         if key == Some("Escape") {
             self.ask_form_key(FormInputEvent::KeyDown {
                 key: FormKey::Escape,
+                modifiers,
             });
-            // …and on to the keymap, which is what makes Escape always work.
-            return None;
+            return Some(Task::none());
         }
 
         // Anything that produced text is text. Taken from the toolkit's own
@@ -5598,8 +5762,9 @@ impl App {
         // through the keyboard layout and the dead keys: the key named "2" on
         // one layout is the character that layout puts there, and a field that
         // read the key name would spell a French keyboard wrong.
-        let text = text?;
-        let mut sent = false;
+        let Some(text) = text else {
+            return Some(Task::none());
+        };
         for character in text.chars() {
             // Control characters are not text. The named keys above already
             // carry the ones a field acts on, and forwarding the rest as
@@ -5608,15 +5773,14 @@ impl App {
                 continue;
             }
             self.ask_form_key(FormInputEvent::Char { character });
-            sent = true;
         }
-        sent.then(Task::none)
+        Some(Task::none())
     }
 
     /// The clipboard shortcuts, with the caret in a text field (§8.6).
     ///
-    /// `None` for a Ctrl-press that is not one of them, which carries on to
-    /// the keymap exactly as every other Ctrl-press does.
+    /// `None` for a Ctrl-press that is not one of them; the caller still
+    /// consumes it because the focused form owns the keyboard.
     ///
     /// Copy and cut cannot answer here: what is selected is PDFium's to
     /// report, so the event goes out and the clipboard is written when the
@@ -5632,17 +5796,27 @@ impl App {
             } else {
                 FormClipboard::Copy
             };
+            // Named before the event goes out, because the answer comes back
+            // a turn later and the caret is free to move in between.
+            let focus = self.form_focus();
             if !self.ask_focused_form_event(FormInputEvent::CopySelection) {
                 // Nothing will answer, so nothing is left waiting for one.
                 return None;
             }
-            self.form_clipboard = Some(intent);
+            self.form_clipboard = Some((intent, focus));
             return Some(Task::none());
         }
         if key.eq_ignore_ascii_case("v") {
             // Read now, sent when it arrives: the clipboard is the toolkit's
-            // and answers asynchronously.
-            return Some(iced::clipboard::read().map(Message::PasteFormText));
+            // and answers asynchronously. The field is named now too, so what
+            // arrives can be matched against where it was asked for.
+            let focus = self.form_focus();
+            return Some(
+                iced::clipboard::read().map(move |value| Message::PasteFormText {
+                    focus: focus.clone(),
+                    value,
+                }),
+            );
         }
         if key.eq_ignore_ascii_case("a") {
             self.ask_focused_form_event(FormInputEvent::SelectAll);
@@ -5660,17 +5834,23 @@ impl App {
     /// and a copy addressed to the wrong page reads an empty selection. Falls
     /// back to the ordinary route when nothing is focused, where the answer is
     /// "nothing is selected" either way.
+    /// The field that holds the caret, named so an answer that arrives a turn
+    /// later can be matched against it — see [`FormFocus`].
+    fn form_focus(&self) -> Option<FormFocus> {
+        self.reader.focused_widget().map(|widget| FormFocus {
+            page: widget.page,
+            field: widget.field.clone(),
+        })
+    }
+
     fn ask_focused_form_event(
         &mut self,
         event: pulpit_render::document::protocol::FormInputEvent,
     ) -> bool {
-        let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
-            return self.ask_form_key(event);
-        };
-        match self.reader_link.as_mut() {
-            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-            None => false,
-        }
+        // One route, now that every focus-owned event takes it: see
+        // [`Self::ask_form_key`], which prefers the focused widget's page and
+        // falls back to the pointer's only when nothing is focused.
+        self.ask_form_key(event)
     }
 
     /// Send one keyboard event to the field that holds the caret.
@@ -5679,18 +5859,12 @@ impl App {
     /// reader of an ordinary deck never takes this path and every letter still
     /// means what the keymap says it means.
     fn ask_form_key(&mut self, event: pulpit_render::document::protocol::FormInputEvent) -> bool {
-        let Some((page, _)) = self.reader.cursor_position() else {
-            // The caret is in a field, so the page it is on is known even if
-            // the pointer has since left the surface. Falling back to the page
-            // the reader is looking at keeps typing working after the mouse
-            // has been moved away, which is most of the time.
-            let Some(page) = self.reader.current_page() else {
-                return false;
-            };
-            return match self.reader_link.as_mut() {
-                Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-                None => false,
-            };
+        let Some(page) = form_event_page(
+            self.reader.focused_widget().map(|widget| widget.page),
+            self.reader.cursor_position().map(|(page, _)| page),
+            self.reader.current_page(),
+        ) else {
+            return false;
         };
         match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
@@ -5817,10 +5991,34 @@ impl App {
         // no-op in every text box there is, and emptying the clipboard instead
         // would lose whatever the reader had put there to paste.
         if let Some(text) = result.selected_text.take() {
-            if let Some(intent) = self.form_clipboard.take() {
+            if let Some((intent, focus)) = self.form_clipboard.take() {
+                // The copy itself is unconditional: the text came back, and
+                // whatever the caret has done since, the reader asked for it
+                // and it goes to the clipboard.
+                //
+                // The *removal* is not. A cut deletes, and it must delete out
+                // of the field it was typed in: the answer arrives a turn
+                // later, and a click queued behind it can have moved the caret
+                // by the time the second half goes out. Checked against the
+                // focus this very answer reports, and against what this layer
+                // believes now, and skipped unless both still name the field
+                // the cut began in. It cannot be made airtight from here —
+                // only a worker-side "copy and replace in one event" would be,
+                // and that is a protocol change for a race this closes in
+                // practice — so what is left is the case where the click's own
+                // answer has not landed yet, and the loss it risks is a
+                // deletion the reader asked for rather than one they did not.
+                let answered_the_same_field =
+                    result.focused_widget.as_ref().is_some_and(|widget| {
+                        focus.as_ref().is_some_and(|focus| {
+                            focus.page == widget.page && focus.field == widget.field
+                        })
+                    });
+                let still_there =
+                    focus.is_none() || (answered_the_same_field && self.form_focus() == focus);
                 if !text.is_empty() {
                     self.form_clipboard_text = Some(text);
-                    if intent == FormClipboard::Cut {
+                    if intent == FormClipboard::Cut && still_there {
                         // The other half of a cut: what was taken is removed
                         // through the engine's own replacement, in one edit,
                         // rather than by a run of synthesised backspaces.
@@ -5926,6 +6124,15 @@ impl App {
             // a caret in a text field, or an open choice list.
             let editing = result.text_focus || editing_choice;
             self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
+        }
+
+        // A Save As is waiting on this answer. Everything above has run — the
+        // commit is in the revision, in the undo history and in the field list
+        // — so the save can go on, and does on the next tick because this is
+        // the pump and there is no `Task` to hand back from here.
+        if self.save_waits_for_form_commit {
+            self.save_waits_for_form_commit = false;
+            self.resume_save_after_form_commit = true;
         }
     }
 
@@ -6165,7 +6372,14 @@ impl App {
                 value,
             },
         );
-        self.reader.close_time_picker();
+        // The engine kills the focus as it takes the value — `SetField` runs
+        // through PDFium's own editor, which force-kills the focus and lets
+        // the form page go — and the answer comes back as an `Applied`, which
+        // carries no `FormEventResult` and so refreshes nothing. Said here
+        // rather than plumbed through a form-event reply: a commit is a
+        // document mutation, and turning it into a form event to get a focus
+        // report back would be a second editing path for one value (§9.1).
+        self.reader.form_focus_dropped();
         self.commit_to_document(transaction);
         Task::none()
     }
@@ -6208,6 +6422,10 @@ impl App {
             if key == Some("Enter") {
                 return Some(self.commit_focused_time());
             }
+            return Some(Task::none());
+        }
+        if self.reader.date_picker().is_some() {
+            return Some(Task::none());
         }
 
         // Tab walks the form's own fields, and it does so whether or not one
@@ -6250,18 +6468,20 @@ impl App {
             }
         }
 
-        // A field has the caret: the keyboard belongs to the document, not to
-        // the toolbar (§8.6). This comes before everything, including Page
-        // Down and Ctrl-Z, because a field being typed into is a text box and
-        // a text box takes the keys a text box takes.
-        //
-        // The one key held back is Escape, which is always the way out of
-        // whatever is open — a caret in a field included. It reaches the field
-        // as well, so PDFium can abandon the edit, and then falls through.
+        // A field has the keyboard: the press belongs to the document, not to
+        // the toolbar or global keymap (§8.6). This comes before everything,
+        // including Page Down, Escape and Ctrl-Z.
         if self.reader.form_has_keyboard() {
-            if let Some(task) = self.form_key(key, text, control) {
+            if let Some(task) = self.form_key(key, text, control, shift) {
                 return Some(task);
             }
+        }
+
+        // Buttons and other non-text widgets take focus without a caret. Tab
+        // traversal and their local activation keys were handled above; any
+        // other press is still theirs and must not escape into the keymap.
+        if self.reader.focused_widget().is_some() {
+            return Some(Task::none());
         }
 
         let key = key?;
@@ -6539,7 +6759,12 @@ impl App {
                         value,
                     },
                 );
-                self.reader.close_date_picker();
+                // The calendar comes down and the caret goes with it, for the
+                // reason spelled out in
+                // `commit_focused_time`: the engine force-kills the focus as
+                // it takes the value, and the `Applied` that answers carries
+                // no focus report to say so.
+                self.reader.form_focus_dropped();
                 self.commit_to_document(transaction);
                 Task::none()
             }
@@ -7063,6 +7288,45 @@ impl App {
     /// "Save anyway" is one of its answers — because the document names these
     /// fields required for *its* submit button, and pulpit only writes copies.
     fn ask_where_to_save_document(&mut self) -> Task<Message> {
+        // First, and before anything reads the document's state: a field that
+        // holds the caret holds characters PDFium has not committed yet. The
+        // save resumes at [`Self::review_then_save_document`] when the commit
+        // has come back through the ordinary path.
+        if self.ask_form_commit_before_save().succeeded() {
+            return Task::none();
+        }
+        self.review_then_save_document()
+    }
+
+    /// Ask the worker to take focus off the field the caret is in, so the edit
+    /// in progress is committed before the file is written.
+    ///
+    /// `Done` means the save is now waiting on that answer; `Refused` that no
+    /// field holds the caret, which is every save of a deck without a form;
+    /// `Failed` that there is no worker to ask, in which case there is also no
+    /// document to save and the caller's own check will say so.
+    fn ask_form_commit_before_save(&mut self) -> crate::platform::Outcome {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
+            return crate::platform::Outcome::refused("no field holds the caret");
+        };
+        let sent = match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent {
+                page,
+                event: FormInputEvent::Focus { gained: false },
+            }),
+            None => false,
+        };
+        if !sent {
+            return crate::platform::Outcome::failed("the document worker took no event");
+        }
+        self.save_waits_for_form_commit = true;
+        crate::platform::Outcome::Done
+    }
+
+    /// The rest of Save As, once nothing is left uncommitted.
+    fn review_then_save_document(&mut self) -> Task<Message> {
         let fields = self.reader.unfilled_required_fields();
         if fields.is_empty() {
             self.save_reviewed = false;
@@ -10442,6 +10706,59 @@ fn describe_host_request(request: &pulpit_render::document::protocol::HostReques
     }
 }
 
+/// Which page a focus-owned form event is addressed to.
+///
+/// The focused widget's page first, and the pointer's only when nothing holds
+/// the focus. The two need not be the same — a caret can sit in a field at the
+/// foot of one page with the pointer resting over the next — and addressing a
+/// keystroke to the page under the pointer does not merely send it to the
+/// wrong place: opening another page's form handle kills the focus on the way,
+/// which commits the field being typed into behind the back of the revision
+/// and undo bookkeeping and drops the character (§8.6).
+fn form_event_page(
+    focused: Option<pulpit_core::page::PageIndex>,
+    cursor: Option<pulpit_core::page::PageIndex>,
+    current: Option<pulpit_core::page::PageIndex>,
+) -> Option<pulpit_core::page::PageIndex> {
+    // The last fallback is the page the reader is looking at, which keeps
+    // typing working after the mouse has been moved off the surface.
+    focused.or(cursor).or(current)
+}
+
+/// Whether an arrow key belongs to the engine rather than to this layer.
+///
+/// A list box moves its own selection on `FORM_OnKeyDown`, and an editable
+/// combo box is a text box with a list attached whose caret is PDFium's, so
+/// both take the key as it is. Only a closed, non-editable combo box ignores
+/// it — the key would be travelling to a dropdown that is not open — and only
+/// that one has the arrow translated into a `SelectOption` index (§8.6).
+fn arrow_reaches_the_engine(
+    choice: Option<&pulpit_render::document::protocol::FocusedChoice>,
+) -> bool {
+    match choice {
+        None => true,
+        Some(choice) => choice.list_box || choice.editable,
+    }
+}
+
+/// The keys whose *release* a field has any use for.
+///
+/// The caret-moving keys, which are the ones that reached the engine as
+/// `FORM_OnKeyDown`: PDFium edits text in `FORM_OnChar`, so a release of
+/// backspace or enter is a release of a key the engine never saw pressed.
+fn released_form_key(key: &str) -> Option<pulpit_render::document::protocol::FormKey> {
+    use pulpit_render::document::protocol::FormKey;
+    Some(match key {
+        "ArrowLeft" | "Left" => FormKey::Left,
+        "ArrowRight" | "Right" => FormKey::Right,
+        "ArrowUp" | "Up" => FormKey::Up,
+        "ArrowDown" | "Down" => FormKey::Down,
+        "Home" => FormKey::Home,
+        "End" => FormKey::End,
+        _ => return None,
+    })
+}
+
 fn describe_key(key: &iced::keyboard::Key) -> Option<String> {
     use iced::keyboard::key::Named;
     use iced::keyboard::Key;
@@ -10485,6 +10802,72 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
         Physical::Unidentified(NativeCode::Windows(code)) => Some(*code as u32),
         Physical::Unidentified(NativeCode::MacOS(code)) => Some(*code as u32),
         Physical::Unidentified(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod form_routing_tests {
+    use super::{arrow_reaches_the_engine, form_event_page, released_form_key};
+    use pulpit_core::page::{PageIndex, PageRect};
+    use pulpit_render::document::protocol::{FocusedChoice, FormKey};
+
+    fn choice(list_box: bool, editable: bool) -> FocusedChoice {
+        FocusedChoice {
+            field: "country".into(),
+            selected: Some(0),
+            selections: vec![0],
+            options: 2,
+            labels: vec!["France".into(), "Japan".into()],
+            editable,
+            multiple_selection: false,
+            list_box,
+            page: PageIndex(0),
+            bounds: PageRect::new(0.0, 0.0, 10.0, 10.0),
+        }
+    }
+
+    #[test]
+    fn a_keystroke_goes_to_the_page_the_caret_is_on() {
+        // The caret on one page, the pointer over another: the keystroke is
+        // the caret's, or it is lost on the way (§8.6).
+        assert_eq!(
+            form_event_page(Some(PageIndex(0)), Some(PageIndex(1)), Some(PageIndex(1))),
+            Some(PageIndex(0))
+        );
+        // Nothing focused: the pointer's page, as before.
+        assert_eq!(
+            form_event_page(None, Some(PageIndex(1)), Some(PageIndex(0))),
+            Some(PageIndex(1))
+        );
+        // Neither: the page being read, which is what keeps a form working
+        // after the mouse has left the surface.
+        assert_eq!(
+            form_event_page(None, None, Some(PageIndex(2))),
+            Some(PageIndex(2))
+        );
+        assert_eq!(form_event_page(None, None, None), None);
+    }
+
+    #[test]
+    fn only_a_closed_plain_combo_has_its_arrows_translated() {
+        // A list box moves its own selection, and an editable combo's list is
+        // PDFium's; only a closed, non-editable combo ignores the key.
+        assert!(arrow_reaches_the_engine(Some(&choice(true, false))));
+        assert!(arrow_reaches_the_engine(Some(&choice(true, true))));
+        assert!(arrow_reaches_the_engine(Some(&choice(false, true))));
+        assert!(!arrow_reaches_the_engine(Some(&choice(false, false))));
+        // No choice at all: an ordinary text field, whose arrows are its own.
+        assert!(arrow_reaches_the_engine(None));
+    }
+
+    #[test]
+    fn the_releases_a_field_hears_are_the_ones_it_was_pressed_with() {
+        assert_eq!(released_form_key("ArrowLeft"), Some(FormKey::Left));
+        assert_eq!(released_form_key("End"), Some(FormKey::End));
+        // Editing keys reach the engine as characters, so their release is a
+        // release of a key it never saw go down.
+        assert_eq!(released_form_key("Backspace"), None);
+        assert_eq!(released_form_key("a"), None);
     }
 }
 

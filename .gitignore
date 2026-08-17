@@ -7,3 +7,7 @@ result
 result-*
 # Coding-agent settings and the temp files they write mid-command.
 .claude/
+# Sign oracle test fixtures and generated credentials
+.venv-sign-oracle/
+tools/sign-oracle/credentials/
+tools/sign-oracle/fixtures/

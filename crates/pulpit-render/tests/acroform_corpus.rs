@@ -544,19 +544,25 @@ fn enter_value(
                     );
                 }
                 None if field.allows_custom_value => {
-                    use pulpit_render::document::protocol::FormKey;
+                    use pulpit_render::document::protocol::{FormKey, KeyModifiers};
                     // Clear what is there first: typing into a combo that
                     // already holds a value appends to it, for a person too.
                     // To the end of the text before deleting backwards — a
                     // fresh caret sits at the start, where backspace has
                     // nothing behind it to take.
-                    let _ = document
-                        .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::End });
+                    let _ = document.form_event(
+                        PageIndex(0),
+                        FormInputEvent::KeyDown {
+                            key: FormKey::End,
+                            modifiers: KeyModifiers::NONE,
+                        },
+                    );
                     for _ in 0..field.value.chars().count() + 8 {
                         let _ = document.form_event(
                             PageIndex(0),
                             FormInputEvent::KeyDown {
                                 key: FormKey::Backspace,
+                                modifiers: KeyModifiers::NONE,
                             },
                         );
                     }
@@ -570,7 +576,7 @@ fn enter_value(
             commit(document);
         }
         _ => {
-            use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+            use pulpit_render::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
             let Some(bounds) = field.anchor_on(PageIndex(0)) else {
                 return;
             };
@@ -594,6 +600,7 @@ fn enter_value(
                     // it is silently dropped.
                     FormInputEvent::KeyDown {
                         key: FormKey::Enter,
+                        modifiers: KeyModifiers::NONE,
                     }
                 } else {
                     FormInputEvent::Char { character }

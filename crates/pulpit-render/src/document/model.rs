@@ -101,6 +101,11 @@ pub enum DocumentWarning {
     /// The document is cryptographically signed. Editing it can invalidate
     /// that signature (A9), and the user is told *before* the first mutation.
     Signed,
+    /// Whether the document is signed could not be established. Treated as if
+    /// it might be (A9): a missed signature costs the user the belief that one
+    /// survived their edits, and a warning they did not need costs a
+    /// dismissal.
+    SignatureUnknown,
     /// The document sets permissions that forbid annotation or form filling.
     MutationForbidden,
     /// The document has a form, and PDFium would not give pulpit an
@@ -134,6 +139,10 @@ impl DocumentWarning {
             DocumentWarning::Signed => {
                 "This document is signed. Saving a modified copy will not carry the \
                  signature's validity with it."
+            }
+            DocumentWarning::SignatureUnknown => {
+                "pulpit could not tell whether this document is signed. If it is, saving a \
+                 modified copy will not carry the signature's validity with it."
             }
             DocumentWarning::MutationForbidden => {
                 "This document's permissions do not allow it to be changed."
