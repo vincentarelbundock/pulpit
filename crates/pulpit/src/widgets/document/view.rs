@@ -1883,6 +1883,19 @@ fn tools<Message: Clone + 'static>(
         ReadCommand::SaveAs,
         reader.open,
     ));
+    // Sign (SPEC-signing.md §31.1): cryptographic, and always offered
+    // alongside Save As rather than folded into it, because a signature is
+    // never implied by any other control (§20.2).
+    bar = bar.push(history(
+        theme::Icon::Stamp,
+        "Sign…",
+        ReadCommand::Sign,
+        reader.open,
+    ));
+    // The signature panel itself (§31.4) is drawn as an app-level overlay
+    // (see `view::sign_dialog`'s neighbour, `signature_panel`) rather than
+    // from here: it is `App` state that outlives whichever tool is armed,
+    // the same reason the Sign dialog above is not built in this module.
 
     container(bar)
         .width(Length::Fill)
