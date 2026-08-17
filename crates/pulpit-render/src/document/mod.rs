@@ -443,12 +443,7 @@ impl<'a> PdfDocument<'a> {
         expected: DocumentRevision,
         transaction: DocumentTransaction,
     ) -> Result<Applied> {
-        if expected != self.revision {
-            return Err(DocumentError::RevisionConflict {
-                expected,
-                actual: self.revision,
-            });
-        }
+        self.check_revision(expected)?;
         if !self.allows_mutation() {
             return Err(DocumentError::MutationForbidden);
         }
@@ -459,107 +454,40 @@ impl<'a> PdfDocument<'a> {
         self.precheck(&transaction)?;
 
         let label = transaction.label();
-        let mut effects: Vec<AppliedEffect> = Vec::with_capacity(transaction.len());
-        let mut undo: Vec<UndoOperation> = Vec::with_capacity(transaction.len());
-        let mut dirty_pages: Vec<PageIndex> = Vec::new();
-        let mut dirty_region: Option<PageRect> = None;
+        let mut steps = AppliedSteps::with_capacity(transaction.len());
 
         for command in &transaction.0 {
             match self.apply_one(command) {
-                Ok(step) => {
-                    if let Some(page) = step.page {
-                        if !dirty_pages.contains(&page) {
-                            dirty_pages.push(page);
-                        }
-                    }
-                    if let Some(rect) = step.region {
-                        dirty_region = Some(match dirty_region {
-                            None => rect,
-                            Some(current) => current.union(&rect),
-                        });
-                    }
-                    effects.push(step.effect);
-                    undo.push(step.undo);
-                }
+                Ok(step) => steps.push(step),
                 Err(error) => {
                     // Atomic at the document-model level (§9.5): put back
                     // everything this transaction already did, newest first.
-                    self.roll_back(&undo);
+                    self.roll_back(steps.inverse());
                     return Err(error);
                 }
             }
         }
 
-        undo.reverse();
-        let restores = self.revision;
-        self.revision = self.revision.next();
-        self.dirty = true;
-        Ok(Applied {
-            effects,
-            document_revision: self.revision,
-            dirty_region,
-            dirty_pages,
-            undo: DocumentUndo {
-                operations: undo,
-                restores,
-                label,
-            },
-        })
+        Ok(self.commit(steps, label))
     }
 
     /// Apply an undo — itself a mutation, so it increments the revision and
     /// returns the operation that redoes it (§6.2).
     pub fn undo(&mut self, expected: DocumentRevision, undo: DocumentUndo) -> Result<Applied> {
-        if expected != self.revision {
-            return Err(DocumentError::RevisionConflict {
-                expected,
-                actual: self.revision,
-            });
-        }
-        let mut effects = Vec::with_capacity(undo.operations.len());
-        let mut redo = Vec::with_capacity(undo.operations.len());
-        let mut dirty_pages: Vec<PageIndex> = Vec::new();
-        let mut dirty_region: Option<PageRect> = None;
+        self.check_revision(expected)?;
+        let mut steps = AppliedSteps::with_capacity(undo.operations.len());
 
         for operation in &undo.operations {
             match self.apply_undo_operation(operation) {
-                Ok(step) => {
-                    if let Some(page) = step.page {
-                        if !dirty_pages.contains(&page) {
-                            dirty_pages.push(page);
-                        }
-                    }
-                    if let Some(rect) = step.region {
-                        dirty_region = Some(match dirty_region {
-                            None => rect,
-                            Some(current) => current.union(&rect),
-                        });
-                    }
-                    effects.push(step.effect);
-                    redo.push(step.undo);
-                }
+                Ok(step) => steps.push(step),
                 Err(error) => {
-                    self.roll_back(&redo);
+                    self.roll_back(steps.inverse());
                     return Err(error);
                 }
             }
         }
 
-        redo.reverse();
-        let restores = self.revision;
-        self.revision = self.revision.next();
-        self.dirty = true;
-        Ok(Applied {
-            effects,
-            document_revision: self.revision,
-            dirty_region,
-            dirty_pages,
-            undo: DocumentUndo {
-                operations: redo,
-                restores,
-                label: undo.label,
-            },
-        })
+        Ok(self.commit(steps, undo.label))
     }
 
     /// Write the document to `destination` (§11.3).
@@ -826,6 +754,31 @@ impl<'a> PdfDocument<'a> {
     /// rollback cannot succeed either. It is still attempted, because the
     /// alternative is leaving half a sweep applied and telling the caller
     /// nothing happened.
+    /// The optimistic revision check (§9.5), made the same way by everything
+    /// that mutates through a transaction.
+    fn check_revision(&self, expected: DocumentRevision) -> Result<()> {
+        if expected != self.revision {
+            return Err(DocumentError::RevisionConflict {
+                expected,
+                actual: self.revision,
+            });
+        }
+        Ok(())
+    }
+
+    /// Finish a transaction that every step survived.
+    ///
+    /// This is the only place the revision moves: a run that failed part way
+    /// has been rolled back and returned its error long before here, so a
+    /// document that refused a transaction still reads as the revision the
+    /// caller had.
+    fn commit(&mut self, steps: AppliedSteps, label: String) -> Applied {
+        let restores = self.revision;
+        self.revision = self.revision.next();
+        self.dirty = true;
+        steps.into_applied(self.revision, restores, label)
+    }
+
     fn roll_back(&mut self, done: &[UndoOperation]) {
         for operation in done.iter().rev() {
             if let Err(error) = self.apply_undo_operation(operation) {
@@ -844,6 +797,76 @@ struct Step {
     region: Option<PageRect>,
     effect: AppliedEffect,
     undo: UndoOperation,
+}
+
+/// The steps a transaction has taken so far.
+///
+/// Applying and undoing differ in which step function they call, not in what a
+/// successful step means: the page it touched joins the dirty set once, the
+/// rectangle it touched widens the dirty region, and its inverse is stacked in
+/// command order so that a failure can be put back newest first. Keeping that
+/// bookkeeping here is what lets each loop show only its own semantics.
+struct AppliedSteps {
+    effects: Vec<AppliedEffect>,
+    /// The inverses in *command* order. Reversed exactly once, when the
+    /// transaction succeeds and this becomes an undo the caller can replay.
+    inverse: Vec<UndoOperation>,
+    dirty_pages: Vec<PageIndex>,
+    dirty_region: Option<PageRect>,
+}
+
+impl AppliedSteps {
+    fn with_capacity(steps: usize) -> Self {
+        Self {
+            effects: Vec::with_capacity(steps),
+            inverse: Vec::with_capacity(steps),
+            dirty_pages: Vec::new(),
+            dirty_region: None,
+        }
+    }
+
+    /// Record one step that succeeded.
+    fn push(&mut self, step: Step) {
+        if let Some(page) = step.page {
+            if !self.dirty_pages.contains(&page) {
+                self.dirty_pages.push(page);
+            }
+        }
+        if let Some(rect) = step.region {
+            self.dirty_region = Some(match self.dirty_region {
+                None => rect,
+                Some(current) => current.union(&rect),
+            });
+        }
+        self.effects.push(step.effect);
+        self.inverse.push(step.undo);
+    }
+
+    /// What to hand [`PdfDocument::roll_back`], which walks it backwards.
+    fn inverse(&self) -> &[UndoOperation] {
+        &self.inverse
+    }
+
+    /// Turn the accumulated steps into the result of a committed transaction.
+    fn into_applied(
+        mut self,
+        document_revision: DocumentRevision,
+        restores: DocumentRevision,
+        label: String,
+    ) -> Applied {
+        self.inverse.reverse();
+        Applied {
+            effects: self.effects,
+            document_revision,
+            dirty_region: self.dirty_region,
+            dirty_pages: self.dirty_pages,
+            undo: DocumentUndo {
+                operations: self.inverse,
+                restores,
+                label,
+            },
+        }
+    }
 }
 
 /// Are these the same file on disk?
@@ -1018,6 +1041,41 @@ mod tests {
             "the first delete was put back"
         );
         assert_eq!(document.revision(), DocumentRevision(1));
+    }
+
+    #[test]
+    fn several_steps_that_fail_at_the_end_are_all_put_back() {
+        // The accumulator's ordering, at the length where it matters: two
+        // commands write, the third cannot, and both writes come back newest
+        // first. The precheck cannot see this one coming — the second delete
+        // is legal until the first one runs. The revision never moves,
+        // because it moves only once every step has succeeded.
+        let mut document = document();
+        let applied = document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::one(ink(0, 100.0)),
+            )
+            .unwrap();
+        let id = created_id(&applied);
+        let revision = document.revision();
+
+        let doomed = DocumentTransaction(vec![
+            ink(1, 100.0),
+            DocumentCommand::Annotation(AnnotationCommand::Delete { id: id.clone() }),
+            DocumentCommand::Annotation(AnnotationCommand::Delete { id: id.clone() }),
+        ]);
+        assert!(document.apply(revision, doomed).is_err());
+        assert_eq!(document.revision(), revision, "a refused transaction");
+        assert_eq!(
+            document.annotation(&id).unwrap().page,
+            PageIndex(0),
+            "the delete was put back"
+        );
+        assert!(
+            document.annotations(PageIndex(1)).unwrap().is_empty(),
+            "the stroke was put back"
+        );
     }
 
     #[test]
