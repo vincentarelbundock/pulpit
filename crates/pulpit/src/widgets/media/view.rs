@@ -10,20 +10,21 @@ use iced::{Element, Length, Padding};
 
 use crate::theme;
 use crate::theme::{target, type_scale};
-use crate::widgets::context::MediaData;
 use crate::widgets::event::{TransportRequest, WidgetEvent};
 use crate::widgets::media::model::Transport;
-use crate::widgets::{Mode, Widget, WidgetKind};
+use crate::widgets::view_context::WidgetViewContext;
+use crate::widgets::{Widget, WidgetKind};
 
 const SPACING: f32 = 10.0;
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    media: &MediaData,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-    scale: f32,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let media = &ctx.context.media;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
+    let scale = ctx.scale;
     if widget.kind() != WidgetKind::MediaTransport {
         return crate::widgets::common::view::misdirected(widget.kind());
     }

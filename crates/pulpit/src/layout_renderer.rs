@@ -17,6 +17,7 @@ use crate::layout::{Direction, Layout, Node};
 use crate::theme;
 use crate::widgets::context::Context;
 use crate::widgets::event::WidgetEvent;
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{annotations, navigation, notes, slides, status, timing, Family, Widget};
 
 /// Draw a whole layout.
@@ -173,64 +174,19 @@ pub fn widget<'a, Message: Clone + 'static>(
         crate::widgets::common::SCALE_RANGE.0,
         crate::widgets::common::SCALE_RANGE.1,
     );
+    let ctx = WidgetViewContext::new(context, compose, on_event, accent, scale);
 
     match widget.kind().family() {
-        Family::Slides => slides::view::view(widget, &context.slides, context.mode, on_event),
-        Family::Annotations => annotations::view::view(
-            widget,
-            context.slides.annotations,
-            context.slides.annotation_controls,
-            context.mode,
-            on_event,
-        ),
-        Family::Notes => notes::view::view(
-            widget,
-            &context.slides,
-            &context.document,
-            context.mode,
-            accent,
-        ),
-        Family::Media => {
-            crate::widgets::media::view::view(widget, &context.media, context.mode, on_event, scale)
-        }
-        Family::Timing => timing::view::view(
-            widget,
-            &context.timing,
-            context.alarms,
-            context.timer_controls,
-            context.mode,
-            on_event,
-            scale,
-        ),
-        Family::Navigation => navigation::view::view(
-            widget,
-            &context.slides,
-            context.mode,
-            on_event,
-            scale,
-            accent,
-        ),
-        Family::Document => crate::widgets::document::view::view(
-            widget,
-            &context.reader,
-            compose,
-            context.mode,
-            on_event,
-        ),
-        Family::Search => {
-            crate::widgets::search::view::view(widget, &context.search, context.mode, on_event)
-        }
-        Family::Chrome => {
-            crate::widgets::chrome::view::view(widget, &context.audience, context.mode, on_event)
-        }
-        Family::Status => status::view::view(
-            widget,
-            &context.document,
-            &context.slides,
-            &context.audience,
-            scale,
-            accent,
-        ),
+        Family::Slides => slides::view::view(&ctx, widget),
+        Family::Annotations => annotations::view::view(&ctx, widget),
+        Family::Notes => notes::view::view(&ctx, widget),
+        Family::Media => crate::widgets::media::view::view(&ctx, widget),
+        Family::Timing => timing::view::view(&ctx, widget),
+        Family::Navigation => navigation::view::view(&ctx, widget),
+        Family::Document => crate::widgets::document::view::view(&ctx, widget),
+        Family::Search => crate::widgets::search::view::view(&ctx, widget),
+        Family::Chrome => crate::widgets::chrome::view::view(&ctx, widget),
+        Family::Status => status::view::view(&ctx, widget),
     }
 }
 

@@ -23,15 +23,17 @@ use crate::media::overlay::{place, PageBox};
 use crate::theme;
 use crate::widgets::context::Mode;
 use crate::widgets::event::{AnnotationCommand, WidgetEvent};
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{AnnotationControls, Widget, WidgetKind};
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    annotations: &Annotations,
-    controls: AnnotationControls,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let annotations = ctx.context.slides.annotations;
+    let controls = ctx.context.slides.annotation_controls;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
     match widget.kind() {
         WidgetKind::Annotations => palette(widget, annotations, controls, mode, on),
         other => crate::widgets::common::view::misdirected(other),

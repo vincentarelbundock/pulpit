@@ -15,16 +15,18 @@ use crate::theme::target;
 use crate::widgets::common::view::fitted_size;
 use crate::widgets::context::{Mode, SlideData};
 use crate::widgets::event::WidgetEvent;
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetKind};
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    slides: &SlideData<'_>,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-    scale: f32,
-    accent: iced::Color,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let slides = &ctx.context.slides;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
+    let scale = ctx.scale;
+    let accent = ctx.accent;
     match widget.kind() {
         WidgetKind::SlideButtons => {
             let options = widget.buttons();

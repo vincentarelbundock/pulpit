@@ -12,20 +12,22 @@ use iced::{Element, Length, Size};
 use crate::theme;
 use crate::widgets::common::view::{fitted_size, format_clock};
 use crate::widgets::common::Variant;
-use crate::widgets::context::{Mode, TimingData};
+use crate::widgets::context::Mode;
 use crate::widgets::event::{AlarmCommand, TimerCommand};
-use crate::widgets::timing::model::{AlarmControls, TimerControls};
+use crate::widgets::timing::model::TimerControls;
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    timing: &TimingData,
-    alarms: &AlarmControls,
-    timer_controls: &TimerControls,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-    scale: f32,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let timing = &ctx.context.timing;
+    let alarms = ctx.context.alarms;
+    let timer_controls = ctx.context.timer_controls;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
+    let scale = ctx.scale;
     // Everything the closure needs, copied out: it outlives this call.
     let kind = widget.kind();
     let style = widget.style;

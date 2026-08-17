@@ -27,6 +27,7 @@ pub mod slides;
 pub mod status;
 pub mod timing;
 pub mod tokens;
+pub mod view_context;
 
 pub use annotations::model::{AnnotationControls, AnnotationOptions};
 pub use catalog::definition;

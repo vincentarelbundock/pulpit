@@ -5,18 +5,20 @@ use iced::{Alignment, Element, Length};
 
 use crate::theme;
 use crate::widgets::common::view::{fitted_size, labelled, status_line};
-use crate::widgets::context::{AudienceData, DocumentData, SlideData};
+use crate::widgets::context::{DocumentData, SlideData};
 use crate::widgets::status::model::{audience_reading, connection_reading, StatusIntent};
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetKind};
 
-pub fn view<Message: 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    document: &DocumentData<'_>,
-    slides: &SlideData<'_>,
-    audience: &AudienceData,
-    scale: f32,
-    accent: iced::Color,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let document = &ctx.context.document;
+    let slides = &ctx.context.slides;
+    let audience = &ctx.context.audience;
+    let scale = ctx.scale;
+    let accent = ctx.accent;
     match widget.kind() {
         WidgetKind::PresentationTitle => title(document, slides, scale),
         WidgetKind::CurrentSection => labelled(

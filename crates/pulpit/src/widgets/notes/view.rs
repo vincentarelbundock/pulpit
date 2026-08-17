@@ -6,16 +6,17 @@ use iced::{ContentFit, Element, Length};
 use pulpit_render::cache::FrameKind;
 
 use crate::theme;
-use crate::widgets::context::{DocumentData, Mode, SlideData};
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::Widget;
 
-pub fn view<Message: 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    slides: &SlideData<'_>,
-    document: &DocumentData<'_>,
-    mode: Mode,
-    accent: iced::Color,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let slides = &ctx.context.slides;
+    let document = &ctx.context.document;
+    let mode = ctx.context.mode;
+    let accent = ctx.accent;
     let options = widget.notes();
     // Notes follow the *preview* slide, not the committed one: reading ahead
     // is the whole point of the pane.
