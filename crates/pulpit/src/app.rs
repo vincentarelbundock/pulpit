@@ -470,16 +470,19 @@ struct PendingEdit {
 /// Bounded to one per page: the interesting case is an edit or two while the
 /// snapshot is on its way, and a page accumulating patches is a page that
 /// should simply be re-rendered.
+/// The rectangle is drawn as its own small image over the page's frame, not
+/// blended into it: the frame is left alone while somebody types, and the
+/// only thing minted per keystroke is a few kilobytes of texture.
 struct ReaderPatch {
+    /// Where it belongs, as a fraction of the upright page.
     region: pulpit_core::notes::Region,
-    width: u32,
-    height: u32,
-    /// The full-page frame size this was drawn to fit. A frame of any other
-    /// size — the reader zoomed, the window moved — cannot take it, and waits
-    /// for its own render instead of being handed a mismatched rectangle.
-    frame_width: u32,
-    frame_height: u32,
-    pixels: Vec<u8>,
+    /// The crop as its own image, minted once when it lands.
+    ///
+    /// Positioned by `region` in page space and scaled by the layout, so a
+    /// patch drawn against a frame size the page has since left is stretched
+    /// — very slightly soft for the moment it stands for — rather than
+    /// dropped, which would take the typed characters off the screen.
+    image: iced::widget::image::Handle,
     revision: pulpit_render::document::DocumentRevision,
     /// True when the pixels show form-field state PDFium holds *uncommitted* —
     /// typing in progress, a value not yet under `/V`. No snapshot contains
@@ -487,12 +490,6 @@ struct ReaderPatch {
     /// patch down: the frame was drawn without the typed characters, and
     /// removing the patch makes them vanish until the next keystroke.
     uncommitted: bool,
-    /// Which patch this is, counted over the session. In the composite cache's
-    /// key because nothing else in the patch has to change when its pixels do:
-    /// two keystrokes into the same field come back at the same revision, in
-    /// the same rectangle, at the same size, and a stamp made of those alone
-    /// would hand the second keystroke the first one's picture.
-    serial: u64,
 }
 
 /// A patch a page wants and has not been able to ask for yet.
@@ -520,9 +517,6 @@ struct WaitingReaderPatch {
 /// A patch the worker has been asked for and not yet answered.
 #[derive(Clone, Copy)]
 struct PendingReaderPatch {
-    /// The full-page frame size the answer is to be composited into.
-    frame_width: u32,
-    frame_height: u32,
     /// Whether *this* request covers uncommitted form state.
     ///
     /// Per request, not per page: labelling one request's answer with what
@@ -768,15 +762,15 @@ pub struct App {
     /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
     /// Page pictures with a retained highlight multiplied into them, keyed by
-    /// the page and a hash of the frame, the patch and the washes. Interior
-    /// mutability because the composite is made on demand inside the view's
-    /// frame lookup, which is `&self`; bounded by a hard cap, and empty again
-    /// the moment the frames containing the real highlights arrive.
+    /// the page and a hash of the frame and the washes. Interior mutability
+    /// because the composite is made on demand inside the view's frame lookup,
+    /// which is `&self`; bounded by a hard cap, and empty again the moment the
+    /// frames containing the real highlights arrive.
     ///
-    /// The page is in the key so a patch landing on one page can evict that
-    /// page's composites and leave every other page's alone: typing is a patch
-    /// per character, and clearing the whole cache per character re-uploaded
-    /// every visible page to the GPU per keystroke.
+    /// Washes only. A form patch is *not* blended in here: it is drawn as its
+    /// own small image over this picture (§9.4), so a keystroke costs a few
+    /// kilobytes of texture rather than a full-page blend and a full-page
+    /// upload. The page stays in the key so an eviction can be per page.
     wash_cache: std::cell::RefCell<
         std::collections::HashMap<(pulpit_core::page::PageIndex, u64), iced::widget::image::Handle>,
     >,
@@ -809,9 +803,6 @@ pub struct App {
     /// covered.
     reader_patch_waiting:
         std::collections::HashMap<pulpit_core::page::PageIndex, WaitingReaderPatch>,
-    /// How many patches have landed, so a composite of one is not mistaken for
-    /// a composite of the next — see [`ReaderPatch::serial`].
-    reader_patch_serial: u64,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -1424,7 +1415,6 @@ impl App {
             reader_patch_pending: std::collections::HashMap::new(),
             reader_patch_scope: std::collections::HashMap::new(),
             reader_patch_waiting: std::collections::HashMap::new(),
-            reader_patch_serial: 0,
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -4649,7 +4639,6 @@ impl App {
                             }) {
                                 self.reader_patches.remove(&page);
                                 self.reader_patch_scope.remove(&page);
-                                self.forget_composites_of(page);
                             }
                         }
                     }
@@ -5633,25 +5622,54 @@ impl App {
     /// points wide, preferring the newest snapshot generation: a frame from
     /// before the last edit is shown until one containing it exists, and a
     /// coarse frame can never replace a refined one at the same generation.
+    ///
+    /// The partial repaint standing in for an edit the frame predates comes
+    /// back beside the frame rather than inside it: the view lays it over the
+    /// page as its own small image (§9.4). Only the washes are blended, and
+    /// only because a `/Highlight` has to multiply the frame's own pixels.
     fn reader_frame(
         &self,
         page: pulpit_core::page::PageIndex,
         width: f32,
-    ) -> Option<iced::widget::image::Handle> {
+    ) -> Option<crate::widgets::context::PageArt> {
         let key = self.ready_reader_frame_key(page, width)?;
         let washes = self.reader.retained_washes(page);
-        // A patch drawn for a frame of another size belongs to a page that has
-        // since been resized; it is dropped rather than stretched.
-        let patch = self
-            .reader_patches
-            .get(&page)
-            .filter(|patch| patch.frame_width == key.width && patch.frame_height == key.height);
-        if !washes.is_empty() || patch.is_some() {
-            if let Some(composed) = self.composited_frame(key, page, &washes, patch) {
-                return Some(composed);
-            }
+        let image = if washes.is_empty() {
+            self.handles.get(&key).cloned()?
+        } else {
+            self.composited_frame(key, page, &washes)
+                .or_else(|| self.handles.get(&key).cloned())?
+        };
+        Some(crate::widgets::context::PageArt {
+            image,
+            patch: self.reader_patch_layer(page),
+        })
+    }
+
+    /// The partial repaint a page is holding, as a layer the view can place.
+    ///
+    /// In the *upright* page's own points, which is the space the renderer
+    /// drew the rectangle in and the space the raster is upright in; the
+    /// reader's facet turns both together.
+    fn reader_patch_layer(
+        &self,
+        page: pulpit_core::page::PageIndex,
+    ) -> Option<crate::widgets::context::PagePatch> {
+        let patch = self.reader_patches.get(&page)?;
+        let geometry = self.reader.page_geometry(page)?;
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return None;
         }
-        self.handles.get(&key).cloned()
+        Some(crate::widgets::context::PagePatch {
+            image: patch.image.clone(),
+            bounds: pulpit_core::page::PageRect::new(
+                patch.region.x * geometry.width,
+                patch.region.y * geometry.height,
+                (patch.region.x + patch.region.width) * geometry.width,
+                (patch.region.y + patch.region.height) * geometry.height,
+            ),
+            device_scale: self.presenter_scale_factor(),
+        })
     }
 
     /// Ask the document worker to draw the rectangle an edit changed (§9.4).
@@ -5760,19 +5778,15 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        // One queued entry per request, so an answer is read with the frame
-        // size and the form state *its own* request meant rather than a later
-        // one's. The queue holds a single entry while a page keeps one request
-        // out at a time; it is a queue because the matching rule is the order
-        // they were asked in, not the count.
+        // One queued entry per request, so an answer is read with the form
+        // state *its own* request meant rather than a later one's. The queue
+        // holds a single entry while a page keeps one request out at a time;
+        // it is a queue because the matching rule is the order they were asked
+        // in, not the count.
         self.reader_patch_pending
             .entry(page)
             .or_default()
-            .push_back(PendingReaderPatch {
-                frame_width: key.width,
-                frame_height: key.height,
-                uncommitted,
-            });
+            .push_back(PendingReaderPatch { uncommitted });
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::RenderPatch {
                 page,
@@ -6487,45 +6501,30 @@ impl App {
         {
             return;
         }
-        self.forget_composites_of(frame.page);
-        self.reader_patch_serial += 1;
+        // The crop becomes its own texture here, once, rather than being
+        // memcpy'd into a clone of the page every time the page is drawn.
+        // Kilobytes: under iced_wgpu's threshold for a synchronous upload, so
+        // it is on screen the pass it appears in and can never flash.
+        let image = iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.pixels);
         self.reader_patches.insert(
             frame.page,
             ReaderPatch {
                 region: frame.region,
-                width: frame.width,
-                height: frame.height,
-                frame_width: asked.frame_width,
-                frame_height: asked.frame_height,
-                pixels: frame.pixels,
+                image,
                 revision: frame.revision,
                 uncommitted: asked.uncommitted,
-                serial: self.reader_patch_serial,
             },
         );
     }
 
-    /// Drop the composites made for one page, and only that page.
+    /// The page picture with its retained highlights multiplied in.
     ///
-    /// Every other page's picture is unchanged by a patch landing here, and
-    /// rebuilding one costs a full-page blend and a fresh upload to every
-    /// window drawing it — per character, while somebody is typing.
-    fn forget_composites_of(&self, page: pulpit_core::page::PageIndex) {
-        self.wash_cache
-            .borrow_mut()
-            .retain(|(at, _), _| *at != page);
-    }
-
-    /// The page picture with the parts an edit changed pasted in and its
-    /// retained highlights multiplied in.
-    ///
-    /// Two stand-ins for the same thing — a frame that predates an edit — and
-    /// they compose in this order because they are not alternatives. The patch
-    /// is the renderer's own pixels for a rectangle, so it goes down first and
-    /// replaces what was there; the washes are pulpit's arithmetic for marks
-    /// the renderer has not drawn yet, so they go on top. A wash inside a
-    /// patched rectangle is not both: [`crate::reader::ReaderSession::patch_landed`]
-    /// takes it down as the patch arrives, or refuses the patch.
+    /// Only the washes: the renderer's own pixels for an edited rectangle are
+    /// a *layer* over this, drawn by the document view (§9.4), because they
+    /// change per keystroke and this does not. A wash inside a patched
+    /// rectangle is not drawn twice:
+    /// [`crate::reader::ReaderSession::patch_landed`] takes it down as the
+    /// patch arrives, or refuses the patch.
     ///
     /// A committed `/Highlight` is blended by multiplying, so text under it
     /// stays fully dark; a translucent rectangle drawn over the frame would
@@ -6538,30 +6537,11 @@ impl App {
         key: FrameKey,
         page: pulpit_core::page::PageIndex,
         washes: &[&crate::widgets::document::preview::GesturePreview],
-        patch: Option<&ReaderPatch>,
     ) -> Option<iced::widget::image::Handle> {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
-        if let Some(patch) = patch {
-            // Which patch, not only what it says it is: two keystrokes into the
-            // same field are the same revision in the same rectangle, and a
-            // stamp made of those alone would return the first one's picture
-            // for the second one's pixels.
-            patch.serial.hash(&mut hasher);
-            patch.revision.hash(&mut hasher);
-            patch.width.hash(&mut hasher);
-            patch.height.hash(&mut hasher);
-            for value in [
-                patch.region.x,
-                patch.region.y,
-                patch.region.width,
-                patch.region.height,
-            ] {
-                value.to_bits().hash(&mut hasher);
-            }
-        }
         for wash in washes {
             for quad in &wash.quads {
                 let bounds = quad.bounds();
@@ -6589,23 +6569,6 @@ impl App {
         let scale_y = frame.height as f32 / geometry.height;
 
         let mut pixels = (*frame.pixels).clone();
-
-        // The renderer's own pixels for the rectangle that changed, row by
-        // row into the frame. Clipped rather than trusted: the patch was sized
-        // from this frame's dimensions, but a rounding disagreement at the
-        // right or bottom edge must not run off the end of the buffer.
-        if let Some(patch) = patch {
-            let x0 = (patch.region.x * frame.width as f32).round() as usize;
-            let y0 = (patch.region.y * frame.height as f32).round() as usize;
-            let columns = (patch.width as usize).min((frame.width as usize).saturating_sub(x0));
-            let rows = (patch.height as usize).min((frame.height as usize).saturating_sub(y0));
-            for row in 0..rows {
-                let from = row * patch.width as usize * 4;
-                let to = ((y0 + row) * frame.width as usize + x0) * 4;
-                pixels[to..to + columns * 4]
-                    .copy_from_slice(&patch.pixels[from..from + columns * 4]);
-            }
-        }
 
         for wash in washes {
             let alpha = wash.opacity.clamp(0.0, 1.0);
@@ -10447,18 +10410,18 @@ impl App {
         // that would have skipped it.
         //
         // What the reader draws for a page is not always the frame under its
-        // key: a wash or a form patch is blended into a *composite* handle,
-        // and it is the composite the document view is handed. A composite is
-        // a fresh handle with fresh pixels every time the patch changes —
-        // once per keystroke in a form field — so keeping only the base frame
-        // resident left exactly the flash this module exists to prevent, on
-        // every character typed. `reader_frame` is memoised through
-        // `wash_cache`, so asking for it here is a cache hit and not a second
-        // blend, and the composite is named as on screen like everything else
-        // the pass draws. The trade is one synchronous full-page upload per
-        // keystroke at layout — a few milliseconds, reported by
-        // `upload_meter` — instead of a page that blinks; the same trade the
-        // slide panels and the audience frame already make.
+        // key: a retained wash is multiplied into a *composite* handle, and it
+        // is the composite the document view is handed. The list has to name
+        // what is actually drawn, or the picture on screen is the one nothing
+        // keeps resident.
+        //
+        // A form patch is no longer part of that: it is drawn as its own small
+        // image over the frame, so a typed-into page's base picture is the
+        // base frame again (§9.4). The patch handle is named here too — it is
+        // on screen — but it costs kilobytes and is under iced_wgpu's
+        // synchronous-upload threshold anyway, which is the point of drawing
+        // it separately: no full-page blend and no full-page upload per
+        // keystroke.
         //
         // Every visible page is on that list, not just the one being edited,
         // and that is the point. Committing a form field — clicking a radio
@@ -10470,19 +10433,24 @@ impl App {
         let mut composites: Vec<iced::widget::image::Handle> = Vec::new();
         for placed in self.reader.visible_pages() {
             let key = self.ready_reader_frame_key(placed.page, placed.width);
-            match self.reader_frame(placed.page, placed.width) {
-                // A composite: hold it in the base frame's place. Holding both
-                // would grow this window's atlas by a whole extra page for a
-                // picture nothing draws.
-                Some(drawn)
-                    if key
-                        .and_then(|key| self.handles.get(&key))
-                        .is_none_or(|base| base.id() != drawn.id()) =>
-                {
-                    composites.push(drawn);
-                }
-                // An unpatched page draws its base frame, exactly as before.
-                _ => keys.push(key),
+            let Some(drawn) = self.reader_frame(placed.page, placed.width) else {
+                keys.push(key);
+                continue;
+            };
+            if let Some(patch) = &drawn.patch {
+                composites.push(patch.image.clone());
+            }
+            // A composite: hold it in the base frame's place. Holding both
+            // would grow this window's atlas by a whole extra page for a
+            // picture nothing draws. An unwashed page draws its base frame,
+            // which is named by key exactly as before.
+            if key
+                .and_then(|key| self.handles.get(&key))
+                .is_none_or(|base| base.id() != drawn.image.id())
+            {
+                composites.push(drawn.image);
+            } else {
+                keys.push(key);
             }
         }
         self.wanted_frames(composites, keys, ahead)
@@ -10496,10 +10464,11 @@ impl App {
     /// The textures for a window's wanted frames, split the way `residency`
     /// asks for them: what this pass draws, and what the next turn will want.
     ///
-    /// `composites` are pictures a view built for itself — a frame with a wash
-    /// or a form patch blended into it has no frame key, and the only way to
-    /// keep the thing actually on screen resident is to hand the handle over as
-    /// it is. They are on screen by construction, so they lead that list.
+    /// `composites` are pictures a view built or was handed for itself — a
+    /// frame with a wash blended into it, or the small raster of a form patch
+    /// — which have no frame key, and the only way to keep the thing actually
+    /// on screen resident is to hand the handle over as it is. They are on
+    /// screen by construction, so they lead that list.
     ///
     /// Nothing appears twice, and nothing on screen is repeated in the list
     /// behind it: a picture already drawn is already uploaded, and naming it

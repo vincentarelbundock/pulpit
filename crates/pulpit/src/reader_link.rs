@@ -124,11 +124,17 @@ pub enum Ask {
         region: pulpit_core::notes::Region,
         width: u32,
         height: u32,
-        /// The full-page frame the crop is going to be composited into. Sent
+        /// The full-page frame the crop is going to be drawn over. Sent
         /// rather than left to the worker to reconstruct from the region: the
         /// two roundings disagree by up to a pixel, and a patch drawn at a
         /// scale the frame beneath it was not drawn at shimmers as the
         /// rectangle grows with each keystroke (§9.4).
+        ///
+        /// The size the crop is *rendered* at, not a size the answer must
+        /// match: the patch is placed by its region in page space and scaled
+        /// by the layout, so an answer that comes back against a frame size
+        /// the page has since left is drawn very slightly soft rather than
+        /// dropped — which would take the typed characters off the screen.
         frame_width: u32,
         frame_height: u32,
         expected_revision: DocumentRevision,

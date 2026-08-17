@@ -227,6 +227,40 @@ pub struct MediaData {
     pub transport: Option<crate::widgets::media::model::Transport>,
 }
 
+/// The renderer's own pixels for the rectangle of a page an edit changed,
+/// drawn *over* the page's frame rather than blended into it (§9.4).
+///
+/// A layer rather than a composite because a keystroke invalidates a few
+/// hundred pixels and a page frame is tens of megabytes: blending meant
+/// cloning and re-uploading the whole page per character. As a layer the base
+/// frame is never touched while somebody types, which is the "never worse"
+/// rule (A2) rather than an exception to it, and the patch raster is small
+/// enough to upload synchronously so it cannot flash.
+#[derive(Debug, Clone)]
+pub struct PagePatch {
+    /// The crop, as its own small image. Minted once, when the patch lands.
+    pub image: ImageHandle,
+    /// Where it goes, in page points. The application builds it in the
+    /// *upright* page's own points — the raster is upright too — and
+    /// [`crate::reader::ReaderSession::facet`] turns it into the reader's
+    /// rotated page space along with every other geometry in the facet.
+    pub bounds: pulpit_core::page::PageRect,
+    /// Device pixels per layout point on the window that draws it, so the
+    /// placement can be snapped to the device grid: a patch that lands on a
+    /// fraction of a pixel is resampled at its edges and shows a hairline
+    /// seam against the frame underneath.
+    pub device_scale: f32,
+}
+
+/// What the reader draws for one page: the base picture, and the partial
+/// repaint layered over it when there is one.
+#[derive(Debug, Clone)]
+pub struct PageArt {
+    /// The frame, or the frame with its retained washes multiplied in.
+    pub image: ImageHandle,
+    pub patch: Option<PagePatch>,
+}
+
 /// A page of the open document, ready to be drawn in the scrolled column.
 #[derive(Debug, Clone)]
 pub struct ReaderPage {
@@ -250,6 +284,10 @@ pub struct ReaderPage {
     /// sheet and nothing on it, rather than nothing at all: the column must
     /// not jump when a frame arrives.
     pub frame: Option<ImageHandle>,
+    /// The partial repaint standing in for an edit this page's frame predates,
+    /// drawn over the frame. Its bounds are in the reader's rotated page
+    /// space; its raster is upright, like the frame's.
+    pub patch: Option<PagePatch>,
     /// Search hits on this page, in canonical page space, and the one the
     /// reader is standing on told apart from the rest.
     ///

@@ -393,8 +393,16 @@ fn sheet<'a, Message: Clone + 'static>(
         || !page.selection.is_empty()
         || page.marquee.is_some()
         || !page.dead_fields.is_empty()
+        || page.patch.is_some()
     {
         let mut layers = iced::widget::stack![sheet];
+        // Directly on the picture, under everything pulpit draws: the patch
+        // *is* the page, for the rectangle it covers — the renderer's own
+        // pixels for a part the frame predates (§9.4). A focus ring, a badge
+        // or a mark still goes over it, exactly as over the frame.
+        if let Some(patch) = &page.patch {
+            layers = layers.push(patch_layer(patch, page.rotation, shown, origin, drawn));
+        }
         // Under everything the reader made: a badge is a statement about the
         // file, and nothing that says what the document *is* may cover what
         // somebody wrote on it.
@@ -699,6 +707,77 @@ fn field_hint_layer<Message: 'static>(
         .padding(PADDING)
         .style(theme::ambient::dialog);
     placed_over_the_sheet(bubble, (left, top), drawn)
+}
+
+/// The rectangle an edit changed, drawn over the page's frame (§9.4).
+///
+/// A layer rather than a blend into the frame: a keystroke invalidates a few
+/// hundred pixels, and compositing meant cloning and re-uploading a
+/// multi-megabyte page per character. Here the frame is never touched while
+/// somebody types, which is what "the frame is never worse than it was" (A2)
+/// asks for, and the patch raster is small enough to upload synchronously.
+///
+/// **Rotation.** The constraint is that the patch must land on the same part
+/// of the page as the pixels it replaces, at every view rotation. Both the
+/// frame and the patch are rasterised *upright*, and the sheet turns each of
+/// them with `Rotation::Solid`, which grows a widget's layout to its turned
+/// size. So the placement is computed in the *rotated* page space — the
+/// facet has already turned `bounds` into it, exactly as it turns every other
+/// rectangle — and the image is given its *upright* content size, which the
+/// rotation then turns back into the box computed here. Under a quarter turn
+/// the anchor's width is the raster's height and vice versa; that swap is the
+/// whole of the arithmetic, and getting it backwards puts the patch on the
+/// page transposed rather than merely misplaced.
+///
+/// The placement is snapped to the device pixel grid. A patch whose edge falls
+/// on a fraction of a pixel is resampled there, and the seam against the frame
+/// underneath is visible as a hairline; the two points of margin the request
+/// already carries mean a snap of up to half a pixel cannot uncover anything
+/// the patch was meant to cover.
+fn patch_layer<Message: 'static>(
+    patch: &crate::widgets::context::PagePatch,
+    rotation: pulpit_core::page::PageRotation,
+    shown: (f32, f32),
+    origin: (f32, f32),
+    drawn: (f32, f32),
+) -> Element<'static, Message> {
+    let anchor = super::model::Anchor::of(patch.bounds, shown, origin, drawn);
+    let scale = if patch.device_scale.is_finite() && patch.device_scale > 0.0 {
+        patch.device_scale
+    } else {
+        1.0
+    };
+    let snap = |value: f32| (value * scale).round() / scale;
+    let (left, top) = (snap(anchor.left), snap(anchor.top));
+    // Snap the far edge, not the size, so a rounded origin cannot push the
+    // far edge off the pixel it was meant to land on.
+    let (width, height) = (
+        (snap(anchor.left + anchor.width) - left).max(0.0),
+        (snap(anchor.top + anchor.height) - top).max(0.0),
+    );
+    if width <= 0.0 || height <= 0.0 {
+        return space::horizontal()
+            .width(Length::Fixed(0.0))
+            .height(Length::Fixed(0.0))
+            .into();
+    }
+    // The upright size of the raster: the turn exchanges the axes back.
+    let upright = if rotation.swaps_axes() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let raster = image(patch.image.clone())
+        .width(Length::Fixed(upright.0))
+        .height(Length::Fixed(upright.1))
+        // Fill, not the default contain: the raster's pixel aspect and the
+        // box's differ by the rounding in both, and contain would letterbox
+        // that difference into a sliver of frame showing through at an edge.
+        .content_fit(iced::ContentFit::Fill)
+        .rotation(iced::Rotation::Solid(iced::Radians::from(iced::Degrees(
+            rotation.degrees() as f32,
+        ))));
+    placed_over_the_sheet(raster, (left, top), drawn)
 }
 
 /// Put `content` at a point on the sheet, in a box exactly the sheet's size.

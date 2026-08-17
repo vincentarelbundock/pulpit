@@ -3272,7 +3272,7 @@ impl ReaderSession {
     pub fn facet<'a>(
         &'a self,
         live: bool,
-        frames: &dyn Fn(PageIndex, f32) -> Option<iced::widget::image::Handle>,
+        frames: &dyn Fn(PageIndex, f32) -> Option<crate::widgets::context::PageArt>,
         search: &pulpit_core::search::SearchState,
     ) -> ReaderData<'a> {
         let current_hit = search.current().map(pulpit_core::search::Hit::key);
@@ -3301,6 +3301,18 @@ impl ReaderSession {
                             }
                             preview
                         };
+                    // Whatever frame the cache has, plus the partial repaint
+                    // held over it, if any. Frames are rasterised upright, so
+                    // the lookup width is the upright one — the same width the
+                    // render plan asked with.
+                    let art = frames(
+                        placed.page,
+                        if rotation.swaps_axes() {
+                            placed.height
+                        } else {
+                            placed.width
+                        },
+                    );
                     ReaderPage {
                         // The open gesture, drawn by the UI so the stroke
                         // follows the hand rather than the round trip (A2).
@@ -3328,17 +3340,17 @@ impl ReaderSession {
                         // replaced when a newer one arrives (A7). Until the
                         // first one does, the sheet is drawn blank at its
                         // full size, so the column does not move under the
-                        // reader when it lands. Frames are rasterised
-                        // upright, so the lookup width is the upright one —
-                        // the same width the render plan asked with.
-                        frame: frames(
-                            placed.page,
-                            if rotation.swaps_axes() {
-                                placed.height
-                            } else {
-                                placed.width
-                            },
-                        ),
+                        // reader when it lands.
+                        frame: art.as_ref().map(|art| art.image.clone()),
+                        // The patch arrives in the upright page's points,
+                        // because that is the space the renderer drew it in;
+                        // it is turned here, once, like every other rectangle
+                        // in this facet. Its raster stays upright and the
+                        // sheet turns it, exactly as it does the frame.
+                        patch: art.and_then(|art| art.patch).map(|mut patch| {
+                            patch.bounds = rotation.rotate_rect(patch.bounds, width, height);
+                            patch
+                        }),
                         // The hit the reader is on is drawn differently from
                         // the rest, which is the whole use of an overlay:
                         // "there are six on this page and you are looking at
@@ -3514,7 +3526,7 @@ mod tests {
 
     /// A frame source with nothing in it: these tests are about geometry and
     /// state, and the pictures live in the application's cache.
-    fn no_frames(_: PageIndex, _: f32) -> Option<iced::widget::image::Handle> {
+    fn no_frames(_: PageIndex, _: f32) -> Option<crate::widgets::context::PageArt> {
         None
     }
 
