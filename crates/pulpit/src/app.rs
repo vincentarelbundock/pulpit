@@ -196,7 +196,11 @@ pub enum Message {
     SetMotion(crate::platform::MotionSetting),
     /// A key came up. Only interactive overlays care; pulpit's own
     /// bindings all act on the press.
-    KeyReleased(String),
+    KeyReleased {
+        key: String,
+        shift: bool,
+        control: bool,
+    },
     Wheel {
         x: f32,
         y: f32,
@@ -1616,9 +1620,13 @@ impl App {
             ) => Some(Message::PointerReleased),
             // A key held down inside a web overlay needs its release, or the
             // page believes it is still held for the rest of the talk.
-            iced::Event::Keyboard(iced::keyboard::Event::KeyReleased { key, .. }) => {
-                describe_key(&key).map(Message::KeyReleased)
-            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyReleased {
+                key, modifiers, ..
+            }) => describe_key(&key).map(|key| Message::KeyReleased {
+                key,
+                shift: modifiers.shift(),
+                control: modifiers.command() || modifiers.control(),
+            }),
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
                 if status == iced::event::Status::Captured {
                     return None;
@@ -2718,10 +2726,27 @@ impl App {
                 self.persist();
                 Task::none()
             }
-            Message::KeyReleased(key) => {
+            Message::KeyReleased {
+                key,
+                shift,
+                control,
+            } => {
                 if self.input_router.focused().is_some() {
                     let routed = self.input_router.key_released(&key);
                     self.deliver(routed);
+                }
+                // A field told a key went down is told it came up: the engine
+                // tracks the key's state, and a press with no release leaves
+                // it believing the key is still held. Only where a field has
+                // the keyboard, so an ordinary deck is untouched.
+                if self.reader.form_has_keyboard() {
+                    if let Some(named) = released_form_key(&key) {
+                        use pulpit_render::document::protocol::{FormInputEvent, KeyModifiers};
+                        self.ask_form_key(FormInputEvent::KeyUp {
+                            key: named,
+                            modifiers: KeyModifiers::new(shift, control),
+                        });
+                    }
                 }
                 Task::none()
             }
@@ -5487,8 +5512,13 @@ impl App {
         key: Option<&str>,
         text: Option<&str>,
         control: bool,
+        shift: bool,
     ) -> Option<Task<Message>> {
-        use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+        use pulpit_render::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
+
+        // What the field is told was held down. Shift is what turns an arrow
+        // into a selection, which is what a copy out of the field then reads.
+        let modifiers = KeyModifiers::new(shift, control);
 
         // Ctrl-anything is a shortcut, not text. Undo, Save As and the rest
         // keep working with the caret in a field, which is what every other
@@ -5565,14 +5595,20 @@ impl App {
             Some("ArrowLeft") | Some("Left") => Some(FormKey::Left),
             Some("ArrowRight") | Some("Right") => Some(FormKey::Right),
             // A *list* box moves its own selection on an arrow key, so those
-            // go straight through. A closed combo box ignores them — in a real
-            // viewer the key would be travelling to a dropdown that is not
-            // open — so for one of those the arrow becomes the selection
-            // change PDFium does answer to (§8.6).
-            Some("ArrowUp") | Some("Up") if self.reader.focused_choice().is_some() => {
+            // go straight through, and so does an editable combo box, whose
+            // list is PDFium's own. A closed, non-editable combo box ignores
+            // them — in a real viewer the key would be travelling to a
+            // dropdown that is not open — so for one of those, and only one
+            // of those, the arrow becomes the selection change PDFium does
+            // answer to (§8.6).
+            Some("ArrowUp") | Some("Up")
+                if !arrow_reaches_the_engine(self.reader.focused_choice()) =>
+            {
                 return self.form_choice_step(false)
             }
-            Some("ArrowDown") | Some("Down") if self.reader.focused_choice().is_some() => {
+            Some("ArrowDown") | Some("Down")
+                if !arrow_reaches_the_engine(self.reader.focused_choice()) =>
+            {
                 return self.form_choice_step(true)
             }
             Some("ArrowUp") | Some("Up") => Some(FormKey::Up),
@@ -5582,12 +5618,16 @@ impl App {
             _ => None,
         };
         if let Some(named) = named {
-            self.ask_form_key(FormInputEvent::KeyDown { key: named });
+            self.ask_form_key(FormInputEvent::KeyDown {
+                key: named,
+                modifiers,
+            });
             return Some(Task::none());
         }
         if key == Some("Escape") {
             self.ask_form_key(FormInputEvent::KeyDown {
                 key: FormKey::Escape,
+                modifiers,
             });
             // …and on to the keymap, which is what makes Escape always work.
             return None;
@@ -5664,13 +5704,10 @@ impl App {
         &mut self,
         event: pulpit_render::document::protocol::FormInputEvent,
     ) -> bool {
-        let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
-            return self.ask_form_key(event);
-        };
-        match self.reader_link.as_mut() {
-            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-            None => false,
-        }
+        // One route, now that every focus-owned event takes it: see
+        // [`Self::ask_form_key`], which prefers the focused widget's page and
+        // falls back to the pointer's only when nothing is focused.
+        self.ask_form_key(event)
     }
 
     /// Send one keyboard event to the field that holds the caret.
@@ -5679,18 +5716,12 @@ impl App {
     /// reader of an ordinary deck never takes this path and every letter still
     /// means what the keymap says it means.
     fn ask_form_key(&mut self, event: pulpit_render::document::protocol::FormInputEvent) -> bool {
-        let Some((page, _)) = self.reader.cursor_position() else {
-            // The caret is in a field, so the page it is on is known even if
-            // the pointer has since left the surface. Falling back to the page
-            // the reader is looking at keeps typing working after the mouse
-            // has been moved away, which is most of the time.
-            let Some(page) = self.reader.current_page() else {
-                return false;
-            };
-            return match self.reader_link.as_mut() {
-                Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-                None => false,
-            };
+        let Some(page) = form_event_page(
+            self.reader.focused_widget().map(|widget| widget.page),
+            self.reader.cursor_position().map(|(page, _)| page),
+            self.reader.current_page(),
+        ) else {
+            return false;
         };
         match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
@@ -6259,7 +6290,7 @@ impl App {
         // whatever is open — a caret in a field included. It reaches the field
         // as well, so PDFium can abandon the edit, and then falls through.
         if self.reader.form_has_keyboard() {
-            if let Some(task) = self.form_key(key, text, control) {
+            if let Some(task) = self.form_key(key, text, control, shift) {
                 return Some(task);
             }
         }
@@ -10442,6 +10473,59 @@ fn describe_host_request(request: &pulpit_render::document::protocol::HostReques
     }
 }
 
+/// Which page a focus-owned form event is addressed to.
+///
+/// The focused widget's page first, and the pointer's only when nothing holds
+/// the focus. The two need not be the same — a caret can sit in a field at the
+/// foot of one page with the pointer resting over the next — and addressing a
+/// keystroke to the page under the pointer does not merely send it to the
+/// wrong place: opening another page's form handle kills the focus on the way,
+/// which commits the field being typed into behind the back of the revision
+/// and undo bookkeeping and drops the character (§8.6).
+fn form_event_page(
+    focused: Option<pulpit_core::page::PageIndex>,
+    cursor: Option<pulpit_core::page::PageIndex>,
+    current: Option<pulpit_core::page::PageIndex>,
+) -> Option<pulpit_core::page::PageIndex> {
+    // The last fallback is the page the reader is looking at, which keeps
+    // typing working after the mouse has been moved off the surface.
+    focused.or(cursor).or(current)
+}
+
+/// Whether an arrow key belongs to the engine rather than to this layer.
+///
+/// A list box moves its own selection on `FORM_OnKeyDown`, and an editable
+/// combo box is a text box with a list attached whose caret is PDFium's, so
+/// both take the key as it is. Only a closed, non-editable combo box ignores
+/// it — the key would be travelling to a dropdown that is not open — and only
+/// that one has the arrow translated into a `SelectOption` index (§8.6).
+fn arrow_reaches_the_engine(
+    choice: Option<&pulpit_render::document::protocol::FocusedChoice>,
+) -> bool {
+    match choice {
+        None => true,
+        Some(choice) => choice.list_box || choice.editable,
+    }
+}
+
+/// The keys whose *release* a field has any use for.
+///
+/// The caret-moving keys, which are the ones that reached the engine as
+/// `FORM_OnKeyDown`: PDFium edits text in `FORM_OnChar`, so a release of
+/// backspace or enter is a release of a key the engine never saw pressed.
+fn released_form_key(key: &str) -> Option<pulpit_render::document::protocol::FormKey> {
+    use pulpit_render::document::protocol::FormKey;
+    Some(match key {
+        "ArrowLeft" | "Left" => FormKey::Left,
+        "ArrowRight" | "Right" => FormKey::Right,
+        "ArrowUp" | "Up" => FormKey::Up,
+        "ArrowDown" | "Down" => FormKey::Down,
+        "Home" => FormKey::Home,
+        "End" => FormKey::End,
+        _ => return None,
+    })
+}
+
 fn describe_key(key: &iced::keyboard::Key) -> Option<String> {
     use iced::keyboard::key::Named;
     use iced::keyboard::Key;
@@ -10485,6 +10569,72 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
         Physical::Unidentified(NativeCode::Windows(code)) => Some(*code as u32),
         Physical::Unidentified(NativeCode::MacOS(code)) => Some(*code as u32),
         Physical::Unidentified(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod form_routing_tests {
+    use super::{arrow_reaches_the_engine, form_event_page, released_form_key};
+    use pulpit_core::page::{PageIndex, PageRect};
+    use pulpit_render::document::protocol::{FocusedChoice, FormKey};
+
+    fn choice(list_box: bool, editable: bool) -> FocusedChoice {
+        FocusedChoice {
+            field: "country".into(),
+            selected: Some(0),
+            selections: vec![0],
+            options: 2,
+            labels: vec!["France".into(), "Japan".into()],
+            editable,
+            multiple_selection: false,
+            list_box,
+            page: PageIndex(0),
+            bounds: PageRect::new(0.0, 0.0, 10.0, 10.0),
+        }
+    }
+
+    #[test]
+    fn a_keystroke_goes_to_the_page_the_caret_is_on() {
+        // The caret on one page, the pointer over another: the keystroke is
+        // the caret's, or it is lost on the way (§8.6).
+        assert_eq!(
+            form_event_page(Some(PageIndex(0)), Some(PageIndex(1)), Some(PageIndex(1))),
+            Some(PageIndex(0))
+        );
+        // Nothing focused: the pointer's page, as before.
+        assert_eq!(
+            form_event_page(None, Some(PageIndex(1)), Some(PageIndex(0))),
+            Some(PageIndex(1))
+        );
+        // Neither: the page being read, which is what keeps a form working
+        // after the mouse has left the surface.
+        assert_eq!(
+            form_event_page(None, None, Some(PageIndex(2))),
+            Some(PageIndex(2))
+        );
+        assert_eq!(form_event_page(None, None, None), None);
+    }
+
+    #[test]
+    fn only_a_closed_plain_combo_has_its_arrows_translated() {
+        // A list box moves its own selection, and an editable combo's list is
+        // PDFium's; only a closed, non-editable combo ignores the key.
+        assert!(arrow_reaches_the_engine(Some(&choice(true, false))));
+        assert!(arrow_reaches_the_engine(Some(&choice(true, true))));
+        assert!(arrow_reaches_the_engine(Some(&choice(false, true))));
+        assert!(!arrow_reaches_the_engine(Some(&choice(false, false))));
+        // No choice at all: an ordinary text field, whose arrows are its own.
+        assert!(arrow_reaches_the_engine(None));
+    }
+
+    #[test]
+    fn the_releases_a_field_hears_are_the_ones_it_was_pressed_with() {
+        assert_eq!(released_form_key("ArrowLeft"), Some(FormKey::Left));
+        assert_eq!(released_form_key("End"), Some(FormKey::End));
+        // Editing keys reach the engine as characters, so their release is a
+        // release of a key it never saw go down.
+        assert_eq!(released_form_key("Backspace"), None);
+        assert_eq!(released_form_key("a"), None);
     }
 }
 

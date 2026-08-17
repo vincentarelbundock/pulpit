@@ -3166,16 +3166,20 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // Sending backspace as a key down is accepted and does
                 // nothing, which is the worst of both — the field simply
                 // fails to delete, with no error anywhere.
-                FormInputEvent::KeyDown { key } => match control_character(key) {
+                FormInputEvent::KeyDown { key, modifiers } => match control_character(key) {
                     Some(character) => {
-                        bindings.FORM_OnChar(form, handle, character, 0);
+                        bindings.FORM_OnChar(form, handle, character, modifiers.flags());
                     }
                     None => {
-                        bindings.FORM_OnKeyDown(form, handle, key_code(key), 0);
+                        // The modifier flags are what make shift-arrow
+                        // *extend* the field's selection rather than move the
+                        // caret: PDFium reads them out of this argument, and a
+                        // zero here is the engine being told nothing was held.
+                        bindings.FORM_OnKeyDown(form, handle, key_code(key), modifiers.flags());
                     }
                 },
-                FormInputEvent::KeyUp { key } => {
-                    bindings.FORM_OnKeyUp(form, handle, key_code(key), 0);
+                FormInputEvent::KeyUp { key, modifiers } => {
+                    bindings.FORM_OnKeyUp(form, handle, key_code(key), modifiers.flags());
                 }
                 FormInputEvent::Focus { gained: false } => {
                     // Losing focus is what *commits* an in-progress edit,

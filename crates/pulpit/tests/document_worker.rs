@@ -281,7 +281,7 @@ fn form_pdf() -> Vec<u8> {
 #[test]
 fn a_field_typed_across_the_process_boundary_is_in_the_saved_file() {
     use pulpit_core::page::PagePoint;
-    use pulpit_render::document::protocol::{FormInputEvent, FormKey};
+    use pulpit_render::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let source = directory.path().join("form.pdf");
@@ -352,6 +352,7 @@ fn a_field_typed_across_the_process_boundary_is_in_the_saved_file() {
             page,
             event: FormInputEvent::KeyDown {
                 key: FormKey::Backspace,
+                modifiers: KeyModifiers::NONE,
             },
         })
         .expect("the worker takes a backspace");
