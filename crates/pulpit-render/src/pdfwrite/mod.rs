@@ -1054,6 +1054,7 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulpit_testkit::Pdf;
     use std::io::Read;
 
     #[test]
@@ -1285,58 +1286,22 @@ mod tests {
         let _session = SigningSession::new();
     }
 
-    /// Build a minimal valid classic-xref PDF fixture with 3 objects programmatically.
-    /// Returns (pdf_bytes, original_startxref_offset).
+    /// A minimal valid classic-xref PDF, and the offset of its cross-reference
+    /// table: what an appended revision has to point its /Prev at.
+    ///
+    /// The testkit computes the offsets, and the offset this hands back is the
+    /// one it recorded, so nothing here counts bytes.
     fn build_classic_fixture() -> (Vec<u8>, u64) {
-        let mut buf = Vec::new();
-
-        // Write header
-        buf.extend_from_slice(b"%PDF-1.4\n");
-
-        // Object 1: Catalog
-        let obj1_offset = buf.len() as u64;
-        buf.extend_from_slice(b"1 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R>>\n");
-        buf.extend_from_slice(b"endobj\n");
-
-        // Object 2: Pages
-        let obj2_offset = buf.len() as u64;
-        buf.extend_from_slice(b"2 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
-        buf.extend_from_slice(b"endobj\n");
-
-        // Object 3: Page
-        let obj3_offset = buf.len() as u64;
-        buf.extend_from_slice(b"3 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
-        buf.extend_from_slice(b"endobj\n");
-
-        // xref table
-        let xref_offset = buf.len() as u64;
-        buf.extend_from_slice(b"xref\n");
-        buf.extend_from_slice(b"0 1\n");
-        buf.extend_from_slice(b"0000000000 65535 f \n");
-        buf.extend_from_slice(format!("{} 1\n", obj1_offset).as_bytes());
-        buf.extend_from_slice(b"0000000000 00000 n \n");
-        buf.extend_from_slice(format!("{} 1\n", obj2_offset).as_bytes());
-        buf.extend_from_slice(b"0000000000 00000 n \n");
-        buf.extend_from_slice(format!("{} 1\n", obj3_offset).as_bytes());
-        buf.extend_from_slice(b"0000000000 00000 n \n");
-
-        // trailer
-        buf.extend_from_slice(b"trailer\n");
-        buf.extend_from_slice(b"<<\n");
-        buf.extend_from_slice(b"/Size 4\n");
-        buf.extend_from_slice(b"/Root 1 0 R\n");
-        buf.extend_from_slice(
-            b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+        let mut pdf = Pdf::new();
+        pdf.add("<</Type /Catalog /Pages 2 0 R>>");
+        pdf.add("<</Type /Pages /Kids [3 0 R] /Count 1>>");
+        pdf.add("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>");
+        let bytes = pdf.build_with_trailer(
+            "/Size {size} /Root 1 0 R \
+             /ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]",
         );
-        buf.extend_from_slice(b">>\n");
-        buf.extend_from_slice(b"startxref\n");
-        buf.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
-        buf.extend_from_slice(b"%%EOF");
-
-        (buf, xref_offset)
+        let xref_offset = find_startxref(&bytes).expect("the builder writes a startxref");
+        (bytes, xref_offset)
     }
 
     #[test]

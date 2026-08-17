@@ -19,23 +19,13 @@
 #![cfg(feature = "pdfium")]
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pulpit_core::page::{PageIndex, PagePoint};
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::protocol::FormInputEvent;
 use pulpit_render::document::DocumentBackend;
-use pulpit_render::pdf::pdfium::PdfiumBackend;
 
-/// One PDFium binding for the whole test binary, as `pdfium_document.rs` does:
-/// the library is a process-wide singleton and two of them are a crash.
-fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    BACKEND
-        .get_or_init(|| PdfiumBackend::bind().ok().map(Mutex::new))
-        .as_ref()
-        .map(|backend| backend.lock().expect("the PDFium binding is not poisoned"))
-}
+mod common;
 
 /// A one-page PDF with two text fields, where `total` is calculated from
 /// `count` by a script and has no value of its own.
@@ -112,7 +102,7 @@ fn inside_count_field() -> PagePoint {
 #[test]
 fn a_calculation_script_runs_when_a_field_it_reads_is_committed() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
         };
@@ -212,7 +202,7 @@ fn what_a_script_asks_the_host_for_is_reported_and_not_performed() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::protocol::HostRequest;
 
-        let Some(mut guard) = binding() else {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
         };
@@ -278,7 +268,7 @@ fn a_form_whose_script_reaches_out_is_warned_about_when_it_opens() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::DocumentWarning;
 
-        let Some(mut guard) = binding() else {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
         };
@@ -355,7 +345,7 @@ fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::{CompatibilityLevel, DocumentWarning};
 
-        let Some(mut guard) = binding() else {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
         };
@@ -460,7 +450,7 @@ fn cross_page_calculating_form() -> Vec<u8> {
 #[test]
 fn a_calculation_can_rewrite_a_field_on_another_page_without_invalidating_it() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
         };

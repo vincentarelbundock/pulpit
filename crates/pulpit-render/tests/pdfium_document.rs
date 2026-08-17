@@ -12,7 +12,6 @@
 #![cfg(feature = "pdfium")]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pulpit_core::annotate::{
     AnnotationCommand, AnnotationDraft, AnnotationId, FreeTextDraft, HighlightDraft, InkDraft,
@@ -28,39 +27,7 @@ use pulpit_render::document::{
 use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
 
-fn workspace_lib() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib")
-}
-
-/// PDFium binds once per process, so every section of this binary shares one
-/// binding.
-///
-/// A document borrows it for as long as the document is open, which is
-/// exactly the lifetime the type asks for: the next section cannot open
-/// anything until the previous document has been dropped, and the compiler
-/// says so rather than a comment.
-fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    let backend = BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var("PULPIT_PDFIUM_PATH", workspace_lib());
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(error) => {
-                    eprintln!("skipping the PDFium document tests: {error}");
-                    None
-                }
-            }
-        })
-        .as_ref()?;
-    Some(
-        backend
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-}
+mod common;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-document-{name}"));
@@ -103,7 +70,9 @@ fn created_id(applied: &pulpit_render::document::Applied) -> AnnotationId {
 
 #[test]
 fn a_completed_gesture_becomes_an_ink_annotation_in_the_open_document() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("create");
     let path = source(&directory);
@@ -151,7 +120,9 @@ fn a_completed_gesture_becomes_an_ink_annotation_in_the_open_document() {
 
 #[test]
 fn saving_and_reopening_preserves_identity_geometry_and_style() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("roundtrip");
     let path = source(&directory);
@@ -192,7 +163,9 @@ fn saving_and_reopening_preserves_identity_geometry_and_style() {
 
 #[test]
 fn the_source_file_is_never_written() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("immutable");
     let path = source(&directory);
@@ -217,7 +190,9 @@ fn the_source_file_is_never_written() {
 
 #[test]
 fn an_erased_mark_comes_back_under_its_own_name() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("undo");
     let path = source(&directory);
@@ -249,7 +224,9 @@ fn an_erased_mark_comes_back_under_its_own_name() {
 
 #[test]
 fn several_kinds_of_mark_round_trip_through_a_saved_file() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("kinds");
     let path = source(&directory);
@@ -325,7 +302,9 @@ fn several_kinds_of_mark_round_trip_through_a_saved_file() {
 /// A mark's text may be a paragraph, and a paragraph has line breaks in it.
 #[test]
 fn a_note_and_a_text_mark_keep_the_lines_they_were_written_on() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("lines");
     let path = source(&directory);
@@ -384,7 +363,9 @@ fn a_note_and_a_text_mark_keep_the_lines_they_were_written_on() {
 /// PDFium handle could not (rule 2).
 #[test]
 fn a_note_from_another_reader_can_be_rewritten_in_place() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("foreign");
     let path = source(&directory);
@@ -465,7 +446,9 @@ fn a_note_from_another_reader_can_be_rewritten_in_place() {
 
 #[test]
 fn a_stale_revision_cannot_overwrite_a_later_change() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("conflict");
     let path = source(&directory);
@@ -489,7 +472,9 @@ fn a_stale_revision_cannot_overwrite_a_later_change() {
 /// `/QuadPoints` have to describe the text that was actually selected.
 #[test]
 fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("selection");
     let path = source(&directory);
@@ -569,7 +554,9 @@ fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
 /// a commit contains the commit.
 #[test]
 fn a_frame_rendered_after_a_commit_contains_the_mark() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("frame");
     let path = source(&directory);
@@ -626,7 +613,9 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
 /// may be pasted into a frame.
 #[test]
 fn a_partial_render_is_exactly_the_crop_of_the_full_one() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("crop");
     let path = source(&directory);
@@ -678,7 +667,9 @@ fn a_partial_render_is_exactly_the_crop_of_the_full_one() {
 
 #[test]
 fn a_pages_geometry_is_read_from_its_crop_box_and_rotation() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("geometry");
     let path = source(&directory);
@@ -705,7 +696,9 @@ fn a_pages_geometry_is_read_from_its_crop_box_and_rotation() {
 /// there is an empty answer rather than a failure.
 #[test]
 fn finding_text_reports_hits_with_the_geometry_to_draw_them() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = temp_dir("search");
     let path = source(&directory);

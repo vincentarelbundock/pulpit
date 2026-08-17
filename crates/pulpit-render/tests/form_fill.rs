@@ -26,7 +26,6 @@
 #![cfg(feature = "pdfium")]
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use pulpit_core::page::{PageIndex, PagePoint};
@@ -39,31 +38,7 @@ use pulpit_render::document::{FieldKind, PdfDocument, SaveOptions};
 use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_testkit::corpus;
 
-fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    let backend = BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var(
-                    "PULPIT_PDFIUM_PATH",
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib"),
-                );
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(error) => {
-                    eprintln!("skipping the form-fill spike: {error}");
-                    None
-                }
-            }
-        })
-        .as_ref()?;
-    Some(
-        backend
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-}
+mod common;
 
 /// The corpus's control case: one plain text field named `name`, nothing wrong
 /// with it. If the spike cannot fill this, it cannot fill anything.
@@ -102,7 +77,9 @@ fn a_documents_fields_are_found_through_the_form_fill_environment() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         // The first thing the environment buys: the fields exist and are
         // describable. `fields()` returned an empty list before it was wired.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             panic!("the corpus no longer carries its control case")
@@ -127,7 +104,9 @@ fn a_documents_fields_are_found_through_the_form_fill_environment() {
 fn typing_into_a_field_puts_the_characters_in_it() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         // The gate itself. Raw events in; the field holds what was typed.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -163,7 +142,9 @@ fn backspace_takes_a_character_back_out() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         // Not a separate feature: the point is that *editing* is PDFium's too, so
         // a key that is not a character still does what it does in a form.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -200,7 +181,9 @@ fn a_keystroke_reports_the_rectangle_it_dirtied() {
         // §9.4: the engine answers with invalidated page rectangles, which is what
         // makes a re-composite cost a field rather than a page. A keystroke that
         // reported nothing would leave the caret and the new glyph undrawn.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -240,7 +223,9 @@ fn a_committed_value_is_one_revision_and_marks_the_document_unsaved() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         // §8.6: a committed change is a document change like any other, in the
         // same history as the annotations. Typing is not — only the commit is.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -283,7 +268,9 @@ fn a_filled_form_saves_and_reopens_with_the_value_in_it() {
         // Acceptance criterion 5, end to end: filled, saved, reopened, still
         // filled. The reopen goes through a fresh engine, so nothing in memory is
         // being read back to itself.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -335,7 +322,9 @@ fn a_save_asked_for_mid_edit_commits_the_caret_first() {
         // serialises what the document holds — so a save sent straight out
         // while someone is still typing would write a file without the
         // characters they can see on screen.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -390,7 +379,9 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
         // with. A value typed a moment ago lives in PDFium's form-fill environment
         // and is not in any appearance yet — so without the compositing pass the
         // person filling the form watches an empty box while they type.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -448,7 +439,9 @@ fn the_form_events_survive_the_worker_boundary() {
         // exercises PDFium's most complex code paths on hostile input, and a crash
         // mid-fill must lose at most uncommitted in-field state. So the events go
         // through the worker's own dispatch rather than straight to the engine.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -508,7 +501,9 @@ fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
         // selection, so PDFium does the editing exactly as it does for a
         // person who selected all and typed. There is still one implementation
         // of what a value looks like in a field, and it is still PDFium's.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -558,7 +553,9 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
         // The specification is explicit that the IPC hop that follows MUST NOT be
         // optimised away by moving PDFium in-process, so what matters is that this
         // leaves room for it. A local pipe round trip is tens of microseconds.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -638,7 +635,9 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::protocol::{FormKey, KeyModifiers};
 
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
 
         fn open_case<'a>(
             guard: &'a mut PdfiumBackend,
@@ -770,7 +769,9 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
 #[test]
 fn a_press_on_a_plain_combo_box_focuses_it_without_opening_a_list() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(case) = corpus()
             .into_iter()
@@ -879,7 +880,9 @@ fn field_values_are_drawn_by_the_render_pool_and_not_only_by_the_editor() {
             count
         }
 
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -973,7 +976,9 @@ fn a_date_field_is_recognised_and_says_what_it_expects() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::FieldFormat;
 
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("dates.pdf");
         std::fs::write(&path, dated_form()).expect("the fixture is written");
@@ -1093,7 +1098,9 @@ fn undoing_a_checkbox_toggle_presses_the_box_again() {
         // reported the unchanged value as a success. The inverse of a toggle
         // is a press, and only when the state differs from what is asked for:
         // pressing a box that is already right would toggle it wrong.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "checkbox-standard") else {
             return;
@@ -1124,7 +1131,9 @@ fn undoing_a_checkbox_toggle_presses_the_box_again() {
 #[test]
 fn undoing_a_radio_choice_presses_the_previous_option() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "radio-group") else {
             return;
@@ -1164,7 +1173,9 @@ fn undoing_a_radio_choice_presses_the_previous_option() {
 #[test]
 fn a_multi_select_list_box_toggles_one_index_without_clearing_the_others() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "list-box-multi-select") else {
             return;
@@ -1269,7 +1280,9 @@ fn a_multi_select_list_box_round_trips_through_its_selection_indices() {
         // record carries the selected indices — and why `set_field` takes
         // them: restoring "the first of what was chosen" is not restoring
         // what was chosen.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "list-box-multi-select") else {
             return;
@@ -1306,7 +1319,9 @@ fn the_text_field_flag_variants_are_told_apart() {
         // `/FT Tx` hides its variants in `/Ff` bits, and collapsing them into
         // plain text is how a password ends up echoed and a file-select field
         // ends up looking editable when no fill of it can ever succeed.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "password-field") else {
             return;
@@ -1339,7 +1354,9 @@ fn the_clipboard_reads_and_replaces_what_a_field_has_selected() {
         // through `FORM_GetSelectedText` and goes back in through
         // `FORM_ReplaceSelection`, in one edit rather than as a run of
         // synthesised keystrokes that would type *over* the selection.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -1398,7 +1415,9 @@ fn a_cut_takes_the_text_out_of_the_field_it_copied_it_from() {
         // A cut is a copy that remembers to remove what it took, and the
         // removal is an empty replacement rather than a run of backspaces: one
         // edit, one keystroke script, one commit.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;
@@ -1443,7 +1462,9 @@ fn a_space_toggles_the_box_that_holds_the_focus() {
         // button handler acts on `FORM_OnChar(' ')`, so the toggle, the
         // appearance and the commit are all still the engine's. A click would
         // have to be aimed, and a keyboard has no pointer to aim it with.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = corpus_form(directory.path(), "checkbox-standard") else {
             return;
@@ -1529,7 +1550,9 @@ fn two_page_form(directory: &std::path::Path) -> Option<PathBuf> {
 #[test]
 fn a_keystroke_addressed_to_the_wrong_page_is_lost() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = two_page_form(directory.path()) else {
             return;
@@ -1596,7 +1619,9 @@ fn a_keystroke_addressed_to_the_wrong_page_is_lost() {
 #[test]
 fn shift_and_an_arrow_extend_the_selection_a_copy_reads() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let Some(path) = plain_form(directory.path()) else {
             return;

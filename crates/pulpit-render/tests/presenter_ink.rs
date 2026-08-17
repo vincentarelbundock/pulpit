@@ -21,6 +21,8 @@ use pulpit_core::notes::Region;
 use pulpit_core::page::PageIndex;
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions};
 
+mod common;
+
 /// The stroke a presenter draws: a wave, so a mark that lands mirrored or
 /// transposed is visible in the comparison rather than symmetric under it.
 fn drawn(kind: StrokeKind) -> InkStroke {
@@ -87,7 +89,7 @@ fn same_shape(drawn: &InkStroke, read: &InkStroke) {
 
 /// The presenter's round trip on one slide layout.
 fn round_trip(region: Region, kind: StrokeKind) {
-    let Some(mut guard) = harness::binding() else {
+    let Some(mut guard) = common::pdfium("the presenter-ink round trip") else {
         return;
     };
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -167,7 +169,7 @@ fn a_mark_drawn_over_a_whole_slide_survives_the_file() {
 fn a_snapshot_of_an_edited_document_renders_the_mark_through_the_pool_backend() {
     use pulpit_render::pdf::{NeverCancel, PdfBackend, RenderRequest};
 
-    let Some(mut guard) = harness::binding() else {
+    let Some(mut guard) = common::pdfium("the presenter-ink round trip") else {
         return;
     };
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -258,7 +260,7 @@ fn a_mark_made_in_document_mode_is_a_mark_the_slide_can_draw() {
     // The other direction of criterion 3, and the reason the conversion is
     // one function used both ways: an annotation nobody drew on a slide still
     // has to *be* drawable on one.
-    let Some(mut guard) = harness::binding() else {
+    let Some(mut guard) = common::pdfium("the presenter-ink round trip") else {
         return;
     };
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -316,38 +318,9 @@ fn a_mark_made_in_document_mode_is_a_mark_the_slide_can_draw() {
     );
 }
 
-/// A source of PDFium and a deck to annotate, shared by the tests above.
+/// A deck to annotate, shared by the tests above.
 mod harness {
     use super::*;
-    use pulpit_render::pdf::pdfium::PdfiumBackend;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    pub fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-        static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-        let backend = BACKEND
-            .get_or_init(|| {
-                if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                    std::env::set_var(
-                        "PULPIT_PDFIUM_PATH",
-                        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib"),
-                    );
-                }
-                match PdfiumBackend::bind() {
-                    Ok(backend) => Some(Mutex::new(backend)),
-                    Err(error) => {
-                        eprintln!("skipping the presenter-ink round trip: {error}");
-                        None
-                    }
-                }
-            })
-            .as_ref()?;
-        Some(
-            backend
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    }
-
     /// A plain letter-sized deck of `pages` pages with a word on each.
     pub fn write_deck(path: &Path, pages: usize) -> std::io::Result<()> {
         let mut objects: Vec<Vec<u8>> = vec![

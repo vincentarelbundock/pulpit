@@ -19,7 +19,6 @@
 #![cfg(feature = "pdfium")]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pulpit_core::annotate::{
     AnnotationCommand, AnnotationDraft, HighlightDraft, InkDraft, InkPoint, MarkStyle,
@@ -33,32 +32,7 @@ use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
 use pulpit_testkit::Engines;
 
-fn workspace_lib() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib")
-}
-
-fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    let backend = BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var("PULPIT_PDFIUM_PATH", workspace_lib());
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(error) => {
-                    eprintln!("skipping the cross-viewer tests: {error}");
-                    None
-                }
-            }
-        })
-        .as_ref()?;
-    Some(
-        backend
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-}
+mod common;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-cross-{name}"));
@@ -104,7 +78,9 @@ fn annotated(backend: &mut PdfiumBackend, directory: &Path) -> PathBuf {
 
 #[test]
 fn another_reader_finds_the_annotation_in_the_pages_annots_array() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_read_objects("the /Annots check") {
         return;
@@ -142,7 +118,9 @@ fn another_reader_finds_the_annotation_in_the_pages_annots_array() {
 fn another_renderer_draws_the_mark_without_regenerating_its_appearance() {
     // §7.1: the appearance is authoritative, and a viewer that does not
     // synthesise missing ones must still show the mark.
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_render("the visibility check") {
         return;
@@ -177,7 +155,9 @@ fn another_renderer_draws_the_mark_without_regenerating_its_appearance() {
 fn a_highlights_quads_land_on_the_text_another_reader_extracts() {
     // §13.4 and criterion 4: the marked region has to be the text, as some
     // other implementation understands both.
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_read_objects("the /QuadPoints check") {
         return;
@@ -245,7 +225,9 @@ fn a_highlights_quads_land_on_the_text_another_reader_extracts() {
 /// embedded and no path to a source file left in the annotation.
 #[test]
 fn a_picture_stamp_is_embedded_and_visible_to_another_renderer() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_render("the picture stamp check") {
         return;
@@ -336,7 +318,9 @@ fn a_picture_stamp_is_embedded_and_visible_to_another_renderer() {
 /// `/Contents`, and the source in pulpit's namespaced entry.
 #[test]
 fn a_generated_mark_carries_its_source_and_shows_its_appearance() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_read_objects("the generated-mark check") {
         return;
@@ -409,7 +393,9 @@ fn a_generated_mark_carries_its_source_and_shows_its_appearance() {
 fn saving_and_reopening_does_not_shift_geometry_on_a_rotated_page() {
     // §13.4's rotation check, done where it can be seen: the mark is drawn on
     // a rotated page, saved, and another renderer is asked where the ink is.
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the cross-viewer tests") else {
+        return;
+    };
     let engines = Engines::detect();
     if !engines.can_render("the rotation check") {
         return;

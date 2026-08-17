@@ -13,21 +13,17 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pulpit_core::overlay::{
     ContentKind, OverlayContent, OverlayDeclaration, OverlayIndex, OverlaySource,
 };
 use pulpit_render::pdf::overlays::declarations_from_links;
-use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::PdfBackend;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+mod common;
 
 fn deck() -> Option<PathBuf> {
-    let path = workspace_root().join("examples/beamer.pdf");
+    let path = common::workspace_root().join("examples/beamer.pdf");
     if path.is_file() {
         Some(path)
     } else {
@@ -36,37 +32,10 @@ fn deck() -> Option<PathBuf> {
     }
 }
 
-/// PDFium binds once per process, so every test shares one backend.
-///
-/// A panicking test poisons the mutex; recovering from that keeps one real
-/// failure from cascading into five that say only `PoisonError`.
-fn shared() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    let backend = BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var("PULPIT_PDFIUM_PATH", workspace_root().join("lib"));
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(e) => {
-                    eprintln!("skipping PDFium tests: {e}");
-                    None
-                }
-            }
-        })
-        .as_ref()?;
-    Some(
-        backend
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-}
-
 /// Every overlay the deck declares, grouped as the application groups them.
 fn discover() -> Option<OverlayIndex> {
     let path = deck()?;
-    let mut backend = shared()?;
+    let mut backend = common::pdfium("PDFium media-deck tests")?;
     let document = backend.open(&path).expect("the example deck should open");
     let pages = backend.page_count(document).expect("page count");
 
@@ -130,7 +99,7 @@ fn every_asset_the_deck_names_is_actually_beside_it() {
     // `run:` names files next to the document. A deck whose links point at
     // nothing would still parse, and would then fail silently on stage.
     let Some(index) = discover() else { return };
-    let directory = workspace_root().join("examples");
+    let directory = common::workspace_root().join("examples");
 
     let mut checked = 0;
     for overlay in index.all() {
@@ -215,7 +184,7 @@ fn the_html_overlay_names_the_file_and_serves_its_directory() {
     match &web.bundle {
         OverlaySource::External(asset) => {
             assert!(asset.path.ends_with("bouncing-balls.html"));
-            let path = workspace_root().join("examples").join(&asset.path);
+            let path = common::workspace_root().join("examples").join(&asset.path);
             assert!(path.is_file(), "{} is missing", path.display());
         }
         other => panic!("expected a file beside the document, got {other:?}"),

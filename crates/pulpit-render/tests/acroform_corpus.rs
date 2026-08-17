@@ -20,42 +20,13 @@
 
 #![cfg(feature = "pdfium")]
 
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
 use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, InkDraft, InkPoint, MarkStyle};
 use pulpit_core::page::PageIndex;
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions};
-use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_testkit::{corpus, Expect, Unchanged};
 
-fn workspace_lib() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib")
-}
-
-fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    let backend = BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var("PULPIT_PDFIUM_PATH", workspace_lib());
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(error) => {
-                    eprintln!("skipping the AcroForm corpus: {error}");
-                    None
-                }
-            }
-        })
-        .as_ref()?;
-    Some(
-        backend
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-}
+mod common;
 
 /// One ink stroke, which is the mutation every case gets: it exercises the
 /// write path against a document whose form is malformed, which is exactly
@@ -73,7 +44,9 @@ fn stroke() -> DocumentTransaction {
 
 #[test]
 fn every_corpus_case_survives_being_opened_annotated_and_saved() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the AcroForm corpus") else {
+        return;
+    };
     let backend = &mut *guard;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -193,7 +166,9 @@ fn the_corpus_states_a_defensible_answer_and_not_only_survival() {
 /// promise is kept, or the failure is named.
 #[test]
 fn the_corpus_fill_promises_are_kept() {
-    let Some(mut guard) = binding() else { return };
+    let Some(mut guard) = common::pdfium("the AcroForm corpus") else {
+        return;
+    };
     let backend = &mut *guard;
     let directory = tempfile::tempdir().expect("a temporary directory");
 

@@ -23,6 +23,9 @@ use pulpit_render::document::{
     AnnotationSupport, DocumentRevision, DocumentTransaction, PdfDocument,
 };
 
+#[cfg(feature = "pdfium")]
+mod common;
+
 #[test]
 fn a_stroke_commits_promptly_enough_to_be_in_the_next_frame() {
     // The engine's own turnaround, without a process boundary or a PDF parser
@@ -124,7 +127,6 @@ fn enumerating_one_page_costs_the_same_however_large_the_document_is() {
 #[cfg(feature = "pdfium")]
 mod commit_path {
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, Instant};
 
     use pulpit_core::page::{PageIndex, PagePoint};
@@ -133,31 +135,7 @@ mod commit_path {
     use pulpit_render::document::{PdfDocument, SaveOptions};
     use pulpit_render::pdf::pdfium::PdfiumBackend;
 
-    fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-        static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-        let backend = BACKEND
-            .get_or_init(|| {
-                if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                    std::env::set_var(
-                        "PULPIT_PDFIUM_PATH",
-                        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib"),
-                    );
-                }
-                match PdfiumBackend::bind() {
-                    Ok(backend) => Some(Mutex::new(backend)),
-                    Err(error) => {
-                        eprintln!("skipping the commit-path budget: {error}");
-                        None
-                    }
-                }
-            })
-            .as_ref()?;
-        Some(
-            backend
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    }
+    use crate::common;
 
     fn corpus_form() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -222,7 +200,9 @@ mod commit_path {
     #[test]
     fn a_form_commit_pays_a_snapshot_a_reopen_and_a_cold_render_of_every_visible_page() {
         pulpit_testkit::on_the_pdfium_thread(|| {
-            let Some(mut guard) = binding() else { return };
+            let Some(mut guard) = common::pdfium("the commit-path budget") else {
+                return;
+            };
             let backend = &mut *guard;
             let directory = tempfile::tempdir().expect("a temporary directory");
 

@@ -6,34 +6,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use pulpit_core::notes::Region;
-use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
 use pulpit_render::pdf::{NeverCancel, PdfBackend, PdfError, RenderRequest};
 
-fn workspace_lib() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib")
-}
-
-fn shared() -> Option<&'static Mutex<PdfiumBackend>> {
-    static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-    BACKEND
-        .get_or_init(|| {
-            if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                std::env::set_var("PULPIT_PDFIUM_PATH", workspace_lib());
-            }
-            match PdfiumBackend::bind() {
-                Ok(backend) => Some(Mutex::new(backend)),
-                Err(e) => {
-                    eprintln!("skipping PDFium tests: {e}");
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
+mod common;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pulpit-pdfium-{name}"));
@@ -43,8 +21,9 @@ fn temp_dir(name: &str) -> PathBuf {
 
 #[test]
 fn opens_and_renders_a_real_pdf() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let path = temp_dir("render").join("deck.pdf");
     write_pdf(&path, 5, Some("pulpit:mapping=slides-only")).unwrap();
 
@@ -87,8 +66,9 @@ fn opens_and_renders_a_real_pdf() {
 
 #[test]
 fn a_cropped_region_differs_from_the_full_page() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let path = temp_dir("crop").join("deck.pdf");
     write_pdf(&path, 2, None).unwrap();
     let document = backend.open(&path).unwrap();
@@ -126,8 +106,9 @@ fn a_cropped_region_differs_from_the_full_page() {
 
 #[test]
 fn an_already_cancelled_render_returns_promptly() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let path = temp_dir("cancel").join("deck.pdf");
     write_pdf(&path, 2, None).unwrap();
     let document = backend.open(&path).unwrap();
@@ -157,8 +138,9 @@ fn an_already_cancelled_render_returns_promptly() {
 
 #[test]
 fn a_malformed_document_is_rejected_without_panicking() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let path = temp_dir("malformed").join("broken.pdf");
     std::fs::write(&path, b"%PDF-1.7\nthis is not a pdf").unwrap();
     assert!(matches!(backend.open(&path), Err(PdfError::Open { .. })));
@@ -176,8 +158,9 @@ fn a_malformed_document_is_rejected_without_panicking() {
 /// parsed into notes keyed by page.
 #[test]
 fn embedded_pdfpc_notes_are_read_from_a_real_pdf() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
 
     let payload = r#"{"pdfpcFormat":2,"pages":[
         {"idx":1,"note":"Open by naming the question."},
@@ -234,8 +217,9 @@ fn embedded_pdfpc_notes_are_read_from_a_real_pdf() {
 #[test]
 #[ignore]
 fn how_long_a_page_takes_to_rasterise() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let deck = std::env::var("PULPIT_BENCH_DECK").unwrap_or_else(|_| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/stress-test-730.pdf")
@@ -299,8 +283,9 @@ fn how_long_a_page_takes_to_rasterise() {
 /// else, with geometry over where it was drawn.
 #[test]
 fn the_render_backend_finds_text_in_a_real_deck() {
-    let Some(backend) = shared() else { return };
-    let mut backend = backend.lock().unwrap();
+    let Some(mut backend) = common::pdfium("PDFium tests") else {
+        return;
+    };
     let path = temp_dir("search").join("deck.pdf");
     write_pdf(&path, 5, None).unwrap();
     let document = backend.open(&path).unwrap();

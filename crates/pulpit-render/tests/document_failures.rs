@@ -27,6 +27,9 @@ use pulpit_render::document::{
     AppliedEffect, DocumentError, DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions,
 };
 
+#[cfg(feature = "pdfium")]
+mod common;
+
 fn stroke(x: f32) -> DocumentTransaction {
     DocumentTransaction::from_annotations([AnnotationCommand::Create(AnnotationDraft::Ink(
         InkDraft {
@@ -290,35 +293,8 @@ fn an_unsupported_annotation_is_never_erased_or_edited() {
 #[cfg(feature = "pdfium")]
 mod corrupt {
     use super::*;
+    use crate::common;
     use pulpit_render::document::pdfium::PdfiumDocument;
-    use pulpit_render::pdf::pdfium::PdfiumBackend;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    fn binding() -> Option<MutexGuard<'static, PdfiumBackend>> {
-        static BACKEND: OnceLock<Option<Mutex<PdfiumBackend>>> = OnceLock::new();
-        let backend = BACKEND
-            .get_or_init(|| {
-                if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-                    std::env::set_var(
-                        "PULPIT_PDFIUM_PATH",
-                        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib"),
-                    );
-                }
-                match PdfiumBackend::bind() {
-                    Ok(backend) => Some(Mutex::new(backend)),
-                    Err(error) => {
-                        eprintln!("skipping the corrupt-annotation tests: {error}");
-                        None
-                    }
-                }
-            })
-            .as_ref()?;
-        Some(
-            backend
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    }
 
     /// A one-page document whose single annotation is `annotation`.
     fn with_annotation(path: &Path, annotation: &str) -> std::io::Result<()> {
@@ -416,7 +392,9 @@ mod corrupt {
     fn corrupt_annotation_data_is_a_diagnostic_rather_than_an_abort() {
         // A8: malformed annotation data produces a diagnostic, not a process
         // abort. Reaching the end of this test at all is the assertion.
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the corrupt-annotation tests") else {
+            return;
+        };
         let directory = tempfile::tempdir().expect("a temporary directory");
         let mut opened = 0;
 
@@ -465,7 +443,9 @@ mod corrupt {
 
     #[test]
     fn a_file_that_is_not_a_pdf_is_a_clean_error() {
-        let Some(mut guard) = binding() else { return };
+        let Some(mut guard) = common::pdfium("the corrupt-annotation tests") else {
+            return;
+        };
         let directory = tempfile::tempdir().unwrap();
         for (name, bytes) in [
             ("empty", &b""[..]),
