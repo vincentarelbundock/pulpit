@@ -12,6 +12,7 @@ pub mod pdfwrite;
 pub mod protocol;
 pub mod shm;
 pub mod supervisor;
+pub mod verify;
 pub mod worker;
 
 pub use cache::{CacheStats, Frame, FrameCache, FrameKey, FrameKind, DEFAULT_BUDGET_BYTES};

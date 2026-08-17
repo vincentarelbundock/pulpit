@@ -1304,12 +1304,13 @@ mod tests {
 
     #[test]
     fn a_document_that_forbids_mutation_refuses_a_value_changing_form_event() {
-        use crate::document::protocol::{FormInputEvent, FormKey};
+        use crate::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
         let mut document = PdfDocument::new(Box::new(MemoryDocument::locked()), 1);
         for event in [
             FormInputEvent::Char { character: 'a' },
             FormInputEvent::KeyDown {
                 key: FormKey::Backspace,
+                modifiers: KeyModifiers::NONE,
             },
             FormInputEvent::ReplaceSelection { text: "Ada".into() },
             FormInputEvent::SelectOption {
