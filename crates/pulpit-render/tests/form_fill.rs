@@ -323,6 +323,64 @@ fn a_filled_form_saves_and_reopens_with_the_value_in_it() {
 }
 
 #[test]
+fn a_save_asked_for_mid_edit_commits_the_caret_first() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // The application's Save As, in the order the application performs it.
+        //
+        // Nothing here defocuses the field because the test knows to: it
+        // defocuses because the last answer said a widget holds the caret,
+        // which is the rule `App::ask_form_commit_before_save` follows.
+        // Losing focus is what commits an in-progress edit, and `write_to`
+        // serialises what the document holds — so a save sent straight out
+        // while someone is still typing would write a file without the
+        // characters they can see on screen.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+        let saved = directory.path().join("saved-mid-edit.pdf");
+
+        {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 91);
+            click_into(&mut document, "name");
+            let mut last = None;
+            for character in "Grace".chars() {
+                last = Some(
+                    document
+                        .form_event(PageIndex(0), FormInputEvent::Char { character })
+                        .unwrap(),
+                );
+            }
+
+            // The state the application reads when the save arrives.
+            let focused = last
+                .and_then(|result| result.focused_widget)
+                .expect("the caret is in a field");
+            let committed = document
+                .form_event(focused.page, FormInputEvent::Focus { gained: false })
+                .expect("the defocus is taken")
+                .committed
+                .expect("leaving the field commits what was typed");
+            assert_eq!(committed.value, "Grace");
+
+            document
+                .save_as(&saved, SaveOptions::verified())
+                .expect("the copy is written");
+        }
+
+        let engine = PdfiumDocument::open(&mut guard, &saved).expect("the copy reopens");
+        let document = PdfDocument::new(Box::new(engine), 92);
+        assert_eq!(
+            document.field_value("name").expect("the field is there"),
+            "Grace",
+            "a save asked for mid-edit keeps what was being typed"
+        );
+    });
+}
+
+#[test]
 fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
     pulpit_testkit::on_the_pdfium_thread(|| {
         // The `FPDF_FFLDraw` half, and the reason it is not optional.
