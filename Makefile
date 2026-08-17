@@ -28,7 +28,7 @@ endif
 
 .PHONY: help all build launch test check lint pdfium install uninstall bundle \
         linux-packages app app-universal icons windows website serve version \
-        bump release clean
+        bump release clean sign-oracle-setup sign-oracle
 
 help:  ## Display this help screen
 	@echo -e "\033[1mAvailable commands:\033[0m\n"
@@ -119,6 +119,19 @@ check:  ## Run cargo check (fast compile check)
 lint:  ## Check formatting and run clippy with warnings denied
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
+
+# ==============================================================================
+# Signing feature test oracle targets
+# ==============================================================================
+
+sign-oracle-setup:  ## Set up venv and install sign-oracle dependencies
+	python3 -m venv .venv-sign-oracle
+	. .venv-sign-oracle/bin/activate && pip install -q -r tools/sign-oracle/requirements.txt
+	@echo "Sign oracle environment ready. Activate with: source .venv-sign-oracle/bin/activate"
+
+sign-oracle:  ## Validate all signed PDF fixtures with pyHanko CLI
+	@mkdir -p tools/sign-oracle/fixtures
+	@. .venv-sign-oracle/bin/activate && bash tools/sign-oracle/verify-fixtures.sh tools/sign-oracle/fixtures
 
 # ==============================================================================
 # Documentation targets

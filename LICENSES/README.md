@@ -22,11 +22,13 @@ kind of obligation:
 | Part of the package | Licence | Full text |
 | --- | --- | --- |
 | Pulpit's own source, in `crates/`, `scripts/`, `packaging/`, `docs-src/` | MIT OR Apache-2.0 | `LICENSE-MIT`, `LICENSE-APACHE` |
+| Ported signing algorithms in `crates/pulpit-render/src/{sign,pdfwrite,verify}/` | MIT, © Matthias Valvekens | `pyhanko-LICENSE.txt` |
 | The two vendored `iced_aw` widgets, in `crates/pulpit/src/vendor/iced_aw/` | MIT, © 2020 Kaiden42 | `ICED_AW-LICENSE` |
 | The Lucide icons, in `crates/pulpit/assets/icons/` | ISC, © 2026 Lucide Icons and Contributors | `LUCIDE-LICENSE` |
 | Fonts embedded by the `typst-assets` Cargo dependency | OFL-1.1 / GUST / Bitstream Vera terms | `TYPST_ASSETS-NOTICE`, a copy of the crate's `NOTICE` |
 | PDFium, fetched into `lib/` and shipped as `lib/pulpit/libpdfium.so` | BSD-3-Clause, plus MIT for the packaging | `lib/PDFIUM-LICENSE`, after `make pdfium` |
 | PDFium test corpus in `tests/pdf-corpus/` | BSD-style; upstream file also contains Apache-2.0, © The PDFium Authors | `tests/pdf-corpus/LICENSES/PDFIUM-LICENSE.txt` |
+| certomancer in test credentials generation, `tools/sign-oracle/` | MIT, © Matthias Valvekens | `certomancer-LICENSE.txt` |
 | Everything resolved from `Cargo.lock` | MIT / Apache-2.0 / BSD / ISC | generated, see below |
 | `examples/stress-test-730.pdf` | © Gerth Stølting Brodal, Aarhus University; no reuse grant | none — see below |
 
@@ -46,6 +48,20 @@ Two widgets were copied rather than the crate depended on; the reasoning is in
 that README. The code is modified — module paths, the icon-font call, one
 let-chain, and formatting — as the MIT licence permits, and the changes are
 recorded.
+
+### pyHanko — signing algorithms and byte-range mechanics
+
+* Upstream: <https://github.com/MatthiasValvekens/pyHanko>
+* Licence: **MIT**, © Matthias Valvekens
+* Full text: `pyhanko-LICENSE.txt`
+* Reference commit: recorded in `NOTES.md`
+
+Algorithms and design decisions from pyHanko are ported into Rust in three
+modules of `crates/pulpit-render/src/`: `sign/` (CMS and cryptographic signing),
+`pdfwrite/` (incremental PDF update writer), and `verify/` (signature discovery,
+coverage classification, and integrity verification). The porting is a derivative
+work under the MIT licence. Section references of the form `pyhanko: path:line` in
+`SPEC-signing.md` point to the specific code the requirement was read from.
 
 ---
 
@@ -105,6 +121,21 @@ every package alongside the other licence texts. When the pinned
 
 The fixtures are development inputs and are not included in binary release
 packages. Their `SHA256SUMS` file makes the recorded provenance verifiable.
+
+### `tools/sign-oracle/` — test credential generation and signature oracle
+
+* What it is: a harness for signing feature integration testing that generates
+  test PKCS#12 credentials and runs pyHanko's CLI against signed PDF fixtures
+  to validate that pulpit's output is verifiable by an independent reference
+  implementation
+* Upstream: <https://github.com/MatthiasValvekens/certomancer> (for test PKI)
+* Licence: **MIT**, © Matthias Valvekens (certomancer)
+* Full text: `certomancer-LICENSE.txt`
+* Reference commit: recorded in `NOTES.md`
+
+certomancer is used only for test infrastructure — credential generation in CI —
+and does not appear in the binary. The sign-oracle harness is not shipped and
+is run only in development and CI workflows.
 
 ### `examples/stress-test-730.pdf`
 

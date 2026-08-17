@@ -1,0 +1,13 @@
+# Test oracle for cryptographic signature validation
+# Pinned to exact versions for reproducibility in CI
+
+# pyHanko is the reference implementation of PDF Advanced Electronic Signatures (PAdES)
+# and provides the signature validation oracle used to verify pulpit's signing output
+pyHanko==0.20.1
+
+# certomancer generates test credentials (PKCS#12 key + certificate chains)
+# Used to create deterministic test fixtures without external PKI
+certomancer==0.9.3
+
+# Common dependencies that may not be automatically resolved
+cryptography>=41.0.0,<43.0.0
