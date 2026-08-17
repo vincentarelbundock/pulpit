@@ -113,18 +113,18 @@ fn sign_spike_create_signed_pdf() {
         .extend_from_slice(b"<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached ");
 
     // /ByteRange placeholder ([] + 60 spaces = 62 bytes)
-    let byterange_pos = output.len() as u64;
-    output.extend_from_slice(b"/ByteRange []");
-    for _ in 0..60 {
-        output.push(b' ');
-    }
+    // Record byterange_start at the position of '[' per §23.3
+    output.extend_from_slice(b"/ByteRange ");
+    let byterange_start = output.len() as u64;
+    output.extend_from_slice(b"[]");
+    output.resize(output.len() + 60, b' ');
 
     // /Contents placeholder (< + bytes_reserved 0s + >)
+    // Record sig_start at the position of '<' per §23.4
+    output.extend_from_slice(b"/Contents ");
     let sig_start = output.len() as u64;
-    output.extend_from_slice(b"/Contents <");
-    for _ in 0..bytes_reserved {
-        output.push(b'0');
-    }
+    output.extend_from_slice(b"<");
+    output.resize(output.len() + bytes_reserved, b'0');
     output.extend_from_slice(b">");
     let sig_end = output.len() as u64;
 
@@ -159,6 +159,7 @@ fn sign_spike_create_signed_pdf() {
     let final_eof = output.len() as u64;
 
     // Compute document digest per §23.3
+    // Hash from 0 to sig_start (just before '<') and from sig_end to eof
     let mut hasher = Sha256::new();
     hasher.update(&output[0..sig_start as usize]);
     hasher.update(&output[sig_end as usize..final_eof as usize]);
@@ -184,12 +185,46 @@ fn sign_spike_create_signed_pdf() {
     }
 
     // Back-patch /ByteRange per §23.3
+    // byterange_start points to '[', replace [] + 60 spaces with actual ByteRange
     let byterange_str = format!("[0 {} {} {}]", sig_start, sig_end, final_eof - sig_end);
-    let mut pos = byterange_pos as usize + 13; // Skip "/ByteRange []"
-    for byte in byterange_str.as_bytes() {
-        output[pos] = *byte;
-        pos += 1;
+    for (i, byte) in byterange_str.as_bytes().iter().enumerate() {
+        output[byterange_start as usize + i] = *byte;
     }
+
+    // Validate PDF structure before oracle test per §23.2-23.4
+    let output_str = String::from_utf8_lossy(&output);
+
+    // Check: exactly one /ByteRange [0 (no [][  corruption)
+    let byterange_count = output_str.matches("/ByteRange [0").count();
+    assert_eq!(
+        byterange_count, 1,
+        "expected exactly one '/ByteRange [0', found {}. Indicates placeholder overwrite failed.",
+        byterange_count
+    );
+
+    // Check: exactly one /Contents <
+    let contents_count = output_str.matches("/Contents <").count();
+    assert_eq!(
+        contents_count, 1,
+        "expected exactly one '/Contents <', found {}. Indicates placeholder corruption.",
+        contents_count
+    );
+
+    // Check: byte at sig_start is '<'
+    assert_eq!(
+        output[sig_start as usize], b'<',
+        "byte at sig_start ({}) should be '<', but got '{}'",
+        sig_start, output[sig_start as usize] as char
+    );
+
+    // Check: byte at sig_end-1 is '>'
+    assert_eq!(
+        output[sig_end as usize - 1],
+        b'>',
+        "byte at sig_end-1 ({}) should be '>', but got '{}'",
+        sig_end - 1,
+        output[sig_end as usize - 1] as char
+    );
 
     // Write to fixture file
     std::fs::create_dir_all("../../tools/sign-oracle/fixtures")
@@ -206,6 +241,17 @@ fn sign_spike_create_signed_pdf() {
         !all_revisions.is_empty(),
         "revision map should have at least one revision"
     );
+
+    // Verify signature discovery (document should parse without errors)
+    println!(
+        "Attempting to discover signatures in PDF ({} bytes)",
+        output.len()
+    );
+    let sigs =
+        verify::discover_signatures(&output, &rev_map).expect("failed to discover signatures");
+    println!("Discovered {} signature(s)", sigs.len());
+    // Note: signature discovery may find 0 if the signature field structure isn't
+    // exactly what the verify module expects; this is not a critical assertion for S0
 
     println!(
         "SUCCESS: Created signed PDF at {} ({} bytes)",
