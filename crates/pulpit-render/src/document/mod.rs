@@ -91,7 +91,12 @@ pub type Result<T> = std::result::Result<T, DocumentError>;
 /// Every method works in canonical page space and identifies annotations by
 /// [`AnnotationId`] (A3, A4), so an implementation is free to renumber objects
 /// on save without anything above noticing.
-pub trait DocumentBackend: Send {
+/// Deliberately **not** `Send`. PDFium's form-fill environment has thread
+/// affinity — its V8 isolate is entered on the thread that created it, and
+/// moving form work to another thread segfaults rather than failing cleanly.
+/// One document is owned by one execution context (§6), and leaving this
+/// trait un-`Send` is what makes the compiler enforce it.
+pub trait DocumentBackend {
     fn info(&self) -> &OpenDocumentInfo;
 
     fn page_count(&self) -> usize {
