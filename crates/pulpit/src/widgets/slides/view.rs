@@ -9,15 +9,17 @@ use crate::theme;
 use crate::widgets::context::{Mode, SlideData};
 use crate::widgets::event::WidgetEvent;
 use crate::widgets::slides::model::{Relative, SlideFit};
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetKind};
 
 /// One slide pane, or the three-across strip.
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    slides: &SlideData<'_>,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let slides = &ctx.context.slides;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
     match widget.kind() {
         WidgetKind::CurrentSlide => panel(widget, slides, mode, Relative::Current, on),
         WidgetKind::PreviousSlide => panel(widget, slides, mode, Relative::Previous, on),

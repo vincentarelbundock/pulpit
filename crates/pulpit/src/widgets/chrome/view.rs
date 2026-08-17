@@ -9,16 +9,18 @@ use iced::{Alignment, Element, Length};
 
 use crate::theme;
 use crate::theme::type_scale;
-use crate::widgets::context::{AudienceData, Mode};
+use crate::widgets::context::Mode;
 use crate::widgets::event::{ChromeCommand, WidgetEvent};
+use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetKind};
 
-pub fn view<Message: Clone + 'static>(
+pub fn view<'ctx, 'a, Message: Clone + 'static>(
+    ctx: &WidgetViewContext<'ctx, 'a, Message>,
     widget: &Widget,
-    audience: &AudienceData,
-    mode: Mode,
-    on: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
+) -> Element<'a, Message> {
+    let audience = &ctx.context.audience;
+    let mode = ctx.context.mode;
+    let on = ctx.on_event;
     match widget.kind() {
         WidgetKind::MainMenu => menu_button(audience.menu_open, mode, on),
         WidgetKind::AudienceControls => lifecycle(audience.started, mode, on),

@@ -21,15 +21,17 @@ pub mod media;
 pub mod navigation;
 pub mod notes;
 pub mod patch;
+pub mod plan;
+pub mod registry;
 pub mod sample;
 pub mod search;
 pub mod slides;
 pub mod status;
 pub mod timing;
 pub mod tokens;
+pub mod view_context;
 
 pub use annotations::model::{AnnotationControls, AnnotationOptions};
-pub use catalog::definition;
 pub use common::{Align, Variant};
 pub use context::{Context, Mode};
 pub use event::WidgetEvent;
@@ -37,6 +39,10 @@ pub use navigation::model::ButtonsOptions;
 pub use notes::model::NotesOptions;
 #[allow(unused_imports)] // see widgets::patch
 pub use patch::{PatchError, WidgetPatch};
+// `WidgetId`, `WidgetRegistration` and `registration` are Phase 3's public
+// surface (persistence by stable id); reachable today via `widgets::registry`
+// and via `WidgetKind::id`/`WidgetKind::from_id`, not yet re-exported at the
+// crate boundary because nothing outside this module needs them yet.
 pub use slides::model::SlideOptions;
 pub use timing::model::{Alarm, AlarmControls, ClockOptions, TimerControls, TimerOptions};
 
@@ -70,6 +76,35 @@ impl WidgetGroup {
         WidgetGroup::OptionalInformation,
         WidgetGroup::Document,
     ];
+}
+
+/// What a widget kind actually does, independent of where it lives in the
+/// catalog or which family renders it.
+///
+/// This is the vocabulary the layout validator and the layout-purpose
+/// inference read instead of matching on [`WidgetKind`] or [`Family`]
+/// directly: a new widget that shows the current slide only has to say so
+/// here, rather than every predicate elsewhere growing another arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WidgetCapability {
+    /// Shows the audience's current slide, on its own or as part of a
+    /// compound widget.
+    ShowsCurrentSlide,
+    /// Shows the document itself, or is only useful alongside it. What makes
+    /// a layout a Reader rather than a presenter screen.
+    ShowsDocument,
+    /// Can move the presentation forward, as configured.
+    NavigatesForward,
+    /// Can move the presentation backward, as configured.
+    NavigatesBackward,
+    /// Starts, moves or stops the audience window.
+    ControlsAudience,
+    /// Pauses or resumes the timer.
+    ControlsTimer,
+    /// Finds a string in the deck or the document.
+    SearchesDocument,
+    /// Plays, pauses or scrubs media.
+    ControlsMedia,
 }
 
 /// Everything that can be placed in a cell.
@@ -129,10 +164,17 @@ pub enum WidgetKind {
     /// case this exists for, and slides and reader ask the same question of
     /// the same model.
     Search,
+
+    /// A static, decorative spacer cell: theme background and nothing else.
+    ///
+    /// The living template for adding a widget — see the doc comment at the
+    /// top of `widgets/registry.rs` for the exact list of files a new kind
+    /// touches, of which this is one line each.
+    BlankSpace,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 25] = [
+    pub const ALL: [WidgetKind; 26] = [
         WidgetKind::CurrentSlide,
         WidgetKind::PreviousSlide,
         WidgetKind::NextSlide,
@@ -158,6 +200,7 @@ impl WidgetKind {
         WidgetKind::DocumentOutline,
         WidgetKind::AnnotationTools,
         WidgetKind::Search,
+        WidgetKind::BlankSpace,
     ];
 
     /// Which family implements this kind. The dispatcher
@@ -181,7 +224,8 @@ impl WidgetKind {
             WidgetKind::PresentationTitle
             | WidgetKind::CurrentSection
             | WidgetKind::AudienceScreenStatus
-            | WidgetKind::ConnectionStatus => Family::Status,
+            | WidgetKind::ConnectionStatus
+            | WidgetKind::BlankSpace => Family::Status,
             WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
@@ -190,34 +234,68 @@ impl WidgetKind {
         }
     }
 
-    // The metadata below is the catalog's, not a second copy of it.
+    // The metadata below is the registry's, not a second copy of it. The
+    // registry itself resolves to the catalog's `WidgetDefinition`, so this
+    // is one hop further from the same single source of truth.
 
     pub fn label(self) -> &'static str {
-        definition(self).label
+        registry::registration(self).label()
     }
 
     pub fn short_label(self) -> &'static str {
-        definition(self).short_label
+        registry::registration(self).short_label()
     }
 
     pub fn tooltip(self) -> &'static str {
-        definition(self).tooltip
+        registry::registration(self).tooltip()
     }
 
     pub fn group(self) -> WidgetGroup {
-        definition(self).group
+        registry::registration(self).group()
     }
 
     pub fn parts(self) -> &'static [WidgetKind] {
-        definition(self).parts
+        registry::registration(self).parts()
     }
 
     pub fn multi_instance(self) -> bool {
-        definition(self).multi_instance
+        registry::registration(self).multi_instance()
+    }
+
+    pub fn placement(self) -> catalog::PlacementPolicy {
+        registry::registration(self).placement()
     }
 
     pub fn minimum_size(self) -> (f32, f32) {
-        definition(self).minimum_size
+        registry::registration(self).minimum_size()
+    }
+
+    /// This kind's own declared capabilities, not counting any compound
+    /// parts. Almost always what [`WidgetKind::capabilities`] should be
+    /// called instead — this exists for the table itself and its tests.
+    pub fn own_capabilities(self) -> &'static [WidgetCapability] {
+        registry::registration(self).capabilities()
+    }
+
+    /// The capabilities this kind offers, including whatever its compound
+    /// parts offer — the same "counts as" mechanism [`WidgetKind::occupies`]
+    /// uses, so a strip that shows the current slide answers a
+    /// current-slide question the same way the plain widget does.
+    pub fn capabilities(self) -> Vec<WidgetCapability> {
+        let mut capabilities = Vec::new();
+        for kind in self.occupies() {
+            for capability in kind.own_capabilities() {
+                if !capabilities.contains(capability) {
+                    capabilities.push(*capability);
+                }
+            }
+        }
+        capabilities
+    }
+
+    /// Does this kind (or something it occupies) have this capability?
+    pub fn has_capability(self, capability: WidgetCapability) -> bool {
+        self.capabilities().contains(&capability)
     }
 
     /// Used by the catalog tests and by anything asking whether a kind
@@ -319,7 +397,8 @@ impl WidgetConfig {
             | WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
-            | WidgetKind::Search => WidgetConfig::None,
+            | WidgetKind::Search
+            | WidgetKind::BlankSpace => WidgetConfig::None,
             // The document toolbar carries the same colour and size choices
             // the presenter palette does, so a mark made in one mode looks
             // the same in the other.
@@ -463,24 +542,32 @@ impl Widget {
 
     /// Does this widget, as configured, let the presenter move forward?
     pub fn provides_forward_navigation(&self) -> bool {
+        if !self.kind.has_capability(WidgetCapability::NavigatesForward) {
+            return false;
+        }
         match self.kind {
             WidgetKind::SlideButtons => self.buttons().forward,
-            WidgetKind::SlideSlider => true,
-            _ => false,
+            _ => true,
         }
     }
 
     /// …and backward?
     pub fn provides_backward_navigation(&self) -> bool {
+        if !self
+            .kind
+            .has_capability(WidgetCapability::NavigatesBackward)
+        {
+            return false;
+        }
         match self.kind {
             WidgetKind::SlideButtons => self.buttons().back,
-            WidgetKind::SlideSlider => true,
-            _ => false,
+            _ => true,
         }
     }
 
     pub fn shows_current_slide(&self) -> bool {
-        self.kind.occupies().contains(&WidgetKind::CurrentSlide)
+        self.kind
+            .has_capability(WidgetCapability::ShowsCurrentSlide)
     }
 
     /// Repair values that are out of range or not allowed for this kind.
