@@ -102,7 +102,11 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever step
     // it is on.
     if let Some(flow) = app.signing.as_ref() {
-        page = stack![page, sign_dialog(flow)].into();
+        let on_page_zero = app
+            .reader
+            .current_page()
+            .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
+        page = stack![page, sign_dialog(flow, on_page_zero)].into();
     }
     if let Some(review) = app.pending_save_review.as_ref() {
         page = stack![page, save_review_dialog(review)].into();
@@ -2148,7 +2152,7 @@ fn append_only_offer_dialog() -> Element<'static, Message> {
 }
 
 /// The Sign flow (SPEC-signing.md §31.1), one dialog per step.
-fn sign_dialog(flow: &crate::signing::SigningFlow) -> Element<'_, Message> {
+fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Element<'_, Message> {
     use crate::signing::SigningFlow;
     use pulpit_render::sign::SigningProfile;
 
@@ -2291,46 +2295,150 @@ fn sign_dialog(flow: &crate::signing::SigningFlow) -> Element<'_, Message> {
             body = body.push(actions);
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
-        SigningFlow::Options { options, .. } => {
-            let body = column![
+        SigningFlow::Options {
+            options,
+            candidates,
+            ..
+        } => {
+            use crate::signing::{PlacementPosition, PlacementSize, SignMsg, TargetChoice};
+
+            let mut body = column![
                 text("Sign").size(type_scale::TITLE),
                 dialog_section(
                     "Reason (optional)",
                     text_input("Reason", &options.reason)
-                        .on_input(|v| Message::Sign(crate::signing::SignMsg::ReasonChanged(v)))
+                        .on_input(|v| Message::Sign(SignMsg::ReasonChanged(v)))
                         .padding(gap::S),
                 ),
                 dialog_section(
                     "Location (optional)",
                     text_input("Location", &options.location)
-                        .on_input(|v| Message::Sign(crate::signing::SignMsg::LocationChanged(v)))
+                        .on_input(|v| Message::Sign(SignMsg::LocationChanged(v)))
                         .padding(gap::S),
                 ),
                 dialog_section(
                     "Contact (optional)",
                     text_input("Contact", &options.contact)
-                        .on_input(|v| Message::Sign(crate::signing::SignMsg::ContactChanged(v)))
+                        .on_input(|v| Message::Sign(SignMsg::ContactChanged(v)))
                         .padding(gap::S),
                 ),
-                // Visible signatures need `SignRequest::appearance`, which
-                // does not exist yet: the choice is shown, disabled, and
-                // named as unavailable rather than silently missing.
-                dialog_section(
-                    "Appearance",
-                    text("Invisible only — visible signatures are not available in this build.")
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                ),
+            ]
+            .spacing(gap::M);
+
+            // §31.1 step 5's target picker: shown only when preflight found
+            // more than one candidate empty field to countersign into. The
+            // single-candidate case (a fresh field, or the one unambiguous
+            // empty field) is already selected and needs no picker.
+            if candidates.len() > 1 {
+                let mut picker = column![].spacing(gap::S);
+                for candidate in candidates {
+                    let label = match candidate {
+                        TargetChoice::NewField => "New field".to_string(),
+                        TargetChoice::ExistingField(name) => name.clone(),
+                    };
+                    let selected = options.target.as_ref() == Some(candidate);
+                    picker = picker.push(
+                        button(text(label).size(type_scale::LABEL))
+                            .padding(gap::S)
+                            .style(if selected {
+                                theme::ambient::selected_button
+                            } else {
+                                theme::ambient::tool_button
+                            })
+                            .on_press(Message::Sign(SignMsg::TargetChosen(candidate.clone()))),
+                    );
+                }
+                body = body.push(dialog_section(
+                    "This document has several empty signature fields — choose one",
+                    picker,
+                ));
+            }
+
+            // §25.5: Visible places a text appearance via position/size
+            // presets on page 0 (the only page_index pulpit-render accepts);
+            // see `crate::signing`'s module doc comment for why placement is
+            // a preset picker rather than a drawn box in v1. Off page 0 the
+            // choice is disabled with the reason shown, rather than letting
+            // the user build a placement Sign would then refuse.
+            let mut appearance_section = column![row![
+                button(text("Invisible").size(type_scale::LABEL))
+                    .padding(gap::S)
+                    .style(if options.visible_requested {
+                        theme::ambient::tool_button
+                    } else {
+                        theme::ambient::selected_button
+                    })
+                    .on_press(Message::Sign(SignMsg::VisibleChanged(false))),
+                if on_page_zero {
+                    button(text("Visible").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(if options.visible_requested {
+                            theme::ambient::selected_button
+                        } else {
+                            theme::ambient::tool_button
+                        })
+                        .on_press(Message::Sign(SignMsg::VisibleChanged(true)))
+                } else {
+                    button(text("Visible").size(type_scale::LABEL)).padding(gap::S)
+                },
+            ]
+            .spacing(gap::S)]
+            .spacing(gap::S);
+            if !on_page_zero {
+                appearance_section = appearance_section.push(
+                    text(
+                        "Visible signatures can only be placed on the first page in this \
+                         build; go to page 1 to place one.",
+                    )
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+                );
+            }
+            if let Some(placement) = options.placement {
+                let mut positions = row![].spacing(gap::S);
+                for position in PlacementPosition::ALL {
+                    let selected = placement.position == position;
+                    positions = positions.push(
+                        button(text(position.label()).size(type_scale::CAPTION))
+                            .padding(gap::XS)
+                            .style(if selected {
+                                theme::ambient::selected_button
+                            } else {
+                                theme::ambient::tool_button
+                            })
+                            .on_press(Message::Sign(SignMsg::PlacementPositionChosen(position))),
+                    );
+                }
+                let mut sizes = row![].spacing(gap::S);
+                for size in PlacementSize::ALL {
+                    let selected = placement.size == size;
+                    sizes = sizes.push(
+                        button(text(size.label()).size(type_scale::CAPTION))
+                            .padding(gap::XS)
+                            .style(if selected {
+                                theme::ambient::selected_button
+                            } else {
+                                theme::ambient::tool_button
+                            })
+                            .on_press(Message::Sign(SignMsg::PlacementSizeChosen(size))),
+                    );
+                }
+                appearance_section = appearance_section
+                    .push(dialog_section("Position", positions))
+                    .push(dialog_section("Size", sizes));
+            }
+            body = body.push(dialog_section("Appearance", appearance_section));
+
+            body = body.push(
                 row![
                     cancel(),
                     button(text("Continue").size(type_scale::LABEL))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
-                        .on_press(Message::Sign(crate::signing::SignMsg::ContinueToConfirm)),
+                        .on_press(Message::Sign(SignMsg::ContinueToConfirm)),
                 ]
                 .spacing(gap::S),
-            ]
-            .spacing(gap::M);
+            );
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::Confirm { info, options, .. } => {
