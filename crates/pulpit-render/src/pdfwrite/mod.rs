@@ -606,13 +606,18 @@ impl IncrementalWriter {
                 self.write_xref_table(writer, &obj_offsets)?;
             }
             XRefKind::Stream => {
-                return Err(PdfWriteError::IncrementalWriteFailed(
-                    "xref stream append mode deferred".to_string(),
-                ));
+                // Allocate next object number for the xref stream itself
+                let xref_stream_obj_num = std::cmp::max(
+                    self.trailer_dict.size,
+                    objects.iter().map(|(n, _, _)| n + 1).max().unwrap_or(1),
+                );
+                self.write_xref_stream(writer, &obj_offsets, xref_stream_obj_num, new_id2)?;
+                // Return early; xref stream writing handles trailer and startxref
+                return Ok(());
             }
         }
 
-        // Write trailer
+        // Write trailer (for classic xref only; xref stream returns above)
         let new_size = std::cmp::max(
             self.trailer_dict.size,
             objects.iter().map(|(n, _, _)| n + 1).max().unwrap_or(1),
@@ -655,6 +660,122 @@ impl IncrementalWriter {
         Ok(())
     }
 
+    fn write_xref_stream<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+        obj_offsets: &[(u32, u64)],
+        xref_stream_obj_num: u32,
+        new_id2: &[u8; 16],
+    ) -> Result<()> {
+        // Build xref stream data: entries in /Index order
+        // /W [1 4 2] = 7 bytes per entry
+        let mut xref_data = Vec::new();
+
+        // Entry for object 0 (free object)
+        xref_data.push(0u8); // type: free
+        xref_data.extend_from_slice(&[0u8; 4]); // offset
+        xref_data.extend_from_slice(&[255u8, 255u8]); // gen
+
+        // Entries for appended objects
+        for (_obj_num, offset) in obj_offsets {
+            xref_data.push(1u8); // type: normal object
+            xref_data.extend_from_slice(&(*offset as u32).to_be_bytes());
+            xref_data.extend_from_slice(&[0u8, 0u8]); // gen
+        }
+
+        // Entry for the xref stream object itself
+        xref_data.push(1u8); // type: normal object
+        let xref_stream_offset = writer.stream_position().map_err(PdfWriteError::Io)?;
+        xref_data.extend_from_slice(&(xref_stream_offset as u32).to_be_bytes());
+        xref_data.extend_from_slice(&[0u8, 0u8]); // gen
+
+        // Build /Index array: [[0, 1], [first_appended, count], [xref_stream_num, 1]]
+        let mut index_array = vec![0u32, 1u32]; // object 0
+
+        if !obj_offsets.is_empty() {
+            index_array.push(obj_offsets[0].0); // first appended object
+            index_array.push(obj_offsets.len() as u32);
+        }
+
+        index_array.push(xref_stream_obj_num); // xref stream itself
+        index_array.push(1u32);
+
+        // Calculate new size
+        let new_size = std::cmp::max(
+            self.trailer_dict.size,
+            std::cmp::max(
+                obj_offsets.iter().map(|(n, _)| n + 1).max().unwrap_or(1),
+                xref_stream_obj_num + 1,
+            ),
+        );
+
+        // Write the xref stream object
+        writeln!(writer, "{} 0 obj", xref_stream_obj_num).map_err(PdfWriteError::Io)?;
+        writeln!(writer, "<<").map_err(PdfWriteError::Io)?;
+        writeln!(writer, "/Type /XRef").map_err(PdfWriteError::Io)?;
+        writeln!(writer, "/Size {}", new_size).map_err(PdfWriteError::Io)?;
+        writeln!(writer, "/W [1 4 2]").map_err(PdfWriteError::Io)?;
+
+        // Write /Index array
+        write!(writer, "/Index [").map_err(PdfWriteError::Io)?;
+        for (i, val) in index_array.iter().enumerate() {
+            if i > 0 {
+                write!(writer, " ").map_err(PdfWriteError::Io)?;
+            }
+            write!(writer, "{}", val).map_err(PdfWriteError::Io)?;
+        }
+        writeln!(writer, "]").map_err(PdfWriteError::Io)?;
+
+        if let Some((root_num, root_gen)) = self.trailer_dict.root {
+            writeln!(
+                writer,
+                "/Root {} {} R",
+                root_num, root_gen
+            )
+            .map_err(PdfWriteError::Io)?;
+        }
+
+        writeln!(writer, "/Prev {}", self.prev_startxref).map_err(PdfWriteError::Io)?;
+
+        // Write /ID array with preserved id1 and new id2
+        if let Some(id_array) = &self.trailer_dict.id {
+            write!(writer, "/ID [").map_err(PdfWriteError::Io)?;
+            if !id_array.is_empty() {
+                writer.write_all(b"<").map_err(PdfWriteError::Io)?;
+                for byte in &id_array[0] {
+                    write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
+                }
+                writer.write_all(b">").map_err(PdfWriteError::Io)?;
+            }
+            writer.write_all(b"<").map_err(PdfWriteError::Io)?;
+            for byte in new_id2 {
+                write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
+            }
+            writer.write_all(b">").map_err(PdfWriteError::Io)?;
+            writeln!(writer, "]").map_err(PdfWriteError::Io)?;
+        }
+
+        if let Some((info_num, info_gen)) = self.trailer_dict.info {
+            writeln!(writer, "/Info {} {} R", info_num, info_gen)
+                .map_err(PdfWriteError::Io)?;
+        }
+
+        writeln!(writer, "/Length {}", xref_data.len()).map_err(PdfWriteError::Io)?;
+        writeln!(writer, ">>").map_err(PdfWriteError::Io)?;
+        writeln!(writer, "stream").map_err(PdfWriteError::Io)?;
+        writer.write_all(&xref_data).map_err(PdfWriteError::Io)?;
+        writeln!(writer).map_err(PdfWriteError::Io)?;
+        writeln!(writer, "endstream").map_err(PdfWriteError::Io)?;
+        writeln!(writer, "endobj").map_err(PdfWriteError::Io)?;
+
+        // Write startxref pointing to the xref stream object
+        writeln!(writer, "startxref").map_err(PdfWriteError::Io)?;
+        writeln!(writer, "{}", xref_stream_offset).map_err(PdfWriteError::Io)?;
+        writeln!(writer, "%%EOF").map_err(PdfWriteError::Io)?;
+
+        Ok(())
+    }
+
     fn write_xref_table<W: Write>(&self, writer: &mut W, obj_offsets: &[(u32, u64)]) -> Result<()> {
         writeln!(writer, "xref").map_err(PdfWriteError::Io)?;
 
@@ -662,10 +783,33 @@ impl IncrementalWriter {
         writeln!(writer, "0 1").map_err(PdfWriteError::Io)?;
         writeln!(writer, "0000000000 65535 f ").map_err(PdfWriteError::Io)?;
 
-        // Emit subsection for each new object
-        for (obj_num, offset) in obj_offsets {
-            writeln!(writer, "{} 1", obj_num).map_err(PdfWriteError::Io)?;
-            writeln!(writer, "{:010} 00000 n ", offset).map_err(PdfWriteError::Io)?;
+        // Group consecutive object numbers into subsections
+        if !obj_offsets.is_empty() {
+            let mut subsection_start = obj_offsets[0].0;
+            let mut subsection_entries = vec![obj_offsets[0]];
+
+            for i in 1..obj_offsets.len() {
+                if obj_offsets[i].0 == obj_offsets[i - 1].0 + 1 {
+                    // Consecutive object number - add to current subsection
+                    subsection_entries.push(obj_offsets[i]);
+                } else {
+                    // Gap found - emit current subsection and start a new one
+                    writeln!(writer, "{} {}", subsection_start, subsection_entries.len())
+                        .map_err(PdfWriteError::Io)?;
+                    for (_obj_num, offset) in &subsection_entries {
+                        writeln!(writer, "{:010} 00000 n ", offset).map_err(PdfWriteError::Io)?;
+                    }
+                    subsection_start = obj_offsets[i].0;
+                    subsection_entries = vec![obj_offsets[i]];
+                }
+            }
+
+            // Emit final subsection
+            writeln!(writer, "{} {}", subsection_start, subsection_entries.len())
+                .map_err(PdfWriteError::Io)?;
+            for (_obj_num, offset) in &subsection_entries {
+                writeln!(writer, "{:010} 00000 n ", offset).map_err(PdfWriteError::Io)?;
+            }
         }
 
         Ok(())
@@ -727,12 +871,14 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
         has_xref_stm: false,
     };
 
-    // Look for "trailer" keyword
-    loop {
-        match tokenizer.next_token()? {
-            Some(token) if token == b"trailer" => break,
-            None => break,
-            _ => continue,
+    // Look for "trailer" keyword (classic xref only)
+    if xref_kind == XRefKind::Table {
+        loop {
+            match tokenizer.next_token()? {
+                Some(token) if token == b"trailer" => break,
+                None => break,
+                _ => continue,
+            }
         }
     }
 
@@ -783,6 +929,43 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
                         if let Ok(num_str) = std::str::from_utf8(&token) {
                             if let Ok(num) = num_str.parse::<u64>() {
                                 trailer_dict.prev = Some(num);
+                            }
+                        }
+                    }
+                    "ID" => {
+                        // Parse ID array: look for [ followed by hex strings followed by ]
+                        if let Some(arr_token) = tokenizer.next_token()? {
+                            if arr_token == b"[" {
+                                let mut id_array = Vec::new();
+                                while let Some(id_token) = tokenizer.next_token()? {
+                                    if id_token == b"]" {
+                                        break;
+                                    }
+                                    if let Ok(id_str) = std::str::from_utf8(&id_token) {
+                                        if let Some(hex) = id_str
+                                            .strip_prefix('<')
+                                            .and_then(|s| s.strip_suffix('>'))
+                                        {
+                                            // Parse hex string
+                                            let mut bytes = Vec::new();
+                                            for i in (0..hex.len()).step_by(2) {
+                                                if i + 1 < hex.len() {
+                                                    if let Ok(b) =
+                                                        u8::from_str_radix(&hex[i..i + 2], 16)
+                                                    {
+                                                        bytes.push(b);
+                                                    }
+                                                }
+                                            }
+                                            if !bytes.is_empty() {
+                                                id_array.push(bytes);
+                                            }
+                                        }
+                                    }
+                                }
+                                if !id_array.is_empty() {
+                                    trailer_dict.id = Some(id_array);
+                                }
                             }
                         }
                     }
@@ -1026,5 +1209,384 @@ mod tests {
         // Deferred: full fixture-based test with perfect byte alignment
         // For now, verify the API exists and type checking works
         let _session = SigningSession::new();
+    }
+
+    /// Build a minimal valid classic-xref PDF fixture with 3 objects programmatically.
+    /// Returns (pdf_bytes, original_startxref_offset).
+    fn build_classic_fixture() -> (Vec<u8>, u64) {
+        let mut buf = Vec::new();
+
+        // Write header
+        buf.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let obj1_offset = buf.len() as u64;
+        buf.extend_from_slice(b"1 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // Object 2: Pages
+        let obj2_offset = buf.len() as u64;
+        buf.extend_from_slice(b"2 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // Object 3: Page
+        let obj3_offset = buf.len() as u64;
+        buf.extend_from_slice(b"3 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // xref table
+        let xref_offset = buf.len() as u64;
+        buf.extend_from_slice(b"xref\n");
+        buf.extend_from_slice(b"0 1\n");
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        buf.extend_from_slice(format!("{} 1\n", obj1_offset as u64).as_bytes());
+        buf.extend_from_slice(b"0000000000 00000 n \n");
+        buf.extend_from_slice(format!("{} 1\n", obj2_offset as u64).as_bytes());
+        buf.extend_from_slice(b"0000000000 00000 n \n");
+        buf.extend_from_slice(format!("{} 1\n", obj3_offset as u64).as_bytes());
+        buf.extend_from_slice(b"0000000000 00000 n \n");
+
+        // trailer
+        buf.extend_from_slice(b"trailer\n");
+        buf.extend_from_slice(b"<<\n");
+        buf.extend_from_slice(b"/Size 4\n");
+        buf.extend_from_slice(b"/Root 1 0 R\n");
+        buf.extend_from_slice(
+            b"/ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]\n",
+        );
+        buf.extend_from_slice(b">>\n");
+        buf.extend_from_slice(b"startxref\n");
+        buf.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
+        buf.extend_from_slice(b"%%EOF");
+
+        (buf, xref_offset)
+    }
+
+    #[test]
+    fn test_classic_xref_append_two_objects() {
+        let (fixture_bytes, _original_xref_offset) = build_classic_fixture();
+
+        // Parse the fixture
+        let writer = IncrementalWriter::open(&fixture_bytes).expect("failed to open fixture");
+
+        // Verify we detected classic xref
+        assert_eq!(writer.xref_kind, XRefKind::Table);
+        assert_eq!(writer.trailer_dict.size, 4);
+
+        // Create output buffer
+        let mut output = io::Cursor::new(Vec::new());
+
+        // Create two new objects
+        let obj4 = PdfObject::Dictionary(vec![
+            ("Type".to_string(), PdfObject::Name("Obj".to_string())),
+            ("Value".to_string(), PdfObject::Integer(42)),
+        ]);
+        let obj5 = PdfObject::Dictionary(vec![
+            ("Type".to_string(), PdfObject::Name("Obj".to_string())),
+            ("Value".to_string(), PdfObject::Integer(99)),
+        ]);
+
+        let new_id2 = [0x21u8; 16]; // New ID second element
+
+        // Append objects
+        writer
+            .append_objects(&mut output, &[(4, 0, obj4), (5, 0, obj5)], &new_id2)
+            .expect("failed to append objects");
+
+        let output_bytes = output.into_inner();
+
+        // Verify fixture bytes are preserved
+        assert!(
+            output_bytes.starts_with(&fixture_bytes),
+            "original bytes not preserved"
+        );
+
+        // Verify new content after fixture
+        assert!(output_bytes.len() > fixture_bytes.len());
+
+        // Parse the result to verify structure
+        let parsed = IncrementalWriter::open(&output_bytes).expect("failed to parse output");
+
+        // Check /Prev chain
+        assert_eq!(parsed.trailer_dict.prev, Some(_original_xref_offset));
+
+        // Check /ID: first element must be unchanged, second must be new
+        if let Some(id_array) = parsed.trailer_dict.id {
+            assert_eq!(id_array.len(), 2);
+            // First ID should be preserved
+            assert_eq!(
+                id_array[0],
+                vec![
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                    0x0E, 0x0F, 0x10
+                ]
+            );
+            // Second ID should be new
+            assert_eq!(id_array[1], vec![0x21; 16]);
+        }
+    }
+
+    #[test]
+    fn test_classic_xref_double_append_chain() {
+        let (fixture_bytes, original_xref) = build_classic_fixture();
+
+        // First append
+        let writer1 = IncrementalWriter::open(&fixture_bytes).expect("failed to open fixture");
+        // Verify that writer1's prev_startxref points to the original fixture
+        assert_eq!(writer1.prev_startxref, original_xref);
+
+        let mut output1 = io::Cursor::new(Vec::new());
+        let obj4 = PdfObject::Dictionary(vec![
+            ("Type".to_string(), PdfObject::Name("Obj".to_string())),
+            ("Value".to_string(), PdfObject::Integer(42)),
+        ]);
+        let obj5 = PdfObject::Dictionary(vec![
+            ("Type".to_string(), PdfObject::Name("Obj".to_string())),
+            ("Value".to_string(), PdfObject::Integer(99)),
+        ]);
+        let new_id2_1 = [0x21u8; 16];
+        writer1
+            .append_objects(&mut output1, &[(4, 0, obj4), (5, 0, obj5)], &new_id2_1)
+            .expect("failed to append objects");
+
+        let output1_bytes = output1.into_inner();
+
+        // Parse first output to get its startxref and /Prev chain
+        let parsed1 = IncrementalWriter::open(&output1_bytes).expect("failed to parse output1");
+        // The parsed1.prev_startxref is the NEW xref offset in output1
+        // The parsed1.trailer_dict.prev should be the original fixture's xref
+        assert_eq!(parsed1.trailer_dict.prev, Some(original_xref));
+
+        let output1_xref = parsed1.prev_startxref;
+
+        // Second append: re-open output1 and append again
+        let writer2 = IncrementalWriter::open(&output1_bytes).expect("failed to open output1");
+        // writer2's prev_startxref should point to output1's new xref
+        assert_eq!(writer2.prev_startxref, output1_xref);
+
+        let mut output2 = io::Cursor::new(Vec::new());
+        let obj6 = PdfObject::Dictionary(vec![
+            ("Type".to_string(), PdfObject::Name("Obj".to_string())),
+            ("Value".to_string(), PdfObject::Integer(123)),
+        ]);
+        let new_id2_2 = [0x22u8; 16];
+        writer2
+            .append_objects(&mut output2, &[(6, 0, obj6)], &new_id2_2)
+            .expect("failed to append objects in second round");
+
+        let output2_bytes = output2.into_inner();
+
+        // Parse final output to verify /Prev chain
+        let parsed2 = IncrementalWriter::open(&output2_bytes).expect("failed to parse output2");
+
+        // Verify /Prev chain: output2 -> output1 -> fixture
+        // parsed2.trailer_dict.prev should point to output1's xref
+        assert_eq!(parsed2.trailer_dict.prev, Some(output1_xref));
+
+        // parsed2.prev_startxref is the new xref offset in output2
+        let output2_xref = parsed2.prev_startxref;
+        assert!(
+            output2_xref > output1_xref,
+            "/Prev chain not in ascending order"
+        );
+
+        // Verify sizes make sense
+        assert!(output2_bytes.len() > output1_bytes.len());
+        assert!(output1_bytes.len() > fixture_bytes.len());
+    }
+
+    /// Build a minimal valid xref-stream PDF fixture with 3 objects.
+    /// Returns (pdf_bytes, original_startxref_offset).
+    fn build_xref_stream_fixture() -> (Vec<u8>, u64) {
+        let mut buf = Vec::new();
+
+        // Write header
+        buf.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let obj1_offset = buf.len() as u64;
+        buf.extend_from_slice(b"1 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // Object 2: Pages
+        let obj2_offset = buf.len() as u64;
+        buf.extend_from_slice(b"2 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // Object 3: Page
+        let obj3_offset = buf.len() as u64;
+        buf.extend_from_slice(b"3 0 obj\n");
+        buf.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
+        buf.extend_from_slice(b"endobj\n");
+
+        // Object 4: xref stream (uncompressed)
+        // 7 bytes per entry: 1 byte type + 4 byte offset + 2 byte generation
+        let mut xref_stream_data = Vec::new();
+
+        // Type 0: free object (generation 65535)
+        xref_stream_data.push(0u8);
+        xref_stream_data.extend_from_slice(&[0, 0, 0, 0]); // offset
+        xref_stream_data.extend_from_slice(&[255, 255]); // gen
+
+        // Type 1: object 1
+        xref_stream_data.push(1u8);
+        xref_stream_data.extend_from_slice(&((obj1_offset as u32).to_be_bytes()));
+        xref_stream_data.extend_from_slice(&[0, 0]); // gen 0
+
+        // Type 1: object 2
+        xref_stream_data.push(1u8);
+        xref_stream_data.extend_from_slice(&((obj2_offset as u32).to_be_bytes()));
+        xref_stream_data.extend_from_slice(&[0, 0]); // gen 0
+
+        // Type 1: object 3
+        xref_stream_data.push(1u8);
+        xref_stream_data.extend_from_slice(&((obj3_offset as u32).to_be_bytes()));
+        xref_stream_data.extend_from_slice(&[0, 0]); // gen 0
+
+        let xref_offset = buf.len() as u64;
+        buf.extend_from_slice(b"4 0 obj\n");
+        buf.extend_from_slice(
+            b"<</Type /XRef /Size 4 /Root 1 0 R /W [1 4 2] /Index [0 4] /Length ",
+        );
+        buf.extend_from_slice(format!("{}", xref_stream_data.len()).as_bytes());
+        buf.extend_from_slice(
+            b" /ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]",
+        );
+        buf.extend_from_slice(b">>\nstream\n");
+        buf.extend_from_slice(&xref_stream_data);
+        buf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        // trailer points to xref stream
+        buf.extend_from_slice(b"startxref\n");
+        buf.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
+        buf.extend_from_slice(b"%%EOF");
+
+        (buf, xref_offset)
+    }
+
+    #[test]
+    fn test_xref_stream_detection() {
+        let (_fixture_bytes, _xref_offset) = build_xref_stream_fixture();
+        // This test verifies the fixture builds without panicking
+        // Full xref-stream append tests are implemented below
+    }
+
+    #[test]
+    fn test_xref_stream_append_single_object() {
+        let (fixture_bytes, _xref_offset) = build_xref_stream_fixture();
+
+        let writer =
+            IncrementalWriter::open(&fixture_bytes).expect("failed to open xref-stream fixture");
+
+        // Verify we detected xref stream
+        assert_eq!(writer.xref_kind, XRefKind::Stream);
+
+        // Try to append a new object
+        let mut output = io::Cursor::new(Vec::new());
+        let obj5 = PdfObject::Dictionary(vec![(
+            "Type".to_string(),
+            PdfObject::Name("Obj".to_string()),
+        )]);
+        let new_id2 = [0x21u8; 16];
+
+        let result = writer.append_objects(&mut output, &[(5, 0, obj5)], &new_id2);
+        assert!(result.is_ok(), "xref-stream append should succeed");
+
+        let output_bytes = output.into_inner();
+
+        // Verify fixture bytes are preserved
+        assert!(
+            output_bytes.starts_with(&fixture_bytes),
+            "original bytes not preserved"
+        );
+
+        // Verify new content after fixture
+        assert!(output_bytes.len() > fixture_bytes.len());
+
+        // Parse the result to verify structure
+        let parsed = IncrementalWriter::open(&output_bytes).expect("failed to parse output");
+
+        // Check that we can re-parse as xref stream
+        assert_eq!(parsed.xref_kind, XRefKind::Stream);
+
+        // Check /Prev chain
+        assert!(
+            parsed.trailer_dict.prev.is_some(),
+            "missing /Prev in xref stream"
+        );
+
+        // Verify no "trailer" keyword appears after the original EOF
+        let trailer_after_fixture = &output_bytes[fixture_bytes.len()..];
+        assert!(
+            !trailer_after_fixture.windows(7).any(|w| w == b"trailer"),
+            "xref stream should not contain trailer keyword"
+        );
+    }
+
+    #[test]
+    fn test_xref_stream_double_append_chain() {
+        let (fixture_bytes, _original_xref) = build_xref_stream_fixture();
+
+        // First append
+        let writer1 = IncrementalWriter::open(&fixture_bytes).expect("failed to open fixture");
+        let mut output1 = io::Cursor::new(Vec::new());
+        let obj5 = PdfObject::Dictionary(vec![(
+            "Type".to_string(),
+            PdfObject::Name("Obj".to_string()),
+        )]);
+        let new_id2_1 = [0x21u8; 16];
+        writer1
+            .append_objects(&mut output1, &[(5, 0, obj5)], &new_id2_1)
+            .expect("failed to append objects");
+
+        let output1_bytes = output1.into_inner();
+
+        // Parse first output
+        let parsed1 = IncrementalWriter::open(&output1_bytes).expect("failed to parse output1");
+        assert_eq!(parsed1.xref_kind, XRefKind::Stream);
+        // The prev_startxref of parsed1 is the location of output1's new xref stream
+        let output1_xref_offset = parsed1.prev_startxref;
+
+        // Second append: re-open output1 and append again
+        let writer2 = IncrementalWriter::open(&output1_bytes).expect("failed to open output1");
+        // writer2.prev_startxref should point to output1's xref stream
+        assert_eq!(writer2.prev_startxref, output1_xref_offset);
+
+        let mut output2 = io::Cursor::new(Vec::new());
+        let obj6 = PdfObject::Dictionary(vec![(
+            "Type".to_string(),
+            PdfObject::Name("Obj".to_string()),
+        )]);
+        let new_id2_2 = [0x22u8; 16];
+        writer2
+            .append_objects(&mut output2, &[(6, 0, obj6)], &new_id2_2)
+            .expect("failed to append objects in second round");
+
+        let output2_bytes = output2.into_inner();
+
+        // Parse final output to verify /Prev chain
+        let parsed2 = IncrementalWriter::open(&output2_bytes).expect("failed to parse output2");
+
+        // Verify it's still xref stream
+        assert_eq!(parsed2.xref_kind, XRefKind::Stream);
+
+        // Verify /Prev in output2 points to output1's xref stream
+        assert_eq!(parsed2.trailer_dict.prev, Some(output1_xref_offset));
+
+        // Verify sizes make sense
+        assert!(output2_bytes.len() > output1_bytes.len());
+        assert!(output1_bytes.len() > fixture_bytes.len());
+
+        // Verify no "trailer" keyword anywhere after original EOF
+        let updated_after_fixture = &output2_bytes[fixture_bytes.len()..];
+        assert!(
+            !updated_after_fixture.windows(7).any(|w| w == b"trailer"),
+            "xref stream chain should not contain trailer keyword"
+        );
     }
 }
