@@ -16,10 +16,16 @@ document.
 The design is derived from a close reading of **pyHanko** (MIT, Matthias
 Valvekens), the most complete open implementation of PAdES. Section references
 of the form `pyhanko: sign/signers/pdf_byterange.py:52` point at the code the
-requirement was read off. pyHanko is a *reference*, not a dependency: none of its
-code is copied, but its file-format decisions, its size-estimation strategy, its
+requirement was read off. pyHanko is a *reference and a source*, not a
+dependency: its file-format decisions, its size-estimation strategy, its
 interruption protocol, and above all its validation model are adopted
-deliberately. The line numbers were read from a specific checkout and will
+deliberately, and porting its logic into Rust is explicitly permitted — pyHanko
+is MIT-licensed, so ports are derivative works and its copyright notice goes
+into `LICENSES/` with a line in `LICENSES/README.md` naming the derived parts.
+The same applies to `certomancer` (MIT, same author), used for test PKI. The
+division of labour is fixed by §35's porting policy: crates carry the
+cryptography; pyHanko is ported for everything that is judgement rather than
+cryptography. The line numbers were read from a specific checkout and will
 drift; before Milestone S0 starts, pin the exact pyHanko commit in the
 repository (a `NOTES` file or the CI oracle's lockfile) so the citations stay
 resolvable.
@@ -1288,15 +1294,50 @@ credentials. That is the correct outcome and the matrix records it as a pass.
 
 ## 35. Delivery
 
-### Milestone S0 — writer decision
+### 35.0 Porting policy
 
-Audit `lopdf` against §24. Decide: adopt, or write the ~1,000-line purpose-built
-writer. The audit also answers a question about PDFium, not lopdf: whether
-PDFium's save preserves an encrypted source's encryption parameters in a form
-the incremental writer can extend per §24(7). If it does not, signing encrypted
-documents is refused in S1 rather than half-supported. Produce a signed fixture
-by any means and verify it with pyHanko's CLI. This de-risks the rest before
-any UI work.
+The plan divides the work by a single rule: **Rust crates carry all
+cryptography; pyHanko is ported for everything that isn't cryptography.**
+
+- Primitives and container parsing are never implemented in this workspace.
+  The RustCrypto stack of §22.3 covers them; DER encoding and signature-scheme
+  bugs are exactly where hand-rolling hurts.
+- What is ported from pyHanko is decisions and algorithms, not plumbing:
+  placeholder arithmetic and the back-patch (§23), size estimation (§23.5),
+  coverage classification (§28.2), the Acrobat MDP quirks (§25.4), the SET OF
+  re-tag rule (§26.1), the TSA nonce protocol (§27.1). Its plumbing — its DER
+  layer, its PDF reader — is replaced by the crates and by `pulpit-render`'s
+  existing reader work.
+- Hand-rolling is reserved for the two audited gaps, both on top of `der`:
+  RFC 3161 structures if `x509-tsp` fails its audit, and the `pdfwrite`
+  module if `lopdf` fails its.
+
+Each port carries pyHanko's MIT notice per the licensing note in the preamble.
+
+### Milestone S0 — de-risk
+
+In order; each step gates the next.
+
+1. Pin the pyHanko commit in a `NOTES` file and add its MIT notice (and
+   certomancer's) to `LICENSES/`, with `LICENSES/README.md` entries.
+2. Stand up the **CI oracle first**: a `make`-driven harness running pyHanko's
+   CLI against every fixture in a directory, with a pinned Python environment.
+   Generate test credentials with certomancer — self-signed and chained
+   PKCS#12, generated in CI or checked in.
+3. Produce a signed fixture **by any means** — even a hard-coded single-page
+   append — and get the oracle green once. This proves the byte-range and CMS
+   mechanics end to end before any architecture exists.
+4. Audit `lopdf` against §24: incremental update, `/ID` preservation,
+   xref-kind matching, unencrypted `/Contents`. Decide: adopt, or write the
+   ~1,000-line purpose-built writer. Expected outcome: the purpose-built
+   writer, because Invariant S2 bounds the input to files pulpit just wrote,
+   and auditing a general library for byte-exactness is often more work than
+   writing the narrow thing.
+5. Probe whether PDFium's save preserves an encrypted source's encryption
+   parameters in a form the incremental writer can extend per §24(7). If not,
+   signing encrypted documents is refused in S1 rather than half-supported.
+6. Pin `cms` 0.2.x and wrap it behind the `sign` module's own types
+   immediately, so the 0.3 upgrade stays local (§22.3).
 
 ### Milestone S1 — B-B (v1)
 
@@ -1305,6 +1346,33 @@ credentials; invisible and ink-appearance visible signatures; verification with
 coverage, integrity, and the §28.4 fallback; post-export verification; signing UI
 with the §31.2 identity disclosure; append-only mode for signed documents,
 including countersigning into an existing empty field (§31.3).
+
+Three parallel workstreams inside `pulpit-render`, meeting at integration:
+
+- **`pdfwrite`** (gated on S0 step 4): incremental writer (§24); field and
+  dictionary emission (§25.1–25.3); placeholder write and back-patch
+  (§23.2–23.3); the §29 typestate, built first — it is cheap now and enforces
+  no-writes-after-digest by construction.
+- **`sign`**: PKCS#12 loading with zeroization (§30); `SignedData` via the
+  `cms` crate with signed attributes per §26.3; mechanism and digest selection
+  per §26.2, v1 rows only; the SET OF re-tag; size estimation (§23.5). Every
+  §26.2 row is unit-tested and oracle-verified.
+- **`verify`**: discovery with last-changed-revision tracking (§28.1);
+  coverage classification (§28.2), ported faithfully with the gap-coincidence
+  check first; cryptographic checks 1–7 (§28.3); `SignatureStatus` (§28.5).
+  The §34.2 attack corpus is built alongside the classifier, not after — each
+  attack becomes a fixture the moment the classifier exists — and the §34.4
+  fuzz targets come up with the parsers, since those paths are
+  attacker-reachable on any opened file.
+
+Integration order: §32 pipeline stages in Save As → §25.4 pre-flight checks
+(read side) → append-only mode and countersigning (§31.3) → UI (§31.1 flow,
+§31.2 disclosure, §31.4 panel, §25.5 ink appearance reusing the existing ink
+pipeline) → countersigning round trip with pyHanko validating both signatures
+including its difference analysis (§34.2's real test) → the §34.3 interop
+matrix.
+
+Exit: acceptance criteria 18–21 and 23–27 green (22 is S2's).
 
 S1 is the v1 release of the feature. Deliberately *not* in it, each recorded
 in §36 so the deferral stays a decision:
@@ -1318,8 +1386,21 @@ in §36 so the deferral stays a decision:
 
 ### Milestone S2 — B-T
 
-RFC 3161 client; signature timestamp attribute; dummy-response sizing; attested
-vs claimed time in the UI.
+Opens with the `x509-tsp` audit (§22.3); on rejection, hand-roll
+`TimeStampReq`/`TimeStampResp` on `der`. Then: TSA client over `ureq` per
+§27.1, nonce mismatch as a hard failure; dummy-response caching for sizing
+(§23.5); the timestamp as an unsigned attribute over `H(signature)` — the
+§26.4 trap; attested-vs-claimed time in the UI (§27.2). CI gains a local TSA
+(certomancer / pyHanko test tooling can play this role).
+
+### Risk register
+
+The three dependency audits are the schedule risks, and all land at milestone
+starts by design: `lopdf` (S0; fallback: the bounded custom writer), `cms`
+0.2→0.3 (S0; fallback: isolated behind the `sign` module's types), `x509-tsp`
+(S2 start; fallback: a small hand-roll). The one unbounded risk is interop
+surprises in the §34.3 viewer matrix — which is why the oracle runs from S0
+step 2 onward, not from release qualification.
 
 ### Acceptance criteria
 
