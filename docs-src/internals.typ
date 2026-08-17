@@ -527,7 +527,9 @@ belongs to the thread that created it; using it from a second thread is a
 segmentation fault inside V8 rather than an error return. The document worker's
 `serve` loop is single-threaded, so a running pulpit satisfies this for free,
 but tests do not — libtest gives every test its own thread, which is what
-`pulpit_testkit::on_the_pdfium_thread` exists to undo.
+`pulpit_testkit::on_the_pdfium_thread` exists to undo. `DocumentBackend` and its
+PDFium implementation are deliberately not `Send`, so a document MUST NOT be
+moved between threads and the compiler, rather than a comment, is what says so.
 
 What does not run is anything that leaves the process. Opening a URL, emailing
 itself, uploading itself, reading a file: every one of those is a callback

@@ -180,9 +180,13 @@ struct FormBinding {
     open_page: Option<(usize, FPDF_PAGE)>,
 }
 
-// PDFium is not thread safe; the whole point of the worker process is that one
-// document is owned by one execution context (§6).
-unsafe impl Send for PdfiumDocument<'_> {}
+// No `unsafe impl Send` here, on purpose. PDFium is not thread safe, and the
+// form-fill environment is worse than merely unsynchronised: its V8 isolate is
+// entered on the thread that created it, so moving a document with an open form
+// environment to another thread crashes inside V8 instead of failing cleanly.
+// The raw pointers this struct holds keep it `!Send`, which is the invariant —
+// one document is owned by one execution context (§6) — expressed in the type
+// system rather than in a comment.
 
 impl<'a> PdfiumDocument<'a> {
     /// Open `source` for reading and annotating.
