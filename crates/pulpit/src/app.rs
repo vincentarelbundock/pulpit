@@ -487,6 +487,34 @@ struct ReaderPatch {
     /// patch down: the frame was drawn without the typed characters, and
     /// removing the patch makes them vanish until the next keystroke.
     uncommitted: bool,
+    /// Which patch this is, counted over the session. In the composite cache's
+    /// key because nothing else in the patch has to change when its pixels do:
+    /// two keystrokes into the same field come back at the same revision, in
+    /// the same rectangle, at the same size, and a stamp made of those alone
+    /// would hand the second keystroke the first one's picture.
+    serial: u64,
+}
+
+/// A patch a page wants and has not been able to ask for yet.
+#[derive(Clone, Copy)]
+struct WaitingReaderPatch {
+    /// What the deferred events dirtied, unioned. Kept here as well as in
+    /// [`App::reader_patch_scope`] so the request that finally goes out asks
+    /// for the same rectangle it would have asked for at the time.
+    dirty: pulpit_core::page::PageRect,
+    /// The revision the *newest* deferred event expected. An older one's is of
+    /// no use: one render answers all of them, and it draws what the document
+    /// holds once they have all been applied.
+    revision: pulpit_render::document::DocumentRevision,
+    /// Whether the newest deferred event left form state uncommitted.
+    ///
+    /// The newest wins, not the strongest. One render answers the whole run, so
+    /// the pixels show the state after the last of them: if that was a
+    /// keystroke, they contain characters no snapshot has and the patch must
+    /// outlive full frames at its revision; if it was a commit, they are in the
+    /// revision and a full frame carrying it is the same pixels, so keeping the
+    /// uncommitted label would pin the rectangle over the page for ever.
+    uncommitted: bool,
 }
 
 /// A patch the worker has been asked for and not yet answered.
@@ -497,10 +525,11 @@ struct PendingReaderPatch {
     frame_height: u32,
     /// Whether *this* request covers uncommitted form state.
     ///
-    /// Per request, not per page: a keystroke and the commit that follows it
-    /// are both in flight at once, and labelling the keystroke's answer with
-    /// what the commit asked for either blinks the typed text away at the
-    /// next full frame or pins a committed rectangle over the page for ever.
+    /// Per request, not per page: labelling one request's answer with what
+    /// another asked for either blinks the typed text away at the next full
+    /// frame or pins a committed rectangle over the page for ever. A page keeps
+    /// one request out at a time, so in practice the queue holds one — the
+    /// order is still what matches an answer to the request that meant it.
     uncommitted: bool,
 }
 
@@ -739,11 +768,18 @@ pub struct App {
     /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
     /// Page pictures with a retained highlight multiplied into them, keyed by
-    /// a hash of the frame and the washes. Interior mutability because the
-    /// composite is made on demand inside the view's frame lookup, which is
-    /// `&self`; bounded by a hard cap, and empty again the moment the frames
-    /// containing the real highlights arrive.
-    wash_cache: std::cell::RefCell<std::collections::HashMap<u64, iced::widget::image::Handle>>,
+    /// the page and a hash of the frame, the patch and the washes. Interior
+    /// mutability because the composite is made on demand inside the view's
+    /// frame lookup, which is `&self`; bounded by a hard cap, and empty again
+    /// the moment the frames containing the real highlights arrive.
+    ///
+    /// The page is in the key so a patch landing on one page can evict that
+    /// page's composites and leave every other page's alone: typing is a patch
+    /// per character, and clearing the whole cache per character re-uploaded
+    /// every visible page to the GPU per keystroke.
+    wash_cache: std::cell::RefCell<
+        std::collections::HashMap<(pulpit_core::page::PageIndex, u64), iced::widget::image::Handle>,
+    >,
     /// The partial repaints standing in for edits the page's frame predates,
     /// one per page. Dropped when a full frame containing the same revision
     /// arrives, which is the same rule the retained previews follow.
@@ -764,6 +800,18 @@ pub struct App {
     /// breaking apart and reassembling as the pointer moves.
     reader_patch_scope:
         std::collections::HashMap<pulpit_core::page::PageIndex, pulpit_core::page::PageRect>,
+    /// The patch a page wants next, held back while one is already out.
+    ///
+    /// Coalesced the way pointer moves are, and for the same reason: the worker
+    /// is serial, a keystroke is a patch, and a burst of typing sent one render
+    /// per character queued renders of states nobody would ever see. The scope
+    /// only grows, so the newest request covers everything the ones it replaced
+    /// covered.
+    reader_patch_waiting:
+        std::collections::HashMap<pulpit_core::page::PageIndex, WaitingReaderPatch>,
+    /// How many patches have landed, so a composite of one is not mistaken for
+    /// a composite of the next — see [`ReaderPatch::serial`].
+    reader_patch_serial: u64,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -1140,6 +1188,11 @@ pub struct App {
     date_language: crate::datefield::Locale,
     form_move_in_flight: bool,
     form_move_waiting: Option<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
+    /// How many form events have been sent and not yet answered. Counted, not
+    /// flagged, because a click is two events and a commit follows a keystroke;
+    /// and consulted by [`App::is_live`], because the answers are drained from
+    /// the tick.
+    form_events_in_flight: usize,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -1370,6 +1423,8 @@ impl App {
             reader_patches: std::collections::HashMap::new(),
             reader_patch_pending: std::collections::HashMap::new(),
             reader_patch_scope: std::collections::HashMap::new(),
+            reader_patch_waiting: std::collections::HashMap::new(),
+            reader_patch_serial: 0,
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -1508,6 +1563,7 @@ impl App {
             date_language: crate::datefield::Locale::from_environment(),
             form_move_in_flight: false,
             form_move_waiting: None,
+            form_events_in_flight: 0,
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
@@ -1663,6 +1719,19 @@ impl App {
             // a second — which is what "selecting text lags" is.
             || self.selection_query_in_flight
             || self.selection_query_waiting.is_some()
+            // A keystroke on its way to the form: the answer and the partial
+            // repaint that carries the typed character are both drained from
+            // the tick, so at the settled tick typing renders at four
+            // characters a second — which is what "the form is slow to type
+            // in" is.
+            || self.form_events_in_flight > 0
+            || !self.reader_patch_pending.is_empty()
+            || !self.reader_patch_waiting.is_empty()
+            // The pointer over a form, for the same reason the sweep of a text
+            // selection is on this list: one round trip per position, drained
+            // from the tick.
+            || self.form_move_in_flight
+            || self.form_move_waiting.is_some()
             // An edit the page cannot show yet. An edit the previews *do*
             // show is not on this list: it is already on screen, and its
             // snapshot is two seconds away, which the settled tick notices
@@ -4580,7 +4649,7 @@ impl App {
                             }) {
                                 self.reader_patches.remove(&page);
                                 self.reader_patch_scope.remove(&page);
-                                self.wash_cache.borrow_mut().clear();
+                                self.forget_composites_of(page);
                             }
                         }
                     }
@@ -4967,7 +5036,12 @@ impl App {
                     self.reader_patches.clear();
                     self.reader_patch_scope.clear();
                     self.reader_patch_pending.clear();
+                    self.reader_patch_waiting.clear();
                     self.wash_cache.borrow_mut().clear();
+                    // Answers owed by the document that is gone are owed by
+                    // nobody. A count left standing here would hold the fast
+                    // tick for the rest of the session.
+                    self.form_events_in_flight = 0;
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
                     // What the form contains, for the navigator. Asked only
@@ -5098,6 +5172,7 @@ impl App {
                     self.journal(entry);
                 }
                 crate::reader_link::Told::FormRefused { refusal, moved } => {
+                    self.form_events_in_flight = self.form_events_in_flight.saturating_sub(1);
                     // The move slot is released by a move and by nothing else
                     // (§8.6) — see `Told::FormChanged` below.
                     if moved {
@@ -5124,6 +5199,7 @@ impl App {
                     result,
                     moved,
                 } => {
+                    self.form_events_in_flight = self.form_events_in_flight.saturating_sub(1);
                     // The move slot is released by a move and by nothing else:
                     // a key or a clipboard answer arriving while a move is
                     // still out says nothing about that move (§8.6).
@@ -5174,6 +5250,10 @@ impl App {
                 }
                 crate::reader_link::Told::Patched(frame) => {
                     self.reader_patch_landed(*frame);
+                }
+                crate::reader_link::Told::PatchRefused { page } => {
+                    self.forget_pending_patch(page);
+                    self.send_waiting_patch(page);
                 }
                 crate::reader_link::Told::Saved {
                     saved,
@@ -5248,6 +5328,8 @@ impl App {
                         self.reader_link = None;
                         // Nothing in flight will ever be answered now.
                         self.reader_pending.clear();
+                        self.reader_patch_pending.clear();
+                        self.reader_patch_waiting.clear();
                         return;
                     }
                 }
@@ -5269,6 +5351,13 @@ impl App {
                     // as the in-flight guard is concerned.
                     self.selection_query_in_flight = false;
                     self.selection_query_waiting = None;
+                    // Likewise a form event: a count of answers that will
+                    // never come would hold the fast tick for the rest of the
+                    // session, and a latched move guard would stop the form
+                    // following the pointer.
+                    self.form_events_in_flight = 0;
+                    self.form_move_in_flight = false;
+                    self.form_move_waiting = None;
                     // If the refusal answered a snapshot request, nothing
                     // will confirm it either.
                     self.reader_render.snapshot_in_flight = None;
@@ -5278,6 +5367,8 @@ impl App {
                         self.reader_link = None;
                         // Nothing in flight will ever be answered now.
                         self.reader_pending.clear();
+                        self.reader_patch_pending.clear();
+                        self.reader_patch_waiting.clear();
                         return;
                     }
                 }
@@ -5613,6 +5704,31 @@ impl App {
         if geometry.width <= 0.0 || geometry.height <= 0.0 {
             return;
         }
+        // One patch per page in flight at a time. A keystroke is a patch, and
+        // typing at speed sent one render per character to a serial worker: the
+        // characters arrived at the rate the queue drained, each render drawing
+        // a state the next one had already superseded. What is deferred is not
+        // lost — the scope only grows, so the request that goes out when the
+        // outstanding one lands covers every rectangle it stood in for.
+        if self.reader_patch_pending.contains_key(&page) {
+            let grown = match self.reader_patch_scope.entry(page) {
+                std::collections::hash_map::Entry::Occupied(mut scope) => {
+                    let grown = scope.get().union(&dirty);
+                    scope.insert(grown);
+                    grown
+                }
+                std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
+            };
+            self.reader_patch_waiting.insert(
+                page,
+                WaitingReaderPatch {
+                    dirty: grown,
+                    revision,
+                    uncommitted,
+                },
+            );
+            return;
+        }
         // Cover everything patched since the frame last caught up, not only
         // what this event dirtied. The next patch will *replace* the one on
         // screen, and a combo box's open list — drawn into the page by PDFium,
@@ -5644,11 +5760,11 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        // One queued entry per request, because more than one is in flight at
-        // a time: a click is a pointer down and a pointer up, and typing then
-        // committing is a keystroke and a commit. Keeping only the newest
-        // would drop the earlier answer on arrival and label the earlier
-        // picture with the later request's meaning.
+        // One queued entry per request, so an answer is read with the frame
+        // size and the form state *its own* request meant rather than a later
+        // one's. The queue holds a single entry while a page keeps one request
+        // out at a time; it is a queue because the matching rule is the order
+        // they were asked in, not the count.
         self.reader_patch_pending
             .entry(page)
             .or_default()
@@ -5670,6 +5786,28 @@ impl App {
         }
     }
 
+    /// Send one event to the document's own form and remember an answer is
+    /// owed.
+    ///
+    /// The one route out for form events, so the count [`App::is_live`] reads
+    /// cannot drift from what was actually sent. Returns whether the worker
+    /// took it, so a caller can tell "the form has this" from "there was no
+    /// form to take it".
+    fn ask_form_event_on(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        event: pulpit_render::document::protocol::FormInputEvent,
+    ) -> bool {
+        let sent = match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
+            None => false,
+        };
+        if sent {
+            self.form_events_in_flight += 1;
+        }
+        sent
+    }
+
     /// Follow the pointer over a form, at the rate the worker can answer.
     ///
     /// Coalesced rather than throttled on a clock: the newest position always
@@ -5688,13 +5826,8 @@ impl App {
             self.form_move_waiting = Some((page, at));
             return;
         }
-        if let Some(link) = self.reader_link.as_mut() {
-            if link.ask(crate::reader_link::Ask::FormEvent {
-                page,
-                event: FormInputEvent::PointerMove { at },
-            }) {
-                self.form_move_in_flight = true;
-            }
+        if self.ask_form_event_on(page, FormInputEvent::PointerMove { at }) {
+            self.form_move_in_flight = true;
         }
     }
 
@@ -5707,13 +5840,11 @@ impl App {
         if !self.reader.press_belongs_to_the_form() {
             return;
         }
-        if let Some(link) = self.reader_link.as_mut() {
-            if link.ask(crate::reader_link::Ask::FormEvent {
-                page,
-                event: pulpit_render::document::protocol::FormInputEvent::PointerMove { at },
-            }) {
-                self.form_move_in_flight = true;
-            }
+        if self.ask_form_event_on(
+            page,
+            pulpit_render::document::protocol::FormInputEvent::PointerMove { at },
+        ) {
+            self.form_move_in_flight = true;
         }
     }
 
@@ -5741,10 +5872,7 @@ impl App {
             FormPointer::Down => FormInputEvent::PointerDown { at },
             FormPointer::Up => FormInputEvent::PointerUp { at },
         };
-        match self.reader_link.as_mut() {
-            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-            None => false,
-        }
+        self.ask_form_event_on(page, event)
     }
 
     /// Move a focused combo box's selection by one, if there is one to move to.
@@ -6029,10 +6157,7 @@ impl App {
         ) else {
             return false;
         };
-        match self.reader_link.as_mut() {
-            Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
-            None => false,
-        }
+        self.ask_form_event_on(page, event)
     }
 
     /// Ask the worker what the document's fields now hold (§6.4).
@@ -6302,22 +6427,56 @@ impl App {
     /// A partial repaint arrived. It is held over the page's frame until a
     /// full frame containing the same revision replaces it.
     fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
-        let Some(queue) = self.reader_patch_pending.get_mut(&frame.page) else {
-            return;
-        };
+        let page = frame.page;
         // The answers come back over one link in the order they were asked
         // for, so the oldest request outstanding is the one this answers.
-        let Some(PendingReaderPatch {
-            frame_width,
-            frame_height,
-            uncommitted,
-        }) = queue.pop_front()
-        else {
+        let Some(asked) = self.take_pending_patch(page) else {
             return;
         };
+        self.adopt_reader_patch(frame, asked);
+        // The page is free to ask again, so whatever was held back while this
+        // one was out goes now.
+        self.send_waiting_patch(page);
+    }
+
+    /// The oldest outstanding request for a page, no longer outstanding.
+    fn take_pending_patch(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+    ) -> Option<PendingReaderPatch> {
+        let queue = self.reader_patch_pending.get_mut(&page)?;
+        let asked = queue.pop_front();
         if queue.is_empty() {
-            self.reader_patch_pending.remove(&frame.page);
+            self.reader_patch_pending.remove(&page);
         }
+        asked
+    }
+
+    /// A request that will never be answered stops being outstanding.
+    fn forget_pending_patch(&mut self, page: pulpit_core::page::PageIndex) {
+        let _ = self.take_pending_patch(page);
+    }
+
+    /// Ask for the patch a page has been waiting to ask for.
+    ///
+    /// Nothing goes out while a request for the page is still outstanding: the
+    /// answer to that one is what makes room for this one.
+    fn send_waiting_patch(&mut self, page: pulpit_core::page::PageIndex) {
+        if self.reader_patch_pending.contains_key(&page) {
+            return;
+        }
+        let Some(waiting) = self.reader_patch_waiting.remove(&page) else {
+            return;
+        };
+        self.ask_patch_of(page, waiting.dirty, waiting.revision, waiting.uncommitted);
+    }
+
+    /// Hold a partial repaint over the page's frame, if the page can take it.
+    fn adopt_reader_patch(
+        &mut self,
+        frame: pulpit_render::document::protocol::DocumentFrame,
+        asked: PendingReaderPatch,
+    ) {
         if !frame.is_consistent() {
             return;
         }
@@ -6328,20 +6487,33 @@ impl App {
         {
             return;
         }
-        self.wash_cache.borrow_mut().clear();
+        self.forget_composites_of(frame.page);
+        self.reader_patch_serial += 1;
         self.reader_patches.insert(
             frame.page,
             ReaderPatch {
                 region: frame.region,
                 width: frame.width,
                 height: frame.height,
-                frame_width,
-                frame_height,
+                frame_width: asked.frame_width,
+                frame_height: asked.frame_height,
                 pixels: frame.pixels,
                 revision: frame.revision,
-                uncommitted,
+                uncommitted: asked.uncommitted,
+                serial: self.reader_patch_serial,
             },
         );
+    }
+
+    /// Drop the composites made for one page, and only that page.
+    ///
+    /// Every other page's picture is unchanged by a patch landing here, and
+    /// rebuilding one costs a full-page blend and a fresh upload to every
+    /// window drawing it — per character, while somebody is typing.
+    fn forget_composites_of(&self, page: pulpit_core::page::PageIndex) {
+        self.wash_cache
+            .borrow_mut()
+            .retain(|(at, _), _| *at != page);
     }
 
     /// The page picture with the parts an edit changed pasted in and its
@@ -6373,6 +6545,11 @@ impl App {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         if let Some(patch) = patch {
+            // Which patch, not only what it says it is: two keystrokes into the
+            // same field are the same revision in the same rectangle, and a
+            // stamp made of those alone would return the first one's picture
+            // for the second one's pixels.
+            patch.serial.hash(&mut hasher);
             patch.revision.hash(&mut hasher);
             patch.width.hash(&mut hasher);
             patch.height.hash(&mut hasher);
@@ -6396,7 +6573,7 @@ impl App {
                 value.to_bits().hash(&mut hasher);
             }
         }
-        let stamp = hasher.finish();
+        let stamp = (page, hasher.finish());
         if let Some(handle) = self.wash_cache.borrow().get(&stamp) {
             return Some(handle.clone());
         }
@@ -6828,14 +7005,10 @@ impl App {
                 } else {
                     task
                 };
-                if let Some(link) = self.reader_link.as_mut() {
-                    link.ask(crate::reader_link::Ask::FormEvent {
-                        page,
-                        event: pulpit_render::document::protocol::FormInputEvent::FocusField {
-                            name,
-                        },
-                    });
-                }
+                self.ask_form_event_on(
+                    page,
+                    pulpit_render::document::protocol::FormInputEvent::FocusField { name },
+                );
                 task
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
@@ -7493,13 +7666,7 @@ impl App {
         let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
             return crate::platform::Outcome::refused("no field holds the caret");
         };
-        let sent = match self.reader_link.as_mut() {
-            Some(link) => link.ask(crate::reader_link::Ask::FormEvent {
-                page,
-                event: FormInputEvent::Focus { gained: false },
-            }),
-            None => false,
-        };
+        let sent = self.ask_form_event_on(page, FormInputEvent::Focus { gained: false });
         if !sent {
             return crate::platform::Outcome::failed("the document worker took no event");
         }
@@ -10221,19 +10388,20 @@ impl App {
     /// unblanking must not wait for an upload — and the two pages one step
     /// away, whose audience-size frames the prefetch has already asked for.
     ///
-    /// On screen first: `residency` uploads one picture per pass, so the order
-    /// decides what is ready this pass and what is ready for the next turn.
-    pub fn audience_resident_handles(&self) -> Vec<iced::widget::image::Handle> {
+    /// What is on the projector is drawn this pass and is uploaded whole; the
+    /// neighbours are drawn by nobody yet and go in the `ahead` list, which
+    /// `residency` takes one per pass.
+    pub fn audience_resident_handles(&self) -> crate::residency::Wanted {
         let width = self.audience_size.width.max(320.0) as u32;
         let committed = self.state.committed();
         let count = self.state.slide_count();
-        let mut keys = vec![self.audience_frame_key()];
+        let mut ahead = Vec::new();
         for slide in [Some(committed + 1), committed.checked_sub(1)] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
-                keys.push(self.ready_frame_key(slide, FrameKind::Slide, width));
+                ahead.push(self.ready_frame_key(slide, FrameKind::Slide, width));
             }
         }
-        self.resident_handles(keys)
+        self.wanted_frames(Vec::new(), vec![self.audience_frame_key()], ahead)
     }
 
     /// Every picture the presenter window draws: the slide panels' three
@@ -10244,7 +10412,7 @@ impl App {
     /// holding the whole frame cache resident here — a quarter of a gigabyte
     /// of pictures for four panels — cost a texture copy of the entire atlas
     /// every time the budget refilled it.
-    pub fn presenter_resident_handles(&self) -> Vec<iced::widget::image::Handle> {
+    pub fn presenter_resident_handles(&self) -> crate::residency::Wanted {
         let committed = self.state.committed();
         let count = self.state.slide_count();
         let widths = self.slide_widths();
@@ -10252,15 +10420,17 @@ impl App {
         // screen this pass, and the slot's own frame is by definition of the
         // page the operator has already left.
         let mut keys = vec![self.presenter_stand_in(), self.last_presenter];
+        let mut ahead = Vec::new();
         for slide in [Some(committed + 1), committed.checked_sub(1)] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
                 // What the neighbour panel draws now, and what the
                 // current-slide panel will draw the moment this page is
                 // turned to. Uploading the second one now is what keeps that
-                // turn a swap rather than a wait.
+                // turn a swap rather than a wait — but nothing draws it yet,
+                // so it waits its turn behind everything that does.
                 keys.push(self.ready_frame_key(slide, FrameKind::Slide, widths.neighbour));
                 if widths.current != widths.neighbour {
-                    keys.push(self.ready_frame_key(slide, FrameKind::Slide, widths.current));
+                    ahead.push(self.ready_frame_key(slide, FrameKind::Slide, widths.current));
                 }
             }
         }
@@ -10275,10 +10445,47 @@ impl App {
         // paint as background for a few passes: a flicker on every settle.
         // Resident, the upload happens at layout, ahead of the prepare pass
         // that would have skipped it.
+        //
+        // What the reader draws for a page is not always the frame under its
+        // key: a wash or a form patch is blended into a *composite* handle,
+        // and it is the composite the document view is handed. A composite is
+        // a fresh handle with fresh pixels every time the patch changes —
+        // once per keystroke in a form field — so keeping only the base frame
+        // resident left exactly the flash this module exists to prevent, on
+        // every character typed. `reader_frame` is memoised through
+        // `wash_cache`, so asking for it here is a cache hit and not a second
+        // blend, and the composite is named as on screen like everything else
+        // the pass draws. The trade is one synchronous full-page upload per
+        // keystroke at layout — a few milliseconds, reported by
+        // `upload_meter` — instead of a page that blinks; the same trade the
+        // slide panels and the audience frame already make.
+        //
+        // Every visible page is on that list, not just the one being edited,
+        // and that is the point. Committing a form field — clicking a radio
+        // button, choosing from a drop-down — writes a fresh snapshot and
+        // reopens it at a new generation, so `ready_reader_frame_key` prefers a
+        // brand-new frame for *every* visible page in the same pass. One
+        // upload per pass then left all but the first painting as bare sheet
+        // until their turn came round: the whole-page flash on a commit.
+        let mut composites: Vec<iced::widget::image::Handle> = Vec::new();
         for placed in self.reader.visible_pages() {
-            keys.push(self.ready_reader_frame_key(placed.page, placed.width));
+            let key = self.ready_reader_frame_key(placed.page, placed.width);
+            match self.reader_frame(placed.page, placed.width) {
+                // A composite: hold it in the base frame's place. Holding both
+                // would grow this window's atlas by a whole extra page for a
+                // picture nothing draws.
+                Some(drawn)
+                    if key
+                        .and_then(|key| self.handles.get(&key))
+                        .is_none_or(|base| base.id() != drawn.id()) =>
+                {
+                    composites.push(drawn);
+                }
+                // An unpatched page draws its base frame, exactly as before.
+                _ => keys.push(key),
+            }
         }
-        self.resident_handles(keys)
+        self.wanted_frames(composites, keys, ahead)
     }
 
     /// Where a window's view reports the uploads it blocked on.
@@ -10286,18 +10493,54 @@ impl App {
         self.upload_meter.clone()
     }
 
-    /// The textures for a window's wanted frames, in order, without repeats.
-    fn resident_handles(&self, keys: Vec<Option<FrameKey>>) -> Vec<iced::widget::image::Handle> {
-        let mut wanted: Vec<FrameKey> = Vec::new();
-        for key in keys.into_iter().flatten() {
-            if !wanted.contains(&key) {
-                wanted.push(key);
-            }
-        }
+    /// The textures for a window's wanted frames, split the way `residency`
+    /// asks for them: what this pass draws, and what the next turn will want.
+    ///
+    /// `composites` are pictures a view built for itself — a frame with a wash
+    /// or a form patch blended into it has no frame key, and the only way to
+    /// keep the thing actually on screen resident is to hand the handle over as
+    /// it is. They are on screen by construction, so they lead that list.
+    ///
+    /// Nothing appears twice, and nothing on screen is repeated in the list
+    /// behind it: a picture already drawn is already uploaded, and naming it
+    /// again would spend the pass's one prefetch on nothing.
+    ///
+    /// Deduplicated by [`Id`] rather than by value: comparing two handles
+    /// compares tens of megabytes of pixels, once per pass.
+    fn wanted_frames(
+        &self,
+        composites: Vec<iced::widget::image::Handle>,
+        on_screen: Vec<Option<FrameKey>>,
+        ahead: Vec<Option<FrameKey>>,
+    ) -> crate::residency::Wanted {
+        let mut wanted = crate::residency::Wanted {
+            on_screen: composites,
+            ahead: Vec::new(),
+        };
+        self.extend_with_frames(&mut wanted.on_screen, on_screen, &[]);
+        let drawn = wanted.on_screen.clone();
+        self.extend_with_frames(&mut wanted.ahead, ahead, &drawn);
         wanted
-            .iter()
-            .filter_map(|key| self.handles.get(key).cloned())
-            .collect()
+    }
+
+    /// Append the textures for `keys` to `handles`, skipping anything already
+    /// there and anything in `taken`.
+    fn extend_with_frames(
+        &self,
+        handles: &mut Vec<iced::widget::image::Handle>,
+        keys: Vec<Option<FrameKey>>,
+        taken: &[iced::widget::image::Handle],
+    ) {
+        for key in keys.into_iter().flatten() {
+            let Some(handle) = self.handles.get(&key) else {
+                continue;
+            };
+            let known = |held: &iced::widget::image::Handle| held.id() == handle.id();
+            if handles.iter().any(known) || taken.iter().any(known) {
+                continue;
+            }
+            handles.push(handle.clone());
+        }
     }
 
     /// Remember what the audience window is actually showing, so the next

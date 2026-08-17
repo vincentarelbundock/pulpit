@@ -219,6 +219,13 @@ pub enum Told {
     /// over the page's frame until a full frame containing the same revision
     /// arrives (§9.2, §9.4).
     Patched(Box<pulpit_render::document::protocol::DocumentFrame>),
+    /// …or the worker would not draw it. Nothing is reported to the reader — a
+    /// patch is an optimisation over the snapshot that is coming anyway — but
+    /// the request stops being outstanding, which is what the page needs to
+    /// know before it asks for the next one.
+    PatchRefused {
+        page: pulpit_core::page::PageIndex,
+    },
     Saved {
         saved: pulpit_render::document::SavedDocument,
         /// The required fields (`/Ff` bit 2) still holding nothing when the
@@ -408,7 +415,12 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             // as it would have.
             Err(error) if !error.is_worker_loss() => {
                 tracing::debug!(%error, "a partial repaint was refused");
-                return Vec::new();
+                // Said rather than swallowed. The application keeps one patch
+                // per page in flight and matches answers to requests in the
+                // order they were asked for; a refusal that said nothing would
+                // leave the request outstanding for ever, and every later
+                // answer for that page would be read as the answer to it.
+                Told::PatchRefused { page }
             }
             other => unexpected(other, "a page patch"),
         }],
