@@ -775,6 +775,18 @@ pub struct App {
     /// exists. Still never enforcement — "Save anyway" is one of the two
     /// answers, and pulpit only writes copies.
     pub pending_save_review: Option<SaveReview>,
+    /// A Save As that is waiting for the caret to leave the field it is in.
+    ///
+    /// Losing focus is what commits an in-progress form edit, so a save asked
+    /// for while a field holds the caret is an ordered operation and not one
+    /// call: defocus, let the commit come back through the ordinary
+    /// [`Self::form_changed`] path — one revision, one undo entry, a refreshed
+    /// field list, a redraw — and only then review and write. Saving first
+    /// would write a file without the characters the reader can see.
+    save_waits_for_form_commit: bool,
+    /// The commit came back and the save can go on. Held rather than run: the
+    /// worker pump has no `Task` to hand back, so the next tick starts it.
+    resume_save_after_form_commit: bool,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -1307,6 +1319,8 @@ impl App {
             form_clipboard: None,
             form_clipboard_text: None,
             pending_save_review: None,
+            save_waits_for_form_commit: false,
+            resume_save_after_form_commit: false,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -3826,6 +3840,12 @@ impl App {
             tasks.push(iced::clipboard::write(text));
         }
 
+        // 1b-ii. A Save As that stopped to let a field commit. The commit has
+        //        landed, so the review and the file picker go on from here.
+        if std::mem::take(&mut self.resume_save_after_form_commit) {
+            tasks.push(self.review_then_save_document());
+        }
+
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
         //     Return would then jump back to a slide nobody can see.
@@ -4808,6 +4828,13 @@ impl App {
                 }
                 crate::reader_link::Told::FormRefused => {
                     self.form_move_answered();
+                    // A save that was waiting on a commit that will not come
+                    // is a save, not a hang: nothing was committed, so nothing
+                    // is lost by going on to write what the document has.
+                    if self.save_waits_for_form_commit {
+                        self.save_waits_for_form_commit = false;
+                        self.resume_save_after_form_commit = true;
+                    }
                 }
                 crate::reader_link::Told::FormChanged { page, result } => {
                     // The worker is free: the newest waiting move goes out now.
@@ -5926,6 +5953,15 @@ impl App {
             // a caret in a text field, or an open choice list.
             let editing = result.text_focus || editing_choice;
             self.ask_patch_of(page, dirty, revision, result.committed.is_none() && editing);
+        }
+
+        // A Save As is waiting on this answer. Everything above has run — the
+        // commit is in the revision, in the undo history and in the field list
+        // — so the save can go on, and does on the next tick because this is
+        // the pump and there is no `Task` to hand back from here.
+        if self.save_waits_for_form_commit {
+            self.save_waits_for_form_commit = false;
+            self.resume_save_after_form_commit = true;
         }
     }
 
@@ -7063,6 +7099,45 @@ impl App {
     /// "Save anyway" is one of its answers — because the document names these
     /// fields required for *its* submit button, and pulpit only writes copies.
     fn ask_where_to_save_document(&mut self) -> Task<Message> {
+        // First, and before anything reads the document's state: a field that
+        // holds the caret holds characters PDFium has not committed yet. The
+        // save resumes at [`Self::review_then_save_document`] when the commit
+        // has come back through the ordinary path.
+        if self.ask_form_commit_before_save().succeeded() {
+            return Task::none();
+        }
+        self.review_then_save_document()
+    }
+
+    /// Ask the worker to take focus off the field the caret is in, so the edit
+    /// in progress is committed before the file is written.
+    ///
+    /// `Done` means the save is now waiting on that answer; `Refused` that no
+    /// field holds the caret, which is every save of a deck without a form;
+    /// `Failed` that there is no worker to ask, in which case there is also no
+    /// document to save and the caller's own check will say so.
+    fn ask_form_commit_before_save(&mut self) -> crate::platform::Outcome {
+        use pulpit_render::document::protocol::FormInputEvent;
+
+        let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
+            return crate::platform::Outcome::refused("no field holds the caret");
+        };
+        let sent = match self.reader_link.as_mut() {
+            Some(link) => link.ask(crate::reader_link::Ask::FormEvent {
+                page,
+                event: FormInputEvent::Focus { gained: false },
+            }),
+            None => false,
+        };
+        if !sent {
+            return crate::platform::Outcome::failed("the document worker took no event");
+        }
+        self.save_waits_for_form_commit = true;
+        crate::platform::Outcome::Done
+    }
+
+    /// The rest of Save As, once nothing is left uncommitted.
+    fn review_then_save_document(&mut self) -> Task<Message> {
         let fields = self.reader.unfilled_required_fields();
         if fields.is_empty() {
             self.save_reviewed = false;
