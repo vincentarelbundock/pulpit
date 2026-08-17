@@ -125,8 +125,13 @@ lint:  ## Check formatting and run clippy with warnings denied
 # ==============================================================================
 
 sign-oracle-setup:  ## Set up venv and install sign-oracle dependencies
-	python3 -m venv .venv-sign-oracle
-	. .venv-sign-oracle/bin/activate && pip install -q -r tools/sign-oracle/requirements.txt
+	@if command -v uv >/dev/null 2>&1; then \
+		uv venv .venv-sign-oracle; \
+		uv pip install -p .venv-sign-oracle/bin/python -r tools/sign-oracle/requirements.txt; \
+	else \
+		python3 -m venv .venv-sign-oracle; \
+		. .venv-sign-oracle/bin/activate && pip install -q -r tools/sign-oracle/requirements.txt; \
+	fi
 	@echo "Sign oracle environment ready. Activate with: source .venv-sign-oracle/bin/activate"
 
 sign-oracle:  ## Validate all signed PDF fixtures with pyHanko CLI

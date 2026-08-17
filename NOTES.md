@@ -7,9 +7,9 @@ cryptographic signing feature (SPEC-signing.md).
 
 **Repository:** <https://github.com/MatthiasValvekens/pyHanko>
 
-**Pinned commit:** `50eb14218bdb731c62bb136d784a3c581794944a`
+**Version:** 0.36.2
 
-**Version:** TODO: determine from git tag at pinned commit
+**Pinned commit (release tag):** `0945f9bc64ef6ef386500943ee2b5941b5f142cd` (v0.36.2)
 
 **Reference role:** pyHanko (MIT, Matthias Valvekens) is a reference implementation
 of PAdES (PDF Advanced Electronic Signatures). Sections of SPEC-signing.md cite
@@ -25,7 +25,9 @@ pyHanko while re-implementing them in Rust. Ported code lives in:
 
 **Repository:** <https://github.com/MatthiasValvekens/certomancer>
 
-**Pinned commit:** TODO: pin alongside pyHanko
+**Version:** 0.16.0
+
+**Pinned commit (release tag):** `8f5c58c566daefbdf91b8f2085b69b791930343a` (v0.16.0)
 
 **Reference role:** certomancer is used for test PKI only — generating test credentials
 and running as a local timestamp authority (TSA) in CI. It is not linked into the

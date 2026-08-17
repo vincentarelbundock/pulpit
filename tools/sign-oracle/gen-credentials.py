@@ -13,7 +13,7 @@ Uses the cryptography library for maximum portability; certomancer is optional
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Deterministic random seed for reproducible test credentials
 SEED_VALUE = 42
@@ -69,9 +69,9 @@ def generate_credentials():
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.utcnow()
+        datetime.now(timezone.utc)
     ).not_valid_after(
-        datetime.utcnow() + timedelta(days=365)
+        datetime.now(timezone.utc) + timedelta(days=365)
     ).add_extension(
         x509.BasicConstraints(ca=False, path_length=None),
         critical=True,
@@ -129,9 +129,9 @@ def generate_credentials():
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.utcnow()
+        datetime.now(timezone.utc)
     ).not_valid_after(
-        datetime.utcnow() + timedelta(days=3650)
+        datetime.now(timezone.utc) + timedelta(days=3650)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=1),
         critical=True,
@@ -168,9 +168,9 @@ def generate_credentials():
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.utcnow()
+        datetime.now(timezone.utc)
     ).not_valid_after(
-        datetime.utcnow() + timedelta(days=1825)
+        datetime.now(timezone.utc) + timedelta(days=1825)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=0),
         critical=True,
@@ -212,9 +212,9 @@ def generate_credentials():
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.utcnow()
+        datetime.now(timezone.utc)
     ).not_valid_after(
-        datetime.utcnow() + timedelta(days=365)
+        datetime.now(timezone.utc) + timedelta(days=365)
     ).add_extension(
         x509.BasicConstraints(ca=False, path_length=None),
         critical=True,
