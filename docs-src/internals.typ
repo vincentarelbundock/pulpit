@@ -314,7 +314,7 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   permanently-zero figure is displayed — which is why texture bytes are not a
   cache statistic at all: they remain unavailable through Iced, and a field
   that could only ever be an estimate or a zero is worse than its absence.
-+ *Measure before restructuring.* Two recorded negative results: replacing the
++ *Measure before restructuring.* Three recorded negative results: replacing the
   CDP pipe's 1 ms retry sleep with `poll(2)` cost 2-3x the worker CPU for one
   to two milliseconds of latency (the sleep stays, with a comment saying why);
   and the 50 ms application tick MUST NOT be replaced until a wrapped GUI
@@ -323,7 +323,22 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   targets. The renderer doorbell is not that replacement and MUST NOT be read
   as licence for it: the tick still runs, still drains, and still owns the
   deadline and restart checks — the doorbell only removes the poll's latency
-  from the path a page turn takes.
+  from the path a page turn takes. The third: a form commit was going to keep
+  its render generation and invalidate only the committed page, so that the
+  snapshot's reopen stopped cooling every visible page at once. Measured
+  first (`cargo test --release -p pulpit-render --test document_budgets`, and
+  the numbers are in that file's `commit_path` module): the incremental
+  snapshot write is about 5.3 ms and the reopen about 0.26 ms — a fixed cost
+  the change could not remove — while a cold page costs 1.3 ms coarse and
+  2.4 ms refined at a 1080p reader cell, 9.8 ms refined at a HiDPI one. The
+  reader has one or two pages on screen, redrawn across two to six pool
+  workers, behind a 250 ms debounce, with the previous frames still standing
+  under A7 so nothing blanks. What the change would buy is a few milliseconds
+  off a path that already waits a quarter of a second; what it would cost is
+  the generation invariant becoming per-page and a correctness hazard it
+  cannot see — a calculate script rewrites a field on another page while
+  `FFI_Invalidate` reports dirty rectangles for the current page only. Not
+  worth its invariant amendment; the whole-document snapshot stays.
 + *Measure the build you ship.* A page turn that felt slow was chased
   through six rounds of instrumentation, and the four largest causes were
   found in this order, none of them by reading the code: a debug binary

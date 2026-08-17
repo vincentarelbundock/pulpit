@@ -387,3 +387,123 @@ fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
             .contains(&DocumentWarning::ButtonAction));
     });
 }
+
+/// Serialise a flat list of object bodies into a PDF with a classic xref.
+fn serialise(objects: &[String]) -> Vec<u8> {
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+    let start_xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            objects.len() + 1,
+            start_xref
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// A *two-page* form: `count` is typed on page one, and the calculation script
+/// on `total` — which lives on page **two** — rewrites itself from it.
+///
+/// The same arithmetic as `calculating_form`, moved across a page boundary,
+/// because that is where the interesting asymmetry is.
+fn cross_page_calculating_form() -> Vec<u8> {
+    let objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] \
+         /CO [7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>"
+            .into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [7 0 R] >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        // 6: the typed field, on page one.
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () \
+         /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>"
+            .into(),
+        // 7: the calculated field, on page two.
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (total) /V () \
+         /Ff 0 /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 4 0 R \
+         /AA << /C << /S /JavaScript /JS (event.value = \
+         this.getField(\"count\").value * 2;) >> >> >>"
+            .into(),
+    ];
+    serialise(&objects)
+}
+
+/// Committing on one page can change a field on another, and the engine's
+/// invalidation does not say so.
+///
+/// This is the hazard the reader's whole-document snapshot currently masks:
+/// every commit reopens the document under a new render generation, so every
+/// visible page is redrawn whether or not anything on it moved, and a
+/// cross-page calculation is therefore *shown* correctly by accident. The
+/// invalidation itself is page-local — `FFI_Invalidate` collects rectangles
+/// for the page the event was delivered to, and `FormEventResult::invalidated`
+/// carries no page at all — so anything that ever narrows the redraw to the
+/// committed page will silently stop drawing the other one.
+///
+/// The test asserts both halves: the value crosses the page boundary, and the
+/// invalidation does not mention it. If the second assertion ever fails,
+/// PDFium has started reporting cross-page dirt and the note above is stale.
+#[test]
+fn a_calculation_can_rewrite_a_field_on_another_page_without_invalidating_it() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else {
+            eprintln!("no libpdfium; skipping");
+            return;
+        };
+        let backend = &mut *guard;
+        let path = std::env::temp_dir().join("pulpit-form-js-cross-page.pdf");
+        std::fs::write(&path, cross_page_calculating_form()).expect("the fixture is written");
+        let mut document = PdfiumDocument::open(backend, &path).expect("the fixture opens");
+        assert_eq!(document.info().page_count, 2, "the fixture has two pages");
+
+        let page = PageIndex(0);
+        let at = inside_count_field();
+        for event in [
+            FormInputEvent::PointerDown { at },
+            FormInputEvent::PointerUp { at },
+            FormInputEvent::Char { character: '2' },
+            FormInputEvent::Char { character: '1' },
+        ] {
+            document.form_event(page, event).expect("the event lands");
+        }
+        let committed = document
+            .form_event(page, FormInputEvent::Focus { gained: false })
+            .expect("focus is dropped");
+
+        assert_eq!(
+            document.field_value("total").expect("total is readable"),
+            "42",
+            "the calculation did not cross the page boundary; either PDFium was \
+             built without V8 or no JS platform was installed"
+        );
+
+        // Everything the commit reported dirty is on page one — the widget on
+        // page two is at `/Rect [100 650 300 680]`, i.e. 112..142 measured down
+        // from the top of a 792pt page, and page one's widget is at 62..92.
+        // Both are page-space rectangles with no page on them, so the only
+        // thing that can be asserted is that the count is small and that they
+        // sit where page one's field is: nothing here names page two.
+        for dirty in &committed.invalidated {
+            assert!(
+                dirty.top >= 50.0 && dirty.bottom <= 100.0,
+                "{dirty:?} is not the typed field's own rectangle — if the \
+                 engine has started reporting the calculated field's, it is \
+                 doing so without saying which page it is on"
+            );
+        }
+    });
+}

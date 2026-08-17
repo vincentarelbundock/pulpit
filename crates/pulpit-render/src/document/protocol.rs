@@ -339,12 +339,12 @@ pub struct DocumentRenderRequest {
     /// Target size in physical pixels.
     pub width: u32,
     pub height: u32,
-    /// The revision the caller believes the document is at.
-    ///
-    /// Not a precondition — a render is not a mutation and never fails over a
-    /// revision — but the answer carries the revision it actually contains,
-    /// which is how a preview knows when it may be dropped (A7, §9.2).
-    pub expected_revision: DocumentRevision,
+    // No expected revision here, deliberately. A render is not a mutation:
+    // the worker draws the document it holds and stamps the answer with the
+    // revision that drawing actually contains (A7, §9.2), which is what a
+    // preview needs in order to know when it may come down. A revision the
+    // caller *believed* was current was never read by the worker, and a field
+    // nothing checks is a field the next reader assumes is checked.
     /// Which part of the page to draw, as a fraction of it.
     ///
     /// [`Region::FULL`] is the whole page, and `width` × `height` is then the
@@ -1050,7 +1050,6 @@ mod tests {
             page: PageIndex(0),
             width: 100,
             height: 50,
-            expected_revision: DocumentRevision::INITIAL,
             region: pulpit_core::notes::Region::new(0.25, 0.5, 0.25, 0.25),
             full_width: 401,
             full_height: 201,
@@ -1085,7 +1084,7 @@ mod tests {
             patch
         );
         let older: DocumentRenderRequest =
-            serde_json::from_str(r#"{"page":0,"width":100,"height":50,"expected_revision":0}"#)
+            serde_json::from_str(r#"{"page":0,"width":100,"height":50}"#)
                 .expect("a request without the fields still parses");
         assert_eq!(older.full_size(), None);
     }
