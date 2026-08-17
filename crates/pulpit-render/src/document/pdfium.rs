@@ -3017,8 +3017,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ///
     /// What this exists for is the inverse of a fill: undoing a typed field
     /// value needs to put the old one back, and there is no other way to say
-    /// that (§9.1). It is deliberately not reachable from the UI as a way to
-    /// *set* a field — nothing in the application sends `SetField` forward.
+    /// that (§9.1). Its one forward caller is the date and time pickers, which
+    /// commit a value someone *chose* rather than typed — the text is the
+    /// application's, the appearance and the format script are still PDFium's,
+    /// and the edit is ordinary enough to undo like any other. Nothing else in
+    /// the application sets a field from outside the page.
     ///
     /// The mechanism follows the kind, because PDFium's editor does: a text
     /// value is typed, a button is pressed, a choice is selected. Replacing
