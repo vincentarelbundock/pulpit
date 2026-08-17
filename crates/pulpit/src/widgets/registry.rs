@@ -24,6 +24,35 @@
 //! This is option (a) from the widget-host refactor plan: no boxing, no
 //! `dyn Element` trees, and the per-kind mapping to its family's `view` is
 //! generated from the same list that drives [`REGISTRY`].
+//!
+//! ## Adding a widget
+//!
+//! `pulpit.status.blank` (`widgets/status/blank.rs`, `WidgetKind::BlankSpace`)
+//! is a living example — a static, decorative spacer with no configuration
+//! and no capabilities. Copy its shape. Wiring a new kind touches:
+//!
+//! 1. **`widgets/mod.rs`** — add the `WidgetKind` variant, one line in
+//!    `WidgetKind::ALL`, one arm in `WidgetKind::family()`, and one arm in
+//!    `WidgetConfig::default_for` (join the `WidgetConfig::None` group
+//!    unless the widget needs its own configuration shape).
+//! 2. **`widgets/catalog.rs`** — one `WidgetDefinition` in `CATALOG`, kept in
+//!    its group's run (the sidebar-order test enforces this). Its
+//!    `thumbnail` field says what a layout thumbnail sketches for it — see
+//!    [`catalog::ThumbnailContent`] — so `layout::thumbnail` needs no
+//!    change.
+//! 3. **`widgets/<family>/mod.rs`** and a new module (or an existing one) —
+//!    the widget's own view code, and whatever pure model it needs.
+//! 4. **`widgets/<family>/view.rs`** — one arm in that family's `view`
+//!    dispatching to the new module. This is the one `match WidgetKind`
+//!    site the source-scan test below allows per family, by design: within
+//!    a family, choosing among its own kinds is that family's business.
+//! 5. **This module's `widget_registry!` invocation** — one line: kind, its
+//!    stable dotted id, its family's `view`, and a `plan` hook
+//!    (`plan::none` unless it needs frames rendered).
+//!
+//! Five touches, all inside `widgets/`, none of them a new central `match`.
+//! `WidgetKind::ALL`'s length and the tests below fail loudly if a step is
+//! skipped.
 
 use super::plan::WidgetPlan;
 use super::view_context::WidgetViewContext;
@@ -214,6 +243,7 @@ widget_registry! {
     DocumentOutline       => "pulpit.document.outline"          => super::document::view::view => super::plan::none,
     AnnotationTools       => "pulpit.document.annotation-tools" => super::document::view::view => super::plan::none,
     Search                => "pulpit.search.query"              => super::search::view::view => super::plan::none,
+    BlankSpace            => "pulpit.status.blank"               => super::status::view::view => super::plan::none,
 }
 
 /// The registration for a kind. Total by construction, proved by the tests
@@ -366,6 +396,136 @@ mod tests {
         for kind in WidgetKind::ALL {
             let widget = Widget::new(kind);
             let _: Element<'_, ()> = dispatch(&ctx, &widget);
+        }
+    }
+
+    /// Every registration, end to end: a unique id, a real catalog entry
+    /// under the same kind, and capabilities that make sense for what the
+    /// kind actually is (a compound's parts, not the compound itself, are
+    /// where its capabilities come from). `dispatch_draws_every_kind` above
+    /// is this same completeness claim for the `view`/`plan` half — every
+    /// kind reachable through the macro-generated match — so this test
+    /// covers the catalog half instead of repeating it.
+    #[test]
+    fn every_registration_is_a_complete_widget() {
+        let mut seen_ids = std::collections::HashSet::new();
+        for kind in WidgetKind::ALL {
+            let entry = registration(kind);
+            assert_eq!(entry.kind, kind);
+            assert!(seen_ids.insert(entry.id.as_str()), "{kind:?}: duplicate id");
+            assert_eq!(
+                entry.definition,
+                catalog::definition(kind),
+                "{kind:?}: registry and catalog disagree"
+            );
+            // A compound's own capabilities are folded into its parts'
+            // (`WidgetKind::capabilities`), so a compound with no
+            // capabilities of its own is not a gap — check the union
+            // instead of the bare table entry.
+            if kind.parts().is_empty() && entry.capabilities().is_empty() {
+                assert!(
+                    kind.capabilities().is_empty(),
+                    "{kind:?}: has capabilities from nowhere"
+                );
+            }
+        }
+    }
+
+    /// The architectural gate: outside a widget's own family (or this
+    /// module and `plan.rs`, which *are* the registry), a `match` on
+    /// `WidgetKind` or `Family` is exactly the scattering this refactor
+    /// closed off. A new central dispatch point is a regression, not a
+    /// style choice, so this fails the build rather than waiting for review.
+    ///
+    /// Deliberately simple: a source-text scan for the handful of literal
+    /// patterns every real dispatch site in this crate happens to use, over
+    /// each file's text up to its first `#[cfg(test)]` (test-only reference
+    /// implementations, e.g. `layout::builtin`'s and `layout::panels`'
+    /// pre-refactor comparison walks, are not the scattering this guards
+    /// against). Good enough to catch a new one being added; not a Rust
+    /// parser, and not trying to be.
+    #[test]
+    fn widgetkind_and_family_matches_stay_where_they_belong() {
+        // Files where a `match` on `WidgetKind`/`Family` is the point of the
+        // file, not a leak: this module and `plan.rs` generate/hold the
+        // per-kind dispatch tables; `widgets/mod.rs` is the vocabulary
+        // itself (`family()`, `WidgetConfig::default_for`, and two small
+        // configuration reads); each family's own `view.rs` chooses among
+        // its own kinds, which is that family's business, not the host's.
+        const ALLOWED: &[&str] = &[
+            "widgets/mod.rs",
+            "widgets/registry.rs",
+            "widgets/plan.rs",
+            "widgets/slides/view.rs",
+            "widgets/notes/view.rs",
+            "widgets/timing/view.rs",
+            "widgets/navigation/view.rs",
+            "widgets/status/view.rs",
+            "widgets/annotations/view.rs",
+            "widgets/media/view.rs",
+            "widgets/chrome/view.rs",
+            "widgets/document/view.rs",
+            "widgets/search/view.rs",
+        ];
+        const PATTERNS: &[&str] = &[
+            "match widget.kind()",
+            "match kind {",
+            "match self.kind {",
+            "match self.kind.family()",
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        visit(&root, &root, ALLOWED, PATTERNS, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "match over WidgetKind/Family found outside the allowlist: {offenders:?}\n\
+             Either move the dispatch into a family module, drive it from \
+             registry/catalog data, or add the file to ALLOWED with a reason."
+        );
+
+        fn visit(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            allowed: &[&str],
+            patterns: &[&str],
+            offenders: &mut Vec<String>,
+        ) {
+            for entry in std::fs::read_dir(dir).expect("readable src tree") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    visit(&path, root, allowed, patterns, offenders);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                if allowed.contains(&relative.as_str()) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("readable source file");
+                let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
+                for pattern in patterns {
+                    for (start, _) in production.match_indices(pattern) {
+                        // A `match kind {`/`match widget.kind() {` header
+                        // names no type; confirm this one is actually a
+                        // `WidgetKind`/`Family` match, not some other
+                        // `kind`-named enum (`ContentKind`, `AppliedKind`,
+                        // `FrameKind`, ...), by checking its arms name one.
+                        let window_end = (start + 400).min(production.len());
+                        let window = &production[start..window_end];
+                        if window.contains("WidgetKind::") || window.contains("Family::") {
+                            offenders.push(format!("{relative}: {pattern:?}"));
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 }

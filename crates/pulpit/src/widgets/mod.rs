@@ -164,10 +164,17 @@ pub enum WidgetKind {
     /// case this exists for, and slides and reader ask the same question of
     /// the same model.
     Search,
+
+    /// A static, decorative spacer cell: theme background and nothing else.
+    ///
+    /// The living template for adding a widget — see the doc comment at the
+    /// top of `widgets/registry.rs` for the exact list of files a new kind
+    /// touches, of which this is one line each.
+    BlankSpace,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 25] = [
+    pub const ALL: [WidgetKind; 26] = [
         WidgetKind::CurrentSlide,
         WidgetKind::PreviousSlide,
         WidgetKind::NextSlide,
@@ -193,6 +200,7 @@ impl WidgetKind {
         WidgetKind::DocumentOutline,
         WidgetKind::AnnotationTools,
         WidgetKind::Search,
+        WidgetKind::BlankSpace,
     ];
 
     /// Which family implements this kind. The dispatcher
@@ -216,7 +224,8 @@ impl WidgetKind {
             WidgetKind::PresentationTitle
             | WidgetKind::CurrentSection
             | WidgetKind::AudienceScreenStatus
-            | WidgetKind::ConnectionStatus => Family::Status,
+            | WidgetKind::ConnectionStatus
+            | WidgetKind::BlankSpace => Family::Status,
             WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
@@ -388,7 +397,8 @@ impl WidgetConfig {
             | WidgetKind::DocumentPage
             | WidgetKind::DocumentNav
             | WidgetKind::DocumentOutline
-            | WidgetKind::Search => WidgetConfig::None,
+            | WidgetKind::Search
+            | WidgetKind::BlankSpace => WidgetConfig::None,
             // The document toolbar carries the same colour and size choices
             // the presenter palette does, so a mark made in one mode looks
             // the same in the other.

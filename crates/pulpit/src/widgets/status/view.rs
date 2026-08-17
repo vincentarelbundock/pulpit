@@ -43,6 +43,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             let reading = connection_reading(audience.connected);
             status_line("Connection", reading.text, colour(reading.intent), scale)
         }
+        WidgetKind::BlankSpace => crate::widgets::status::blank::view(),
         other => crate::widgets::common::view::misdirected(other),
     }
 }

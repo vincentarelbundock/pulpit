@@ -930,6 +930,7 @@ mod fixtures {
             WidgetKind::MainMenu,
             WidgetKind::AudienceControls,
             WidgetKind::Search,
+            WidgetKind::BlankSpace,
         ];
         let mut children = Vec::new();
         let mut sizes = Vec::new();

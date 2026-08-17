@@ -1083,6 +1083,48 @@ Slider, Pause or Resume, End Presentation, Annotations, Media Transport, Menu,
 Start and Stop. Everything else may repeat. A single-instance widget already in
 the layout shows *Already in Layout* on its library card and cannot be dragged.
 
+=== The registry: one authority, one place to add a widget
+
+`crates/pulpit/src/widgets/registry.rs` is the single authority for widget
+identity and rendering. `WidgetKind` and `Family` still exist — a closed enum
+buys the exhaustiveness check that makes a missing implementation a compile
+error rather than a blank pane mid-talk — but nothing outside a widget's own
+family module matches on either. Everything a contributor used to have to
+hunt down across the crate is one of three tables instead:
+
+- `widgets/catalog.rs` — one `WidgetDefinition` per kind: label, tooltip,
+  group, compound parts, placement policy, capabilities, minimum size, and
+  what a layout thumbnail should sketch for it (`ThumbnailContent`).
+- `widgets/registry.rs`'s `widget_registry!` macro — one line per kind: its
+  stable dotted `WidgetId`, its family's `view`, and a `plan` hook (what
+  frames it needs rendered, given its cell's share of the window).
+- `widgets/mod.rs` — the vocabulary itself: the `WidgetKind` variant,
+  `WidgetKind::ALL`, `WidgetKind::family()`, and `WidgetConfig::default_for`.
+
+*Adding a widget* touches five places, all inside `widgets/`: the variant and
+its three one-line arms in `widgets/mod.rs`; one `WidgetDefinition` in
+`widgets/catalog.rs`; the widget's own module; one arm in its family's
+`view.rs` choosing among that family's kinds (the one `match WidgetKind` site
+that stays — a family choosing among its own is that family's business, not
+the host's); and one line in the `widget_registry!` invocation.
+`pulpit.status.blank` (`widgets/status/blank.rs`, `WidgetKind::BlankSpace`) is
+a living, minimal example: a static decorative panel with no configuration
+and no capabilities, wired through exactly those five touches.
+
+What stays a host service rather than registry data: `layout::validate`
+reads `WidgetCapability`, not kinds; `layout::panels` aggregates the
+`WidgetPlan`s widgets declare rather than knowing what any one kind is;
+`layout::thumbnail` reads `ThumbnailContent` from the catalog rather than
+matching kinds itself. A widget declares what it needs and what it looks
+like; the host only aggregates.
+
+A source-scan test in `widgets/registry.rs`
+(`widgetkind_and_family_matches_stay_where_they_belong`) is the gate: it
+walks the crate's source tree at test time and fails the build if a `match`
+on `WidgetKind` or `Family` turns up outside the allowlisted registry,
+vocabulary and per-family `view.rs` files. A new central dispatch point is
+meant to fail loudly, not wait for review to notice.
+
 === Menu, Start and Stop
 
 The hamburger and the audience window's Start and Stop are widgets like any
