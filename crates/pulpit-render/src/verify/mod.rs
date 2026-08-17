@@ -207,6 +207,11 @@ impl RevisionMap {
     pub fn all_revisions(&self) -> Vec<&RevisionInfo> {
         self.revisions.values().collect()
     }
+
+    /// All revisions as (startxref, info) pairs in order.
+    pub fn all_revisions_map(&self) -> Vec<(&u64, &RevisionInfo)> {
+        self.revisions.iter().collect()
+    }
 }
 
 /// Find the byte offset of the final startxref directive.
@@ -469,17 +474,15 @@ fn parse_xref_stream_entries(xref_slice: &[u8]) -> Result<std::collections::Hash
                             }
                         }
                     }
-                    "W" => {
-                        if token == b"[" {
-                            _w_widths.clear();
-                            while let Ok(Some(w_token)) = tokenizer.next_token() {
-                                if w_token == b"]" {
-                                    break;
-                                }
-                                if let Ok(w_str) = std::str::from_utf8(&w_token) {
-                                    if let Ok(w) = w_str.parse::<usize>() {
-                                        _w_widths.push(w);
-                                    }
+                    "W" if token == b"[" => {
+                        _w_widths.clear();
+                        while let Ok(Some(w_token)) = tokenizer.next_token() {
+                            if w_token == b"]" {
+                                break;
+                            }
+                            if let Ok(w_str) = std::str::from_utf8(&w_token) {
+                                if let Ok(w) = w_str.parse::<usize>() {
+                                    _w_widths.push(w);
                                 }
                             }
                         }
@@ -576,17 +579,27 @@ pub fn classify_coverage(
         return Ok((SignatureCoverage::EntireFile, false));
     }
 
-    // Check 5: Is the signature's revision the entire file?
-    // Look up the revision where this signature was last changed.
-    if let Some(rev_info) = revisions.get_by_startxref(sig_dict_revision_startxref) {
-        // The xref container must be fully covered
-        if rev_info.xref_end <= start2 + len2 {
-            // All xref containers of this revision and earlier are covered
-            return Ok((SignatureCoverage::EntireRevision, true));
+    // Check 5: Look up the revision where the signature was last changed
+    let coverage_end = start2 + len2;
+    if let Some(_sig_rev_info) = revisions.get_by_startxref(sig_dict_revision_startxref) {
+        // Check 6: Any xref container of revisions <= rev ends beyond start2+len2?
+        // Per §28.2: if any xref container of revision <= rev ends beyond start2 + len2
+        //            -> ContiguousBlockFromStart
+        for (startxref, rev_info) in revisions.all_revisions_map() {
+            // Only check revisions up to and including the revision where sig was last changed
+            if *startxref <= sig_dict_revision_startxref {
+                // If any xref container ends BEYOND the coverage end, we don't have full coverage
+                if rev_info.xref_end > coverage_end {
+                    return Ok((SignatureCoverage::ContiguousBlockFromStart, true));
+                }
+            }
         }
+
+        // All xref containers of our revision and earlier are covered
+        return Ok((SignatureCoverage::EntireRevision, true));
     }
 
-    // Otherwise: covers only part of the revision
+    // If we can't find the revision info, we can't classify as EntireRevision
     Ok((SignatureCoverage::ContiguousBlockFromStart, false))
 }
 
@@ -1176,7 +1189,7 @@ mod tests {
         // ByteRange with length != 4 should be handled gracefully
         // This would be caught during extraction, but coverage classification
         // assumes 4 elements. Test that we don't panic on edge cases.
-        let revisions = RevisionMap {
+        let _revisions = RevisionMap {
             revisions: BTreeMap::new(),
         };
         // A properly formed 4-element range is required for classification
@@ -1330,8 +1343,9 @@ mod tests {
     #[test]
     fn test_signature_object_redefined_changes_coverage() {
         // Build a two-revision fixture where revision 2's xref redefines
-        // the signature object. Coverage should classify against revision 2,
-        // not revision 1, resulting in non-EntireFile.
+        // the signature object. Coverage should classify against revision 2.
+        // The xref for revision 2 extends beyond the coverage end, so it's
+        // ContiguousBlockFromStart.
 
         let mut revisions_map = BTreeMap::new();
 
@@ -1355,7 +1369,7 @@ mod tests {
             RevisionInfo {
                 startxref: 200,
                 xref_start: 400,
-                xref_end: 430,
+                xref_end: 550, // Extends beyond coverage end (500)
                 eof: 800,
                 obj_numbers: obj_nums_2,
             },
@@ -1365,8 +1379,8 @@ mod tests {
             revisions: revisions_map,
         };
 
-        // Byte range built for revision 1: [0..100)+[150..500)
-        // But signature was last changed in revision 2 (at offset 200)
+        // Byte range: [0..100)+[150..500)
+        // But xref for revision 2 ends at 550, beyond the coverage end of 500
         let br = ByteRange {
             z: 0,
             len1: 100,
@@ -1381,7 +1395,7 @@ mod tests {
         // Classify against revision 2 (where sig was last changed)
         let (cov, _) = classify_coverage(&br, &ce, 800, 200, &revisions).unwrap();
 
-        // Since xref for revision 2 (400-430) is not covered by byte range
+        // Since xref for revision 2 (400-550) extends beyond byte range
         // ending at 500, coverage should be ContiguousBlockFromStart
         assert_eq!(cov, SignatureCoverage::ContiguousBlockFromStart);
     }
@@ -1517,7 +1531,7 @@ mod tests {
         let mut pdf_v2 = pdf_v1.clone();
         pdf_v2.extend_from_slice(b"\n2 0 obj\n<</Type /Dummy>>\nendobj\n");
         pdf_v2.extend_from_slice(b"xref\n");
-        pdf_v2.extend_from_slice(format!("0 1\n0000000000 65535 f \ntrailer\n").as_bytes());
+        pdf_v2.extend_from_slice(b"0 1\n0000000000 65535 f \ntrailer\n");
         pdf_v2.extend_from_slice(
             format!("<<\n/Size 8\n/Root 1 0 R\n/Prev {}\n>>\n", v1_size).as_bytes(),
         );

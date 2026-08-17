@@ -1244,6 +1244,7 @@ mod tests {
             FormInputEvent::Char { character: 'a' },
             FormInputEvent::KeyDown {
                 key: FormKey::Enter,
+                modifiers: KeyModifiers::NONE,
             },
             FormInputEvent::ReplaceSelection { text: "Ada".into() },
             FormInputEvent::SelectOption {
@@ -1265,6 +1266,7 @@ mod tests {
             },
             FormInputEvent::KeyUp {
                 key: FormKey::Enter,
+                modifiers: KeyModifiers::NONE,
             },
             FormInputEvent::Focus { gained: false },
             FormInputEvent::FocusField {
