@@ -20,7 +20,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 4;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 5;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,9 +80,14 @@ pub enum FormInputEvent {
     },
     KeyDown {
         key: FormKey,
+        /// What was held down with the key. Shift is the load-bearing one: a
+        /// shift-arrow *extends* a field's selection, which is what makes
+        /// `CopySelection` have anything to read.
+        modifiers: KeyModifiers,
     },
     KeyUp {
         key: FormKey,
+        modifiers: KeyModifiers,
     },
     /// The page surface gained or lost keyboard focus. Losing it is what
     /// commits an in-progress field edit, so it is an event and not a hint.
@@ -156,6 +161,76 @@ pub enum FormInputEvent {
     },
     /// Select everything in the focused text field (`FORM_SelectAllText`).
     SelectAll,
+}
+
+impl FormInputEvent {
+    /// Could this event change what the document holds?
+    ///
+    /// The boundary a permissions check is drawn at (§8.6, and
+    /// `SPEC-document.md` §1213's fail-closed rule for an encrypted file). It
+    /// is deliberately not the same question as
+    /// [`DocumentRequest::is_mutation`], which answers a *replay* question for
+    /// the supervisor and is allowed to be pessimistic about a pointer move.
+    ///
+    /// Everything that can commit a value, type into a field or press a widget
+    /// is a change. Everything a reader needs in order to *read* a form —
+    /// following the pointer, releasing a key, taking or losing focus, naming
+    /// a field, copying a selection — is not, and refusing those would leave a
+    /// read-only document without hover, without a caret and without copy,
+    /// which is a worse answer than the one the permissions asked for.
+    pub fn can_change_the_document(&self) -> bool {
+        match self {
+            // A press or a release lands on a widget: it toggles a checkbox,
+            // moves a radio group, presses a button.
+            FormInputEvent::PointerDown { .. }
+            | FormInputEvent::PointerUp { .. }
+            | FormInputEvent::Char { .. }
+            | FormInputEvent::KeyDown { .. }
+            | FormInputEvent::SelectOption { .. }
+            | FormInputEvent::ReplaceSelection { .. } => true,
+            FormInputEvent::PointerMove { .. }
+            | FormInputEvent::KeyUp { .. }
+            | FormInputEvent::Focus { .. }
+            | FormInputEvent::FocusField { .. }
+            | FormInputEvent::CopySelection
+            | FormInputEvent::SelectAll => false,
+        }
+    }
+}
+
+/// What was held down when a key was pressed or released.
+///
+/// Carried explicitly rather than folded into [`FormKey`], because the engine
+/// takes it as a separate argument and because a modifier is a *state* rather
+/// than a key: shift-arrow extends a selection where arrow moves the caret,
+/// and a field that never hears about shift can never be selected from the
+/// keyboard at all. Two flags, which are the two PDFium's editing acts on;
+/// alt and meta belong to the host's shortcuts, not to the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeyModifiers {
+    pub shift: bool,
+    pub control: bool,
+}
+
+impl KeyModifiers {
+    pub const NONE: KeyModifiers = KeyModifiers {
+        shift: false,
+        control: false,
+    };
+    pub const SHIFT: KeyModifiers = KeyModifiers {
+        shift: true,
+        control: false,
+    };
+
+    pub fn new(shift: bool, control: bool) -> KeyModifiers {
+        KeyModifiers { shift, control }
+    }
+
+    /// PDFium's `FWL_EVENTFLAG` bitset, which is what `FORM_OnKeyDown` and
+    /// friends take: shift is bit 0 and control bit 1.
+    pub fn flags(self) -> i32 {
+        (i32::from(self.shift)) | (i32::from(self.control) << 1)
+    }
 }
 
 /// The keys a form field responds to that are not characters.
@@ -1161,6 +1236,47 @@ mod tests {
             serde_json::from_str::<DocumentResponse>(&encoded).unwrap(),
             answer
         );
+    }
+
+    #[test]
+    fn only_the_events_that_can_commit_count_as_a_change() {
+        for event in [
+            FormInputEvent::Char { character: 'a' },
+            FormInputEvent::KeyDown {
+                key: FormKey::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+            FormInputEvent::ReplaceSelection { text: "Ada".into() },
+            FormInputEvent::SelectOption {
+                index: 1,
+                selected: true,
+            },
+            FormInputEvent::PointerDown {
+                at: PagePoint::new(1.0, 2.0),
+            },
+            FormInputEvent::PointerUp {
+                at: PagePoint::new(1.0, 2.0),
+            },
+        ] {
+            assert!(event.can_change_the_document(), "{event:?}");
+        }
+        for event in [
+            FormInputEvent::PointerMove {
+                at: PagePoint::new(1.0, 2.0),
+            },
+            FormInputEvent::KeyUp {
+                key: FormKey::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+            FormInputEvent::Focus { gained: false },
+            FormInputEvent::FocusField {
+                name: "name".into(),
+            },
+            FormInputEvent::CopySelection,
+            FormInputEvent::SelectAll,
+        ] {
+            assert!(!event.can_change_the_document(), "{event:?}");
+        }
     }
 
     #[test]

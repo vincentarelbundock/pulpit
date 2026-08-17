@@ -178,11 +178,27 @@ struct FormBinding {
     /// which is exactly what §11.5 says a worker crash mid-fill is allowed to
     /// lose.
     open_page: Option<(usize, FPDF_PAGE)>,
+    /// Whether the press that is still down was intercepted as an overlay
+    /// choice rather than handed to the engine.
+    ///
+    /// A latch rather than a second hit test, because the release of a press
+    /// is the release of *that* press wherever the pointer has since travelled
+    /// to. Recomputing the interception on the button-up asks a different
+    /// question — "is the pointer over an overlay choice now?" — and answers
+    /// it about a widget the gesture never began in: drag out of an
+    /// intercepted choice and the engine is handed a button-up with no
+    /// button-down behind it. Cleared on the up, on a focus change and when
+    /// the interaction moves page, all three of which end the gesture.
+    overlay_capture: bool,
 }
 
-// PDFium is not thread safe; the whole point of the worker process is that one
-// document is owned by one execution context (§6).
-unsafe impl Send for PdfiumDocument<'_> {}
+// No `unsafe impl Send` here, on purpose. PDFium is not thread safe, and the
+// form-fill environment is worse than merely unsynchronised: its V8 isolate is
+// entered on the thread that created it, so moving a document with an open form
+// environment to another thread crashes inside V8 instead of failing cleanly.
+// The raw pointers this struct holds keep it `!Send`, which is the invariant —
+// one document is owned by one execution context (§6) — expressed in the type
+// system rather than in a comment.
 
 impl<'a> PdfiumDocument<'a> {
     /// Open `source` for reading and annotating.
@@ -313,6 +329,7 @@ impl<'a> PdfiumDocument<'a> {
                     environment,
                     handle,
                     open_page: None,
+                    overlay_capture: false,
                 })
             }
             None => {
@@ -397,7 +414,11 @@ impl<'a> PdfiumDocument<'a> {
         let Some(form) = self.form_handle() else {
             return;
         };
-        let Some((_, handle)) = self.form.as_mut().and_then(|form| form.open_page.take()) else {
+        let Some((_, handle)) = self.form.as_mut().and_then(|form| {
+            // The gesture cannot outlive the page it began on.
+            form.overlay_capture = false;
+            form.open_page.take()
+        }) else {
             return;
         };
         // The loan comes back before the page it lent goes away, so no script
@@ -1049,17 +1070,11 @@ impl<'a> PdfiumDocument<'a> {
         }
 
         // A9: an existing signature is detected and warned about *before* the
-        // first mutation, not discovered after a save. PDFium exposes no
-        // accessor for the signature dictionary without a form-fill
-        // environment, so this is a bounded scan of the file's own bytes —
-        // the same technique the capability scan already uses for `/Trans`.
-        if self
-            .source
-            .as_deref()
-            .map(carries_a_signature)
-            .unwrap_or(false)
-        {
-            warnings.push(DocumentWarning::Signed);
+        // first mutation, not discovered after a save.
+        match signature_status(self.backend.bindings(), handle, self.source.as_deref()) {
+            SignatureStatus::Signed => warnings.push(DocumentWarning::Signed),
+            SignatureStatus::Unsigned => {}
+            SignatureStatus::Unknown => warnings.push(DocumentWarning::SignatureUnknown),
         }
 
         let first_page = if page_count > 0 {
@@ -1976,12 +1991,6 @@ impl<'a> PdfiumDocument<'a> {
     }
 }
 
-/// Does this file carry a cryptographic signature?
-///
-/// A byte scan, because the alternative is a form-fill environment that this
-/// engine does not otherwise need. It errs towards saying yes: a false warning
-/// costs the user one dismissal, and a missed one costs them the belief that a
-/// signature survived their edits, which A9 exists to prevent.
 /// What a text field's format script makes of its value.
 ///
 /// PDF has no field type for "date". Acrobat's format categories are entries
@@ -2239,25 +2248,85 @@ fn field_script_reaches_out(
     false
 }
 
-fn carries_a_signature(source: &Path) -> bool {
+/// Whether a document carries a cryptographic signature — including the
+/// answer "pulpit could not tell".
+///
+/// Three states rather than a bool, for the same reason every operation that
+/// leaves the process returns an `Outcome`: "no signature" and "no answer" are
+/// different facts, and collapsing them is how a signed file gets reported as
+/// unsigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignatureStatus {
+    Signed,
+    Unsigned,
+    Unknown,
+}
+
+/// Ask the engine first, and fall back to the file's bytes.
+///
+/// `FPDF_GetSignatureCount` is the structured answer: it reads the parsed
+/// document, so it sees a signature hidden in a compressed object stream,
+/// which no byte scan can. It returns -1 when the build cannot answer, and
+/// only then is the bounded byte scan consulted — and if that cannot answer
+/// either, the status is [`SignatureStatus::Unknown`] rather than a guess.
+fn signature_status(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_DOCUMENT,
+    source: Option<&Path>,
+) -> SignatureStatus {
+    match unsafe { bindings.FPDF_GetSignatureCount(handle) } {
+        count if count > 0 => SignatureStatus::Signed,
+        0 => SignatureStatus::Unsigned,
+        // -1: this PDFium cannot answer. Ask the bytes.
+        _ => match source {
+            Some(source) => scan_for_signature(source),
+            None => SignatureStatus::Unknown,
+        },
+    }
+}
+
+/// Does this file carry a signature, as far as a bounded byte scan can say?
+///
+/// The fallback only. It cannot see into a compressed object stream and it
+/// will not read an unbounded file, so both of those answer
+/// [`SignatureStatus::Unknown`] — an oversize file used to be reported as
+/// unsigned, which is exactly the belief A9 exists to prevent.
+fn scan_for_signature(source: &Path) -> SignatureStatus {
     /// Signature dictionaries live in the trailer's neighbourhood, but an
     /// incrementally updated file can carry them anywhere; 32 MiB covers every
     /// document a person opens by hand and bounds the read.
     const MAX_SCAN_BYTES: u64 = 32 << 20;
 
     let Ok(metadata) = std::fs::metadata(source) else {
-        return false;
+        return SignatureStatus::Unknown;
     };
     if metadata.len() > MAX_SCAN_BYTES {
-        return false;
+        return SignatureStatus::Unknown;
     }
     let Ok(bytes) = std::fs::read(source) else {
-        return false;
+        return SignatureStatus::Unknown;
     };
     // `/Type /Sig` with any amount of whitespace between the two names, and
     // `/FT /Sig` for the field that carries it.
-    contains_pdf_name_pair(&bytes, b"/Type", b"/Sig")
+    if contains_pdf_name_pair(&bytes, b"/Type", b"/Sig")
         || contains_pdf_name_pair(&bytes, b"/FT", b"/Sig")
+    {
+        SignatureStatus::Signed
+    } else if has_compressed_object_streams(&bytes) {
+        // The scan reads what it can see, and an object stream is what it
+        // cannot: a signature inside one leaves no `/Sig` in the raw bytes.
+        SignatureStatus::Unknown
+    } else {
+        SignatureStatus::Unsigned
+    }
+}
+
+/// Does this file put objects inside compressed streams?
+///
+/// If it does, the byte scan's "no signature here" covers only the part of the
+/// file it can read, and the honest answer is that it does not know.
+fn has_compressed_object_streams(bytes: &[u8]) -> bool {
+    contains_pdf_name_pair(bytes, b"/Type", b"/ObjStm")
 }
 
 fn contains_pdf_name_pair(bytes: &[u8], first: &[u8], second: &[u8]) -> bool {
@@ -3017,8 +3086,11 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ///
     /// What this exists for is the inverse of a fill: undoing a typed field
     /// value needs to put the old one back, and there is no other way to say
-    /// that (§9.1). It is deliberately not reachable from the UI as a way to
-    /// *set* a field — nothing in the application sends `SetField` forward.
+    /// that (§9.1). Its one forward caller is the date and time pickers, which
+    /// commit a value someone *chose* rather than typed — the text is the
+    /// application's, the appearance and the format script are still PDFium's,
+    /// and the edit is ordinary enough to undo like any other. Nothing else in
+    /// the application sets a field from outside the page.
     ///
     /// The mechanism follows the kind, because PDFium's editor does: a text
     /// value is typed, a button is pressed, a choice is selected. Replacing
@@ -3110,13 +3182,32 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // the document — an editable combo keeps the engine's list — rather
         // than decided here.
         let overlay_press = match &event {
-            FormInputEvent::PointerDown { at: point } | FormInputEvent::PointerUp { at: point } => {
+            FormInputEvent::PointerDown { at: point } => {
                 self.overlay_choice_widget(page, handle, *point)
             }
             _ => None,
         };
-        let opened_choice =
-            overlay_press.is_some() && matches!(&event, FormInputEvent::PointerDown { .. });
+        let opened_choice = overlay_press.is_some();
+        // The release is decided by the latch the press set, not by a fresh
+        // hit test — see `FormBinding::overlay_capture`. Set here and cleared
+        // on the up, on a focus event and when the page moves.
+        match (&event, self.form.as_mut()) {
+            (FormInputEvent::PointerDown { .. }, Some(binding)) => {
+                binding.overlay_capture = overlay_press.is_some();
+            }
+            (FormInputEvent::Focus { .. }, Some(binding)) => binding.overlay_capture = false,
+            _ => {}
+        }
+        let held_overlay_press = match &event {
+            FormInputEvent::PointerUp { .. } => {
+                let held = self.form.as_ref().is_some_and(|form| form.overlay_capture);
+                if let Some(binding) = self.form.as_mut() {
+                    binding.overlay_capture = false;
+                }
+                held
+            }
+            _ => false,
+        };
         unsafe {
             match event {
                 FormInputEvent::PointerDown { at: point } => match overlay_press {
@@ -3137,7 +3228,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // The release of a press the engine never saw is not the
                 // engine's either: forwarding it alone would land a button-up
                 // in a widget with no button-down behind it.
-                FormInputEvent::PointerUp { at: point } if overlay_press.is_none() => {
+                FormInputEvent::PointerUp { at: point } if !held_overlay_press => {
                     let (x, y) = at(point);
                     bindings.FORM_OnLButtonUp(form, handle, 0, f64::from(x), f64::from(y));
                 }
@@ -3166,16 +3257,20 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // Sending backspace as a key down is accepted and does
                 // nothing, which is the worst of both — the field simply
                 // fails to delete, with no error anywhere.
-                FormInputEvent::KeyDown { key } => match control_character(key) {
+                FormInputEvent::KeyDown { key, modifiers } => match control_character(key) {
                     Some(character) => {
-                        bindings.FORM_OnChar(form, handle, character, 0);
+                        bindings.FORM_OnChar(form, handle, character, modifiers.flags());
                     }
                     None => {
-                        bindings.FORM_OnKeyDown(form, handle, key_code(key), 0);
+                        // The modifier flags are what make shift-arrow
+                        // *extend* the field's selection rather than move the
+                        // caret: PDFium reads them out of this argument, and a
+                        // zero here is the engine being told nothing was held.
+                        bindings.FORM_OnKeyDown(form, handle, key_code(key), modifiers.flags());
                     }
                 },
-                FormInputEvent::KeyUp { key } => {
-                    bindings.FORM_OnKeyUp(form, handle, key_code(key), 0);
+                FormInputEvent::KeyUp { key, modifiers } => {
+                    bindings.FORM_OnKeyUp(form, handle, key_code(key), modifiers.flags());
                 }
                 FormInputEvent::Focus { gained: false } => {
                     // Losing focus is what *commits* an in-progress edit,
@@ -3726,6 +3821,63 @@ fn expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a file of `bytes` bytes, sparsely where the filesystem allows it,
+    /// so the oversize path can be exercised without a 32 MiB fixture in the
+    /// repository or 32 MiB of writing.
+    fn sparse_file(directory: &Path, name: &str, bytes: u64) -> std::path::PathBuf {
+        let path = directory.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_too_large_to_scan_is_unknown_rather_than_unsigned() {
+        // The bug this replaced: a signed 40 MiB file reported as carrying no
+        // signature, which is the one answer A9 must never give.
+        let directory = tempfile::tempdir().unwrap();
+        let big = sparse_file(directory.path(), "big.pdf", (32 << 20) + 1);
+        assert_eq!(scan_for_signature(&big), SignatureStatus::Unknown);
+    }
+
+    #[test]
+    fn a_scannable_file_is_read_and_answered_either_way() {
+        let directory = tempfile::tempdir().unwrap();
+        let signed = directory.path().join("signed.pdf");
+        std::fs::write(&signed, b"%PDF-1.7\n1 0 obj << /Type /Sig >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&signed), SignatureStatus::Signed);
+
+        let field = directory.path().join("field.pdf");
+        std::fs::write(&field, b"%PDF-1.7\n1 0 obj << /FT/Sig >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&field), SignatureStatus::Signed);
+
+        let plain = directory.path().join("plain.pdf");
+        std::fs::write(&plain, b"%PDF-1.7\n1 0 obj << /Type /Page >> endobj\n").unwrap();
+        assert_eq!(scan_for_signature(&plain), SignatureStatus::Unsigned);
+    }
+
+    #[test]
+    fn a_compressed_object_stream_is_unknown_because_the_scan_cannot_see_in() {
+        // A signature inside an object stream leaves no `/Sig` in the raw
+        // bytes, so "not found" is not "not there".
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("objstm.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.7\n1 0 obj << /Type /ObjStm /N 4 >> stream\n....\nendstream endobj\n",
+        )
+        .unwrap();
+        assert_eq!(scan_for_signature(&path), SignatureStatus::Unknown);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_unknown() {
+        assert_eq!(
+            scan_for_signature(Path::new("/nowhere/at/all.pdf")),
+            SignatureStatus::Unknown
+        );
+    }
 
     #[test]
     fn acrobats_numbered_date_presets_translate_to_their_patterns() {

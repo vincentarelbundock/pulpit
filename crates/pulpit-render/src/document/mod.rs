@@ -91,7 +91,12 @@ pub type Result<T> = std::result::Result<T, DocumentError>;
 /// Every method works in canonical page space and identifies annotations by
 /// [`AnnotationId`] (A3, A4), so an implementation is free to renumber objects
 /// on save without anything above noticing.
-pub trait DocumentBackend: Send {
+/// Deliberately **not** `Send`. PDFium's form-fill environment has thread
+/// affinity — its V8 isolate is entered on the thread that created it, and
+/// moving form work to another thread segfaults rather than failing cleanly.
+/// One document is owned by one execution context (§6), and leaving this
+/// trait un-`Send` is what makes the compiler enforce it.
+pub trait DocumentBackend {
     fn info(&self) -> &OpenDocumentInfo;
 
     fn page_count(&self) -> usize {
@@ -400,6 +405,15 @@ impl<'a> PdfDocument<'a> {
         page: PageIndex,
         event: crate::document::protocol::FormInputEvent,
     ) -> Result<crate::document::protocol::FormEventResult> {
+        // Fail closed at the boundary, not after the engine has taken the
+        // keystroke: a document whose own permissions forbid changing it
+        // refuses every event that could commit a value, press a widget or
+        // type into a field. The events a *reader* needs — the pointer
+        // following the page, focus, copy — still go through, so a locked
+        // form is read-only rather than inert.
+        if event.can_change_the_document() && !self.allows_mutation() {
+            return Err(DocumentError::MutationForbidden);
+        }
         let mut result = self.backend.form_event(page, event)?;
         limits::within(
             "invalidated rectangles",
@@ -435,12 +449,7 @@ impl<'a> PdfDocument<'a> {
                 actual: self.revision,
             });
         }
-        if !self.info().level.allows_annotation()
-            || self
-                .info()
-                .warnings
-                .contains(&DocumentWarning::MutationForbidden)
-        {
+        if !self.allows_mutation() {
             return Err(DocumentError::MutationForbidden);
         }
         if transaction.is_empty() {
@@ -609,6 +618,19 @@ impl<'a> PdfDocument<'a> {
     /// The identities this session has handed out, for diagnostics.
     pub fn issued_ids(&self) -> u64 {
         self.ids.issued()
+    }
+
+    /// May this document be changed at all?
+    ///
+    /// One answer, consulted by every path that writes — a transaction and a
+    /// form event alike — so that an encrypted file's permissions cannot be
+    /// enforced on one of them and forgotten on the other.
+    fn allows_mutation(&self) -> bool {
+        self.info().level.allows_annotation()
+            && !self
+                .info()
+                .warnings
+                .contains(&DocumentWarning::MutationForbidden)
     }
 
     fn check_page(&self, page: PageIndex) -> Result<()> {
@@ -1277,6 +1299,76 @@ mod tests {
                 DocumentTransaction::one(ink(0, 10.0))
             ),
             Err(DocumentError::MutationForbidden)
+        ));
+    }
+
+    #[test]
+    fn a_document_that_forbids_mutation_refuses_a_value_changing_form_event() {
+        use crate::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
+        let mut document = PdfDocument::new(Box::new(MemoryDocument::locked()), 1);
+        for event in [
+            FormInputEvent::Char { character: 'a' },
+            FormInputEvent::KeyDown {
+                key: FormKey::Backspace,
+                modifiers: KeyModifiers::NONE,
+            },
+            FormInputEvent::ReplaceSelection { text: "Ada".into() },
+            FormInputEvent::SelectOption {
+                index: 0,
+                selected: true,
+            },
+            FormInputEvent::PointerDown {
+                at: PagePoint::new(10.0, 10.0),
+            },
+            FormInputEvent::PointerUp {
+                at: PagePoint::new(10.0, 10.0),
+            },
+        ] {
+            assert!(
+                matches!(
+                    document.form_event(PageIndex(0), event.clone()),
+                    Err(DocumentError::MutationForbidden)
+                ),
+                "{event:?} was not refused"
+            );
+        }
+        assert_eq!(document.revision(), DocumentRevision::INITIAL);
+        assert!(!document.is_dirty());
+    }
+
+    #[test]
+    fn a_locked_document_still_lets_a_reader_move_the_pointer_and_take_focus() {
+        // The refusal is drawn at what can *change* the document. Reading one
+        // — hover, focus, copy — is not a mutation and reaches the backend,
+        // which here has no form-fill environment and says so.
+        use crate::document::protocol::FormInputEvent;
+        let mut document = PdfDocument::new(Box::new(MemoryDocument::locked()), 1);
+        for event in [
+            FormInputEvent::PointerMove {
+                at: PagePoint::new(10.0, 10.0),
+            },
+            FormInputEvent::Focus { gained: true },
+            FormInputEvent::CopySelection,
+        ] {
+            assert!(
+                matches!(
+                    document.form_event(PageIndex(0), event.clone()),
+                    Err(DocumentError::Backend(_))
+                ),
+                "{event:?} should have reached the backend"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlocked_document_does_not_refuse_a_form_event_on_permissions() {
+        // The same event on a document with no such permission is refused by
+        // the backend for having no form-fill environment, not by the gate.
+        use crate::document::protocol::FormInputEvent;
+        let mut document = PdfDocument::new(Box::new(MemoryDocument::with_form()), 5);
+        assert!(matches!(
+            document.form_event(PageIndex(0), FormInputEvent::Char { character: 'a' }),
+            Err(DocumentError::Backend(_))
         ));
     }
 

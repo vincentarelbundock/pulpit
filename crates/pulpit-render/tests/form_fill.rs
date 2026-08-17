@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use pulpit_core::page::{PageIndex, PagePoint};
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::protocol::{
-    DocumentRequest, DocumentResponse, FormInputEvent, FormKey,
+    DocumentRequest, DocumentResponse, FormInputEvent, FormKey, KeyModifiers,
 };
 use pulpit_render::document::worker::DocumentWorker;
 use pulpit_render::document::{FieldKind, PdfDocument, SaveOptions};
@@ -182,6 +182,7 @@ fn backspace_takes_a_character_back_out() {
                 PageIndex(0),
                 FormInputEvent::KeyDown {
                     key: FormKey::Backspace,
+                    modifiers: KeyModifiers::NONE,
                 },
             )
             .expect("backspace is accepted");
@@ -319,6 +320,64 @@ fn a_filled_form_saves_and_reopens_with_the_value_in_it() {
         let engine = PdfiumDocument::open(&mut guard, &path).expect("the source still opens");
         let source = PdfDocument::new(Box::new(engine), 58);
         assert_eq!(source.field_value("name").unwrap(), "");
+    });
+}
+
+#[test]
+fn a_save_asked_for_mid_edit_commits_the_caret_first() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // The application's Save As, in the order the application performs it.
+        //
+        // Nothing here defocuses the field because the test knows to: it
+        // defocuses because the last answer said a widget holds the caret,
+        // which is the rule `App::ask_form_commit_before_save` follows.
+        // Losing focus is what commits an in-progress edit, and `write_to`
+        // serialises what the document holds — so a save sent straight out
+        // while someone is still typing would write a file without the
+        // characters they can see on screen.
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+        let saved = directory.path().join("saved-mid-edit.pdf");
+
+        {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 91);
+            click_into(&mut document, "name");
+            let mut last = None;
+            for character in "Grace".chars() {
+                last = Some(
+                    document
+                        .form_event(PageIndex(0), FormInputEvent::Char { character })
+                        .unwrap(),
+                );
+            }
+
+            // The state the application reads when the save arrives.
+            let focused = last
+                .and_then(|result| result.focused_widget)
+                .expect("the caret is in a field");
+            let committed = document
+                .form_event(focused.page, FormInputEvent::Focus { gained: false })
+                .expect("the defocus is taken")
+                .committed
+                .expect("leaving the field commits what was typed");
+            assert_eq!(committed.value, "Grace");
+
+            document
+                .save_as(&saved, SaveOptions::verified())
+                .expect("the copy is written");
+        }
+
+        let engine = PdfiumDocument::open(&mut guard, &saved).expect("the copy reopens");
+        let document = PdfDocument::new(Box::new(engine), 92);
+        assert_eq!(
+            document.field_value("name").expect("the field is there"),
+            "Grace",
+            "a save asked for mid-edit keeps what was being typed"
+        );
     });
 }
 
@@ -575,7 +634,7 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
 #[test]
 fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
     pulpit_testkit::on_the_pdfium_thread(|| {
-        use pulpit_render::document::protocol::FormKey;
+        use pulpit_render::document::protocol::{FormKey, KeyModifiers};
 
         let Some(mut guard) = binding() else { return };
 
@@ -605,7 +664,13 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
             assert!(pressed.is_some());
             let after_click = document.field_value("colour").unwrap();
             let arrowed = document
-                .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::Down })
+                .form_event(
+                    PageIndex(0),
+                    FormInputEvent::KeyDown {
+                        key: FormKey::Down,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                )
                 .unwrap();
             assert!(
                 !arrowed.invalidated.is_empty(),
@@ -640,7 +705,13 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
         click_into(&mut document, "country");
 
         let arrowed = document
-            .form_event(PageIndex(0), FormInputEvent::KeyDown { key: FormKey::Down })
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::KeyDown {
+                    key: FormKey::Down,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )
             .unwrap();
         // The focused combo is reported, so the application knows to translate.
         let choice = arrowed
@@ -1397,5 +1468,181 @@ fn a_space_toggles_the_box_that_holds_the_focus() {
             .unwrap();
 
         assert_eq!(document.field_value("agree").unwrap(), "Yes");
+    });
+}
+
+/// A two-page form, one text field on each page, so a keystroke can be
+/// addressed to the wrong one.
+fn two_page_form(directory: &std::path::Path) -> Option<PathBuf> {
+    use pulpit_testkit::{stream_body, Page, Pdf};
+
+    let widget = |name: &str, page: u32| {
+        format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T ({name}) /V () \
+             /Rect [100 300 400 330] /P {page} 0 R /F 4 /DA (/Helv 12 Tf 0 g) >>"
+        )
+    };
+    let mut pdf = Pdf::new();
+    // 1 catalog, 2 page tree, 3 font, 4 first page, 5 contents.
+    for _ in 0..5 {
+        pdf.reserve();
+    }
+    let first = pdf.add(widget("first", 4));
+    let second = pdf.reserve();
+    let layout = Page::default();
+    let back = pdf.add(layout.dictionary(&format!("{second} 0 R"), 5));
+    pdf.set(second, widget("second", back));
+    pdf.set(
+        1,
+        format!(
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{first} 0 R {second} 0 R] \
+             /DA (/Helv 12 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>"
+        ),
+    );
+    pdf.set(
+        2,
+        format!("<< /Type /Pages /Count 2 /Kids [4 0 R {back} 0 R] >>"),
+    );
+    pdf.set(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    pdf.set(4, layout.dictionary(&format!("{first} 0 R"), 5));
+    pdf.set(
+        5,
+        stream_body("", b"BT /Helv 12 Tf 72 720 Td (pulpit) Tj ET"),
+    );
+
+    let path = directory.join("two-page-form.pdf");
+    std::fs::write(&path, pdf.build()).ok()?;
+    Some(path)
+}
+
+/// A keystroke belongs to the page the *focus* is on, and addressing it to any
+/// other page loses it (§8.6).
+///
+/// The hazard the application's routing exists for: a caret in a field on one
+/// page with the pointer resting over the next. Opening another page's form
+/// handle runs `FORM_OnBeforeClosePage` on the one being left, which kills the
+/// focus and commits the field — so the character arrives at a page where
+/// nothing is focused and is simply dropped, and the commit it caused happens
+/// underneath the revision and undo bookkeeping.
+#[test]
+fn a_keystroke_addressed_to_the_wrong_page_is_lost() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = two_page_form(directory.path()) else {
+            return;
+        };
+
+        // The focused page takes both characters, which is what the
+        // application now does whatever the pointer is over.
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 81);
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::FocusField {
+                    name: "first".into(),
+                },
+            )
+            .expect("the field takes the focus");
+        for character in "Ab".chars() {
+            document
+                .form_event(PageIndex(0), FormInputEvent::Char { character })
+                .expect("a character is accepted");
+        }
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+        assert_eq!(document.field_value("first").unwrap(), "Ab");
+        drop(document);
+
+        // The same two characters, the second addressed to the page a pointer
+        // happened to be over. It never reaches the field.
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 82);
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::FocusField {
+                    name: "first".into(),
+                },
+            )
+            .expect("the field takes the focus");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Char { character: 'A' })
+            .expect("a character is accepted");
+        document
+            .form_event(PageIndex(1), FormInputEvent::Char { character: 'b' })
+            .expect("the misaddressed character is accepted and discarded");
+        document
+            .form_event(PageIndex(0), FormInputEvent::Focus { gained: false })
+            .unwrap();
+        assert_ne!(
+            document.field_value("first").unwrap(),
+            "Ab",
+            "a keystroke sent to another page must not be assumed to reach the field"
+        );
+        assert_eq!(document.field_value("second").unwrap(), "");
+    });
+}
+
+/// Shift-arrow extends the field's selection, which is what a copy reads.
+///
+/// The modifier is the whole point: the same arrow without it moves the caret
+/// and selects nothing, so a protocol that could not carry shift could not
+/// select from the keyboard at all.
+#[test]
+fn shift_and_an_arrow_extend_the_selection_a_copy_reads() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = binding() else { return };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            return;
+        };
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 83);
+        click_into(&mut document, "name");
+        for character in "Ada".chars() {
+            document
+                .form_event(PageIndex(0), FormInputEvent::Char { character })
+                .expect("a character is accepted");
+        }
+
+        fn selected(document: &mut PdfDocument<'_>) -> String {
+            document
+                .form_event(PageIndex(0), FormInputEvent::CopySelection)
+                .expect("a copy is answered")
+                .selected_text
+                .expect("a copy always answers with what was selected")
+        }
+
+        // A bare arrow moves the caret and selects nothing.
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::KeyDown {
+                    key: FormKey::Left,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )
+            .unwrap();
+        assert_eq!(selected(&mut document), "");
+
+        // Held with shift, it takes the character it passes over.
+        document
+            .form_event(
+                PageIndex(0),
+                FormInputEvent::KeyDown {
+                    key: FormKey::Left,
+                    modifiers: KeyModifiers::SHIFT,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            selected(&mut document),
+            "d",
+            "shift-arrow must extend the field's selection"
+        );
     });
 }

@@ -8,19 +8,21 @@
 pub mod cache;
 pub mod document;
 pub mod pdf;
+pub mod pdfwrite;
 pub mod protocol;
 pub mod shm;
-pub mod supervisor;
-pub mod worker;
-
-// Signing and verification modules (per SPEC-signing.md §22.2)
-pub mod pdfwrite;
 pub mod sign;
+pub mod supervisor;
 pub mod verify;
+pub mod worker;
 
 pub use cache::{CacheStats, Frame, FrameCache, FrameKey, FrameKind, DEFAULT_BUDGET_BYTES};
 pub use pdf::capabilities::{CapabilityFinding, DocumentCapabilities, FindingKind};
 pub use protocol::{Priority, Quality, RenderJob, Request, RequestId, Response, PROTOCOL_VERSION};
+pub use sign::{
+    build_cms, estimate_cms_size, load_pkcs12, CredentialSummary, DigestAlgorithm, SigningError,
+    SigningProfile,
+};
 pub use supervisor::{
     RenderDiagnostics, RenderEvent, RendererSupervisor, SupervisorConfig, WorkerCommand,
 };

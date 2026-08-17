@@ -12,11 +12,13 @@ name = "pulpit-render-worker"
 path = "src/bin/worker.rs"
 
 [features]
-default = ["pdfium"]
+default = ["pdfium", "p12-keystore"]
 # PDFium is loaded dynamically at run time; the binary is not linked in, so a
 # build without libpdfium present still succeeds and falls back with a clear
 # diagnostic (see `scripts/fetch-pdfium.sh`).
 pdfium = ["dep:pdfium-render"]
+# p12-keystore provides PKCS#12 loading and decryption
+p12-keystore = ["dep:p12-keystore"]
 
 [dependencies]
 pulpit-core = { workspace = true }
@@ -29,24 +31,28 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zip = { workspace = true }
+
 # Cryptographic signing
-sha2 = { version = "0.10", features = ["oid"] }
-cms = { version = "0.2", features = ["std"] }
-x509-cert = { version = "0.2", features = ["builder"] }
-der = { version = "0.7", features = ["alloc", "derive"] }
-rsa = "0.9"
-p256 = "0.13"
-p384 = "0.13"
-p521 = "0.13"
-ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-pkcs8 = "0.10"
-pkcs12 = "0.1"
-zeroize = "1.7"
-signature = "2.2"
-rand = "0.8"
-hex = "0.4"
-rcgen = "0.12"
+cms = { workspace = true }
+x509-cert = { workspace = true }
+der = { workspace = true }
+rsa = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+p521 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+spki = { workspace = true }
+pkcs8 = { workspace = true }
+pkcs12 = { workspace = true }
+zeroize = { workspace = true }
+signature = { workspace = true }
+ecdsa = { workspace = true }
+hex = { workspace = true }
+p12-keystore = { version = "0.3.1", optional = true }
 
 [dev-dependencies]
 pulpit-testkit = { workspace = true }
 tempfile = { workspace = true }
+rcgen = "0.12"
+rand = "0.8"

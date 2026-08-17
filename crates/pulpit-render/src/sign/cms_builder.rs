@@ -26,10 +26,10 @@ use cms::signed_data::{
 use der::asn1::{Any, AnyRef, ObjectIdentifier, OctetString, SetOfVec, UtcTime};
 use der::{Encode, Sequence};
 use sha2::{Digest as _, Sha256};
+use spki::AlgorithmIdentifierOwned;
 use x509_cert::attr::Attribute;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
-use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
 
 // --- OIDs used directly (§26.3, §26.1) ---------------------------------
