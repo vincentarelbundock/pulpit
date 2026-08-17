@@ -317,7 +317,10 @@ mod tests {
         let p12_cert =
             p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
         let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        keystore.add_entry(
+            "test_alias",
+            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
+        );
 
         let password = "test_password";
         let p12_bytes = keystore
@@ -377,7 +380,10 @@ mod tests {
         let p12_cert =
             p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
         let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        keystore.add_entry(
+            "test_alias",
+            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
+        );
 
         let password = "test_password";
         let p12_bytes = keystore
@@ -442,7 +448,10 @@ mod tests {
         let p12_cert =
             p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
         let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        keystore.add_entry(
+            "test_alias",
+            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
+        );
 
         let password = "test_password";
         let p12_bytes = keystore
@@ -502,16 +511,8 @@ mod tests {
         );
 
         // Verify estimates are even (required for hex encoding)
-        assert_eq!(
-            estimated_size_loose % 2,
-            0,
-            "Loose estimate must be even"
-        );
-        assert_eq!(
-            estimated_size_tight % 2,
-            0,
-            "Tight estimate must be even"
-        );
+        assert_eq!(estimated_size_loose % 2, 0, "Loose estimate must be even");
+        assert_eq!(estimated_size_tight % 2, 0, "Tight estimate must be even");
     }
 
     #[test]

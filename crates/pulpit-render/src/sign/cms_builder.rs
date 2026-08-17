@@ -310,16 +310,18 @@ fn sign_with_ed25519(credential: &Credential, data: &[u8]) -> Result<Vec<u8>, Si
                 break;
             }
         }
-        found_idx.ok_or_else(|| SigningError::SignatureOperationFailed(
-            "Could not find Ed25519 seed in PKCS#8".to_string(),
-        ))?
+        found_idx.ok_or_else(|| {
+            SigningError::SignatureOperationFailed(
+                "Could not find Ed25519 seed in PKCS#8".to_string(),
+            )
+        })?
     };
 
     let seed_bytes: [u8; 32] = pkey_der[seed_start..seed_start + 32]
         .try_into()
-        .map_err(|_| SigningError::SignatureOperationFailed(
-            "Failed to extract Ed25519 seed".to_string(),
-        ))?;
+        .map_err(|_| {
+            SigningError::SignatureOperationFailed("Failed to extract Ed25519 seed".to_string())
+        })?;
 
     // Create signing key from seed
     let signing_key = SigningKey::from_bytes(&seed_bytes);

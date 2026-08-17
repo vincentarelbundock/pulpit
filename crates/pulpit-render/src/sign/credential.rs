@@ -103,10 +103,7 @@ pub struct CredentialSummary {
     pub key_bits: Option<usize>,
 }
 
-pub fn load_pkcs12_impl(
-    pkcs12_data: &[u8],
-    passphrase: &str,
-) -> Result<Credential, SigningError> {
+pub fn load_pkcs12_impl(pkcs12_data: &[u8], passphrase: &str) -> Result<Credential, SigningError> {
     #[cfg(feature = "p12-keystore")]
     {
         use zeroize::Zeroizing;
@@ -117,8 +114,11 @@ pub fn load_pkcs12_impl(
             .map_err(|e| {
                 let err_msg = format!("{:?}", e);
                 // Map MAC/decryption failures to WrongPassphrase
-                if err_msg.contains("MacError") || err_msg.contains("InvalidMac") ||
-                   err_msg.contains("InvalidPassword") || err_msg.contains("decrypt") {
+                if err_msg.contains("MacError")
+                    || err_msg.contains("InvalidMac")
+                    || err_msg.contains("InvalidPassword")
+                    || err_msg.contains("decrypt")
+                {
                     SigningError::WrongPassphrase
                 } else {
                     SigningError::KeyLoadFailed(format!("Failed to load PKCS#12: {}", err_msg))
@@ -194,6 +194,7 @@ pub fn load_pkcs12_impl(
     }
 }
 
+#[allow(dead_code)]
 pub fn from_parts(
     cert_der: &[u8],
     key_der: &[u8],
@@ -204,9 +205,8 @@ pub fn from_parts(
 
     let mut cert_chain = Vec::new();
     for chain_cert_der in chain {
-        match Certificate::from_der(&chain_cert_der) {
-            Ok(c) => cert_chain.push(c),
-            Err(_) => {}
+        if let Ok(c) = Certificate::from_der(&chain_cert_der) {
+            cert_chain.push(c);
         }
     }
 
@@ -264,9 +264,7 @@ fn analyze_private_key(pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), Sign
         return Ok((KeyType::Ed25519, PublicKeyInfo::Ed25519));
     }
 
-    Err(SigningError::UnsupportedKeyAlgorithm {
-        algorithm: oid_str,
-    })
+    Err(SigningError::UnsupportedKeyAlgorithm { algorithm: oid_str })
 }
 
 fn extract_rsa_bits(pkey_der: &[u8]) -> Option<usize> {
@@ -283,7 +281,9 @@ impl Credential {
     pub fn summary(&self) -> Result<CredentialSummary, SigningError> {
         use x509_cert::der::Encode;
 
-        let cert_der = self.signer_certificate.to_der()
+        let cert_der = self
+            .signer_certificate
+            .to_der()
             .map_err(|e| SigningError::DerEncodingFailed(e.to_string()))?;
         let fingerprint = {
             let mut h = sha2::Sha256::new();
@@ -294,9 +294,24 @@ impl Credential {
         Ok(CredentialSummary {
             subject: format!("{:?}", self.signer_certificate.tbs_certificate.subject),
             issuer: format!("{:?}", self.signer_certificate.tbs_certificate.issuer),
-            serial: hex::encode(self.signer_certificate.tbs_certificate.serial_number.as_bytes()),
-            not_before: self.signer_certificate.tbs_certificate.validity.not_before.to_string(),
-            not_after: self.signer_certificate.tbs_certificate.validity.not_after.to_string(),
+            serial: hex::encode(
+                self.signer_certificate
+                    .tbs_certificate
+                    .serial_number
+                    .as_bytes(),
+            ),
+            not_before: self
+                .signer_certificate
+                .tbs_certificate
+                .validity
+                .not_before
+                .to_string(),
+            not_after: self
+                .signer_certificate
+                .tbs_certificate
+                .validity
+                .not_after
+                .to_string(),
             sha256_fingerprint: fingerprint,
             key_algorithm: self.public_key_info.key_type_name().to_string(),
             key_bits: self.public_key_info.bits(),
@@ -335,7 +350,10 @@ mod tests {
             p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
         let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
 
-        keystore.add_entry("test_alias", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
+        keystore.add_entry(
+            "test_alias",
+            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
+        );
 
         let password = "test_password_123";
         let p12_bytes = keystore
@@ -347,8 +365,10 @@ mod tests {
         let credential = load_pkcs12_impl(&p12_bytes, password).expect("Failed to load PKCS#12");
         // Verify we got a credential with certificate and key info
         // The signer_certificate should be populated from the PKCS#12
-        assert!(!credential.public_key_info.key_type_name().is_empty(),
-            "Expected key type to be identified");
+        assert!(
+            !credential.public_key_info.key_type_name().is_empty(),
+            "Expected key type to be identified"
+        );
 
         // Test loading with wrong passphrase fails with WrongPassphrase error
         let result = load_pkcs12_impl(&p12_bytes, "wrong_password");
