@@ -108,7 +108,13 @@ pub enum Message {
     },
     /// Text read asynchronously after Ctrl-V while a form field holds the
     /// caret. `None` for a clipboard holding something that is not text.
-    PasteFormText(Option<String>),
+    ///
+    /// `focus` is the field the shortcut was typed in, carried so the text
+    /// cannot land anywhere else — see [`FormFocus`].
+    PasteFormText {
+        focus: Option<FormFocus>,
+        value: Option<String>,
+    },
     Do(Action),
     Nav(Nav),
     /// The back button: return to the place the last jump left behind, or —
@@ -565,6 +571,27 @@ pub enum FormClipboard {
     Cut,
 }
 
+/// Which field a clipboard action was started in (§8.6).
+///
+/// A clipboard action is two turns of the event loop with a wait in the middle
+/// — the toolkit's read for a paste, the worker's answer for a copy or a cut —
+/// and the caret can leave the field, or the reader can click into another
+/// one, while that wait is on. "Some field is focused" is not enough to finish
+/// on: it is what lets a paste land in a field the reader never asked to paste
+/// into, and lets the removal half of a cut delete a selection out of a
+/// different field entirely. So the field is named when the action starts and
+/// the completion is dropped unless the same field still holds the caret.
+///
+/// The page and the field's name, and not the document revision: an edit
+/// between the two halves — a keystroke in the same field, an annotation
+/// committed elsewhere — moves the revision without moving the caret, and a
+/// paste dropped for that would be a paste dropped for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormFocus {
+    page: pulpit_core::page::PageIndex,
+    field: String,
+}
+
 /// What of a clipboard's contents may be put into a form field.
 ///
 /// Control characters are dropped — a field value is text, and the `\u{1b}`
@@ -763,7 +790,9 @@ pub struct App {
     /// is waiting on an answer, which is almost always: only the event a
     /// Ctrl-C or a Ctrl-X sent brings a selection back, and only the shortcut
     /// that sent it knows whether the text is also to be removed.
-    pub form_clipboard: Option<FormClipboard>,
+    /// Paired with the field it was typed in, so the removal half of a cut
+    /// cannot be addressed to a field the caret has since moved to.
+    pub form_clipboard: Option<(FormClipboard, Option<FormFocus>)>,
     /// A field's selection, copied and waiting for a tick to write it out.
     /// The worker pump that receives it has no `Task` to hand back.
     pub form_clipboard_text: Option<String>,
@@ -2188,13 +2217,17 @@ impl App {
                 }
                 Task::none()
             }
-            Message::PasteFormText(value) => {
+            Message::PasteFormText { focus, value } => {
                 // The read is asynchronous, so the caret may have left the
                 // field — or the document — while it was in flight. A paste
                 // with nowhere to land is dropped rather than sent: the worker
                 // would answer an event with no focused field with a refusal,
-                // and a refusal is not what "nothing was selected" means.
-                let Some(value) = value.filter(|_| self.reader.form_holds_the_caret()) else {
+                // and a refusal is not what "nothing was selected" means. And
+                // one whose field has been left is dropped for a stronger
+                // reason: the text belongs to the field it was asked for and
+                // to no other (§8.6).
+                let landing = self.reader.form_holds_the_caret() && self.form_focus() == focus;
+                let Some(value) = value.filter(|_| landing) else {
                     return Task::none();
                 };
                 let text = sanitised_paste(&value);
@@ -4806,12 +4839,22 @@ impl App {
                     };
                     self.journal(entry);
                 }
-                crate::reader_link::Told::FormRefused => {
-                    self.form_move_answered();
+                crate::reader_link::Told::FormRefused { moved } => {
+                    if moved {
+                        self.form_move_answered();
+                    }
                 }
-                crate::reader_link::Told::FormChanged { page, result } => {
-                    // The worker is free: the newest waiting move goes out now.
-                    self.form_move_answered();
+                crate::reader_link::Told::FormChanged {
+                    page,
+                    result,
+                    moved,
+                } => {
+                    // The move slot is released by a move and by nothing else:
+                    // a key or a clipboard answer arriving while a move is
+                    // still out says nothing about that move (§8.6).
+                    if moved {
+                        self.form_move_answered();
+                    }
                     self.form_changed(page, *result);
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
@@ -5632,17 +5675,27 @@ impl App {
             } else {
                 FormClipboard::Copy
             };
+            // Named before the event goes out, because the answer comes back
+            // a turn later and the caret is free to move in between.
+            let focus = self.form_focus();
             if !self.ask_focused_form_event(FormInputEvent::CopySelection) {
                 // Nothing will answer, so nothing is left waiting for one.
                 return None;
             }
-            self.form_clipboard = Some(intent);
+            self.form_clipboard = Some((intent, focus));
             return Some(Task::none());
         }
         if key.eq_ignore_ascii_case("v") {
             // Read now, sent when it arrives: the clipboard is the toolkit's
-            // and answers asynchronously.
-            return Some(iced::clipboard::read().map(Message::PasteFormText));
+            // and answers asynchronously. The field is named now too, so what
+            // arrives can be matched against where it was asked for.
+            let focus = self.form_focus();
+            return Some(
+                iced::clipboard::read().map(move |value| Message::PasteFormText {
+                    focus: focus.clone(),
+                    value,
+                }),
+            );
         }
         if key.eq_ignore_ascii_case("a") {
             self.ask_focused_form_event(FormInputEvent::SelectAll);
@@ -5660,6 +5713,15 @@ impl App {
     /// and a copy addressed to the wrong page reads an empty selection. Falls
     /// back to the ordinary route when nothing is focused, where the answer is
     /// "nothing is selected" either way.
+    /// The field that holds the caret, named so an answer that arrives a turn
+    /// later can be matched against it — see [`FormFocus`].
+    fn form_focus(&self) -> Option<FormFocus> {
+        self.reader.focused_widget().map(|widget| FormFocus {
+            page: widget.page,
+            field: widget.field.clone(),
+        })
+    }
+
     fn ask_focused_form_event(
         &mut self,
         event: pulpit_render::document::protocol::FormInputEvent,
@@ -5817,10 +5879,34 @@ impl App {
         // no-op in every text box there is, and emptying the clipboard instead
         // would lose whatever the reader had put there to paste.
         if let Some(text) = result.selected_text.take() {
-            if let Some(intent) = self.form_clipboard.take() {
+            if let Some((intent, focus)) = self.form_clipboard.take() {
+                // The copy itself is unconditional: the text came back, and
+                // whatever the caret has done since, the reader asked for it
+                // and it goes to the clipboard.
+                //
+                // The *removal* is not. A cut deletes, and it must delete out
+                // of the field it was typed in: the answer arrives a turn
+                // later, and a click queued behind it can have moved the caret
+                // by the time the second half goes out. Checked against the
+                // focus this very answer reports, and against what this layer
+                // believes now, and skipped unless both still name the field
+                // the cut began in. It cannot be made airtight from here —
+                // only a worker-side "copy and replace in one event" would be,
+                // and that is a protocol change for a race this closes in
+                // practice — so what is left is the case where the click's own
+                // answer has not landed yet, and the loss it risks is a
+                // deletion the reader asked for rather than one they did not.
+                let answered_the_same_field =
+                    result.focused_widget.as_ref().is_some_and(|widget| {
+                        focus.as_ref().is_some_and(|focus| {
+                            focus.page == widget.page && focus.field == widget.field
+                        })
+                    });
+                let still_there =
+                    focus.is_none() || (answered_the_same_field && self.form_focus() == focus);
                 if !text.is_empty() {
                     self.form_clipboard_text = Some(text);
-                    if intent == FormClipboard::Cut {
+                    if intent == FormClipboard::Cut && still_there {
                         // The other half of a cut: what was taken is removed
                         // through the engine's own replacement, in one edit,
                         // rather than by a run of synthesised backspaces.
@@ -6165,7 +6251,14 @@ impl App {
                 value,
             },
         );
-        self.reader.close_time_picker();
+        // The engine kills the focus as it takes the value — `SetField` runs
+        // through PDFium's own editor, which force-kills the focus and lets
+        // the form page go — and the answer comes back as an `Applied`, which
+        // carries no `FormEventResult` and so refreshes nothing. Said here
+        // rather than plumbed through a form-event reply: a commit is a
+        // document mutation, and turning it into a form event to get a focus
+        // report back would be a second editing path for one value (§9.1).
+        self.reader.form_focus_dropped();
         self.commit_to_document(transaction);
         Task::none()
     }
@@ -6539,7 +6632,12 @@ impl App {
                         value,
                     },
                 );
-                self.reader.close_date_picker();
+                // The calendar comes down and the caret goes with it, for the
+                // reason spelled out in
+                // `commit_focused_time`: the engine force-kills the focus as
+                // it takes the value, and the `Applied` that answers carries
+                // no focus report to say so.
+                self.reader.form_focus_dropped();
                 self.commit_to_document(transaction);
                 Task::none()
             }

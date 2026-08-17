@@ -180,11 +180,23 @@ pub enum Told {
     FormChanged {
         page: pulpit_core::page::PageIndex,
         result: Box<pulpit_render::document::protocol::FormEventResult>,
+        /// Whether this answers a pointer *move*.
+        ///
+        /// The application keeps at most one move in flight, and the slot it
+        /// waits on is a slot for moves: a key, a copy or a paste answering
+        /// while a move is still out would otherwise release it and let a
+        /// second move go out behind the first. Read from the event that was
+        /// sent rather than carried by the caller, because the kind of a
+        /// request is a property of the request.
+        moved: bool,
     },
     /// A form event the worker would not take — a document with no fillable
     /// form, or a page that would not load. Nothing changed, and saying so is
     /// what keeps the caller's one-in-flight guard from latching shut.
-    FormRefused,
+    FormRefused {
+        /// Whether this answers a pointer move — see [`Told::FormChanged`].
+        moved: bool,
+    },
     Applied(Box<Applied>),
     /// A mutation — a transaction, an undo or a redo — was not applied.
     ///
@@ -436,8 +448,16 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             other => unexpected(other, "search results"),
         }],
         Ask::FormEvent { page, event } => {
+            let moved = matches!(
+                &event,
+                pulpit_render::document::protocol::FormInputEvent::PointerMove { .. }
+            );
             match session.request(DocumentRequest::FormEvent { page, event }) {
-                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged { page, result }],
+                Ok(DocumentResponse::Form(result)) => vec![Told::FormChanged {
+                    page,
+                    result,
+                    moved,
+                }],
                 // A refused keystroke is not a lost worker and not a lost
                 // edit: the field simply did not take it. Reported at debug
                 // level rather than as a failure banner, because a document
@@ -450,7 +470,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                     // nothing would latch that guard shut and the form would
                     // stop following the pointer for the rest of the session.
                     tracing::debug!(%error, "a form event was refused");
-                    vec![Told::FormRefused]
+                    vec![Told::FormRefused { moved }]
                 }
                 other => vec![unexpected(other, "a form event result")],
             }

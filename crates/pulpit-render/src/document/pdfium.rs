@@ -178,6 +178,18 @@ struct FormBinding {
     /// which is exactly what §11.5 says a worker crash mid-fill is allowed to
     /// lose.
     open_page: Option<(usize, FPDF_PAGE)>,
+    /// Whether the press that is still down was intercepted as an overlay
+    /// choice rather than handed to the engine.
+    ///
+    /// A latch rather than a second hit test, because the release of a press
+    /// is the release of *that* press wherever the pointer has since travelled
+    /// to. Recomputing the interception on the button-up asks a different
+    /// question — "is the pointer over an overlay choice now?" — and answers
+    /// it about a widget the gesture never began in: drag out of an
+    /// intercepted choice and the engine is handed a button-up with no
+    /// button-down behind it. Cleared on the up, on a focus change and when
+    /// the interaction moves page, all three of which end the gesture.
+    overlay_capture: bool,
 }
 
 // PDFium is not thread safe; the whole point of the worker process is that one
@@ -313,6 +325,7 @@ impl<'a> PdfiumDocument<'a> {
                     environment,
                     handle,
                     open_page: None,
+                    overlay_capture: false,
                 })
             }
             None => {
@@ -397,7 +410,11 @@ impl<'a> PdfiumDocument<'a> {
         let Some(form) = self.form_handle() else {
             return;
         };
-        let Some((_, handle)) = self.form.as_mut().and_then(|form| form.open_page.take()) else {
+        let Some((_, handle)) = self.form.as_mut().and_then(|form| {
+            // The gesture cannot outlive the page it began on.
+            form.overlay_capture = false;
+            form.open_page.take()
+        }) else {
             return;
         };
         // The loan comes back before the page it lent goes away, so no script
@@ -3110,13 +3127,32 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // the document — an editable combo keeps the engine's list — rather
         // than decided here.
         let overlay_press = match &event {
-            FormInputEvent::PointerDown { at: point } | FormInputEvent::PointerUp { at: point } => {
+            FormInputEvent::PointerDown { at: point } => {
                 self.overlay_choice_widget(page, handle, *point)
             }
             _ => None,
         };
-        let opened_choice =
-            overlay_press.is_some() && matches!(&event, FormInputEvent::PointerDown { .. });
+        let opened_choice = overlay_press.is_some();
+        // The release is decided by the latch the press set, not by a fresh
+        // hit test — see `FormBinding::overlay_capture`. Set here and cleared
+        // on the up, on a focus event and when the page moves.
+        match (&event, self.form.as_mut()) {
+            (FormInputEvent::PointerDown { .. }, Some(binding)) => {
+                binding.overlay_capture = overlay_press.is_some();
+            }
+            (FormInputEvent::Focus { .. }, Some(binding)) => binding.overlay_capture = false,
+            _ => {}
+        }
+        let held_overlay_press = match &event {
+            FormInputEvent::PointerUp { .. } => {
+                let held = self.form.as_ref().is_some_and(|form| form.overlay_capture);
+                if let Some(binding) = self.form.as_mut() {
+                    binding.overlay_capture = false;
+                }
+                held
+            }
+            _ => false,
+        };
         unsafe {
             match event {
                 FormInputEvent::PointerDown { at: point } => match overlay_press {
@@ -3137,7 +3173,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // The release of a press the engine never saw is not the
                 // engine's either: forwarding it alone would land a button-up
                 // in a widget with no button-down behind it.
-                FormInputEvent::PointerUp { at: point } if overlay_press.is_none() => {
+                FormInputEvent::PointerUp { at: point } if !held_overlay_press => {
                     let (x, y) = at(point);
                     bindings.FORM_OnLButtonUp(form, handle, 0, f64::from(x), f64::from(y));
                 }
