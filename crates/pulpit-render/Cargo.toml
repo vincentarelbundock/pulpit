@@ -25,6 +25,9 @@ pulpit-core = { workspace = true }
 pdfium-render = { version = "0.9", optional = true }
 bincode = { workspace = true }
 memmap2 = { workspace = true }
+# Already in the dependency graph via `zip`; used here to inflate xref streams
+# and object streams during signature verification.
+flate2 = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

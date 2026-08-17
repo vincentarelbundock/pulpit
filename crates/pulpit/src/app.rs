@@ -7651,7 +7651,10 @@ impl App {
                                 credential_path.display()
                             )
                         })?;
-                        pulpit_render::sign::load_pkcs12(&bytes, &passphrase)
+                        pulpit_render::sign::load_pkcs12(
+                            &bytes,
+                            pulpit_render::sign::Zeroizing::new(passphrase),
+                        )
                             .map(std::sync::Arc::new)
                             .map_err(|e| format!("{e}; the credential was not loaded"))
                     },

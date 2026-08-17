@@ -24,7 +24,10 @@
 //! # The module MUST NOT depend on the sign module or PDFium.
 
 pub mod cms_check;
+pub mod objects;
 pub mod preflight;
+
+pub use objects::{Confidence, Dict, ObjectResolver, PdfValue, XrefEntry, XrefIndex};
 
 pub use cms_check::{
     check_signature, verify_signatures, AlgorithmFinding, CertificateSummary, IdentityAssurance,
@@ -69,6 +72,12 @@ pub enum VerifyError {
 
     #[error("file is too small")]
     FileTooSmall,
+
+    #[error("unsupported stream filter: {0}")]
+    UnsupportedFilter(String),
+
+    #[error("the document is encrypted")]
+    EncryptedPdf,
 }
 
 pub type Result<T> = std::result::Result<T, VerifyError>;
@@ -618,17 +627,23 @@ pub fn classify_coverage(
 /// Discover signatures in the document and perform initial structural checks.
 /// Returns a vector of StructuralReport for each /Sig field with non-null /V.
 pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<StructuralReport>> {
+    // An encrypted document cannot be read structurally, and appending to one
+    // would silently produce a broken file. Report it instead of guessing.
+    if is_encrypted(bytes) {
+        return Err(VerifyError::EncryptedPdf);
+    }
+
     let mut reports = Vec::new();
 
     // Find catalog
     let catalog_ref = find_catalog_ref(bytes)?;
 
-    // Find /AcroForm /Fields array
-    let fields_array = find_fields_array(bytes, catalog_ref)?;
+    // Walk the whole field tree, with /FT and /T resolved through parents.
+    let fields = find_field_tree(bytes, catalog_ref)?;
 
     // Enumerate fields in document order
-    for field_ref in fields_array {
-        if let Ok(Some(sig_report)) = extract_signature_field(bytes, field_ref, revisions) {
+    for field in &fields {
+        if let Ok(Some(sig_report)) = extract_signature_field(bytes, field, revisions) {
             reports.push(sig_report);
         }
     }
@@ -638,6 +653,12 @@ pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<
 
 /// Parse the catalog reference from the trailer.
 pub fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
+    // The resolver knows the merged trailer of the active revision, including
+    // the cross-reference-stream case the tokenizer walk below cannot read.
+    if let Some(root) = ObjectResolver::new(bytes).root_ref() {
+        return Ok(root);
+    }
+
     let startxref = find_startxref(bytes)?;
     let xref_pos = startxref as usize;
     if xref_pos >= bytes.len() {
@@ -695,163 +716,239 @@ pub fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
     ))
 }
 
-/// Find /AcroForm /Fields array references.
-pub fn find_fields_array(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<(u32, u16)>> {
-    // Find the catalog object
-    let catalog_obj_slice = find_object(bytes, catalog_ref.0)?;
-    if catalog_obj_slice.is_empty() {
-        return Err(VerifyError::AcroformParseError(
-            "catalog object not found".to_string(),
-        ));
-    }
-
-    let mut tokenizer = PdfTokenizer::new(catalog_obj_slice);
-
-    // Find /AcroForm reference
-    let mut acroform_ref: Option<(u32, u16)> = None;
-    let mut key: Option<String> = None;
-
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"endobj" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                if k == "AcroForm" {
-                    if let Ok(num_str) = std::str::from_utf8(&token) {
-                        if let Ok(num) = num_str.parse::<u32>() {
-                            if let Ok(Some(gen_token)) = tokenizer.next_token() {
-                                if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
-                                    if let Ok(gen) = gen_str.parse::<u16>() {
-                                        if let Ok(Some(r_token)) = tokenizer.next_token() {
-                                            if r_token == b"R" {
-                                                acroform_ref = Some((num, gen));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(acroform_ref) = acroform_ref {
-        let acroform_obj_slice = find_object(bytes, acroform_ref.0)?;
-        if !acroform_obj_slice.is_empty() {
-            return extract_fields_refs(acroform_obj_slice);
-        }
-    }
-
-    Ok(Vec::new())
+/// One node of the interactive form field tree, after inheritance.
+#[derive(Debug, Clone)]
+pub struct FieldEntry {
+    /// The field object's number and generation.
+    pub obj: (u32, u16),
+    /// `/FT`, inherited from the nearest ancestor that declares one.
+    pub field_type: Option<String>,
+    /// The fully qualified field name: ancestors' `/T` joined with `.`.
+    pub qualified_name: Option<String>,
+    /// `/V`, inherited, when it is an indirect reference.
+    pub value_ref: Option<(u32, u16)>,
 }
 
-/// Extract field references from /AcroForm /Fields array.
-fn extract_fields_refs(obj_slice: &[u8]) -> Result<Vec<(u32, u16)>> {
-    let mut tokenizer = PdfTokenizer::new(obj_slice);
-    let mut refs = Vec::new();
-    let mut in_fields_array = false;
+/// Maximum depth of the `/Kids` walk.
+const MAX_FIELD_DEPTH: usize = 32;
+/// Maximum number of field nodes visited.
+const MAX_FIELD_NODES: usize = 20_000;
 
-    let mut key: Option<String> = None;
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"endobj" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                if k == "Fields" && token == b"[" {
-                    in_fields_array = true;
-                }
-            } else if in_fields_array && token == b"]" {
-                break;
-            } else if in_fields_array {
-                if let Ok(num_str) = std::str::from_utf8(&token) {
-                    if let Ok(num) = num_str.parse::<u32>() {
-                        if let Ok(Some(gen_token)) = tokenizer.next_token() {
-                            if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
-                                if let Ok(gen) = gen_str.parse::<u16>() {
-                                    if let Ok(Some(r_token)) = tokenizer.next_token() {
-                                        if r_token == b"R" {
-                                            refs.push((num, gen));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(refs)
-}
-
-/// Find the byte offset of the *last* definition of `obj_num`.
+/// Walk the whole `/AcroForm` field tree, not just the direct `/Fields` array.
 ///
-/// The last definition is the effective one: an incremental update appends a
-/// replacement object after every earlier copy, so scanning from the end is
-/// what makes a re-emitted catalog, page or field visible to discovery. The
-/// preceding byte is checked so that `4 0 obj` does not match inside
-/// `14 0 obj`.
-fn find_object_definition(bytes: &[u8], obj_num: u32) -> Option<usize> {
-    let search = format!("{} 0 obj", obj_num);
-    let needle = search.as_bytes();
-    let mut candidate = None;
-    let mut from = 0usize;
-    while let Some(offset) = find_bytes(&bytes[from..], needle) {
-        let pos = from + offset;
-        let boundary = pos == 0 || !bytes[pos - 1].is_ascii_digit();
-        if boundary {
-            candidate = Some(pos);
-        }
-        from = pos + 1;
-    }
-    candidate
+/// `/FT`, `/T` and `/V` are inheritable: a hierarchical signature field may
+/// carry none of them on the node that holds the widget. This returns every
+/// node reachable through `/Kids`, with those three attributes resolved
+/// through the parent chain, bounded in both depth and node count.
+pub fn find_field_tree(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<FieldEntry>> {
+    let resolver = ObjectResolver::new(bytes);
+    find_field_tree_with(&resolver, catalog_ref)
 }
 
-/// Find object bytes by object number.
-pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
-    if let Some(pos) = find_object_definition(bytes, obj_num) {
-        let obj_start = pos;
-        // Find corresponding "endobj"
-        if let Some(endobj_pos) = find_bytes(&bytes[obj_start..], b"endobj") {
-            let obj_end = obj_start + endobj_pos + 6; // past "endobj"
-            if obj_end <= bytes.len() {
-                return Ok(&bytes[obj_start..obj_end]);
-            }
-        }
+fn find_field_tree_with(
+    resolver: &ObjectResolver<'_>,
+    catalog_ref: (u32, u16),
+) -> Result<Vec<FieldEntry>> {
+    let (catalog, _) = resolver.resolve(catalog_ref.0)?;
+    let Some(catalog) = catalog.as_dict() else {
+        return Err(VerifyError::AcroformParseError(
+            "catalog is not a dictionary".to_string(),
+        ));
+    };
+    let Some(acroform) = resolver.dict_get(catalog, "AcroForm") else {
+        return Ok(Vec::new());
+    };
+    let Some(acroform) = acroform.as_dict() else {
+        return Ok(Vec::new());
+    };
+    let Some(fields) = resolver.dict_get(acroform, "Fields") else {
+        return Ok(Vec::new());
+    };
+    let Some(roots) = fields.as_array().map(|a| a.to_vec()) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut budget = MAX_FIELD_NODES;
+    for node in roots {
+        walk_field_node(
+            resolver,
+            &node,
+            None,
+            None,
+            None,
+            0,
+            &mut visited,
+            &mut budget,
+            &mut out,
+        );
     }
-    Err(VerifyError::SignatureObjectNotFound)
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_field_node(
+    resolver: &ObjectResolver<'_>,
+    node: &PdfValue,
+    inherited_ft: Option<&str>,
+    inherited_name: Option<&str>,
+    inherited_v: Option<(u32, u16)>,
+    depth: usize,
+    visited: &mut std::collections::HashSet<u32>,
+    budget: &mut usize,
+    out: &mut Vec<FieldEntry>,
+) {
+    if depth > MAX_FIELD_DEPTH || *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+
+    // Only nodes reachable as indirect references can be reported, since the
+    // callers of this module address fields by object number.
+    let Some((num, gen)) = node.as_ref_pair() else {
+        return;
+    };
+    if !visited.insert(num) {
+        return;
+    }
+    // A /Fields entry that resolves to nothing might have been the signature
+    // that locks the target: report it so the caller refuses, never drop it.
+    let Ok((value, _conf)) = resolver.resolve(num) else {
+        out.push(FieldEntry {
+            obj: (num, gen),
+            field_type: None,
+            qualified_name: None,
+            value_ref: None,
+        });
+        return;
+    };
+    let Some(dict) = value.as_dict() else {
+        out.push(FieldEntry {
+            obj: (num, gen),
+            field_type: None,
+            qualified_name: None,
+            value_ref: None,
+        });
+        return;
+    };
+
+    let field_type = dict
+        .get("FT")
+        .and_then(|v| v.as_name())
+        .map(|s| s.to_string())
+        .or_else(|| inherited_ft.map(|s| s.to_string()));
+
+    let own_name = match dict.get("T") {
+        Some(PdfValue::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+        _ => None,
+    };
+    let qualified_name = match (inherited_name, own_name.as_deref()) {
+        (Some(parent), Some(own)) => Some(format!("{parent}.{own}")),
+        (Some(parent), None) => Some(parent.to_string()),
+        (None, Some(own)) => Some(own.to_string()),
+        (None, None) => None,
+    };
+
+    let value_ref = dict.get("V").and_then(|v| v.as_ref_pair()).or(inherited_v);
+
+    out.push(FieldEntry {
+        obj: (num, gen),
+        field_type: field_type.clone(),
+        qualified_name: qualified_name.clone(),
+        value_ref,
+    });
+
+    let Some(kids) = resolver.dict_get(dict, "Kids") else {
+        return;
+    };
+    let Some(kids) = kids.as_array().map(|a| a.to_vec()) else {
+        return;
+    };
+    for kid in kids {
+        walk_field_node(
+            resolver,
+            &kid,
+            field_type.as_deref(),
+            qualified_name.as_deref(),
+            value_ref,
+            depth + 1,
+            visited,
+            budget,
+            out,
+        );
+    }
+}
+
+/// Find the form field references reachable from `/AcroForm`.
+///
+/// The whole `/Kids` tree is walked, so hierarchical fields are included;
+/// the order is document order, parents before their children.
+pub fn find_fields_array(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<(u32, u16)>> {
+    Ok(find_field_tree(bytes, catalog_ref)?
+        .into_iter()
+        .map(|f| f.obj)
+        .collect())
+}
+
+/// Find object bytes by object number, through the cross-reference chain.
+///
+/// The returned slice covers `N G obj … endobj` in the file. An object that
+/// lives in an object stream has no such slice; use
+/// [`ObjectResolver::object_bytes`] for those.
+pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
+    let resolver = ObjectResolver::new(bytes);
+    let (start, end, _conf) = resolver
+        .object_span(obj_num)
+        .ok_or(VerifyError::SignatureObjectNotFound)?;
+    bytes
+        .get(start..end)
+        .ok_or(VerifyError::SignatureObjectNotFound)
+}
+
+/// Find object bytes together with the confidence of the lookup.
+pub fn find_object_with_confidence(bytes: &[u8], obj_num: u32) -> Result<(&[u8], Confidence)> {
+    let resolver = ObjectResolver::new(bytes);
+    let (start, end, conf) = resolver
+        .object_span(obj_num)
+        .ok_or(VerifyError::SignatureObjectNotFound)?;
+    let slice = bytes
+        .get(start..end)
+        .ok_or(VerifyError::SignatureObjectNotFound)?;
+    Ok((slice, conf))
 }
 
 /// Find object offset (file position) by object number.
 pub fn find_object_offset(bytes: &[u8], obj_num: u32) -> Result<u64> {
-    if let Some(pos) = find_object_definition(bytes, obj_num) {
-        return Ok(pos as u64);
-    }
-    Err(VerifyError::SignatureObjectNotFound)
+    let resolver = ObjectResolver::new(bytes);
+    resolver
+        .object_span(obj_num)
+        .map(|(start, _, _)| start as u64)
+        .ok_or(VerifyError::SignatureObjectNotFound)
 }
 
-/// Find a byte sequence in data.
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
+/// Whether the active revision of `bytes` declares `/Encrypt` in its trailer.
+///
+/// Signing an encrypted document by appending plaintext produces a file no
+/// reader will accept, so the sign path MUST refuse on this; verification
+/// reports it rather than describing a signature it cannot read.
+pub fn is_encrypted(bytes: &[u8]) -> bool {
+    ObjectResolver::new(bytes).is_encrypted()
 }
 
 /// Extract a signature field from field reference.
 fn extract_signature_field(
     bytes: &[u8],
-    field_ref: (u32, u16),
+    field: &FieldEntry,
     revisions: &RevisionMap,
 ) -> Result<Option<StructuralReport>> {
+    let field_ref = field.obj;
+    // /FT, /T and /V arrive already resolved through the parent chain; the
+    // tokenizer pass below only refines them from the node's own dictionary.
+    let mut field_type: Option<String> = field.field_type.clone();
+    let mut field_name: Option<String> = field.qualified_name.clone();
+    let mut sig_dict_ref: Option<(u32, u16)> = field.value_ref;
+
     let field_obj_slice = find_object(bytes, field_ref.0)?;
     if field_obj_slice.is_empty() {
         return Ok(None);
@@ -859,9 +956,6 @@ fn extract_signature_field(
 
     let mut tokenizer = PdfTokenizer::new(field_obj_slice);
 
-    let mut field_type: Option<String> = None;
-    let mut field_name: Option<String> = None;
-    let mut sig_dict_ref: Option<(u32, u16)> = None;
     let mut contents_extent: Option<ContentsExtent> = None;
     let mut byte_range: Option<ByteRange> = None;
     let mut declared_docmdp: Option<MdpPerm> = None;
@@ -888,7 +982,9 @@ fn extract_signature_field(
                             }
                         }
                     }
-                    "T" => {
+                    // The qualified name from the field tree wins: it carries
+                    // the ancestors' /T, which this local pass cannot see.
+                    "T" if field_name.is_none() => {
                         if let Ok(name_str) = std::str::from_utf8(&token) {
                             if let Some(name_val) = parse_pdf_string(name_str) {
                                 field_name = Some(name_val);
@@ -1777,5 +1873,309 @@ mod tests {
         assert_eq!(sig.field_name, "Sig1");
         // Coverage is Unclear due to test PDF having incorrect ByteRange values,
         // but signature discovery works correctly.
+    }
+
+    // ---------------------------------------------------------------
+    // Object resolution (§28.1 prerequisite): the resolver, not a scan.
+    // ---------------------------------------------------------------
+
+    /// One object to emit into a fixture.
+    struct ObjSpec {
+        num: u32,
+        gen: u16,
+        body: Vec<u8>,
+    }
+
+    fn obj(num: u32, gen: u16, body: &[u8]) -> ObjSpec {
+        ObjSpec {
+            num,
+            gen,
+            body: body.to_vec(),
+        }
+    }
+
+    /// Emit a single-revision PDF with a correct classic cross-reference
+    /// table, one subsection per object so generations are carried exactly.
+    fn build_classic_pdf(objs: &[ObjSpec], trailer_extra: &str) -> Vec<u8> {
+        let mut buf = Vec::from(&b"%PDF-1.7\n"[..]);
+        let mut offsets = Vec::new();
+        for o in objs {
+            offsets.push(buf.len());
+            buf.extend_from_slice(format!("{} {} obj\n", o.num, o.gen).as_bytes());
+            buf.extend_from_slice(&o.body);
+            buf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = buf.len();
+        buf.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+        let max_num = objs.iter().map(|o| o.num).max().unwrap_or(0);
+        for (o, off) in objs.iter().zip(&offsets) {
+            buf.extend_from_slice(format!("{} 1\n{:010} {:05} n \n", o.num, off, o.gen).as_bytes());
+        }
+        buf.extend_from_slice(
+            format!(
+                "trailer\n<</Size {}\n/Root 1 0 R\n{trailer_extra}>>\nstartxref\n{xref}\n%%EOF",
+                max_num + 1
+            )
+            .as_bytes(),
+        );
+        buf
+    }
+
+    #[test]
+    fn object_with_nonzero_generation_is_found() {
+        // The old scan searched for the literal "{n} 0 obj" and so could never
+        // see this object at all.
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog>>"),
+                obj(4, 2, b"<</Marker /GenTwo>>"),
+            ],
+            "",
+        );
+
+        let (slice, confidence) =
+            find_object_with_confidence(&pdf, 4).expect("object 4 must resolve");
+        assert_eq!(confidence, Confidence::Resolved);
+        let text = String::from_utf8_lossy(slice);
+        assert!(text.starts_with("4 2 obj"), "got {text:?}");
+        assert!(text.contains("GenTwo"));
+
+        let resolver = ObjectResolver::new(&pdf);
+        let (value, _) = resolver.resolve(4).unwrap();
+        assert_eq!(
+            value.as_dict().unwrap().get("Marker").unwrap().as_name(),
+            Some("GenTwo")
+        );
+    }
+
+    #[test]
+    fn generation_mismatch_is_not_accepted_from_the_xref() {
+        // The xref claims generation 0 for an object written as generation 2:
+        // the header check must reject the offset rather than trust it.
+        let mut pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
+        let broken = pdf.len();
+        let _ = broken;
+        // Rewrite the entry's generation field for object 1.
+        let entry = b"00000 n";
+        if let Some(p) = pdf.windows(entry.len()).rposition(|w| w == entry) {
+            pdf[p..p + 5].copy_from_slice(b"00007");
+        }
+        let resolver = ObjectResolver::new(&pdf);
+        // The repair scan still finds it, but the lookup is no longer
+        // presented as resolved.
+        let (_span_start, _span_end, confidence) = resolver.object_span(1).expect("scan finds it");
+        assert_eq!(confidence, Confidence::Scanned);
+    }
+
+    /// A stream whose body contains a decoy definition of object 5.
+    fn stream_with_decoy() -> Vec<u8> {
+        let body = b"5 0 obj\n<</Decoy true>>\nendobj\n";
+        let mut out = format!("<</Length {}>>\nstream\n", body.len()).into_bytes();
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendstream");
+        out
+    }
+
+    #[test]
+    fn decoy_object_inside_a_stream_body_is_not_selected() {
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog>>"),
+                obj(3, 0, &stream_with_decoy()),
+                obj(5, 0, b"<</Real true>>"),
+            ],
+            "",
+        );
+
+        // Through the cross-reference chain.
+        let slice = find_object(&pdf, 5).expect("object 5 must resolve");
+        let text = String::from_utf8_lossy(slice);
+        assert!(text.contains("/Real"), "got {text:?}");
+        assert!(!text.contains("Decoy"));
+
+        // And through the repair scan, which is what the old text search was.
+        let scan = objects::scan_object_definitions(&pdf);
+        let (start, _gen) = scan.get(&5).copied().expect("scan finds object 5");
+        let scanned = String::from_utf8_lossy(&pdf[start..start + 24]);
+        assert!(scanned.starts_with("5 0 obj"));
+        assert!(!scanned.contains("Decoy"), "got {scanned:?}");
+        // The decoy lives inside object 3's body, which the scan steps over.
+        let decoy_at = pdf
+            .windows(7)
+            .position(|w| w == b"5 0 obj")
+            .expect("the decoy is present in the file");
+        assert!(
+            decoy_at < start,
+            "the decoy must precede the real definition, so a naive scan would find it"
+        );
+    }
+
+    /// Build a PDF whose cross-reference is a stream, with object 7 living
+    /// inside object stream 6. `compress` selects a FlateDecode body.
+    fn build_objstm_pdf(compress: bool) -> Vec<u8> {
+        use std::io::Write;
+
+        // Object stream payload: one object, number 7.
+        let inner = b"<</Type /Marker /Note (from-objstm)>>";
+        let pairs = b"7 0 ";
+        let first = pairs.len();
+        let mut payload = Vec::from(&pairs[..]);
+        payload.extend_from_slice(inner);
+
+        let (stm_body, stm_filter) = if compress {
+            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(&payload).unwrap();
+            (enc.finish().unwrap(), " /Filter /FlateDecode")
+        } else {
+            (payload.clone(), "")
+        };
+
+        let mut buf = Vec::from(&b"%PDF-1.5\n"[..]);
+
+        let obj6 = buf.len();
+        buf.extend_from_slice(
+            format!(
+                "6 0 obj\n<</Type /ObjStm /N 1 /First {first} /Length {}{stm_filter}>>\nstream\n",
+                stm_body.len()
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(&stm_body);
+        buf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        // Cross-reference stream, uncompressed, /W [1 4 2].
+        let obj8 = buf.len();
+        let mut rows: Vec<u8> = Vec::new();
+        let mut row = |kind: u8, f2: u32, f3: u16| {
+            rows.push(kind);
+            rows.extend_from_slice(&f2.to_be_bytes());
+            rows.extend_from_slice(&f3.to_be_bytes());
+        };
+        row(1, obj6 as u32, 0); // object 6, in file
+        row(2, 6, 0); // object 7, in object stream 6 at index 0
+        row(1, obj8 as u32, 0); // object 8, in file
+        buf.extend_from_slice(
+            format!(
+                "8 0 obj\n<</Type /XRef /Size 9 /Index [6 3] /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                rows.len()
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(&rows);
+        buf.extend_from_slice(b"\nendstream\nendobj\n");
+        buf.extend_from_slice(format!("startxref\n{obj8}\n%%EOF").as_bytes());
+        buf
+    }
+
+    #[test]
+    fn object_inside_an_uncompressed_object_stream_is_resolved() {
+        let pdf = build_objstm_pdf(false);
+        let resolver = ObjectResolver::new(&pdf);
+        let (value, confidence) = resolver.resolve(7).expect("object 7 lives in objstm 6");
+        assert_eq!(confidence, Confidence::Resolved);
+        let dict = value.as_dict().expect("a dictionary");
+        assert_eq!(dict.get("Type").unwrap().as_name(), Some("Marker"));
+
+        // And its bytes are handed back as a self-contained definition.
+        let (bytes, _) = resolver.object_bytes(7).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.starts_with("7 0 obj"), "got {text:?}");
+        assert!(text.contains("from-objstm"));
+    }
+
+    #[test]
+    fn object_inside_a_flate_object_stream_is_resolved() {
+        let pdf = build_objstm_pdf(true);
+        let resolver = ObjectResolver::new(&pdf);
+        let (value, confidence) = resolver.resolve(7).expect("object 7 lives in objstm 6");
+        assert_eq!(confidence, Confidence::Resolved);
+        assert_eq!(
+            value.as_dict().unwrap().get("Type").unwrap().as_name(),
+            Some("Marker")
+        );
+    }
+
+    #[test]
+    fn xref_stream_supplies_the_catalog_reference() {
+        let pdf = build_objstm_pdf(false);
+        // /Root comes from the cross-reference stream dictionary, which the
+        // tokenizer walk over a classic trailer could never read.
+        assert_eq!(find_catalog_ref(&pdf).unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn hierarchical_field_tree_is_discovered_with_inheritance() {
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog /AcroForm 2 0 R>>"),
+                obj(2, 0, b"<</Fields [3 0 R] /SigFlags 3>>"),
+                // Parent declares /FT and /T; the terminal field declares
+                // neither and must inherit both.
+                obj(3, 0, b"<</T (form) /FT /Sig /Kids [4 0 R]>>"),
+                obj(4, 0, b"<</T (Sig1) /V 5 0 R>>"),
+                obj(5, 0, b"<</Type /Sig>>"),
+            ],
+            "",
+        );
+
+        let fields = find_field_tree(&pdf, (1, 0)).expect("field tree");
+        assert_eq!(fields.len(), 2, "parent and child are both reported");
+
+        let child = fields
+            .iter()
+            .find(|f| f.obj.0 == 4)
+            .expect("terminal field");
+        assert_eq!(child.field_type.as_deref(), Some("Sig"));
+        assert_eq!(child.qualified_name.as_deref(), Some("form.Sig1"));
+        assert_eq!(child.value_ref, Some((5, 0)));
+
+        // The compatibility wrapper reports the same objects.
+        let refs = find_fields_array(&pdf, (1, 0)).unwrap();
+        assert!(refs.contains(&(4, 0)));
+    }
+
+    #[test]
+    fn field_tree_walk_survives_a_kids_cycle() {
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog /AcroForm 2 0 R>>"),
+                obj(2, 0, b"<</Fields [3 0 R]>>"),
+                obj(3, 0, b"<</T (a) /FT /Sig /Kids [4 0 R]>>"),
+                obj(4, 0, b"<</T (b) /Kids [3 0 R]>>"),
+            ],
+            "",
+        );
+        let fields = find_field_tree(&pdf, (1, 0)).expect("field tree");
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn an_encrypted_document_is_detected_and_refused() {
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog /AcroForm 2 0 R>>"),
+                obj(2, 0, b"<</Fields []>>"),
+                obj(
+                    9,
+                    0,
+                    b"<</Filter /Standard /V 2 /R 3 /Length 128 /P -1340>>",
+                ),
+            ],
+            "/Encrypt 9 0 R\n",
+        );
+
+        assert!(is_encrypted(&pdf), "the trailer declares /Encrypt");
+
+        let revisions = RevisionMap::build(&pdf).unwrap();
+        assert!(matches!(
+            discover_signatures(&pdf, &revisions),
+            Err(VerifyError::EncryptedPdf)
+        ));
+    }
+
+    #[test]
+    fn an_unencrypted_document_is_not_flagged() {
+        let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
+        assert!(!is_encrypted(&pdf));
     }
 }

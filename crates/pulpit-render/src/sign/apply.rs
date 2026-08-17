@@ -251,6 +251,19 @@ fn sign_document_file_inner(
     request: &SignRequest,
     tamper: Option<Tamper<'_>>,
 ) -> Result<SignReport, SignApplyError> {
+    // The promise is that the source is untouched. Signing in place would
+    // break it — the rename at the end would replace the source with the
+    // candidate — so it is refused before anything is read.
+    if is_same_file(source, destination)? {
+        return Err(SignApplyError::Refused(PreflightRefusal::InvalidState(
+            format!(
+                "the destination is the source file ({}); signing in place is refused because \
+                 the source must be left untouched",
+                source.display()
+            ),
+        )));
+    }
+
     let source_bytes = std::fs::read(source).map_err(|e| SignApplyError::Io {
         path: source.to_path_buf(),
         source: e,
@@ -294,8 +307,9 @@ fn sign_document_file_inner(
     // temporary-file convention `pdf::pdfium::write_atomically` uses, so an
     // interrupted signing leaves the destination either untouched or holding
     // a complete signed PDF.
-    let temporary = temporary_path(destination);
-    write_and_sync(&temporary, &candidate)?;
+    let (temporary, mut temporary_file) = create_temporary(destination)?;
+    write_and_sync(&temporary, &mut temporary_file, &candidate)?;
+    drop(temporary_file);
 
     // §32: the gate reads the file back from disk. Anything less would be
     // checking what we meant to write rather than what we wrote.
@@ -1017,19 +1031,121 @@ fn digest_spans<D: Digest>(first: &[u8], second: &[u8]) -> Vec<u8> {
 
 // --- Files ----------------------------------------------------------------
 
-/// A hidden temporary file in the destination's own directory, named the way
-/// `pdf::pdfium::write_atomically` names its own, so that the two leave the
-/// same debris behind if a process dies mid-write.
-fn temporary_path(destination: &Path) -> PathBuf {
-    let directory = destination.parent().unwrap_or_else(|| Path::new("."));
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ticket = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    directory.join(format!(".pulpit-sign-{}-{ticket}", std::process::id()))
+/// Do `source` and `destination` name the same file?
+///
+/// The destination need not exist yet, so it is resolved as its canonical
+/// parent directory plus its final component. A path whose parent cannot be
+/// resolved is not the source by definition — the source was resolvable.
+fn is_same_file(source: &Path, destination: &Path) -> Result<bool, SignApplyError> {
+    let source_canonical = source.canonicalize().map_err(|e| SignApplyError::Io {
+        path: source.to_path_buf(),
+        source: e,
+    })?;
+
+    if let Ok(destination_canonical) = destination.canonicalize() {
+        return Ok(destination_canonical == source_canonical);
+    }
+
+    let (Some(parent), Some(name)) = (destination.parent(), destination.file_name()) else {
+        return Ok(false);
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    match parent.canonicalize() {
+        Ok(parent) => Ok(parent.join(name) == source_canonical),
+        Err(_) => Ok(false),
+    }
 }
 
-fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SignApplyError> {
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::File::create(path)?;
+/// A per-attempt name for the temporary file. Uniqueness, not secrecy: the
+/// secrecy comes from `O_EXCL`, which is what makes a pre-planted file or
+/// symlink at the same name a failure rather than a hijack.
+fn temporary_name() -> String {
+    use std::hash::{BuildHasher, Hasher, RandomState};
+
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+
+    // `RandomState` is seeded per process by the standard library; hashing
+    // the ticket and the clock through it gives a name an attacker cannot
+    // predict from the pid alone.
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(ticket);
+    hasher.write_u64(nanos);
+    hasher.write_u32(std::process::id());
+    format!(
+        ".pulpit-sign-{}-{:016x}",
+        std::process::id(),
+        hasher.finish()
+    )
+}
+
+/// Create `path`, and only create it: `O_CREAT|O_EXCL`, mode `0o600`.
+///
+/// An existing file, or a symlink pointing anywhere at all, makes this fail
+/// with `AlreadyExists` instead of opening — and nothing is truncated.
+fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Create the hidden temporary file in the destination's own directory.
+///
+/// `create_new` is `O_EXCL|O_CREAT`: it never follows a symlink and never
+/// truncates an existing file, so a name planted by another user is a
+/// refusal rather than a write through to whatever it points at. The mode is
+/// `0o600` from the first instant the file exists, not after the fact.
+fn create_temporary(destination: &Path) -> Result<(PathBuf, std::fs::File), SignApplyError> {
+    let directory = destination.parent().unwrap_or_else(|| Path::new("."));
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+
+    let mut last_error = None;
+    for _ in 0..32 {
+        let path = directory.join(temporary_name());
+        match open_exclusive(&path) {
+            Ok(file) => return Ok((path, file)),
+            // The name was taken: draw another one rather than touch it.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
+            Err(e) => return Err(SignApplyError::Io { path, source: e }),
+        }
+    }
+
+    Err(SignApplyError::Io {
+        path: directory.to_path_buf(),
+        source: last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "no free temporary file name",
+            )
+        }),
+    })
+}
+
+/// Write through the handle that was created, never by reopening the path:
+/// reopening would hand the window back to whoever can write the directory.
+fn write_and_sync(
+    path: &Path,
+    file: &mut std::fs::File,
+    bytes: &[u8],
+) -> Result<(), SignApplyError> {
+    let mut write = || -> std::io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()
     };
@@ -1347,6 +1463,91 @@ mod tests {
         assert_eq!(entries[0].0, "Type");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[2].0, "AcroForm");
+    }
+
+    // --- The temporary file and the in-place guard ------------------------
+
+    #[test]
+    fn a_planted_file_at_the_temporary_name_is_not_truncated() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let planted = directory.path().join(".pulpit-sign-planted");
+        std::fs::write(&planted, b"victim contents").expect("plant a file");
+
+        let error = open_exclusive(&planted).expect_err("O_EXCL refuses an existing name");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&planted).expect("read back"),
+            b"victim contents",
+            "the planted file must not have been truncated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_at_the_temporary_name_is_not_followed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let victim = directory.path().join("victim");
+        std::fs::write(&victim, b"victim contents").expect("write the victim");
+        let planted = directory.path().join(".pulpit-sign-planted");
+        std::os::unix::fs::symlink(&victim, &planted).expect("plant a symlink");
+
+        let error = open_exclusive(&planted).expect_err("O_EXCL refuses a symlink");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&victim).expect("read back"),
+            b"victim contents",
+            "the symlink's target must not have been written through"
+        );
+    }
+
+    #[test]
+    fn the_temporary_file_is_fresh_private_and_unpredictable() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let destination = directory.path().join("signed.pdf");
+
+        let (first, _first_file) = create_temporary(&destination).expect("create a temporary");
+        let (second, _second_file) = create_temporary(&destination).expect("create another");
+
+        assert_ne!(first, second, "two temporaries must not share a name");
+        assert!(first.exists() && second.exists());
+        assert_eq!(first.parent(), Some(directory.path()));
+        assert_eq!(std::fs::read(&first).expect("read back"), b"");
+
+        // The name must not be derivable from the pid and a counter alone.
+        let predictable = format!(".pulpit-sign-{}-0", std::process::id());
+        assert_ne!(first.file_name().unwrap().to_string_lossy(), predictable);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first)
+                .expect("stat")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the candidate must be private");
+        }
+    }
+
+    #[test]
+    fn signing_a_file_onto_itself_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = directory.path().join("deck.pdf");
+        std::fs::write(&source, b"%PDF-1.4\n").expect("write the source");
+
+        // The same path, spelled three ways that all resolve to one file.
+        let indirect = directory.path().join(".").join("deck.pdf");
+        let link = directory.path().join("link.pdf");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &link).expect("plant a symlink");
+
+        assert!(is_same_file(&source, &source).expect("resolve"));
+        assert!(is_same_file(&source, &indirect).expect("resolve"));
+        #[cfg(unix)]
+        assert!(is_same_file(&source, &link).expect("resolve"));
+
+        // A destination that does not exist yet is still compared correctly.
+        let fresh = directory.path().join("signed.pdf");
+        assert!(!is_same_file(&source, &fresh).expect("resolve"));
     }
 
     #[test]

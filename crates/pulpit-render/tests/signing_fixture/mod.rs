@@ -36,7 +36,9 @@ pub fn load_test_credential() -> Option<sign::Credential> {
     let cred_path = PathBuf::from("../../tools/sign-oracle/credentials/test-self-signed.p12");
     if cred_path.exists() {
         if let Ok(p12_bytes) = std::fs::read(&cred_path) {
-            if let Ok(cred) = sign::load_pkcs12(&p12_bytes, "test") {
+            if let Ok(cred) =
+                sign::load_pkcs12(&p12_bytes, sign::Zeroizing::new("test".to_string()))
+            {
                 return Some(cred);
             }
         }

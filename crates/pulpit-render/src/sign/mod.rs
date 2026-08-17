@@ -20,6 +20,9 @@ pub use apply::{
 pub use credential::{Credential, CredentialSummary};
 pub use errors::SigningError;
 pub use mechanism::{DigestAlgorithm, SigningMechanism};
+/// Re-exported so callers can build the passphrase buffer [`load_pkcs12`]
+/// requires without taking a direct `zeroize` dependency.
+pub use zeroize::Zeroizing;
 
 /// Signing profile affects which attributes are included (§26.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +43,14 @@ pub struct CmsSignatureInfo {
 }
 
 /// Load a PKCS#12 file and return its credential.
-/// §30: passphrase lives in Zeroizing buffer, dropped as soon as credential is extracted.
-pub fn load_pkcs12(pkcs12_data: &[u8], passphrase: &str) -> Result<Credential, SigningError> {
+///
+/// §30: the passphrase is taken by value in a [`zeroize::Zeroizing`] buffer and
+/// wiped as soon as the keystore is decrypted. Callers should move their only
+/// copy in rather than cloning a plain `String`.
+pub fn load_pkcs12(
+    pkcs12_data: &[u8],
+    passphrase: zeroize::Zeroizing<String>,
+) -> Result<Credential, SigningError> {
     credential::load_pkcs12_impl(pkcs12_data, passphrase)
 }
 
@@ -328,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_pkcs12_loading_deferred() {
-        let result = load_pkcs12(b"dummy", "password");
+        let result = load_pkcs12(b"dummy", Zeroizing::new("password".to_string()));
         assert!(result.is_err());
     }
 
@@ -363,7 +372,8 @@ mod tests {
             .expect("Failed to write PKCS#12");
 
         // Load credential
-        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+        let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))
+            .expect("Failed to load PKCS#12");
 
         // Use a fixed 32-byte test digest
         let test_digest = vec![0x42u8; 32];
@@ -427,7 +437,8 @@ mod tests {
             .expect("Failed to write PKCS#12");
 
         // Load credential
-        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+        let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))
+            .expect("Failed to load PKCS#12");
 
         // Estimate CMS size
         let test_digest = vec![0x42u8; 32];
@@ -496,7 +507,8 @@ mod tests {
             .expect("Failed to write PKCS#12");
 
         // Load credential
-        let credential = load_pkcs12(&p12_bytes, password).expect("Failed to load PKCS#12");
+        let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))
+            .expect("Failed to load PKCS#12");
 
         // Test digest (32 bytes for SHA-256)
         let test_digest = vec![0x42u8; 32];

@@ -253,14 +253,41 @@ impl PdfObject {
                 write!(writer, "{}", formatted).map_err(PdfWriteError::Io)?
             }
             PdfObject::String(s) => {
-                writer.write_all(b"(").map_err(PdfWriteError::Io)?;
-                for &byte in s {
-                    if byte == b'(' || byte == b')' || byte == b'\\' {
-                        writer.write_all(b"\\").map_err(PdfWriteError::Io)?;
+                // A BOM-less literal string is read as PDFDocEncoding by a
+                // conforming viewer, so raw UTF-8 would garble any non-ASCII
+                // signer name or reason. ASCII is a subset of PDFDocEncoding
+                // and is emitted unchanged (keeping existing output
+                // byte-exact); anything else is emitted as UTF-16BE with a
+                // leading BOM, as a hex string.
+                if s.is_ascii() {
+                    writer.write_all(b"(").map_err(PdfWriteError::Io)?;
+                    for &byte in s {
+                        if byte == b'(' || byte == b')' || byte == b'\\' {
+                            writer.write_all(b"\\").map_err(PdfWriteError::Io)?;
+                        }
+                        writer.write_all(&[byte]).map_err(PdfWriteError::Io)?;
                     }
-                    writer.write_all(&[byte]).map_err(PdfWriteError::Io)?;
+                    writer.write_all(b")").map_err(PdfWriteError::Io)?;
+                } else {
+                    // Non-UTF-8 bytes are not text we can transcode; they are
+                    // preserved verbatim inside a hex string instead.
+                    let text = std::str::from_utf8(s).ok();
+                    writer.write_all(b"<").map_err(PdfWriteError::Io)?;
+                    match text {
+                        Some(text) => {
+                            write!(writer, "FEFF").map_err(PdfWriteError::Io)?;
+                            for unit in text.encode_utf16() {
+                                write!(writer, "{:04X}", unit).map_err(PdfWriteError::Io)?;
+                            }
+                        }
+                        None => {
+                            for byte in s {
+                                write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
+                            }
+                        }
+                    }
+                    writer.write_all(b">").map_err(PdfWriteError::Io)?;
                 }
-                writer.write_all(b")").map_err(PdfWriteError::Io)?;
             }
             PdfObject::Name(n) => write!(writer, "/{}", n).map_err(PdfWriteError::Io)?,
             PdfObject::HexString(h) => {
@@ -704,38 +731,53 @@ impl IncrementalWriter {
         xref_stream_obj_num: u32,
         new_id2: &[u8; 16],
     ) -> Result<()> {
-        // Build xref stream data: entries in /Index order
-        // /W [1 4 2] = 7 bytes per entry
-        let mut xref_data = Vec::new();
-
-        // Entry for object 0 (free object)
-        xref_data.push(0u8); // type: free
-        xref_data.extend_from_slice(&[0u8; 4]); // offset
-        xref_data.extend_from_slice(&[255u8, 255u8]); // gen
-
-        // Entries for appended objects
-        for (_obj_num, offset) in obj_offsets {
-            xref_data.push(1u8); // type: normal object
-            xref_data.extend_from_slice(&(*offset as u32).to_be_bytes());
-            xref_data.extend_from_slice(&[0u8, 0u8]); // gen
-        }
-
-        // Entry for the xref stream object itself
-        xref_data.push(1u8); // type: normal object
+        // Collect every entry this section describes, keyed by object number.
+        //
+        // The rows of an xref stream are positional: they are read in the order
+        // given by the `/Index` ranges. Emitting a single range that spans the
+        // appended object numbers is only correct when those numbers are
+        // consecutive, which they are not in general — signing rewrites the
+        // catalog, the AcroForm and a page (low numbers) alongside freshly
+        // allocated ones taken from the trailer's `/Size`. So the entries are
+        // sorted by object number and split into consecutive runs, one
+        // `/Index` pair per run, with the rows written in exactly that order.
         let xref_stream_offset = writer.stream_position().map_err(PdfWriteError::Io)?;
-        xref_data.extend_from_slice(&(xref_stream_offset as u32).to_be_bytes());
-        xref_data.extend_from_slice(&[0u8, 0u8]); // gen
 
-        // Build /Index array: [[0, 1], [first_appended, count], [xref_stream_num, 1]]
-        let mut index_array = vec![0u32, 1u32]; // object 0
-
-        if !obj_offsets.is_empty() {
-            index_array.push(obj_offsets[0].0); // first appended object
-            index_array.push(obj_offsets.len() as u32);
+        // (obj_num, type, offset, gen)
+        let mut entries: Vec<(u32, u8, u64, u16)> = Vec::with_capacity(obj_offsets.len() + 2);
+        entries.push((0, 0, 0, 65535)); // object 0: head of the free list
+        for (obj_num, offset) in obj_offsets {
+            entries.push((*obj_num, 1, *offset, 0));
         }
+        entries.push((xref_stream_obj_num, 1, xref_stream_offset, 0));
 
-        index_array.push(xref_stream_obj_num); // xref stream itself
-        index_array.push(1u32);
+        entries.sort_by_key(|(n, _, _, _)| *n);
+        entries.dedup_by_key(|(n, _, _, _)| *n);
+
+        // Split into consecutive runs; each run becomes one /Index pair.
+        let mut index_array: Vec<u32> = Vec::new();
+        let mut run_start = entries[0].0;
+        let mut run_len = 0u32;
+        for (i, (obj_num, _, _, _)) in entries.iter().enumerate() {
+            if i > 0 && *obj_num != entries[i - 1].0 + 1 {
+                index_array.push(run_start);
+                index_array.push(run_len);
+                run_start = *obj_num;
+                run_len = 0;
+            }
+            run_len += 1;
+        }
+        index_array.push(run_start);
+        index_array.push(run_len);
+
+        // Rows, in exactly the order the /Index ranges enumerate.
+        // /W [1 4 2] = 7 bytes per entry
+        let mut xref_data = Vec::with_capacity(entries.len() * 7);
+        for (_obj_num, kind, offset, generation) in &entries {
+            xref_data.push(*kind);
+            xref_data.extend_from_slice(&(*offset as u32).to_be_bytes());
+            xref_data.extend_from_slice(&generation.to_be_bytes());
+        }
 
         // Calculate new size
         let new_size = std::cmp::max(
@@ -1558,6 +1600,153 @@ mod tests {
             !trailer_after_fixture.windows(7).any(|w| w == b"trailer"),
             "xref stream should not contain trailer keyword"
         );
+    }
+
+    /// Extract the `/Index` array and the raw stream rows from the last xref
+    /// stream in `bytes`, using the file's own `startxref`.
+    fn parse_last_xref_stream(bytes: &[u8]) -> (Vec<u32>, Vec<(u8, u64, u16)>) {
+        let startxref = find_startxref(bytes).expect("startxref") as usize;
+        let tail = &bytes[startxref..];
+
+        let dict_end = tail
+            .windows(2)
+            .position(|w| w == b">>")
+            .expect("dictionary end");
+        let dict = std::str::from_utf8(&tail[..dict_end]).expect("dict is ascii");
+
+        let index_start = dict.find("/Index [").expect("/Index") + "/Index [".len();
+        let index_end = index_start + dict[index_start..].find(']').expect("/Index end");
+        let index: Vec<u32> = dict[index_start..index_end]
+            .split_whitespace()
+            .map(|t| t.parse().expect("index integer"))
+            .collect();
+
+        let stream_kw = tail
+            .windows(7)
+            .position(|w| w == b"stream\n")
+            .expect("stream keyword");
+        let data_start = stream_kw + 7;
+        let data_end = data_start
+            + tail[data_start..]
+                .windows(9)
+                .position(|w| w == b"endstream")
+                .expect("endstream")
+            - 1; // trailing newline written after the data
+
+        let data = &tail[data_start..data_end];
+        assert_eq!(data.len() % 7, 0, "rows are not a whole number of entries");
+        let mut rows = Vec::new();
+        let mut i = 0;
+        while i + 7 <= data.len() {
+            let c = &data[i..i + 7];
+            let offset = u32::from_be_bytes([c[1], c[2], c[3], c[4]]) as u64;
+            let generation = u16::from_be_bytes([c[5], c[6]]);
+            rows.push((c[0], offset, generation));
+            i += 7;
+        }
+
+        (index, rows)
+    }
+
+    #[test]
+    fn test_xref_stream_append_non_consecutive_object_numbers() {
+        let (fixture_bytes, _xref_offset) = build_xref_stream_fixture();
+
+        let writer =
+            IncrementalWriter::open(&fixture_bytes).expect("failed to open xref-stream fixture");
+        assert_eq!(writer.xref_kind, XRefKind::Stream);
+
+        // A signing-shaped rewrite: the catalog (1) and page (3) are replaced,
+        // and new objects are allocated above the trailer's /Size. The numbers
+        // are deliberately gapped.
+        let mut output = io::Cursor::new(Vec::new());
+        let mk = |v: i64| PdfObject::Dictionary(vec![("Value".to_string(), PdfObject::Integer(v))]);
+        let new_id2 = [0x21u8; 16];
+        writer
+            .append_objects(
+                &mut output,
+                &[(1, 0, mk(1)), (3, 0, mk(3)), (7, 0, mk(7)), (8, 0, mk(8))],
+                &new_id2,
+            )
+            .expect("append should succeed");
+
+        let output_bytes = output.into_inner();
+        let (index, rows) = parse_last_xref_stream(&output_bytes);
+
+        // Runs: {0,1} then {3} then {7,8,9} (9 is the xref stream itself,
+        // allocated as max(size, max_obj+1) = 9, adjacent to 8).
+        assert_eq!(index, vec![0, 2, 3, 1, 7, 3], "/Index runs are wrong");
+
+        // Expand the /Index ranges: this, and not the order the objects were
+        // handed to `append_objects`, is the object number each row describes.
+        let mut expected_nums: Vec<u32> = Vec::new();
+        for pair in index.chunks(2) {
+            for k in 0..pair[1] {
+                expected_nums.push(pair[0] + k);
+            }
+        }
+        assert_eq!(
+            expected_nums,
+            vec![0, 1, 3, 7, 8, 9],
+            "/Index does not enumerate the objects that were written"
+        );
+        assert_eq!(
+            rows.len(),
+            expected_nums.len(),
+            "/Index does not cover the rows"
+        );
+
+        // Row 0 is the free-list head; every other row must point at the
+        // `N 0 obj` header for its own object number.
+        assert_eq!(rows[0], (0, 0, 65535));
+        for (row, obj_num) in rows.iter().zip(&expected_nums).skip(1) {
+            let (kind, offset, generation) = *row;
+            assert_eq!(kind, 1, "object {} should be in use", obj_num);
+            assert_eq!(generation, 0);
+            let header = format!("{} 0 obj", obj_num);
+            let at = &output_bytes[offset as usize..];
+            assert!(
+                at.starts_with(header.as_bytes()),
+                "row for object {} points at {:?}, not {:?}",
+                obj_num,
+                String::from_utf8_lossy(&at[..header.len().min(at.len())]),
+                header
+            );
+        }
+    }
+
+    #[test]
+    fn test_pdf_object_string_ascii_is_literal() {
+        let obj = PdfObject::String(b"Alice (the signer) \\ Ltd".to_vec());
+        let mut result = Vec::new();
+        obj.serialize(&mut result).unwrap();
+        assert_eq!(result, b"(Alice \\(the signer\\) \\\\ Ltd)");
+    }
+
+    #[test]
+    fn test_pdf_object_string_non_ascii_is_utf16be_with_bom() {
+        let obj = PdfObject::String("Émile".as_bytes().to_vec());
+        let mut result = Vec::new();
+        obj.serialize(&mut result).unwrap();
+        assert_eq!(result, b"<FEFF00C9006D0069006C0065>");
+
+        // Round-trip: strip the delimiters, decode the hex, check the BOM and
+        // recover the original text.
+        let hex = std::str::from_utf8(&result[1..result.len() - 1]).unwrap();
+        let units: Vec<u16> = (0..hex.len())
+            .step_by(4)
+            .map(|i| u16::from_str_radix(&hex[i..i + 4], 16).unwrap())
+            .collect();
+        assert_eq!(units[0], 0xFEFF);
+        assert_eq!(String::from_utf16(&units[1..]).unwrap(), "Émile");
+    }
+
+    #[test]
+    fn test_pdf_object_string_astral_plane_round_trips() {
+        let obj = PdfObject::String("a\u{1F512}".as_bytes().to_vec());
+        let mut result = Vec::new();
+        obj.serialize(&mut result).unwrap();
+        assert_eq!(result, b"<FEFF0061D83DDD12>");
     }
 
     #[test]

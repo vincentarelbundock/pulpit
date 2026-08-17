@@ -328,9 +328,7 @@ pub fn sign_tbs(
         | SigningMechanism::Rsa4096Sha512 => sign_with_rsa(credential, tbs, mechanism),
         SigningMechanism::EcdsaP256Sha256 => sign_with_ecdsa_p256(credential, tbs),
         SigningMechanism::EcdsaP384Sha384 => sign_with_ecdsa_p384(credential, tbs),
-        SigningMechanism::EcdsaP521Sha512 => Err(SigningError::UnsupportedKeyAlgorithm {
-            algorithm: "P-521 key parsing deferred (see mechanism.rs)".to_string(),
-        }),
+        SigningMechanism::EcdsaP521Sha512 => sign_with_ecdsa_p521(credential, tbs),
         SigningMechanism::Ed25519 => sign_with_ed25519(credential, tbs),
     }
 }
@@ -405,6 +403,26 @@ fn sign_with_ecdsa_p384(credential: &Credential, tbs: &[u8]) -> Result<Vec<u8>, 
     })?;
 
     let sig: p384::ecdsa::Signature = key.sign(tbs);
+    Ok(sig.to_der().as_bytes().to_vec())
+}
+
+fn sign_with_ecdsa_p521(credential: &Credential, tbs: &[u8]) -> Result<Vec<u8>, SigningError> {
+    use pkcs8::DecodePrivateKey;
+    use signature::Signer;
+
+    let pkey_der = credential.private_key_der();
+    // `p521::ecdsa::SigningKey` does not implement `DecodePrivateKey` (unlike
+    // its P-256/P-384 counterparts), so go through `SecretKey`, whose scalar
+    // bytes are held in a zeroizing buffer for the hop.
+    let secret = p521::SecretKey::from_pkcs8_der(pkey_der).map_err(|e| {
+        SigningError::SignatureOperationFailed(format!("Failed to parse P-521 key: {e}"))
+    })?;
+    let scalar_bytes = zeroize::Zeroizing::new(secret.to_bytes());
+    let key = p521::ecdsa::SigningKey::from_slice(&scalar_bytes[..]).map_err(|e| {
+        SigningError::SignatureOperationFailed(format!("Failed to load P-521 key: {e}"))
+    })?;
+
+    let sig: p521::ecdsa::Signature = key.sign(tbs);
     Ok(sig.to_der().as_bytes().to_vec())
 }
 
