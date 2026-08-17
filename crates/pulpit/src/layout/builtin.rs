@@ -4,7 +4,7 @@
 //! a good presenter screen looks like: strong hierarchy, readable at a
 //! glance, large controls, restrained colour.
 
-use crate::layout::model::{AspectRatio, Layout, LayoutId, Origin};
+use crate::layout::model::{AspectRatio, Layout, LayoutId, LayoutPurpose, Origin};
 use crate::layout::tree::{Cell, CellBackground, Direction, Node, NodeId, Split};
 use crate::widgets::{Widget, WidgetKind};
 
@@ -115,14 +115,15 @@ impl Builder {
 /// tall one, since a page is portrait (§2.4). Layouts are stored
 /// proportionally and scale to whatever they land on either way; the ratio
 /// only sets what the designer previews.
-fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
+fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio, purpose: LayoutPurpose) -> Layout {
     let mut layout = Layout::from_parts(
         LayoutId(id.to_string()),
         name.to_string(),
         Origin::BuiltIn,
         ratio,
         root,
-    );
+    )
+    .with_purpose(purpose);
     layout.renumber();
     debug_assert!(layout.is_canonical(), "{name} is not canonical");
     layout
@@ -195,6 +196,7 @@ pub fn presenter_default() -> Layout {
         "presenter-default",
         root,
         AspectRatio::SixteenNine,
+        LayoutPurpose::Presentation,
     )
 }
 
@@ -250,7 +252,13 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
         &[0.07, 0.93],
         vec![band, body],
     );
-    finish("Reader", "reader-default", root, ratio)
+    finish(
+        "Reader",
+        "reader-default",
+        root,
+        ratio,
+        LayoutPurpose::Document,
+    )
 }
 
 /// The built-ins, in the order the library shows them.
@@ -280,42 +288,11 @@ pub fn default_for(mode: LayoutMode) -> LayoutId {
 
 /// What a layout is for.
 ///
-/// Not a property of the layout tree: presentation widgets in a document
-/// layout and document widgets in a presenter layout are not errors (§2), and
-/// a cell whose widget has nothing to show renders its empty behaviour. This
-/// says which layout is *mounted*, which is the whole of what "mode" means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LayoutMode {
-    Presentation,
-    Document,
-}
-
-impl LayoutMode {
-    /// Which mode a built-in belongs to, by the widgets it actually carries.
-    ///
-    /// Derived rather than declared, so a user's copy of a built-in answers
-    /// the same way the built-in does without carrying a flag that could
-    /// disagree with its contents.
-    pub fn of(layout: &Layout) -> LayoutMode {
-        let document = layout
-            .widgets()
-            .iter()
-            .any(|widget| widget.kind().family() == crate::widgets::Family::Document);
-        if document {
-            LayoutMode::Document
-        } else {
-            LayoutMode::Presentation
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            LayoutMode::Presentation => "Presentation",
-            LayoutMode::Document => "Document",
-        }
-    }
-}
+/// An alias, not a second type: [`LayoutPurpose`] lives in [`crate::layout::model`]
+/// now that it is a field on [`Layout`] rather than something computed only
+/// here, but every existing caller of `LayoutMode` — there are many — keeps
+/// compiling unchanged.
+pub type LayoutMode = LayoutPurpose;
 
 #[cfg(test)]
 mod tests {
@@ -334,6 +311,23 @@ mod tests {
         }
         let ids: Vec<&str> = layouts.iter().map(|layout| layout.id.0.as_str()).collect();
         assert_eq!(ids, vec!["presenter-default", "reader-default"]);
+    }
+
+    /// A built-in without its explicit purpose — the shape a v1 file, or an
+    /// early v2 one, would deserialize to — falls back to the same
+    /// widget-driven rule the old `LayoutMode::of` always used.
+    #[test]
+    fn purposeless_layouts_infer_the_same_mode_the_built_ins_declare() {
+        for mut layout in built_in_layouts() {
+            let declared = LayoutMode::of(&layout);
+            layout.purpose = None;
+            assert_eq!(
+                LayoutMode::of(&layout),
+                declared,
+                "{} infers a different mode once its explicit purpose is gone",
+                layout.name
+            );
+        }
     }
 
     /// §2.1: `reader-default` is a stable identifier, and the assertion on

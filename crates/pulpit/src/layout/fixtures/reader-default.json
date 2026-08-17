@@ -2,6 +2,7 @@
   "design_ratio": "sixteen-nine",
   "format_version": 2,
   "name": "Reader",
+  "purpose": "document",
   "root": {
     "children": [
       {
