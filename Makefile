@@ -28,7 +28,7 @@ endif
 
 .PHONY: help all build launch test check lint pdfium install uninstall bundle \
         linux-packages app app-universal icons windows website serve version \
-        bump release clean sign-oracle-setup sign-oracle
+        bump release clean sign-oracle-setup sign-oracle fuzz-sign
 
 help:  ## Display this help screen
 	@echo -e "\033[1mAvailable commands:\033[0m\n"
@@ -137,6 +137,15 @@ sign-oracle-setup:  ## Set up venv and install sign-oracle dependencies
 sign-oracle:  ## Validate all signed PDF fixtures with pyHanko CLI
 	@mkdir -p tools/sign-oracle/fixtures
 	@. .venv-sign-oracle/bin/activate && bash tools/sign-oracle/verify-fixtures.sh tools/sign-oracle/fixtures
+
+fuzz-sign:  ## Run all fuzzing targets for 60 seconds each (development fuzzing)
+	@echo "Running fuzzing targets for PDF signature verification..."
+	cd crates/pulpit-render && \
+	cargo fuzz run fuzz_revision_map -- -max_total_time=60 && \
+	cargo fuzz run fuzz_discover -- -max_total_time=60 && \
+	cargo fuzz run fuzz_verify_full -- -max_total_time=60 && \
+	cargo fuzz run fuzz_cms -- -max_total_time=60
+	@echo "Fuzzing complete. For longer runs, see crates/pulpit-render/fuzz/README.md"
 
 # ==============================================================================
 # Documentation targets

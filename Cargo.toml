@@ -5,6 +5,7 @@ members = [
     "crates/pulpit-display",
     "crates/pulpit-media",
     "crates/pulpit-render",
+    "crates/pulpit-render/fuzz",
     "crates/pulpit-testkit",
     "crates/pulpit",
 ]
