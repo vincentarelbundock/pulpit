@@ -81,6 +81,29 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         page = stack![page, form_navigation_dialog(request)].into();
     }
     // What a save would leave empty, asked before the file is written.
+    // A small always-present affordance for the signature panel (§31.4),
+    // whenever the open document has at least one signature to report on.
+    // Not folded into the reader toolbar's generic `Message` widget (see
+    // `widgets::document::view::tools`'s note) because the panel is `App`
+    // state, not `ReadCommand` state.
+    if !app.document_signatures.is_empty() && !app.signature_panel_open {
+        page = stack![page, signature_panel_toggle(app)].into();
+    }
+    if app.signature_panel_open {
+        page = stack![page, signature_panel(app)].into();
+    }
+    // §31.3, A9: offered before anything can mutate a document that already
+    // carries a signature. Above the page, non-dismissable except its own
+    // two buttons — declining silently would leave the reader guessing
+    // which mode they are in.
+    if app.pending_append_only_offer {
+        page = stack![page, append_only_offer_dialog()].into();
+    }
+    // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever step
+    // it is on.
+    if let Some(flow) = app.signing.as_ref() {
+        page = stack![page, sign_dialog(flow)].into();
+    }
     if let Some(review) = app.pending_save_review.as_ref() {
         page = stack![page, save_review_dialog(review)].into();
     }
@@ -1993,6 +2016,425 @@ fn save_review_dialog(review: &crate::app::SaveReview) -> Element<'static, Messa
     // The ground behind declines the save: writing no file is the answer that
     // changes nothing.
     panel(body, Some(Message::CancelSaveReview))
+}
+
+/// The always-present corner affordance that opens the signature panel.
+fn signature_panel_toggle(app: &App) -> Element<'_, Message> {
+    let count = app.document_signatures.len();
+    let label = if count == 1 {
+        "1 signature".to_string()
+    } else {
+        format!("{count} signatures")
+    };
+    container(
+        button(text(label).size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::ToggleSignaturePanel),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::End)
+    .align_y(iced::alignment::Vertical::Top)
+    .padding(gap::M)
+    .into()
+}
+
+/// The signature panel (§31.4): every discovered signature's status line,
+/// with an expandable detail view and two copy actions each.
+fn signature_panel(app: &App) -> Element<'_, Message> {
+    let mut body = column![row![
+        text("Signatures").size(type_scale::TITLE),
+        space::horizontal(),
+    ]
+    .align_y(Alignment::Center),]
+    .spacing(gap::M);
+
+    for (index, entry) in app.document_signatures.iter().enumerate() {
+        let line = crate::signing::signature_line_for_verification(entry);
+        let mut row_body = column![row![
+            text(line.summary_text()).size(type_scale::BODY),
+            space::horizontal(),
+            button(text("Details").size(type_scale::LABEL))
+                .padding(gap::XS)
+                .style(theme::ambient::tool_button)
+                .on_press(Message::ToggleSignatureDetail(index)),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(gap::S),]
+        .spacing(gap::S);
+
+        if app.signature_panel_expanded == Some(index) {
+            if let pulpit_render::verify::SignatureVerification::Checked(status) = entry {
+                row_body = row_body.push(
+                    column![
+                        text(format!("Field: {}", status.field_name)).size(type_scale::CAPTION),
+                        text(format!("Subject: {}", status.signer_cert.subject))
+                            .size(type_scale::CAPTION),
+                        text(format!("Issuer: {}", status.signer_cert.issuer))
+                            .size(type_scale::CAPTION),
+                        text(format!("Serial: {}", status.signer_cert.serial))
+                            .size(type_scale::CAPTION),
+                        text(format!(
+                            "Fingerprint (SHA-256): {}",
+                            status.signer_cert.sha256_fingerprint
+                        ))
+                        .size(type_scale::CAPTION),
+                        text("Certificate chain: embedded, not validated (§20.3)")
+                            .size(type_scale::CAPTION),
+                        text(format!("Coverage: {:?}", status.coverage)).size(type_scale::CAPTION),
+                        text(format!(
+                            "Signing time (claimed, not attested): {}",
+                            status
+                                .claimed_time
+                                .map(|t| t.to_string())
+                                .unwrap_or_else(|| "not stated".to_string())
+                        ))
+                        .size(type_scale::CAPTION),
+                        text(format!(
+                            "Digest: {}; signature: {}",
+                            status.digest_algorithm, status.signature_algorithm
+                        ))
+                        .size(type_scale::CAPTION),
+                    ]
+                    .spacing(gap::XS)
+                    .padding(gap::S),
+                );
+            }
+            row_body = row_body.push(
+                row![
+                    button(text("Copy fingerprint").size(type_scale::LABEL))
+                        .padding(gap::XS)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::CopySignatureFingerprint(index)),
+                    button(text("Copy report").size(type_scale::LABEL))
+                        .padding(gap::XS)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::CopySignatureReport(index)),
+                ]
+                .spacing(gap::S),
+            );
+        }
+        body = body.push(row_body);
+        body = body.push(rule());
+    }
+
+    panel(body, Some(Message::ToggleSignaturePanel))
+}
+
+/// §31.3, A9: the append-only offer, shown the moment a document that
+/// already carries a signature is opened, before anything can mutate it.
+fn append_only_offer_dialog() -> Element<'static, Message> {
+    let body = column![
+        text("Keep this document append-only?").size(type_scale::TITLE),
+        text(crate::signing::APPEND_ONLY_OFFER).size(type_scale::BODY),
+        row![
+            button(text("Edit anyway").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::alert_button)
+                .on_press(Message::EditAnyway),
+            button(text("Append-only mode").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::selected_button)
+                .on_press(Message::AcceptAppendOnly),
+        ]
+        .spacing(gap::S),
+    ]
+    .spacing(gap::M);
+
+    // No way out but an answer: mutating a signed document by accident is
+    // exactly what this dialog exists to prevent.
+    panel(body, None)
+}
+
+/// The Sign flow (SPEC-signing.md §31.1), one dialog per step.
+fn sign_dialog(flow: &crate::signing::SigningFlow) -> Element<'_, Message> {
+    use crate::signing::SigningFlow;
+    use pulpit_render::sign::SigningProfile;
+
+    let cancel = || {
+        button(text("Cancel").size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::Sign(crate::signing::SignMsg::Cancel))
+    };
+
+    match flow {
+        SigningFlow::SavingFirst => {
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                text("Saving your edits before signing…").size(type_scale::BODY),
+            ]
+            .spacing(gap::M);
+            panel(body, None)
+        }
+        SigningFlow::ChooseCredential => {
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                text("Choose the PKCS#12 (.p12/.pfx) credential to sign with.")
+                    .size(type_scale::BODY),
+                dialog_footer(
+                    button(text("Choose file…").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::selected_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::ChooseCredentialFile)),
+                ),
+            ]
+            .spacing(gap::M);
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+        }
+        SigningFlow::EnterPassphrase {
+            passphrase, error, ..
+        } => {
+            let mut body = column![
+                text("Sign").size(type_scale::TITLE),
+                text("Enter the credential's passphrase.").size(type_scale::BODY),
+                text_input("Passphrase", passphrase)
+                    .secure(true)
+                    .on_input(|typed| {
+                        Message::Sign(crate::signing::SignMsg::PassphraseChanged(typed))
+                    })
+                    .on_submit(Message::Sign(crate::signing::SignMsg::PassphraseSubmit))
+                    .padding(gap::S),
+            ]
+            .spacing(gap::M);
+            if let Some(error) = error {
+                body = body.push(
+                    text(error.clone())
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::alert()),
+                );
+            }
+            body = body.push(
+                row![
+                    cancel(),
+                    button(text("Continue").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::selected_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::PassphraseSubmit)),
+                ]
+                .spacing(gap::S),
+            );
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+        }
+        SigningFlow::LoadingCredential { .. } => {
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                text("Reading the credential…").size(type_scale::BODY),
+            ]
+            .spacing(gap::M);
+            panel(body, None)
+        }
+        SigningFlow::CredentialSummary {
+            credential, info, ..
+        } => {
+            let summary = &info.summary;
+            let mut body = column![
+                text("Sign").size(type_scale::TITLE),
+                dialog_section(
+                    "Subject",
+                    text(summary.subject.clone()).size(type_scale::BODY)
+                ),
+                dialog_section(
+                    "Issuer",
+                    text(summary.issuer.clone()).size(type_scale::BODY)
+                ),
+                dialog_section(
+                    "Valid",
+                    text(format!("{} — {}", summary.not_before, summary.not_after))
+                        .size(type_scale::BODY),
+                ),
+                dialog_section(
+                    "SHA-256 fingerprint",
+                    text(summary.sha256_fingerprint.clone()).size(type_scale::BODY),
+                ),
+                dialog_section(
+                    "Key",
+                    text(match summary.key_bits {
+                        Some(bits) => format!("{} ({bits} bits)", summary.key_algorithm),
+                        None => summary.key_algorithm.clone(),
+                    })
+                    .size(type_scale::BODY),
+                ),
+            ]
+            .spacing(gap::M);
+            let _ = credential; // key material itself is never shown
+            if info.expired || info.not_yet_valid {
+                let warning = if info.expired {
+                    "This certificate has expired."
+                } else {
+                    "This certificate is not yet valid."
+                };
+                body = body.push(
+                    text(warning)
+                        .size(type_scale::BODY)
+                        .color(theme::ambient::alert()),
+                );
+                if !info.override_validity {
+                    body = body.push(
+                        button(text("Sign anyway").size(type_scale::LABEL))
+                            .padding(gap::S)
+                            .style(theme::ambient::alert_button)
+                            .on_press(Message::Sign(crate::signing::SignMsg::OverrideValidity)),
+                    );
+                }
+            }
+            let mut actions = row![cancel()].spacing(gap::S);
+            if info.may_proceed() {
+                actions = actions.push(
+                    button(text("Continue").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::selected_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::ContinueToOptions)),
+                );
+            }
+            body = body.push(actions);
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+        }
+        SigningFlow::Options { options, .. } => {
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                dialog_section(
+                    "Reason (optional)",
+                    text_input("Reason", &options.reason)
+                        .on_input(|v| Message::Sign(crate::signing::SignMsg::ReasonChanged(v)))
+                        .padding(gap::S),
+                ),
+                dialog_section(
+                    "Location (optional)",
+                    text_input("Location", &options.location)
+                        .on_input(|v| Message::Sign(crate::signing::SignMsg::LocationChanged(v)))
+                        .padding(gap::S),
+                ),
+                dialog_section(
+                    "Contact (optional)",
+                    text_input("Contact", &options.contact)
+                        .on_input(|v| Message::Sign(crate::signing::SignMsg::ContactChanged(v)))
+                        .padding(gap::S),
+                ),
+                // Visible signatures need `SignRequest::appearance`, which
+                // does not exist yet: the choice is shown, disabled, and
+                // named as unavailable rather than silently missing.
+                dialog_section(
+                    "Appearance",
+                    text("Invisible only — visible signatures are not available in this build.")
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                ),
+                row![
+                    cancel(),
+                    button(text("Continue").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::selected_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::ContinueToConfirm)),
+                ]
+                .spacing(gap::S),
+            ]
+            .spacing(gap::M);
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+        }
+        SigningFlow::Confirm { info, options, .. } => {
+            let mut body = column![
+                text("Confirm signature").size(type_scale::TITLE),
+                text(format!(
+                    "Signing as {} (fingerprint {}), profile {}.",
+                    info.summary.subject,
+                    info.summary.sha256_fingerprint,
+                    match SigningProfile::AdbePkcs7Detached {
+                        SigningProfile::AdbePkcs7Detached => "B-B",
+                        SigningProfile::EtsiCadesDetached => "B-B (PAdES)",
+                    }
+                ))
+                .size(type_scale::BODY),
+                text(crate::signing::IDENTITY_DISCLOSURE)
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+            ]
+            .spacing(gap::M);
+            if options
+                .target
+                .as_ref()
+                .map(crate::signing::TargetChoice::is_countersign)
+                .unwrap_or(false)
+            {
+                body = body.push(
+                    text(crate::signing::COUNTERSIGN_DISCLOSURE)
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                );
+            }
+            body = body.push(
+                row![
+                    button(text("Back").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::BackToOptions)),
+                    cancel(),
+                    button(text("Sign").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::selected_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::Confirm)),
+                ]
+                .spacing(gap::S),
+            );
+            // Non-dismissable except its own two buttons (§31.1 step 7):
+            // no ground-behind press and no close glyph.
+            panel(body, None)
+        }
+        SigningFlow::Signing { destination, .. } => {
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                text(format!("Signing to {}…", destination.display())).size(type_scale::BODY),
+            ]
+            .spacing(gap::M);
+            panel(body, None)
+        }
+        SigningFlow::Result {
+            report,
+            destination,
+            verification,
+        } => {
+            let mut body = column![
+                text("Signed").size(type_scale::TITLE),
+                text(format!(
+                    "Wrote {} ({} signature{} now present).",
+                    destination.display(),
+                    report.signature_count,
+                    if report.signature_count == 1 { "" } else { "s" }
+                ))
+                .size(type_scale::BODY),
+            ]
+            .spacing(gap::M);
+            for entry in verification {
+                let line = crate::signing::signature_line_for_verification(entry);
+                body = body.push(text(line.summary_text()).size(type_scale::BODY));
+            }
+            body = body.push(
+                button(text("Done").size(type_scale::LABEL))
+                    .padding(gap::S)
+                    .style(theme::ambient::selected_button)
+                    .on_press(Message::Sign(crate::signing::SignMsg::Done)),
+            );
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Done)))
+        }
+        SigningFlow::Failed { detail } => {
+            let body = column![
+                text("Signing failed").size(type_scale::TITLE),
+                text(detail.clone())
+                    .size(type_scale::BODY)
+                    .color(theme::ambient::alert()),
+                text("The source document is unchanged.")
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+                button(text("Close").size(type_scale::LABEL))
+                    .padding(gap::S)
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::Sign(crate::signing::SignMsg::Done)),
+            ]
+            .spacing(gap::M);
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Done)))
+        }
+    }
 }
 
 /// The offer to recover an interrupted talk.
