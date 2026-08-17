@@ -463,78 +463,20 @@ struct PendingEdit {
     reversal: Option<(u64, Box<pulpit_render::document::DocumentUndo>)>,
 }
 
-/// A rectangle of a page, drawn by the document worker from the document it
-/// actually holds, standing in for the part of the frame an edit invalidated
-/// until a full frame containing that edit arrives (§9.4).
+/// The pixels of a page's partial repaint, minted once when it lands.
 ///
-/// Bounded to one per page: the interesting case is an edit or two while the
-/// snapshot is on its way, and a page accumulating patches is a page that
-/// should simply be re-rendered.
-/// The rectangle is drawn as its own small image over the page's frame, not
-/// blended into it: the frame is left alone while somebody types, and the
-/// only thing minted per keystroke is a few kilobytes of texture.
-struct ReaderPatch {
-    /// Where it belongs, as a fraction of the upright page.
-    region: pulpit_core::notes::Region,
-    /// The crop as its own image, minted once when it lands.
-    ///
-    /// Positioned by `region` in page space and scaled by the layout, so a
-    /// patch drawn against a frame size the page has since left is stretched
-    /// — very slightly soft for the moment it stands for — rather than
-    /// dropped, which would take the typed characters off the screen.
-    image: iced::widget::image::Handle,
-    revision: pulpit_render::document::DocumentRevision,
-    /// True when the pixels show form-field state PDFium holds *uncommitted* —
-    /// typing in progress, a value not yet under `/V`. No snapshot contains
-    /// that state, so a full frame at the same revision must not take this
-    /// patch down: the frame was drawn without the typed characters, and
-    /// removing the patch makes them vanish until the next keystroke.
-    uncommitted: bool,
-    /// The full-page frame size this crop was rendered against — see
-    /// [`PendingReaderPatch::frame_size`]. A zoom or a resize while a field is
-    /// open leaves the rectangle stretched, and the page asks again at the new
-    /// size rather than living with it.
-    frame_size: (u32, u32),
-}
-
-/// A patch a page wants and has not been able to ask for yet.
-#[derive(Clone, Copy)]
-struct WaitingReaderPatch {
-    /// What the deferred events dirtied, unioned. Kept here as well as in
-    /// [`App::reader_patch_scope`] so the request that finally goes out asks
-    /// for the same rectangle it would have asked for at the time.
-    dirty: pulpit_core::page::PageRect,
-    /// Whether the newest deferred event left form state uncommitted.
-    ///
-    /// The newest wins, not the strongest. One render answers the whole run, so
-    /// the pixels show the state after the last of them: if that was a
-    /// keystroke, they contain characters no snapshot has and the patch must
-    /// outlive full frames at its revision; if it was a commit, they are in the
-    /// revision and a full frame carrying it is the same pixels, so keeping the
-    /// uncommitted label would pin the rectangle over the page for ever.
-    uncommitted: bool,
-}
-
-/// A patch the worker has been asked for and not yet answered.
-#[derive(Clone, Copy)]
-struct PendingReaderPatch {
-    /// Whether *this* request covers uncommitted form state.
-    ///
-    /// Per request, not per page: labelling one request's answer with what
-    /// another asked for either blinks the typed text away at the next full
-    /// frame or pins a committed rectangle over the page for ever. A page keeps
-    /// one request out at a time, so in practice the queue holds one — the
-    /// order is still what matches an answer to the request that meant it.
-    uncommitted: bool,
-    /// The full-page frame size the crop was rendered against.
-    ///
-    /// Kept so the page can notice that it has since been zoomed or resized:
-    /// the patch that lands is scaled into place rather than dropped, which is
-    /// slightly soft, and the cure is to ask again at the size the page is now
-    /// drawn at. Nothing is lost while that round trip is out — the soft
-    /// rectangle is on screen the whole time.
-    frame_size: (u32, u32),
-}
+/// Everything *about* a patch — where it belongs, what revision it contains,
+/// whether it shows uncommitted typing, what frame size it was drawn against —
+/// lives in [`crate::form_flow::FormFlow`], which is where it can be tested.
+/// This map holds only the texture, keyed the same way and emptied by the same
+/// events, so the two are one thing in two halves.
+///
+/// A patch is positioned by its region in page space and scaled by the layout,
+/// so one drawn against a frame size the page has since left is stretched —
+/// very slightly soft for the moment it stands for — rather than dropped,
+/// which would take the typed characters off the screen.
+type ReaderPatchImages =
+    std::collections::HashMap<pulpit_core::page::PageIndex, iced::widget::image::Handle>;
 
 /// Where the reader's pages are rendered from.
 ///
@@ -783,35 +725,14 @@ pub struct App {
     wash_cache: std::cell::RefCell<
         std::collections::HashMap<(pulpit_core::page::PageIndex, u64), iced::widget::image::Handle>,
     >,
-    /// The partial repaints standing in for edits the page's frame predates,
-    /// one per page. Dropped when a full frame containing the same revision
-    /// arrives, which is the same rule the retained previews follow.
-    reader_patches: std::collections::HashMap<pulpit_core::page::PageIndex, ReaderPatch>,
-    /// What each in-flight patch was asked for, oldest first, so the answer
-    /// can be matched to the frame and the form state *its own* request meant.
-    /// One link, answered in order, so the queue is the order they land in.
-    reader_patch_pending: std::collections::HashMap<
-        pulpit_core::page::PageIndex,
-        std::collections::VecDeque<PendingReaderPatch>,
-    >,
-    /// Everything patched on a page since its frame last caught up, in page
-    /// points. One patch per page means each new patch *replaces* the last, so
-    /// it has to keep covering what earlier ones covered: PDFium draws a combo
-    /// box's open list into the page, a hover then invalidates only the two
-    /// rows that changed, and a patch of just those rows would take the rest
-    /// of the list back to a frame that never had it — the popup visibly
-    /// breaking apart and reassembling as the pointer moves.
-    reader_patch_scope:
-        std::collections::HashMap<pulpit_core::page::PageIndex, pulpit_core::page::PageRect>,
-    /// The patch a page wants next, held back while one is already out.
-    ///
-    /// Coalesced the way pointer moves are, and for the same reason: the worker
-    /// is serial, a keystroke is a patch, and a burst of typing sent one render
-    /// per character queued renders of states nobody would ever see. The scope
-    /// only grows, so the newest request covers everything the ones it replaced
-    /// covered.
-    reader_patch_waiting:
-        std::collections::HashMap<pulpit_core::page::PageIndex, WaitingReaderPatch>,
+    /// The per-keystroke bookkeeping behind form editing: what has been asked
+    /// for, what a page is holding, what waits behind it, and what mutations
+    /// are held back while the form might still commit (§9.4). Pure, and
+    /// tested on its own — the bugs it holds shut all lived here, where
+    /// nothing could reach them.
+    form_flow: crate::form_flow::FormFlow,
+    /// The pixels for whatever `form_flow` says each page is holding.
+    reader_patch_images: ReaderPatchImages,
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
@@ -1187,24 +1108,6 @@ pub struct App {
     /// position the pointer has already left is not worth drawing.
     form_move:
         crate::coalesce::Coalesced<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
-    /// How many form events that *may* commit a value are out with no answer.
-    ///
-    /// A form event's answer says whether it committed; nothing said before it
-    /// can. So an annotation posted while one of these is in flight cannot
-    /// know what revision it will meet, and [`App::expected_revision`] would
-    /// name one revision too few — a spurious conflict, and the mark is
-    /// refused. Rather than guess, the transaction waits here until the form
-    /// has answered; the wait is one round trip and only ever happens when a
-    /// mark is drawn in the same instant a field is being typed into.
-    ///
-    /// One entry per form event in flight, oldest first, saying whether that
-    /// event could commit. A queue rather than a count because the answers
-    /// come back over one link in the order they were asked for, so an answer
-    /// retires the oldest entry and nothing has to guess which.
-    form_events_in_flight: std::collections::VecDeque<bool>,
-    /// Transactions held back for exactly that reason, in the order they were
-    /// made. Sent from the pump as soon as the form is quiet.
-    deferred_commits: Vec<pulpit_render::document::DocumentTransaction>,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -1432,10 +1335,8 @@ impl App {
             cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
             handles: std::collections::HashMap::new(),
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-            reader_patches: std::collections::HashMap::new(),
-            reader_patch_pending: std::collections::HashMap::new(),
-            reader_patch_scope: std::collections::HashMap::new(),
-            reader_patch_waiting: std::collections::HashMap::new(),
+            form_flow: crate::form_flow::FormFlow::default(),
+            reader_patch_images: std::collections::HashMap::new(),
             last_audience: None,
             last_presenter: None,
             documents: DocumentManager::new(
@@ -1572,8 +1473,6 @@ impl App {
             selection_query: Default::default(),
             date_language: crate::datefield::Locale::from_environment(),
             form_move: Default::default(),
-            form_events_in_flight: std::collections::VecDeque::new(),
-            deferred_commits: Vec::new(),
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
@@ -1739,8 +1638,7 @@ impl App {
             // sends them has to keep running.
             || self.selection_query.is_waiting()
             || self.form_move.is_waiting()
-            || !self.reader_patch_waiting.is_empty()
-            || !self.deferred_commits.is_empty()
+            || self.form_flow.is_waiting()
             // An edit the page cannot show yet. An edit the previews *do*
             // show is not on this list: it is already on screen, and its
             // snapshot is two seconds away, which the settled tick notices
@@ -4653,11 +4551,8 @@ impl App {
                             // which no snapshot contains: taking it down here
                             // made half-typed values blink out whenever a
                             // deferred frame landed behind them.
-                            if self.reader_patches.get(&page).is_some_and(|patch| {
-                                patch.revision <= snapshot.revision && !patch.uncommitted
-                            }) {
-                                self.reader_patches.remove(&page);
-                                self.reader_patch_scope.remove(&page);
+                            if self.form_flow.frame_landed(page, snapshot.revision) {
+                                self.reader_patch_images.remove(&page);
                             }
                         }
                     }
@@ -5038,15 +4933,11 @@ impl App {
     /// entry that outlived its document was popped by the next document's
     /// first answer and read as that edit's record.
     fn forget_per_document_edit_state(&mut self) {
-        self.reader_patches.clear();
-        self.reader_patch_scope.clear();
-        self.reader_patch_pending.clear();
-        self.reader_patch_waiting.clear();
+        self.form_flow.forget_document();
+        self.reader_patch_images.clear();
         self.reader_pending.clear();
         self.form_move.abandon();
         self.selection_query.abandon();
-        self.form_events_in_flight.clear();
-        self.deferred_commits.clear();
         self.form_clipboard = None;
         self.form_clipboard_text = None;
         self.pending_form_goto = None;
@@ -5298,7 +5189,7 @@ impl App {
                     self.reader_patch_landed(*frame);
                 }
                 crate::reader_link::Told::PatchRefused { page } => {
-                    self.forget_pending_patch(page);
+                    self.form_flow.patch_refused(page);
                     self.send_waiting_patch(page);
                 }
                 crate::reader_link::Told::Saved {
@@ -5427,10 +5318,8 @@ impl App {
         // Mutations held back while a form event that might commit was out.
         // The form has answered by now or it has not; if it has not, they wait
         // one more tick rather than being sent against a revision nobody knows.
-        if !self.deferred_commits.is_empty() && !self.a_form_commit_may_be_in_flight() {
-            for transaction in std::mem::take(&mut self.deferred_commits) {
-                self.commit_to_document(transaction);
-            }
+        for transaction in self.form_flow.released_commits() {
+            self.commit_to_document(transaction);
         }
 
         // Whatever is on screen and out of date. Bounded by the window: a
@@ -5716,18 +5605,19 @@ impl App {
         &self,
         page: pulpit_core::page::PageIndex,
     ) -> Option<crate::widgets::context::PagePatch> {
-        let patch = self.reader_patches.get(&page)?;
+        let region = self.form_flow.patch_region(page)?;
+        let image = self.reader_patch_images.get(&page)?;
         let geometry = self.reader.page_geometry(page)?;
         if geometry.width <= 0.0 || geometry.height <= 0.0 {
             return None;
         }
         Some(crate::widgets::context::PagePatch {
-            image: patch.image.clone(),
+            image: image.clone(),
             bounds: pulpit_core::page::PageRect::new(
-                patch.region.x * geometry.width,
-                patch.region.y * geometry.height,
-                (patch.region.x + patch.region.width) * geometry.width,
-                (patch.region.y + patch.region.height) * geometry.height,
+                region.x * geometry.width,
+                region.y * geometry.height,
+                (region.x + region.width) * geometry.width,
+                (region.y + region.height) * geometry.height,
             ),
             device_scale: self.presenter_scale_factor(),
         })
@@ -5764,51 +5654,36 @@ impl App {
     /// committed into the document, which no snapshot can contain — the patch
     /// then outlives full frames at the same revision instead of being taken
     /// down by one that was drawn without the typed characters.
+    ///
+    /// The adapter half: [`crate::form_flow::FormFlow`] decides what to cover
+    /// and whether a request goes out at all, this turns the one that does
+    /// into a rectangle of pixels and reports back whether it actually went.
     fn ask_patch_of(
         &mut self,
         page: pulpit_core::page::PageIndex,
         dirty: pulpit_core::page::PageRect,
         uncommitted: bool,
     ) {
-        // Cover everything patched since the frame last caught up, not only
-        // what this event dirtied. The next patch will *replace* the one on
-        // screen, and a combo box's open list — drawn into the page by PDFium,
-        // then invalidated two rows at a time as the pointer moves — must not
-        // be narrowed back down to two rows of popup over a frame that has no
-        // popup at all. The scope resets when a full frame takes the page's
-        // patch down. Grown before anything below can return, so a request
-        // that cannot go out now is still covered by the one that does.
-        let dirty = self.grow_patch_scope(page, dirty);
-        let Some((surface_width, _)) = self.page_surface_size() else {
+        let placement = self.patch_placement(page);
+        // The scope grows inside the machine whether or not the page can take
+        // a crop, so a request that cannot go out now is still covered by the
+        // one that does.
+        let Some(ask) = self
+            .form_flow
+            .ask_patch(page, dirty, uncommitted, placement.is_some())
+        else {
             return;
         };
-        let Some(key) = self.ready_reader_frame_key(page, surface_width) else {
+        let Some((key, page_width, page_height)) = placement else {
             return;
         };
-        let Some(geometry) = self.reader.page_geometry(page) else {
-            return;
-        };
-        if geometry.width <= 0.0 || geometry.height <= 0.0 {
-            return;
-        }
-        // One patch per page in flight at a time. A keystroke is a patch, and
-        // typing at speed sent one render per character to a serial worker: the
-        // characters arrived at the rate the queue drained, each render drawing
-        // a state the next one had already superseded. What is deferred is not
-        // lost — the scope only grows, so the request that goes out when the
-        // outstanding one lands covers every rectangle it stood in for.
-        if self.reader_patch_pending.contains_key(&page) {
-            self.reader_patch_waiting
-                .insert(page, WaitingReaderPatch { dirty, uncommitted });
-            return;
-        }
         // A margin, in page points, so the edge of a mark's antialiasing is
         // inside the patch rather than split down the middle of a pixel by it.
         const MARGIN: f32 = 2.0;
-        let left = ((dirty.left - MARGIN) / geometry.width).clamp(0.0, 1.0);
-        let top = ((dirty.top - MARGIN) / geometry.height).clamp(0.0, 1.0);
-        let right = ((dirty.right + MARGIN) / geometry.width).clamp(0.0, 1.0);
-        let bottom = ((dirty.bottom + MARGIN) / geometry.height).clamp(0.0, 1.0);
+        let left = ((ask.dirty.left - MARGIN) / page_width).clamp(0.0, 1.0);
+        let top = ((ask.dirty.top - MARGIN) / page_height).clamp(0.0, 1.0);
+        let right = ((ask.dirty.right + MARGIN) / page_width).clamp(0.0, 1.0);
+        let bottom = ((ask.dirty.bottom + MARGIN) / page_height).clamp(0.0, 1.0);
         let region = pulpit_core::notes::Region::new(left, top, right - left, bottom - top);
         if !region.is_valid() {
             return;
@@ -5831,23 +5706,25 @@ impl App {
         };
         // Outstanding only if it actually went out. Marking it before the send
         // latched the page shut when there was no link to send on: the entry
-        // was never answered, every later patch for that page was held back
-        // behind it for ever, and the fast tick was pinned waiting for it.
-        //
-        // One queued entry per request, so an answer is read with the form
-        // state *its own* request meant rather than a later one's. The queue
-        // holds a single entry while a page keeps one request out at a time;
-        // it is a queue because the matching rule is the order they were asked
-        // in, not the count.
+        // was never answered, and every later patch for that page was held
+        // back behind it for ever.
         if sent {
-            self.reader_patch_pending
-                .entry(page)
-                .or_default()
-                .push_back(PendingReaderPatch {
-                    uncommitted,
-                    frame_size: (key.width, key.height),
-                });
+            self.form_flow.ask_sent(&ask, (key.width, key.height));
         }
+    }
+
+    /// What a page needs before a crop of it can be asked for: a frame on
+    /// screen, at a size, and geometry to scale a rectangle of it by. The
+    /// page's own width and height in points come back copied rather than
+    /// borrowed, because the caller goes on to ask the machine for a request.
+    fn patch_placement(&self, page: pulpit_core::page::PageIndex) -> Option<(FrameKey, f32, f32)> {
+        let (surface_width, _) = self.page_surface_size()?;
+        let key = self.ready_reader_frame_key(page, surface_width)?;
+        let geometry = self.reader.page_geometry(page)?;
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return None;
+        }
+        Some((key, geometry.width, geometry.height))
     }
 
     /// Ask again for any patch that was drawn against a frame size the page
@@ -5860,43 +5737,12 @@ impl App {
     /// rectangle instead, and this is what ends it. The rectangle stays on
     /// screen for the round trip; only its sharpness is at stake.
     fn reask_resized_patches(&mut self) {
-        let Some((surface_width, _)) = self.page_surface_size() else {
-            return;
-        };
-        let stale: Vec<(pulpit_core::page::PageIndex, bool)> = self
-            .reader_patches
-            .iter()
-            .filter(|(page, patch)| {
-                self.ready_reader_frame_key(**page, surface_width)
-                    .is_some_and(|key| (key.width, key.height) != patch.frame_size)
-            })
-            .map(|(page, patch)| (*page, patch.uncommitted))
-            .collect();
-        for (page, uncommitted) in stale {
-            // The scope is what the page is showing, which is exactly what has
-            // to be redrawn at the new size.
-            let Some(dirty) = self.reader_patch_scope.get(&page).copied() else {
-                continue;
-            };
-            self.ask_patch_of(page, dirty, uncommitted);
-        }
-    }
-
-    /// Everything patched on a page since its frame last caught up, with
-    /// `dirty` added to it. Monotone: one rectangle replaces the last one
-    /// drawn, so it must keep covering what that one covered.
-    fn grow_patch_scope(
-        &mut self,
-        page: pulpit_core::page::PageIndex,
-        dirty: pulpit_core::page::PageRect,
-    ) -> pulpit_core::page::PageRect {
-        match self.reader_patch_scope.entry(page) {
-            std::collections::hash_map::Entry::Occupied(mut scope) => {
-                let grown = scope.get().union(&dirty);
-                scope.insert(grown);
-                grown
-            }
-            std::collections::hash_map::Entry::Vacant(scope) => *scope.insert(dirty),
+        let stale = self.form_flow.resized_patches(|page| {
+            self.patch_placement(page)
+                .map(|(key, _, _)| (key.width, key.height))
+        });
+        for reask in stale {
+            self.ask_patch_of(reask.page, reask.dirty, reask.uncommitted);
         }
     }
 
@@ -5920,20 +5766,14 @@ impl App {
             None => false,
         };
         if sent {
-            self.form_events_in_flight.push_back(may_commit);
+            self.form_flow.form_event_sent(may_commit);
         }
         sent
     }
 
     /// One form event answered, whatever it answered with.
     fn form_event_answered(&mut self) {
-        self.form_events_in_flight.pop_front();
-    }
-
-    /// Could a form event still in flight move the revision? A mutation posted
-    /// while one can does not know what revision it will meet.
-    fn a_form_commit_may_be_in_flight(&self) -> bool {
-        self.form_events_in_flight.iter().any(|may| *may)
+        self.form_flow.form_event_answered();
     }
 
     /// Follow the pointer over a form, at the rate the worker can answer.
@@ -6542,35 +6382,55 @@ impl App {
 
     /// A partial repaint arrived. It is held over the page's frame until a
     /// full frame containing the same revision replaces it.
+    ///
+    /// The reader is asked what it makes of the crop before the machine is
+    /// told, because only the reader can say: whether a retained preview can
+    /// be reconciled with a rectangle drawn over it is its question, and
+    /// asking it takes the previews the crop contains down. It is asked only
+    /// once something is owed for the page, so an answer to nothing — a page
+    /// scrolled away, a document reopened under the round trip — cannot take
+    /// a preview off a page that is still standing in for an edit.
     fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
         let page = frame.page;
-        // The answers come back over one link in the order they were asked
-        // for, so the oldest request outstanding is the one this answers.
-        let Some(asked) = self.take_pending_patch(page) else {
+        if !self.form_flow.has_pending(page) {
             return;
-        };
-        self.adopt_reader_patch(frame, asked);
-        // The page is free to ask again, so whatever was held back while this
-        // one was out goes now.
-        self.send_waiting_patch(page);
-    }
-
-    /// The oldest outstanding request for a page, no longer outstanding.
-    fn take_pending_patch(
-        &mut self,
-        page: pulpit_core::page::PageIndex,
-    ) -> Option<PendingReaderPatch> {
-        let queue = self.reader_patch_pending.get_mut(&page)?;
-        let asked = queue.pop_front();
-        if queue.is_empty() {
-            self.reader_patch_pending.remove(&page);
         }
-        asked
-    }
-
-    /// A request that will never be answered stops being outstanding.
-    fn forget_pending_patch(&mut self, page: pulpit_core::page::PageIndex) {
-        let _ = self.take_pending_patch(page);
+        let answer = if frame.is_consistent() {
+            match self.reader.patch_landed(page, frame.region, frame.revision) {
+                crate::reader::PatchOutcome::Taken => crate::form_flow::PatchAnswer::Taken {
+                    region: frame.region,
+                    revision: frame.revision,
+                },
+                // A retained preview straddles the rectangle: half of it would
+                // be drawn twice and half not at all, so this crop is
+                // unusable. The cure is a bigger crop rather than giving up.
+                crate::reader::PatchOutcome::Straddled { preview } => {
+                    crate::form_flow::PatchAnswer::Straddled { preview }
+                }
+                crate::reader::PatchOutcome::Unplaceable => crate::form_flow::PatchAnswer::Unusable,
+            }
+        } else {
+            crate::form_flow::PatchAnswer::Unusable
+        };
+        match self.form_flow.patch_answered(page, answer) {
+            crate::form_flow::Landing::Nothing => {}
+            crate::form_flow::Landing::Hold => {
+                // The crop becomes its own texture here, once, rather than
+                // being memcpy'd into a clone of the page every time the page
+                // is drawn. Kilobytes: under iced_wgpu's threshold for a
+                // synchronous upload, so it is on screen the pass it appears
+                // in and can never flash.
+                let image =
+                    iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.pixels);
+                self.reader_patch_images.insert(page, image);
+            }
+            crate::form_flow::Landing::Regrow(reask) => {
+                self.ask_patch_of(page, reask.dirty, reask.uncommitted);
+            }
+        }
+        // The page may be free to ask again, so whatever was held back while
+        // this one was out goes now.
+        self.send_waiting_patch(page);
     }
 
     /// Ask for the patch a page has been waiting to ask for.
@@ -6578,64 +6438,10 @@ impl App {
     /// Nothing goes out while a request for the page is still outstanding: the
     /// answer to that one is what makes room for this one.
     fn send_waiting_patch(&mut self, page: pulpit_core::page::PageIndex) {
-        if self.reader_patch_pending.contains_key(&page) {
-            return;
-        }
-        let Some(waiting) = self.reader_patch_waiting.remove(&page) else {
+        let Some(waiting) = self.form_flow.waiting_for(page) else {
             return;
         };
         self.ask_patch_of(page, waiting.dirty, waiting.uncommitted);
-    }
-
-    /// Hold a partial repaint over the page's frame, if the page can take it.
-    fn adopt_reader_patch(
-        &mut self,
-        frame: pulpit_render::document::protocol::DocumentFrame,
-        asked: PendingReaderPatch,
-    ) {
-        if !frame.is_consistent() {
-            return;
-        }
-        // Only usable if the previews on the page can be reconciled with it.
-        match self
-            .reader
-            .patch_landed(frame.page, frame.region, frame.revision)
-        {
-            crate::reader::PatchOutcome::Taken => {}
-            crate::reader::PatchOutcome::Unplaceable => return,
-            // A retained preview straddles the rectangle: half of it would be
-            // drawn twice and half not at all, so this crop is unusable. The
-            // cure is a bigger crop rather than giving up — with a monotone
-            // scope, a page that refused once would refuse every patch for the
-            // rest of the session, and the form would stop showing typing.
-            //
-            // Only when the scope actually grew, which is what makes this
-            // terminate: a preview the patch cannot be made to contain (one
-            // that falls outside the page) grows nothing and is asked for once.
-            crate::reader::PatchOutcome::Straddled { preview } => {
-                let before = self.reader_patch_scope.get(&frame.page).copied();
-                let grown = self.grow_patch_scope(frame.page, preview);
-                if before != Some(grown) {
-                    self.ask_patch_of(frame.page, grown, asked.uncommitted);
-                }
-                return;
-            }
-        }
-        // The crop becomes its own texture here, once, rather than being
-        // memcpy'd into a clone of the page every time the page is drawn.
-        // Kilobytes: under iced_wgpu's threshold for a synchronous upload, so
-        // it is on screen the pass it appears in and can never flash.
-        let image = iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.pixels);
-        self.reader_patches.insert(
-            frame.page,
-            ReaderPatch {
-                region: frame.region,
-                image,
-                revision: frame.revision,
-                uncommitted: asked.uncommitted,
-                frame_size: asked.frame_size,
-            },
-        );
     }
 
     /// The page picture with its retained highlights multiplied in.
@@ -8994,10 +8800,9 @@ impl App {
         // refused for a conflict that is nobody's mistake. It waits for the
         // form to answer instead, which is one round trip and only ever
         // happens when a mark is made in the same instant a field is edited.
-        if self.a_form_commit_may_be_in_flight() {
-            self.deferred_commits.push(transaction);
+        let Some(transaction) = self.form_flow.commit_requested(transaction) else {
             return true;
-        }
+        };
         let expected = self.expected_revision();
         // Keep drawing what this commit creates until a frame containing it
         // arrives (§9.2): the stroke must not vanish at release and reappear
