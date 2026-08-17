@@ -847,7 +847,9 @@ impl ReaderSession {
     /// They open on the time the field already holds when that can be read,
     /// and on `now` when it cannot — the wall clock being the answer a time
     /// field is usually asking for. `now` is passed in rather than read here,
-    /// because state that reads a clock cannot be tested.
+    /// because state that reads a clock cannot be tested. The value is read in
+    /// the same language it is written in, so a localised am/pm marker is one
+    /// the helper recognises.
     pub fn set_focused_time(
         &mut self,
         focused: Option<&pulpit_render::document::protocol::FocusedTime>,
@@ -869,7 +871,10 @@ impl ReaderSession {
             pattern: focused.pattern.clone(),
             page: focused.page,
             bounds: focused.bounds,
-            time: crate::datefield::TimeOfDay::parse(&focused.value).unwrap_or(now),
+            // Read in the language the helper writes in, so the marker it
+            // parses is the marker it produced.
+            time: crate::datefield::TimeOfDay::parse(&focused.value, self.date_language)
+                .unwrap_or(now),
         });
     }
 
@@ -5357,6 +5362,21 @@ mod tests {
 
         session.set_focused_time(None, now);
         assert!(session.time_picker().is_none());
+    }
+
+    #[test]
+    fn the_time_helper_reopens_on_a_value_written_in_the_readers_language() {
+        // The value in the field was written by this helper, in this reader's
+        // language — so it has to be read in that language too, or every
+        // localised afternoon reopens half a day out.
+        let mut session = open_with_form(1);
+        let language = crate::datefield::Locale::parse("ja_JP").expect("ja_JP has date data");
+        session.set_date_language(language);
+        let now = crate::datefield::TimeOfDay::new(11, 45);
+        let afternoon = crate::datefield::TimeOfDay::new(14, 5);
+        let written = afternoon.format("h:MM tt", language);
+        session.set_focused_time(Some(&focused_time("at", "h:MM tt", &written)), now);
+        assert_eq!(session.time_picker().unwrap().time, afternoon);
     }
 
     #[test]

@@ -938,9 +938,21 @@ code that generates its appearance.
   its selection indices, because one string cannot name three choices; the
   undo record carries them. It MUST NOT write `/V` or generate an appearance
   itself, so the comb spacing, auto-sizing, quadding and format script are
-  still PDFium's, computed once. Nothing sends a forward `SetField`; the
-  inverse is the only caller. A state no press can produce — clearing a
+  still PDFium's, computed once. A state no press can produce — clearing a
   chosen radio group — is refused rather than faked.
+- A forward `SetField` has exactly one other caller: the date and time
+  helpers (§8.6), which commit a picked value through the same path for the
+  same reason — pulpit chooses the *text* the pattern asks for, and PDFium's
+  editor still writes it, runs the field's format script and produces the
+  appearance. Undo of a picked value is then the ordinary inverse, so a
+  picked date and a typed one leave the same kind of entry in the same
+  history. Everything else about a field's value comes from a person typing
+  into the engine's own editor; the application never writes `/V` itself.
+  - **Consequence:** committing through `SetField` ends in
+    `FORM_ForceToKillFocus`, so the field is left *unfocused*. The picker is
+    closed before the commit and the caret does not stay in the field — the
+    next form event re-reports focus from scratch, and a helper that assumed
+    it still had the caret would be reading a focus that is gone.
 
 The engine remains in the supervised worker process. Interactive events
 travel over the existing IPC; invalidations return as dirty rectangles

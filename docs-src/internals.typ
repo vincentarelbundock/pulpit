@@ -478,8 +478,10 @@ So pulpit does not implement them again. Raw input events over a page in form
 mode are forwarded to PDFium's interactive form-fill environment
 (`FORM_OnLButtonDown`, `FORM_OnChar`, `FORM_OnKeyDown` and the rest), which
 does the hit-testing, the focus, the caret and the editing, and answers with
-the page rectangles it wants redrawn. The application draws no field editor and
-never sets a value from outside the page; `set_field` exists and refuses.
+the page rectangles it wants redrawn. The application draws no field editor,
+and the two writes that do not come from someone typing — undoing a fill, and
+committing a date or a time a picker chose — go through `set_field`, which is
+PDFium's editor driven from outside rather than a second one.
 
 That is not fastidiousness. A second implementation of "what a filled field
 looks like" disagrees with the first somewhere, and where it disagrees is
@@ -611,15 +613,24 @@ closed combo box ignores exactly the same key: in a real viewer that key would
 be travelling to a dropdown that is not open, and PDFium has no dropdown open.
 Clicking the arrow does not open one either.
 
-So a combo box is the one field the application has to translate for, and
+So a combo box is the field the application has to translate for, and
 `FORM_SetIndexSelected` — carried as `SelectOption` — is PDFium's own way in:
 the engine performs the selection, generates the appearance and reports the
 change, exactly as it does for a keystroke. To choose an index the application
 needs to know what is selected now and how many options there are, which is
-what `FormEventResult::focused_choice` carries, populated for combo boxes only
-so a list box is never double-stepped. Stepping stops at both ends rather than
-wrapping, and a combo holding a value outside its own `/Opt` list starts at the
-near end.
+what `FormEventResult::focused_choice` carries.
+
+It is reported for a list box as well, because the drawn list — the one place
+the application renders a field's editing state (§8.6) — is drawn for every
+*non-editable* choice field, list box and combo box alike, and it needs the
+labels and the selection to draw. What the backend reports rather than what the
+application guesses is which kind it is: `list_box` says a list box, `editable`
+says an editable combo. The arrow keys follow those flags — a list box moves
+its own selection natively and is never stepped by the application, so nothing
+is double-stepped; an editable combo keeps the engine's list entirely, because
+it has a caret PDFium is drawing and a second surface over that is what §8.6
+forbids. Stepping a combo stops at both ends rather than wrapping, and a combo
+holding a value outside its own `/Opt` list starts at the near end.
 
 A combo box is also not a text field, so PDFium never calls
 `FFI_SetTextFieldFocus` for one. Deciding the keyboard belongs to the form on
@@ -632,9 +643,12 @@ history as the marks — a fill followed by a stroke undoes the stroke first. Th
 inverse is a `SetField` carrying the field's before-image, captured before the
 event that commits it, because afterwards the old value is gone.
 
-Putting a value back is the one write that does not come from someone typing,
-and it goes through the editor anyway: focus the widget, `FORM_SelectAllText`,
-`FORM_ReplaceSelection`, kill the focus to commit. PDFium does exactly what it
+Putting a value back is not quite the only write that does not come from
+someone typing — the date and time pickers send the same `SetField` forward to
+commit a value someone chose rather than typed, which is what makes a picked
+date an ordinary edit with an ordinary undo instead of a second kind of
+change. Both go through the editor anyway: focus the widget,
+`FORM_SelectAllText`, `FORM_ReplaceSelection`, kill the focus to commit. PDFium does exactly what it
 does for a person who selected all and typed, so there is still one
 implementation of what a value looks like in a field. Two details are
 load-bearing. The annotation handed to `FORM_SetFocusedAnnot` must come from
@@ -645,6 +659,11 @@ focus captured *before* the event: a focus loss is the usual way a text field
 commits, so by the time the commit is reported there is no focused widget left
 to name it. Both of those were bugs that no test caught, because nothing
 asserted on the committed field's name.
+
+The kill is also why the pickers close before they commit rather than after.
+`FORM_ForceToKillFocus` leaves the field unfocused, so the caret is gone by the
+time the change is reported and the next form event reports focus afresh; a
+helper still on screen would be anchored to a field nothing is in.
 
 Measured on the development machines, in a debug build: one keystroke through
 the environment costs about 12 µs, and a full-page redraw with the compositing
