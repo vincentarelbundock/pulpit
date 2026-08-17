@@ -10,7 +10,8 @@
 mod signing_fixture;
 
 use pulpit_render::sign::apply::{
-    sign_document_file, sign_document_file_with_tamper, SignApplyError, SignRequest, SignTarget,
+    sign_document_file, sign_document_file_with_tamper, AppearanceContent, SignAppearance,
+    SignApplyError, SignRequest, SignTarget,
 };
 use pulpit_render::verify::{self, SignatureCoverage, SignatureVerification};
 use signing_fixture::{
@@ -321,4 +322,139 @@ fn a_corrupted_candidate_is_never_promoted() {
         .filter(|e| e.file_name().to_string_lossy().starts_with(".pulpit-sign-"))
         .collect();
     assert!(leftovers.is_empty(), "a temporary file was left behind");
+}
+
+/// §25.5: a visible signature field carrying an ink appearance. Intact,
+/// valid, `EntireFile` coverage, and the output bytes contain a
+/// `/Subtype /Form` XObject whose stream carries the path operators and
+/// whose `/BBox` matches the requested rect.
+#[test]
+fn a_visible_ink_signature_carries_a_form_xobject_appearance() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("unsigned.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, build_unsigned_pdf(&[])).expect("write the source");
+
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        rect: [72.0, 72.0, 272.0, 132.0],
+        page_index: 0,
+        content: AppearanceContent::Ink {
+            strokes: vec![vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]],
+            stroke_width: 1.5,
+        },
+    });
+
+    let report = sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing with an ink appearance succeeds");
+    assert_eq!(report.field_name, "Signature1");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses[0].intact);
+    assert!(statuses[0].valid);
+    assert_eq!(statuses[0].coverage, SignatureCoverage::EntireFile);
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/Subtype /Form"),
+        "expected a form XObject in the output"
+    );
+    assert!(
+        text.contains("/BBox [0 0 200 60]"),
+        "expected the BBox to match the 200x60 rect, got: {text}"
+    );
+    assert!(text.contains(" m\n"), "expected a moveto path operator");
+    assert!(text.contains(" l\n"), "expected a lineto path operator");
+    assert!(text.contains("\nS\n"), "expected a stroke operator");
+    assert!(
+        text.contains("1 J 1 j 1.5 w"),
+        "expected the line style operators"
+    );
+
+    std::fs::write(oracle_fixture_path("apply-visible-ink.pdf"), &output)
+        .expect("write the oracle fixture");
+}
+
+/// §25.5: a visible signature field carrying a text appearance. `BT`/`ET`
+/// bracket the text operators and the signer name is present, escaped as a
+/// PDF literal string.
+#[test]
+fn a_visible_text_signature_carries_the_signer_name() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("unsigned.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, build_unsigned_pdf(&[])).expect("write the source");
+
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        rect: [72.0, 72.0, 272.0, 132.0],
+        page_index: 0,
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024-08-20 22:00 UTC".to_string(),
+        },
+    });
+
+    let report = sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing with a text appearance succeeds");
+    assert_eq!(report.field_name, "Signature1");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses[0].intact);
+    assert!(statuses[0].valid);
+    assert_eq!(statuses[0].coverage, SignatureCoverage::EntireFile);
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains("BT\n"), "expected a text object start");
+    assert!(text.contains("ET\n"), "expected a text object end");
+    assert!(
+        text.contains("(Ada Lovelace) Tj"),
+        "expected the signer name to appear as a Tj operand, got: {text}"
+    );
+    assert!(
+        text.contains("/Font << /F0"),
+        "expected the Helvetica font resource"
+    );
+}
+
+/// The invisible path is unchanged when `appearance` is left `None`: no
+/// `/AP` and the zero-size `/Rect` from before this feature existed.
+#[test]
+fn the_invisible_path_is_unchanged_without_an_appearance() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("unsigned.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, build_unsigned_pdf(&[])).expect("write the source");
+
+    let report = sign_document_file(
+        &source,
+        &destination,
+        &credential,
+        &request(SignTarget::NewInvisibleField { name: None }),
+    )
+    .expect("signing succeeds");
+    assert_eq!(report.field_name, "Signature1");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        !text.contains("/Subtype /Form"),
+        "an invisible signature must not carry a form XObject appearance"
+    );
 }
