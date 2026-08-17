@@ -752,6 +752,25 @@ impl ReaderSession {
     }
 
     /// Take the worker's word for where the caret is.
+    /// The caret is no longer in a field, and every trace of the field it was
+    /// in goes with it.
+    ///
+    /// Whatever takes the focus away — arming a tool, or a commit the engine
+    /// answers by killing the focus itself — leaves the same nothing behind.
+    /// Kept in one place because the failure of clearing only part of it is
+    /// silent: `form_typing` left standing keeps [`Self::form_has_keyboard`]
+    /// true, so this layer goes on capturing keys for a field PDFium has
+    /// already let go of and the first character the reader types afterwards
+    /// is swallowed (§8.6).
+    pub fn form_focus_dropped(&mut self) {
+        self.form_typing = false;
+        self.form_choice = None;
+        self.form_hint = None;
+        self.form_widget = None;
+        self.date_picker = None;
+        self.time_picker = None;
+    }
+
     pub fn set_form_typing(&mut self, typing: bool) {
         self.form_typing = typing;
     }
@@ -2981,12 +3000,7 @@ impl ReaderSession {
                 // it. Recorded here so the keyboard goes back to the toolbar
                 // in the same beat; the *worker* is told separately, because
                 // only it can commit what was half-typed (§8.6).
-                self.form_typing = false;
-                self.form_choice = None;
-                self.form_hint = None;
-                self.form_widget = None;
-                self.date_picker = None;
-                self.time_picker = None;
+                self.form_focus_dropped();
                 false
             }
             ReadCommand::ToolOptions(tool) => {
@@ -5269,6 +5283,38 @@ mod tests {
             session.date_picker().is_none(),
             "a calendar left open over a page being drawn on is chrome nobody asked for"
         );
+    }
+
+    #[test]
+    fn committing_a_picked_date_takes_the_caret_with_it() {
+        // The commit goes out as a `SetField`, and the engine force-kills the
+        // focus as it takes it. The answer is an `Applied`, which carries no
+        // focus report — so if this layer did not let go itself it would keep
+        // capturing keys for a field nothing is focused in, and the first
+        // character typed after picking a day would vanish.
+        let mut session = open_with_form(1);
+        let today = crate::datefield::Date::new(2026, 8, 16);
+        session.set_form_typing(true);
+        session.set_focused_widget(Some(pulpit_render::document::protocol::FocusedWidget {
+            field: "when".into(),
+            page: PageIndex(0),
+            bounds: pulpit_core::page::PageRect::new(100.0, 100.0, 300.0, 130.0),
+        }));
+        session.set_focused_date(Some(&focused_date("when", "dd mmmm yyyy")), today);
+        assert!(session.form_has_keyboard());
+
+        session.form_focus_dropped();
+
+        assert!(
+            !session.form_has_keyboard(),
+            "the keyboard is still being held for a field PDFium has let go of"
+        );
+        assert!(!session.form_holds_the_caret());
+        assert!(session.date_picker().is_none());
+        assert!(session.time_picker().is_none());
+        assert!(session.focused_widget().is_none());
+        assert!(session.choice_list().is_none());
+        assert!(session.form_hint().is_none());
     }
 
     fn focused_time(
