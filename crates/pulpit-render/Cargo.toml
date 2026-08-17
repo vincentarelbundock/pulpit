@@ -42,6 +42,7 @@ p384 = { workspace = true }
 p521 = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
+spki = { workspace = true }
 pkcs8 = { workspace = true }
 pkcs12 = { workspace = true }
 zeroize = { workspace = true }
@@ -54,3 +55,4 @@ p12-keystore = { version = "0.3.1", optional = true }
 pulpit-testkit = { workspace = true }
 tempfile = { workspace = true }
 rcgen = "0.12"
+rand = "0.8"

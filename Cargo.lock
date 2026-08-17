@@ -1609,6 +1609,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",
@@ -5015,12 +5016,14 @@ dependencies = [
  "pkcs8 0.10.2",
  "pulpit-core",
  "pulpit-testkit",
+ "rand 0.8.7",
  "rcgen",
  "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "signature",
+ "spki 0.7.3",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -5110,6 +5113,7 @@ version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
+ "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
