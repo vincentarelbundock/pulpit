@@ -3840,7 +3840,13 @@ impl App {
             }
             Action::FocusSearch => {
                 if self.search_workspace {
-                    self.close_search(true)
+                    let mut tasks = vec![self.close_search(true)];
+                    if self.uses_document_viewer() {
+                        tasks.push(self.on_read_command(
+                            crate::widgets::event::ReadCommand::SetOutlineCollapsed(true),
+                        ));
+                    }
+                    Task::batch(tasks)
                 } else {
                     self.open_search()
                 }
