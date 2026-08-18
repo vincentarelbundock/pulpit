@@ -4488,6 +4488,23 @@ mod tests {
     }
 
     #[test]
+    fn remounting_keeps_the_place_within_the_page() {
+        let mut session = open(8);
+        session.apply(&ReadCommand::SetZoom(Zoom::FitWidth));
+        session.apply(&ReadCommand::GoToPage(PageIndex(4)));
+        let placed = session.column.pages[4];
+        session.apply(&ReadCommand::DragScrollHandle(
+            placed.top + placed.height * 0.6,
+        ));
+
+        session.remount_cell(1_000.0, 800.0);
+
+        let (page, _, fraction) = session.reading_position().expect("a laid-out column");
+        assert_eq!(page, PageIndex(4));
+        assert!((fraction - 0.6).abs() < 1e-2, "{fraction}");
+    }
+
+    #[test]
     fn leaving_a_remounted_surface_keeps_the_page_reached_there() {
         let mut session = open(8);
         session.apply(&ReadCommand::SetZoom(Zoom::FitWidth));

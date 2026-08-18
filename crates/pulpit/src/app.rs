@@ -4077,16 +4077,13 @@ impl App {
                     // geometries for the same reader. Resolve a fit against
                     // the one being entered, keeping the logical page (and
                     // any page reached while fullscreen) across the change.
-                    if let Some(cell) = self.page_surface_size() {
-                        self.reader.remount_cell(cell.0, cell.1);
-                    }
                     // Fullscreen and the ordinary layout mount different
                     // widget trees. The new scrollable therefore starts at
                     // zero even though the reader session still owns the
                     // real page and offset. Push that position into the newly
                     // mounted surface after this update so leaving fullscreen
                     // cannot visually jump back to page one.
-                    return self.scroll_surface_to_reader();
+                    return self.remount_reader_surface();
                 }
                 let wanted = !self.coordinator.roles.audience_fullscreen;
                 self.coordinator.roles.audience_fullscreen = wanted;
@@ -7272,6 +7269,17 @@ impl App {
         )
     }
 
+    /// Refit a newly mounted document surface without losing the reading
+    /// position, then put its fresh scrollable at the reader's retained
+    /// offset.
+    fn remount_reader_surface(&mut self) -> Task<Message> {
+        let Some(cell) = self.page_surface_size() else {
+            return Task::none();
+        };
+        self.reader.remount_cell(cell.0, cell.1);
+        self.scroll_surface_to_reader()
+    }
+
     /// Something the reader's widgets asked for.
     ///
     /// The split is the one §5.3 draws: the viewport belongs to the session
@@ -8015,7 +8023,9 @@ impl App {
     /// A layout whose primary viewer is the document is not usable before a
     /// PDF is open. Otherwise built-ins and saved layouts participate in the
     /// exact order [`LayoutStore::all`] provides, and adopting rather than
-    /// merely mounting preserves the per-document choice.
+    /// merely mounting preserves the per-document choice. When the next
+    /// layout carries a document surface, remounting it preserves the page
+    /// and the fraction of that page currently at the top of the viewport.
     fn cycle_layout(&mut self) -> Task<Message> {
         let next = next_usable_layout(
             self.layouts.all(),
@@ -8025,6 +8035,7 @@ impl App {
         .cloned();
         if let Some(layout) = next {
             self.adopt_layout(layout);
+            return self.remount_reader_surface();
         }
         Task::none()
     }

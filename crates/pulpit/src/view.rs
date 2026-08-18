@@ -42,8 +42,8 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     }
 
     // Startup and the `?` reference are one surface, not two versions of the
-    // same information. When there is work behind it, the page adds only the
-    // way back; the reference itself remains identical.
+    // same information. When there is work behind it, the page adds only a
+    // dismissal control; the reference itself remains identical.
     let mut page = if app.shortcuts_open {
         shortcut_reference_page(app, app.state.document().is_some())
     } else {
@@ -54,6 +54,12 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
             Page::Settings => settings_page(app),
         }
     };
+    // The empty-start surface passes through `presenter`, which owns the menu
+    // overlay there. An explicitly opened shortcut reference bypasses it, so
+    // mount the same menu at this level when its hamburger is used.
+    if app.shortcuts_open && app.menu_open {
+        page = stack![page, menu(app)].into();
+    }
 
     // A ringing cue washes the presenter window, under everything else so it
     // tints the page rather than covering any control — including the Snooze
@@ -1010,8 +1016,42 @@ fn recent_menu_documents(
         .map(std::path::PathBuf::as_path)
 }
 
+fn recent_menu_label(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .map(std::ffi::OsStr::to_string_lossy)
+        .unwrap_or_else(|| path.as_os_str().to_string_lossy())
+}
+
+/// Fit the five visible filenames while keeping the flyout on screen.
+///
+/// One body-size unit per character is deliberately conservative for the
+/// proportional UI font. The cap is the viewport minus the panel's padding
+/// and a small right margin; exceptionally long names therefore stay inside
+/// the window instead of making the whole overlay wider than it.
+fn recent_menu_width(
+    recent: &std::collections::VecDeque<std::path::PathBuf>,
+    viewport_width: f32,
+) -> f32 {
+    let longest = recent_menu_documents(recent)
+        .map(|path| recent_menu_label(path).chars().count())
+        .max()
+        .unwrap_or(0) as f32;
+    let wanted = (longest * type_scale::BODY + gap::S * 2.0).max(MENU_WIDTH);
+    let shell = gap::M * 2.0 + gap::S * 2.0;
+    wanted.min((viewport_width - shell).max(MENU_WIDTH))
+}
+
 /// The main menu: the handful of commands that are not on the layout.
 fn menu(app: &App) -> Element<'_, Message> {
+    responsive(move |size| menu_at_width(app, size.width)).into()
+}
+
+fn menu_at_width(app: &App, viewport_width: f32) -> Element<'_, Message> {
+    let menu_width = if app.recent_menu_open {
+        recent_menu_width(&app.settings.recent, viewport_width)
+    } else {
+        MENU_WIDTH
+    };
     let entry = |label: &'static str, shortcut: Option<String>, message: Message| {
         let mut row = Row::new()
             .spacing(gap::M)
@@ -1047,14 +1087,15 @@ fn menu(app: &App) -> Element<'_, Message> {
         })
     };
     let recent_entry = |path: &std::path::Path| {
-        let label = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        let label = recent_menu_label(path).into_owned();
         button(
-            container(text(label).size(type_scale::BODY))
-                .center_y(Length::Fill)
-                .padding(iced::Padding::from([0.0, gap::S])),
+            container(
+                text(label)
+                    .size(type_scale::BODY)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .center_y(Length::Fill)
+            .padding(iced::Padding::from([0.0, gap::S])),
         )
         .width(Length::Fill)
         .height(Length::Fixed(MENU_ROW))
@@ -1066,7 +1107,7 @@ fn menu(app: &App) -> Element<'_, Message> {
 
     let mut items = Column::new()
         .spacing(gap::XS)
-        .width(Length::Fixed(MENU_WIDTH));
+        .width(Length::Fixed(menu_width));
     items = items.push(
         container(
             text("pulpit")
@@ -1245,12 +1286,18 @@ fn menu(app: &App) -> Element<'_, Message> {
             .height(Length::Fill),
     );
 
-    // The menu hangs below the button's strip.
-    let above = flyout_top(app, crate::widgets::WidgetKind::MainMenu);
+    // The menu hangs below the button's strip. The shortcut reference owns a
+    // fixed header rather than the active layout's toolbar, so its flyout is
+    // anchored to that header on both empty startup and explicit `?` help.
+    let above = if app.shortcuts_open || app.state.document().is_none() {
+        gap::L + theme::controls::BUTTON_HEIGHT + gap::S * 2.0
+    } else {
+        flyout_top(app, crate::widgets::WidgetKind::MainMenu)
+    };
     Row::new()
         .push(
             column![spacer(above), panel, rest()]
-                .width(Length::Fixed(MENU_WIDTH + gap::M * 2.0 + gap::S)),
+                .width(Length::Fixed(menu_width + gap::M * 2.0 + gap::S)),
         )
         .push(beside)
         .into()
@@ -1333,10 +1380,10 @@ fn shortcut_group<'a>(
     content.into()
 }
 
-const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5, 6];
-const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 2, 4];
-const SHORTCUT_TABLE_RIGHT: &[usize] = &[3, 5, 6];
-const SHORTCUT_TABLE_WIDTH: f32 = 540.0;
+const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 5];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[2, 3, 4];
+const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {
     width >= 1_100.0
@@ -1367,19 +1414,30 @@ fn shortcut_table_separator() -> Element<'static, Message> {
 
 /// The one mode-neutral welcome and shortcut-reference surface.
 ///
-/// If a document is already open, `can_go_back` exposes it again without
+/// If a document is already open, `can_close` exposes it again without
 /// making a second, subtly different help layout.
-fn shortcut_reference_page(app: &App, can_go_back: bool) -> Element<'_, Message> {
+fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
     let guide = responsive(move |size| {
         if split_shortcut_tables(size.width) {
             container(
                 row![
-                    container(shortcut_table(app, SHORTCUT_TABLE_LEFT))
-                        .width(Length::Fixed(SHORTCUT_TABLE_WIDTH)),
+                    container(
+                        container(shortcut_table(app, SHORTCUT_TABLE_LEFT))
+                            .width(Length::Fill)
+                            .max_width(SHORTCUT_TABLE_WIDTH),
+                    )
+                    .width(Length::FillPortion(1))
+                    .align_x(Alignment::Center),
                     shortcut_table_separator(),
-                    container(shortcut_table(app, SHORTCUT_TABLE_RIGHT))
-                        .width(Length::Fixed(SHORTCUT_TABLE_WIDTH)),
+                    container(
+                        container(shortcut_table(app, SHORTCUT_TABLE_RIGHT))
+                            .width(Length::Fill)
+                            .max_width(SHORTCUT_TABLE_WIDTH),
+                    )
+                    .width(Length::FillPortion(1))
+                    .align_x(Alignment::Center),
                 ]
+                .width(Length::Fill)
                 .align_y(Alignment::Start),
             )
             .width(Length::Fill)
@@ -1411,29 +1469,27 @@ fn shortcut_reference_page(app: &App, can_go_back: bool) -> Element<'_, Message>
     )
     .width(Length::Fill)
     .align_x(Alignment::Center);
-    let header: Element<'_, Message> = if can_go_back {
-        let back = button(
-            row![
-                theme::icon::icon(theme::Icon::ArrowLeft, type_scale::BODY),
-                text("Back").size(type_scale::BODY),
-            ]
-            .spacing(gap::S)
+    let mut header = stack![
+        brand,
+        container(menu_button(app))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Start)
             .align_y(Alignment::Center),
-        )
-        .style(theme::ambient::tool_button)
-        .on_press(Message::CloseShortcuts);
-        stack![
-            brand,
-            container(back)
+    ];
+    if can_close {
+        let close = button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::CloseShortcuts);
+        header = header.push(
+            container(close)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .align_x(Alignment::Start)
+                .align_x(Alignment::End)
                 .align_y(Alignment::Center),
-        ]
-        .into()
-    } else {
-        brand.into()
-    };
+        );
+    }
     let content = column![header, guide].spacing(gap::M).width(Length::Fill);
 
     // The centring has to happen *inside* the scrollable. A vertical
@@ -1630,25 +1686,17 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
 /// presenter screen is a layout the user designed, and nothing should push it
 /// around.
 fn settings_page(app: &App) -> Element<'_, Message> {
-    // The way out sits above the title, not beside it: one is navigation, the
-    // other is where you are. Just the title, too — the desktop, the backend
-    // and the palette in use are facts about this session, and they are in
-    // "This session" below with the rest of the capability report.
-    let header = column![
-        button(
-            row![
-                theme::icon::icon(theme::Icon::ArrowLeft, 18.0),
-                text("Back").size(type_scale::BODY)
-            ]
-            .spacing(gap::S)
-            .align_y(Alignment::Center)
-        )
-        .padding(gap::S)
-        .style(theme::ambient::tool_button)
-        .on_press(Message::ShowPresenter),
+    // Full-window secondary pages use the same top-right dismissal as the
+    // shortcut reference and the document sidebar.
+    let header = row![
         text("Settings").size(type_scale::TITLE),
+        space::horizontal(),
+        button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::ShowPresenter),
     ]
-    .spacing(gap::M);
+    .align_y(Alignment::Center);
 
     // A full page, not a squashed drawer: generous rhythm and page margins.
     let mut body = Column::new()
@@ -3678,6 +3726,17 @@ mod tests {
             shown.last().copied(),
             Some(std::path::Path::new("deck-4.pdf"))
         );
+    }
+
+    #[test]
+    fn recent_menu_fits_the_longest_visible_name_without_leaving_the_viewport() {
+        let long_name = format!("{}.pdf", "quarterly-presentation-".repeat(2));
+        let recent = std::collections::VecDeque::from([
+            std::path::PathBuf::from("short.pdf"),
+            std::path::PathBuf::from(long_name),
+        ]);
+        assert!(recent_menu_width(&recent, 1_000.0) > MENU_WIDTH);
+        assert_eq!(recent_menu_width(&recent, 400.0), 360.0);
     }
 
     #[test]

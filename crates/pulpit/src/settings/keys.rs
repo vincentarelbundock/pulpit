@@ -110,7 +110,18 @@ pub struct ShortcutGroup {
 /// The grouping is semantic, not balanced by item count. Actions deliberately
 /// left without a keyboard shortcut are absent because there is nothing a
 /// user can press for them while shortcut customisation is unavailable.
-pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
+pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
+    ShortcutGroup {
+        title: "Files & application",
+        actions: &[
+            Action::OpenDocument,
+            Action::ReloadDocument,
+            Action::CycleLayout,
+            Action::ShowLayouts,
+            Action::ShowShortcuts,
+            Action::Quit,
+        ],
+    },
     ShortcutGroup {
         title: "Move through pages",
         actions: &[
@@ -119,15 +130,6 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
             Action::First,
             Action::Last,
             Action::ShowOverview,
-        ],
-    },
-    ShortcutGroup {
-        title: "Preview",
-        actions: &[
-            Action::PreviewNext,
-            Action::PreviewPrevious,
-            Action::CommitPreview,
-            Action::CancelPreview,
         ],
     },
     ShortcutGroup {
@@ -176,17 +178,6 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
             Action::ToggleDualPage,
         ],
     },
-    ShortcutGroup {
-        title: "Files & application",
-        actions: &[
-            Action::OpenDocument,
-            Action::ReloadDocument,
-            Action::CycleLayout,
-            Action::ShowLayouts,
-            Action::ShowShortcuts,
-            Action::Quit,
-        ],
-    },
 ];
 
 /// The compact reference shown before a document is open.
@@ -202,14 +193,8 @@ pub const QUICK_START_ACTIONS: [Action; 8] = [
 ];
 
 /// Keys worth teaching specifically for live presentation.
-pub const PRESENTING_ACTIONS: [Action; 6] = [
-    Action::PreviewNext,
-    Action::PreviewPrevious,
-    Action::CommitPreview,
-    Action::Blank,
-    Action::BlankAlternate,
-    Action::ToggleTimer,
-];
+pub const PRESENTING_ACTIONS: [Action; 3] =
+    [Action::Blank, Action::BlankAlternate, Action::ToggleTimer];
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
@@ -311,7 +296,7 @@ impl Action {
 /// The modifiers held down with a key.
 ///
 /// These are data rather than a prefix glued onto the key name. The old
-/// `"ShiftTab"` spelling could not express two modifiers at once, and — worse
+/// `"CtrlShiftZ"` spelling could not express modifiers structurally, and — worse
 /// — it gave resolution no way to tell a modifier that is load-bearing from
 /// one that is incidental. See [`Keymap::resolve_with_mods`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -485,6 +470,19 @@ impl From<KeymapWire> for Keymap {
             .bindings
             .into_iter()
             .map(|(binding, action)| (binding.normalized(), action))
+            // Preview stepping is controlled by the scrubber rather than the
+            // fixed keymap. Remove the retired bindings from stored keymaps
+            // too, or existing users would keep Tab after fresh installs
+            // stopped advertising it.
+            .filter(|(_, action)| {
+                !matches!(
+                    action,
+                    Action::PreviewNext
+                        | Action::PreviewPrevious
+                        | Action::CommitPreview
+                        | Action::CancelPreview
+                )
+            })
             .collect();
 
         // These were shipped as defaults but could not do what their labels
@@ -531,15 +529,6 @@ impl Default for Keymap {
                 named("Home", Action::First),
                 named("End", Action::Last),
                 with("g", Mods::shift(), Action::Last),
-                named("Tab", Action::PreviewNext),
-                with("Tab", Mods::shift(), Action::PreviewPrevious),
-                // `Enter` commits the preview and does *not* also advance.
-                // It used to do both, which meant one of the two bindings was
-                // dead — and since the toolkit never reports "Return", the
-                // dead one was the commit. Page navigation has dedicated
-                // keys; commit has none, so this is where `Enter` belongs.
-                named("Enter", Action::CommitPreview),
-                named("Escape", Action::CancelPreview),
                 // Blanking is the most reflexive key at a lectern, so it does
                 // not move for anyone — `b` and `w` are vim word motions, but
                 // a presenter has no words to move over.
@@ -631,7 +620,7 @@ impl Keymap {
     /// Resolve a keypress held with `mods`.
     ///
     /// Two passes. The first wants the modifiers to match exactly, so
-    /// `Ctrl`+`Q` finds quit and `Shift`+`Tab` finds the previous preview.
+    /// `Ctrl`+`Q` finds quit and `Shift`+`F3` finds the previous match.
     /// The second allows an *unmatched shift only*: a presenter resting a
     /// finger on shift must still be able to blank the screen with `b`.
     ///
@@ -739,11 +728,18 @@ impl Keymap {
 
     /// Actions deliberately left unbound by default.
     ///
-    /// Stepping through a slide's links is rare enough that it does not earn
-    /// one of the bare letters, but it stays bindable. Listing them here is
-    /// what lets the "everything is reachable" test stay strict about the
-    /// rest.
-    pub const UNBOUND_BY_DEFAULT: [Action; 2] = [Action::FocusNextLink, Action::FocusPreviousLink];
+    /// Preview control belongs to the scrubber rather than Tab/Enter, and
+    /// stepping through a slide's links is rare enough that it does not earn
+    /// one of the bare letters. The variants remain internal actions, but no
+    /// fixed shortcut or reference entry advertises them.
+    pub const UNBOUND_BY_DEFAULT: [Action; 6] = [
+        Action::PreviewNext,
+        Action::PreviewPrevious,
+        Action::CommitPreview,
+        Action::CancelPreview,
+        Action::FocusNextLink,
+        Action::FocusPreviousLink,
+    ];
 
     /// The binding to *show* for an action, if any.
     ///
@@ -1009,15 +1005,15 @@ mod tests {
     fn a_shifted_binding_is_reachable_at_all() {
         let keymap = Keymap::default();
         assert_eq!(
-            keymap.resolve_with_mods(Some("Tab"), Mods::shift(), None),
-            Some(Action::PreviewPrevious)
+            keymap.resolve_with_mods(Some("f3"), Mods::shift(), None),
+            Some(Action::FindPrevious)
         );
     }
 
     #[test]
     fn an_unshifted_press_never_reaches_a_shifted_binding() {
         let keymap = Keymap::default();
-        assert_eq!(keymap.resolve(Some("Tab"), None), Some(Action::PreviewNext));
+        assert_eq!(keymap.resolve(Some("f3"), None), Some(Action::FindNext));
         assert_eq!(keymap.resolve(Some("Right"), None), Some(Action::Next));
     }
 
@@ -1117,15 +1113,23 @@ mod tests {
     }
 
     #[test]
-    fn enter_commits_the_preview_rather_than_advancing() {
-        // It used to be bound to both, so the toolkit's "Enter" hit Next and
-        // the commit — written as "Return", a name the toolkit never emits —
-        // was dead twice over.
+    fn preview_actions_have_no_fixed_shortcuts() {
         let keymap = Keymap::default();
+        assert_eq!(keymap.resolve(Some("Tab"), None), None);
         assert_eq!(
-            keymap.resolve(Some("Enter"), None),
-            Some(Action::CommitPreview)
+            keymap.resolve_with_mods(Some("Tab"), Mods::shift(), None),
+            None
         );
+        assert_eq!(keymap.resolve(Some("Enter"), None), None);
+        assert_eq!(keymap.resolve(Some("Escape"), None), None);
+        for action in [
+            Action::PreviewNext,
+            Action::PreviewPrevious,
+            Action::CommitPreview,
+            Action::CancelPreview,
+        ] {
+            assert!(keymap.keys_for(action).is_empty(), "{action:?}");
+        }
     }
 
     #[test]
@@ -1210,18 +1214,33 @@ mod migration_tests {
     #[test]
     fn a_legacy_shift_prefixed_name_loads_as_a_modifier() {
         // Written by any version before modifiers were data. Left as a name,
-        // it would never match again: the toolkit reports "Tab" and the shift
+        // it would never match again: the toolkit reports "Z" and the shift
         // flag separately.
-        let stored = r#"{"bindings":[[{"kind":"named","key":"ShiftTab"},"preview-previous"]]}"#;
+        let stored = r#"{"bindings":[[{"kind":"named","key":"CtrlShiftZ"},"redo-annotation"]]}"#;
         let keymap: Keymap = serde_json::from_str(stored).expect("should load");
         assert_eq!(
             keymap.bindings[0].0,
-            KeyBinding::named_with("Tab", Mods::shift())
+            KeyBinding::named_with("Z", Mods::ctrl_shift())
         );
         assert_eq!(
-            keymap.resolve_with_mods(Some("Tab"), Mods::shift(), None),
-            Some(Action::PreviewPrevious)
+            keymap.resolve_with_mods(Some("Z"), Mods::ctrl_shift(), None),
+            Some(Action::RedoAnnotation)
         );
+    }
+
+    #[test]
+    fn retired_preview_bindings_are_removed_from_stored_keymaps() {
+        let stored = r#"{"bindings":[[{"kind":"named","key":"Tab"},"preview-next"],[{"kind":"named","key":"ShiftTab"},"preview-previous"],[{"kind":"named","key":"Enter"},"commit-preview"],[{"kind":"named","key":"Escape"},"cancel-preview"],[{"kind":"named","key":"b"},"blank"]]}"#;
+        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
+        assert_eq!(keymap.resolve(Some("b"), None), Some(Action::Blank));
+        for action in [
+            Action::PreviewNext,
+            Action::PreviewPrevious,
+            Action::CommitPreview,
+            Action::CancelPreview,
+        ] {
+            assert!(keymap.keys_for(action).is_empty(), "{action:?}");
+        }
     }
 
     #[test]

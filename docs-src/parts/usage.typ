@@ -9,9 +9,6 @@
   [`→` `↓` `Space` `PageDown`], [next slide (audience follows)],
   [`←` `↑` `PageUp` `Backspace`], [previous slide],
   [`Home` / `End`], [first / last],
-  [`Tab` / `Shift+Tab`], [look ahead / back on your screen only, leaving the audience where it is],
-  [`Enter`], [show the slide you were looking at to the audience],
-  [`Esc`], [go back to the slide the audience is on],
   [`b` / `w`], [blank black / blank white],
   [`p` / `r`], [start-pause / reset the timer],
   [`s`], [swap presenter and audience displays],
@@ -30,10 +27,7 @@ it, storing the raw scancode in `settings.toml`.
 Four ways to move through the deck:
 
 - *Keys*, listed above. Arrows, `Space` and `PageUp`/`PageDown` move the
-  audience with you. `Tab` and `Shift+Tab` instead look ahead or back on your
-  own screen while the audience stays put, which is how you check what is
-  coming without showing it. `Enter` then shows the slide you landed on, and
-  `Esc` returns you to the one the audience is seeing.
+  audience with you.
 - *Back and forward buttons*, a widget you can place in any layout cell, with
   or without words beside the arrows.
 - *Slider*, a draggable track across the whole deck.
