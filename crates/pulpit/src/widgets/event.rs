@@ -68,6 +68,8 @@ pub enum FindCommand {
     Focus(usize),
     ToggleCaseSensitive,
     ToggleWholeWord,
+    /// Treat the query as a Rust regular expression.
+    ToggleRegex,
     /// Forget the query and everything found for it.
     Clear,
 }

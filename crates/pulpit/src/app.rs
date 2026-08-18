@@ -280,6 +280,10 @@ pub enum Message {
     Read(crate::widgets::event::ReadCommand),
     /// Something asked of the search pane, in whatever view it is placed.
     Find(crate::widgets::event::FindCommand),
+    /// Dismiss the transient search workspace without forgetting its query.
+    CloseSearchWorkspace,
+    /// The workspace reports its offset so it can virtualize a long result set.
+    SearchScrolled(f32),
     /// Put back the edits a previous run did not save, or do not.
     RestoreReaderEdits,
     DiscardReaderEdits,
@@ -1071,6 +1075,11 @@ pub struct App {
     /// through a different layout, and two models would be two answers to one
     /// question.
     pub search: pulpit_core::search::SearchState,
+    /// Search is an activity over the whole Reader or Presenter, never a cell
+    /// that permanently takes document space.
+    pub search_workspace: bool,
+    /// Vertical offset of the page-grouped result stream.
+    pub search_scroll: f32,
     /// The thread talking to this document's worker, when document mode is
     /// available for it. `None` when nothing is open, or when the worker
     /// could not be started — presentation mode does not depend on it.
@@ -1471,6 +1480,8 @@ impl App {
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
+            search_workspace: false,
+            search_scroll: 0.0,
             reader_render: ReaderRenderState::default(),
             reader_crop: pulpit_core::notes::Region::FULL,
             reader_link: None,
@@ -2180,6 +2191,10 @@ impl App {
                 {
                     return self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop);
                 }
+                if key.as_deref() == Some("Escape") && self.search_workspace {
+                    self.search_workspace = false;
+                    return Task::none();
+                }
                 // The editor owns the keyboard while it is open: presenter
                 // shortcuts must not blank the audience while someone is
                 // typing a layout name.
@@ -2557,6 +2572,14 @@ impl App {
             }
             Message::Read(command) => self.on_read_command(command),
             Message::Find(command) => self.on_find_command(command),
+            Message::CloseSearchWorkspace => {
+                self.search_workspace = false;
+                Task::none()
+            }
+            Message::SearchScrolled(offset) => {
+                self.search_scroll = offset.max(0.0);
+                Task::none()
+            }
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
@@ -2701,8 +2724,8 @@ impl App {
                     // Open on the slide the presenter is on, however far down
                     // a long deck that is — and in a document layout that is
                     // the page the reader is showing, not the session index.
-                    let slide = if crate::layout::builtin::LayoutMode::of(&self.active_layout)
-                        == crate::layout::builtin::LayoutMode::Document
+                    let slide = if crate::layout::PrimaryViewer::of(&self.active_layout)
+                        == crate::layout::PrimaryViewer::Document
                     {
                         let slide = self.slide_showing(self.reader.controls().page.get());
                         // The grid's cursor and accent read the preview slide,
@@ -2728,8 +2751,8 @@ impl App {
                 // In a document layout the grid is a way of moving the reader,
                 // not of showing a slide to a room: the session index would
                 // change with nothing on screen following it.
-                if crate::layout::builtin::LayoutMode::of(&self.active_layout)
-                    == crate::layout::builtin::LayoutMode::Document
+                if crate::layout::PrimaryViewer::of(&self.active_layout)
+                    == crate::layout::PrimaryViewer::Document
                 {
                     let page = self.page_showing(slide);
                     return self
@@ -3140,11 +3163,11 @@ impl App {
             .note(format!("presenter layout: {}", layout.name));
         // Each mode remembers its own (§2.3): choosing a presenter variant
         // must never change what a PDF opens into, and the reverse.
-        match crate::layout::builtin::LayoutMode::of(&layout) {
-            crate::layout::builtin::LayoutMode::Presentation => {
+        match crate::layout::PrimaryViewer::of(&layout) {
+            crate::layout::PrimaryViewer::Slide => {
                 self.settings.layout.active = Some(layout.id.0.clone());
             }
-            crate::layout::builtin::LayoutMode::Document => {
+            crate::layout::PrimaryViewer::Document => {
                 self.settings.layout.active_document = Some(layout.id.0.clone());
             }
         }
@@ -3642,9 +3665,10 @@ impl App {
     /// Applicability belongs to the semantic action, so the same press is a
     /// deliberate no-op when there is no Reader on screen.
     fn on_reader_action(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
-        use crate::layout::builtin::LayoutMode;
-
-        if self.reader.is_open() && LayoutMode::of(&self.active_layout) == LayoutMode::Document {
+        if self.reader.is_open()
+            && crate::layout::PrimaryViewer::of(&self.active_layout)
+                == crate::layout::PrimaryViewer::Document
+        {
             self.on_read_command(command)
         } else {
             Task::none()
@@ -3654,10 +3678,6 @@ impl App {
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::ToggleReader => self.toggle_reader(),
-            // The caret goes to the box wherever the layout put it. Nothing
-            // is opened or mounted: a layout without a search pane has
-            // nowhere for the caret to go, and the key does nothing rather
-            // than rearranging the presenter's screen mid-talk.
             // The rail collapses in place, wherever the layout put it, and a
             // layout without an outline pane simply has nothing to collapse.
             Action::ToggleOutline => {
@@ -3666,8 +3686,12 @@ impl App {
                     !collapsed,
                 ))
             }
+            // Search temporarily takes the whole working surface in Reader and
+            // Presenter alike. It is never a layout cell or a permanent rail.
             Action::FocusSearch => {
-                iced::widget::operation::focus(crate::widgets::search::view::input_id())
+                self.search_workspace = true;
+                self.overview = false;
+                iced::widget::operation::focus(crate::widgets::search::view::workspace_input_id())
             }
             Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
             Action::FindPrevious => {
@@ -3843,11 +3867,9 @@ impl App {
                 self.annotation_controls = crate::widgets::AnnotationControls::new(
                     annotation_options_in(&self.active_layout),
                 );
-                match crate::layout::builtin::LayoutMode::of(&self.active_layout) {
-                    crate::layout::builtin::LayoutMode::Presentation => {
-                        self.settings.layout.active = Some(id.0)
-                    }
-                    crate::layout::builtin::LayoutMode::Document => {
+                match crate::layout::PrimaryViewer::of(&self.active_layout) {
+                    crate::layout::PrimaryViewer::Slide => self.settings.layout.active = Some(id.0),
+                    crate::layout::PrimaryViewer::Document => {
                         self.settings.layout.active_document = Some(id.0)
                     }
                 }
@@ -6218,7 +6240,7 @@ impl App {
 
     /// Put a document's own jump to the reader, if it goes anywhere real.
     fn offer_form_navigation(&mut self, page: pulpit_core::page::PageIndex, what: String) {
-        if !self.in_document_mode() || page.get() >= self.reader.page_count() {
+        if !self.uses_document_viewer() || page.get() >= self.reader.page_count() {
             return;
         }
         self.pending_form_goto = Some(FormNavigation { page, what });
@@ -6639,11 +6661,13 @@ impl App {
         control: bool,
         shift: bool,
     ) -> Option<Task<Message>> {
-        use crate::layout::builtin::LayoutMode;
         use crate::widgets::event::ReadCommand;
         use pulpit_core::annotation::AnnotationTool;
 
-        if !self.reader.is_open() || LayoutMode::of(&self.active_layout) != LayoutMode::Document {
+        if !self.reader.is_open()
+            || crate::layout::PrimaryViewer::of(&self.active_layout)
+                != crate::layout::PrimaryViewer::Document
+        {
             return None;
         }
         // The calendar takes Escape first, because Escape closes the nearest
@@ -7365,8 +7389,6 @@ impl App {
     /// Nothing happens when the answer is the layout already mounted, which is
     /// the common case: no toast, no relayout, no entry in the diagnostics.
     fn settle_layout_for_document(&mut self) {
-        use crate::layout::builtin::LayoutMode;
-
         let remembered = self
             .document_hash
             .as_ref()
@@ -7385,15 +7407,17 @@ impl App {
                 let Some(first) = self.reader.page_geometry(pulpit_core::page::PageIndex(0)) else {
                     return;
                 };
-                let mode = crate::layout::detect::mode_for_page(first.width, first.height);
-                let last_used = match mode {
-                    LayoutMode::Presentation => self.settings.layout.active.clone(),
-                    LayoutMode::Document => self.settings.layout.active_document.clone(),
+                let viewer = crate::layout::detect::viewer_for_page(first.width, first.height);
+                let last_used = match viewer {
+                    crate::layout::PrimaryViewer::Slide => self.settings.layout.active.clone(),
+                    crate::layout::PrimaryViewer::Document => {
+                        self.settings.layout.active_document.clone()
+                    }
                 };
                 last_used
                     .map(LayoutId)
                     .filter(|id| self.layouts.get(id).is_some())
-                    .unwrap_or_else(|| crate::layout::builtin::default_for(mode))
+                    .unwrap_or_else(|| crate::layout::builtin::default_for(viewer))
             }
         };
 
@@ -7493,15 +7517,13 @@ impl App {
     /// document because that is where they are (A1). Each mode comes back to
     /// the layout it was last in, which is why the two are remembered apart.
     fn toggle_reader(&mut self) -> Task<Message> {
-        use crate::layout::builtin::LayoutMode;
-
-        let wanted = match LayoutMode::of(&self.active_layout) {
-            LayoutMode::Presentation => LayoutMode::Document,
-            LayoutMode::Document => LayoutMode::Presentation,
+        let wanted = match crate::layout::PrimaryViewer::of(&self.active_layout) {
+            crate::layout::PrimaryViewer::Slide => crate::layout::PrimaryViewer::Document,
+            crate::layout::PrimaryViewer::Document => crate::layout::PrimaryViewer::Slide,
         };
         let remembered = match wanted {
-            LayoutMode::Presentation => self.settings.layout.active.clone(),
-            LayoutMode::Document => self.settings.layout.active_document.clone(),
+            crate::layout::PrimaryViewer::Slide => self.settings.layout.active.clone(),
+            crate::layout::PrimaryViewer::Document => self.settings.layout.active_document.clone(),
         };
         // The layout this mode was last in, or its default when it has not
         // been in one yet. A remembered id that no longer names a layout —
@@ -7515,7 +7537,7 @@ impl App {
             self.notify(format!("The {} layout is missing.", wanted.label()));
             return Task::none();
         };
-        if wanted == LayoutMode::Document && !self.reader.is_open() {
+        if wanted == crate::layout::PrimaryViewer::Document && !self.reader.is_open() {
             // Saying so beats mounting a Reader over a document that is not
             // there and letting the empty page speak for itself.
             self.notify("There is no document open to read.".to_string());
@@ -8194,21 +8216,26 @@ impl App {
         use crate::widgets::event::FindCommand;
         match command {
             FindCommand::Type(typed) => {
-                let query = pulpit_core::search::Query::new(
+                let mut query = pulpit_core::search::Query::new(
                     &typed,
                     self.search.query().case_sensitive,
                     self.search.query().whole_word,
                 );
+                query.regex = self.search.query().regex;
                 self.restart_search(query);
                 Task::none()
             }
-            FindCommand::ToggleCaseSensitive | FindCommand::ToggleWholeWord => {
+            FindCommand::ToggleCaseSensitive
+            | FindCommand::ToggleWholeWord
+            | FindCommand::ToggleRegex => {
                 let current = self.search.query();
                 let case_sensitive =
                     current.case_sensitive ^ (command == FindCommand::ToggleCaseSensitive);
                 let whole_word = current.whole_word ^ (command == FindCommand::ToggleWholeWord);
-                let query =
+                let regex = current.regex ^ (command == FindCommand::ToggleRegex);
+                let mut query =
                     pulpit_core::search::Query::new(current.text(), case_sensitive, whole_word);
+                query.regex = regex;
                 self.restart_search(query);
                 Task::none()
             }
@@ -8218,14 +8245,21 @@ impl App {
             }
             FindCommand::Next => {
                 let hit = self.search.advance().cloned();
+                if hit.is_some() {
+                    self.search_workspace = false;
+                }
                 self.go_to_hit(hit)
             }
             FindCommand::Previous => {
                 let hit = self.search.retreat().cloned();
+                if hit.is_some() {
+                    self.search_workspace = false;
+                }
                 self.go_to_hit(hit)
             }
             FindCommand::Focus(index) => {
                 let hit = self.search.focus(index).cloned();
+                self.search_workspace = false;
                 self.go_to_hit(hit)
             }
         }
@@ -8233,6 +8267,7 @@ impl App {
 
     /// Point the search at the open document under a new query.
     fn restart_search(&mut self, query: pulpit_core::search::Query) {
+        self.search_scroll = 0.0;
         // The page count comes from whichever half is open. In document mode
         // the reader knows it; in presentation mode the deck does.
         let pages = if self.reader.is_open() {
@@ -8244,8 +8279,16 @@ impl App {
                 .unwrap_or(0)
         };
         self.search.open(pages);
-        self.search.set_query(query);
+        let invalid = query.validate().err();
+        let generation = self.search.set_query(query);
         if self.search.query().is_empty() {
+            return;
+        }
+        if let Some(problem) = invalid {
+            self.search.fail(
+                generation,
+                pulpit_core::search::SearchProblem::InvalidPattern(problem),
+            );
             return;
         }
         // Notes and bookmarks are already in this process, so they are
@@ -8281,8 +8324,9 @@ impl App {
         let Some(hit) = hit else {
             return Task::none();
         };
-        use crate::layout::builtin::LayoutMode;
-        if LayoutMode::of(&self.active_layout) == LayoutMode::Document {
+        if crate::layout::PrimaryViewer::of(&self.active_layout)
+            == crate::layout::PrimaryViewer::Document
+        {
             return self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(hit.page));
         }
         // In presentation mode the presenter moves and the audience does not:
@@ -8294,15 +8338,15 @@ impl App {
     /// Whether the presenter screen is currently reading a document rather
     /// than driving a deck. The two modes count in different units, so every
     /// history question starts here.
-    fn in_document_mode(&self) -> bool {
-        crate::layout::builtin::LayoutMode::of(&self.active_layout)
-            == crate::layout::builtin::LayoutMode::Document
+    fn uses_document_viewer(&self) -> bool {
+        crate::layout::PrimaryViewer::of(&self.active_layout)
+            == crate::layout::PrimaryViewer::Document
     }
 
     /// Where the presenter is now, in whichever unit the current mode counts
     /// in.
     fn current_place(&self) -> pulpit_core::Place {
-        if self.in_document_mode() {
+        if self.uses_document_viewer() {
             pulpit_core::Place::Page(self.reader.controls().page.get())
         } else {
             pulpit_core::Place::Slide(self.state.committed())
@@ -8319,7 +8363,7 @@ impl App {
     /// jump.
     fn go_to_place(&mut self, place: pulpit_core::Place) -> Task<Message> {
         self.navigating_history = true;
-        let task = if self.in_document_mode() {
+        let task = if self.uses_document_viewer() {
             let page = match place {
                 pulpit_core::Place::Page(page) => pulpit_core::PageIndex(page),
                 pulpit_core::Place::Slide(slide) => self.page_showing(slide),
@@ -8359,7 +8403,7 @@ impl App {
     /// One step in the reading direction, which is what the buttons fall back
     /// to and what the keys always do.
     fn step_sequentially(&mut self, forward: bool) -> Task<Message> {
-        if self.in_document_mode() {
+        if self.uses_document_viewer() {
             let page = self.reader.controls().page.get();
             let page = if forward {
                 page.saturating_add(1)

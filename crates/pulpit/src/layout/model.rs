@@ -8,48 +8,35 @@ use crate::layout::tree::{
 };
 use crate::widgets::{Widget, WidgetCapability, WidgetKind};
 
-/// What a layout is for.
+/// The viewer that gives a layout its navigation surface.
 ///
-/// Not a property of the layout tree: presentation widgets in a document
-/// layout and document widgets in a presenter layout are not errors (§2), and
-/// a cell whose widget has nothing to show renders its empty behaviour. This
-/// says which layout is *mounted*, which is the whole of what "mode" means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LayoutPurpose {
-    Presentation,
+/// This is derived from the widgets every time; it is not an application mode
+/// or persisted layout metadata. All other widgets and interactions are
+/// shared. A layout containing a continuous document surface uses page
+/// navigation; every other layout uses the fitted single-page surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimaryViewer {
+    Slide,
     Document,
 }
 
-impl LayoutPurpose {
-    /// Which purpose a layout has, by the widgets it actually carries — the
-    /// rule used when nothing has said so explicitly (a v1 file, or a layout
-    /// built without [`Layout::with_purpose`]).
-    pub fn infer(layout: &Layout) -> LayoutPurpose {
-        let document = layout.widgets().iter().any(|widget| {
+impl PrimaryViewer {
+    pub fn of(layout: &Layout) -> PrimaryViewer {
+        if layout.widgets().iter().any(|widget| {
             widget
                 .kind()
                 .has_capability(WidgetCapability::ShowsDocument)
-        });
-        if document {
-            LayoutPurpose::Document
+        }) {
+            PrimaryViewer::Document
         } else {
-            LayoutPurpose::Presentation
+            PrimaryViewer::Slide
         }
-    }
-
-    /// A layout's purpose: what it declared explicitly, or the inferred
-    /// fallback when it declared nothing.
-    pub fn of(layout: &Layout) -> LayoutPurpose {
-        layout
-            .purpose
-            .unwrap_or_else(|| LayoutPurpose::infer(layout))
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            LayoutPurpose::Presentation => "Presentation",
-            LayoutPurpose::Document => "Document",
+            PrimaryViewer::Slide => "slide viewer",
+            PrimaryViewer::Document => "document viewer",
         }
     }
 }
@@ -209,11 +196,6 @@ pub struct Layout {
     #[serde(default)]
     pub design_ratio: AspectRatio,
     pub root: Node,
-    /// What this layout is for, explicitly declared. `None` means "infer it
-    /// from the widgets", which is what every layout did before this field
-    /// existed and what a v1 or purpose-less v2 file still gets.
-    #[serde(default)]
-    pub purpose: Option<LayoutPurpose>,
     /// Next node id to hand out.
     #[serde(default = "default_next_id")]
     next_id: u32,
@@ -238,7 +220,6 @@ impl Layout {
             origin,
             design_ratio,
             root,
-            purpose: None,
             next_id: 0,
         };
         layout.renumber();
@@ -253,17 +234,8 @@ impl Layout {
             origin: Origin::Custom,
             design_ratio: AspectRatio::default(),
             root: Node::Leaf(Cell::new(NodeId(0))),
-            purpose: None,
             next_id: 1,
         }
-    }
-
-    /// Declare what this layout is for, explicitly. Built-ins call this so
-    /// their purpose survives being copied and edited into something that no
-    /// longer carries the widget that would otherwise imply it.
-    pub fn with_purpose(mut self, purpose: LayoutPurpose) -> Layout {
-        self.purpose = Some(purpose);
-        self
     }
 
     pub fn is_editable(&self) -> bool {

@@ -638,7 +638,7 @@ unsafe extern "C" fn execute_named_action(this: *mut FPDF_FORMFILLINFO, name: *c
     // hostile document.
     let mut bytes = Vec::new();
     for offset in 0..limits::MAX_JS_STRING_UNITS {
-        let byte = unsafe { *name.add(offset) } as u8;
+        let byte = unsafe { *name.add(offset) }.to_ne_bytes()[0];
         if byte == 0 {
             break;
         }

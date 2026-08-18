@@ -5,6 +5,15 @@
 
 = Architecture
 
+Pulpit has one interaction model, not presenter and reader modes under the
+hood. The active layout is only a tree of widgets. Its primary viewer widget
+chooses how the current PDF is drawn: `CurrentSlide` is one fitted page on a
+black canvas, while `DocumentPage` is a continuous scrolling column. Search,
+navigation history, annotations, document state, shortcuts, display control
+and every other interaction remain application-wide and do not branch on a
+persisted or declared mode. Switching between Presenter and Reader therefore
+mounts another layout; it does not enter another state machine.
+
 ```
 Application (iced daemon, one update loop)
 ├── PresentationState        authoritative domain state         pulpit-core

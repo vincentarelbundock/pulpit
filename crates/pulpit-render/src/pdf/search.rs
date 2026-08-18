@@ -149,6 +149,11 @@ pub(crate) fn find_on_page(
     if needle.is_empty() {
         return Vec::new();
     }
+    if query.regex {
+        return find_regex_on_page(
+            bindings, text_page, geometry, page, query, most_hits, most_quads,
+        );
+    }
     let mut flags = 0;
     if query.case_sensitive {
         flags |= MATCH_CASE;
@@ -201,4 +206,63 @@ pub(crate) fn find_on_page(
     }
     unsafe { bindings.FPDFText_FindClose(search) };
     hits
+}
+
+/// Regex needs the page's text rather than PDFium's literal finder. Text stays
+/// inside the worker; only bounded hits cross IPC, exactly as literal search.
+fn find_regex_on_page(
+    bindings: &dyn PdfiumLibraryBindings,
+    text_page: FPDF_TEXTPAGE,
+    geometry: &PageGeometry,
+    page: PageIndex,
+    query: &Query,
+    most_hits: usize,
+    most_quads: usize,
+) -> Vec<Hit> {
+    let count = unsafe { bindings.FPDFText_CountChars(text_page) }.max(0);
+    let text = text_of(
+        bindings,
+        text_page,
+        0,
+        count,
+        count.saturating_add(1) as usize,
+    );
+    query
+        .matches_in(&text)
+        .into_iter()
+        .take(most_hits)
+        .enumerate()
+        .map(|(ordinal, found)| {
+            // PDFium addresses UTF-16 code units. `TextMatch` deliberately
+            // addresses Rust characters so snippets remain Unicode-correct.
+            let start = utf16_offset(&text, found.offset);
+            let end = utf16_offset(&text, found.offset + found.len);
+            let quads = quads_of(
+                bindings,
+                text_page,
+                geometry,
+                start as i32,
+                end.saturating_sub(start) as i32,
+                most_quads,
+            );
+            Hit::from_text(page, HitSource::PageText, ordinal, &text, found, quads)
+        })
+        .collect()
+}
+
+fn utf16_offset(text: &str, char_offset: usize) -> usize {
+    text.chars().take(char_offset).map(char::len_utf16).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf16_offset;
+
+    #[test]
+    fn rust_character_offsets_are_mapped_back_to_pdfium_utf16_offsets() {
+        assert_eq!(utf16_offset("a😀b", 0), 0);
+        assert_eq!(utf16_offset("a😀b", 1), 1);
+        assert_eq!(utf16_offset("a😀b", 2), 3);
+        assert_eq!(utf16_offset("a😀b", 3), 4);
+    }
 }

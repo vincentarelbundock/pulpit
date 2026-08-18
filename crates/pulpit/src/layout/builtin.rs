@@ -4,7 +4,7 @@
 //! a good presenter screen looks like: strong hierarchy, readable at a
 //! glance, large controls, restrained colour.
 
-use crate::layout::model::{AspectRatio, Layout, LayoutId, LayoutPurpose, Origin};
+use crate::layout::model::{AspectRatio, Layout, LayoutId, Origin, PrimaryViewer};
 use crate::layout::tree::{Cell, CellBackground, Direction, Node, NodeId, Split};
 use crate::widgets::{Widget, WidgetKind};
 
@@ -115,15 +115,14 @@ impl Builder {
 /// tall one, since a page is portrait (§2.4). Layouts are stored
 /// proportionally and scale to whatever they land on either way; the ratio
 /// only sets what the designer previews.
-fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio, purpose: LayoutPurpose) -> Layout {
+fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
     let mut layout = Layout::from_parts(
         LayoutId(id.to_string()),
         name.to_string(),
         Origin::BuiltIn,
         ratio,
         root,
-    )
-    .with_purpose(purpose);
+    );
     layout.renumber();
     debug_assert!(layout.is_canonical(), "{name} is not canonical");
     layout
@@ -131,7 +130,7 @@ fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio, purpose: LayoutP
 
 /// **Presenter Default** — the layout a first run opens with. Most of the
 /// width is the live slide; the remaining rail stacks the two readings (clock
-/// and timer side by side), the next slide, the notes, and search; a shallow band
+/// and timer side by side), the next slide, and the notes; a shallow band
 /// along the bottom carries the controls.
 ///
 /// The rail is a little over a quarter of the width, which is what the notes
@@ -150,15 +149,13 @@ pub fn presenter_default() -> Layout {
         readings,
         b.slide(WidgetKind::NextSlide),
         b.panel(WidgetKind::SpeakerNotes),
-        b.panel(WidgetKind::Search),
     ];
-    // Notes and search share most of the rail, the next slide takes most of
-    // the rest, and the clock and timer get the shallow band their digits and
-    // one line need.
+    // Notes take most of the rail, the next slide takes most of the rest, and
+    // the clock and timer get the shallow band their digits and one line need.
     let rail = b.split(
         "Look-ahead rail",
         Direction::Vertical,
-        &[0.125, 0.25, 0.375, 0.25],
+        &[0.15, 0.30, 0.55],
         rail_children,
     );
 
@@ -196,7 +193,6 @@ pub fn presenter_default() -> Layout {
         "presenter-default",
         root,
         AspectRatio::SixteenNine,
-        LayoutPurpose::Presentation,
     )
 }
 
@@ -204,7 +200,7 @@ pub fn presenter_default() -> Layout {
 ///
 /// The page gets everything that is not a control: a shallow band along the
 /// top carries navigation and the annotation tools, and a narrow rail carries
-/// the outline and search.
+/// the outline. Search is a transient workspace over the whole window.
 ///
 /// The band is the height of a button and no more. The rail is narrower than
 /// the presenter's, because it holds section titles and search results rather
@@ -228,17 +224,7 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
         band_children,
     );
 
-    let rail_children = vec![
-        b.panel(WidgetKind::DocumentOutline),
-        b.panel(WidgetKind::Search),
-    ];
-    let rail = b.split(
-        "Outline and search",
-        Direction::Vertical,
-        &[0.65, 0.35],
-        rail_children,
-    );
-    let body_children = vec![rail, b.page()];
+    let body_children = vec![b.panel(WidgetKind::DocumentOutline), b.page()];
     let body = b.split(
         "Document",
         Direction::Horizontal,
@@ -252,13 +238,7 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
         &[0.07, 0.93],
         vec![band, body],
     );
-    finish(
-        "Reader",
-        "reader-default",
-        root,
-        ratio,
-        LayoutPurpose::Document,
-    )
+    finish("Reader", "reader-default", root, ratio)
 }
 
 /// The built-ins, in the order the library shows them.
@@ -279,20 +259,12 @@ pub fn built_in_layouts() -> Vec<Layout> {
 ///
 /// A property of the document rather than of a global setting: choosing a
 /// presenter variant never changes what a PDF opens into, and the reverse.
-pub fn default_for(mode: LayoutMode) -> LayoutId {
-    match mode {
-        LayoutMode::Presentation => LayoutId("presenter-default".to_string()),
-        LayoutMode::Document => LayoutId("reader-default".to_string()),
+pub fn default_for(viewer: PrimaryViewer) -> LayoutId {
+    match viewer {
+        PrimaryViewer::Slide => LayoutId("presenter-default".to_string()),
+        PrimaryViewer::Document => LayoutId("reader-default".to_string()),
     }
 }
-
-/// What a layout is for.
-///
-/// An alias, not a second type: [`LayoutPurpose`] lives in [`crate::layout::model`]
-/// now that it is a field on [`Layout`] rather than something computed only
-/// here, but every existing caller of `LayoutMode` — there are many — keeps
-/// compiling unchanged.
-pub type LayoutMode = LayoutPurpose;
 
 #[cfg(test)]
 mod tests {
@@ -313,21 +285,17 @@ mod tests {
         assert_eq!(ids, vec!["presenter-default", "reader-default"]);
     }
 
-    /// A built-in without its explicit purpose — the shape a v1 file, or an
-    /// early v2 one, would deserialize to — falls back to the same
-    /// widget-driven rule the old `LayoutMode::of` always used.
+    /// The primary viewer is always derived from the widget tree.
     #[test]
-    fn purposeless_layouts_infer_the_same_mode_the_built_ins_declare() {
-        for mut layout in built_in_layouts() {
-            let declared = LayoutMode::of(&layout);
-            layout.purpose = None;
-            assert_eq!(
-                LayoutMode::of(&layout),
-                declared,
-                "{} infers a different mode once its explicit purpose is gone",
-                layout.name
-            );
-        }
+    fn built_ins_derive_their_viewer_from_their_widgets() {
+        assert_eq!(
+            PrimaryViewer::of(&presenter_default()),
+            PrimaryViewer::Slide
+        );
+        assert_eq!(
+            PrimaryViewer::of(&reader_default(AspectRatio::SixteenNine)),
+            PrimaryViewer::Document
+        );
     }
 
     /// §2.1: `reader-default` is a stable identifier, and the assertion on
@@ -337,19 +305,19 @@ mod tests {
     #[test]
     fn the_built_in_list_is_bimodal_and_each_mode_has_one_root() {
         let layouts = built_in_layouts();
-        assert_eq!(LayoutMode::of(&layouts[0]), LayoutMode::Presentation);
+        assert_eq!(PrimaryViewer::of(&layouts[0]), PrimaryViewer::Slide);
         assert_eq!(
-            default_for(LayoutMode::Presentation),
+            default_for(PrimaryViewer::Slide),
             layouts[0].id,
             "a presentation opens into the first presenter built-in"
         );
 
         let reader = reader_default(AspectRatio::SixteenNine);
-        assert_eq!(LayoutMode::of(&reader), LayoutMode::Document);
-        assert_eq!(default_for(LayoutMode::Document), reader.id);
+        assert_eq!(PrimaryViewer::of(&reader), PrimaryViewer::Document);
+        assert_eq!(default_for(PrimaryViewer::Document), reader.id);
         assert_ne!(
-            default_for(LayoutMode::Document),
-            default_for(LayoutMode::Presentation),
+            default_for(PrimaryViewer::Document),
+            default_for(PrimaryViewer::Slide),
             "choosing one mode's default must not change the other's"
         );
     }
@@ -378,6 +346,10 @@ mod tests {
         ] {
             assert!(kinds.contains(&required), "Reader is missing {required:?}");
         }
+        assert!(
+            !kinds.contains(&WidgetKind::Search),
+            "search is a transient workspace, not a permanent reader rail"
+        );
     }
 
     /// §2.2: the page is on a mount, which is the inverse of a slide's cell.
@@ -403,10 +375,10 @@ mod tests {
     #[test]
     fn a_copy_of_a_layout_belongs_to_the_same_mode_as_its_original() {
         for (original, mode) in [
-            (presenter_default(), LayoutMode::Presentation),
+            (presenter_default(), PrimaryViewer::Slide),
             (
                 reader_default(AspectRatio::SixteenNine),
-                LayoutMode::Document,
+                PrimaryViewer::Document,
             ),
         ] {
             let mut copy = original.clone();
@@ -414,12 +386,12 @@ mod tests {
             copy.name = "Mine".into();
             copy.origin = Origin::Custom;
             assert_eq!(
-                LayoutMode::of(&copy),
+                PrimaryViewer::of(&copy),
                 mode,
                 "a copy of {} changed mode",
                 original.name
             );
-            assert_eq!(mode.label(), LayoutMode::of(&original).label());
+            assert_eq!(mode.label(), PrimaryViewer::of(&original).label());
         }
     }
 
@@ -475,7 +447,7 @@ mod tests {
         assert_eq!(stage.sizes, vec![0.72, 0.28]);
 
         let rail = stage.children[1].as_split().unwrap();
-        assert_eq!(rail.sizes, vec![0.125, 0.25, 0.375, 0.25]);
+        assert_eq!(rail.sizes, vec![0.15, 0.30, 0.55]);
         assert_eq!(rail.children[0].as_split().unwrap().sizes, vec![0.5, 0.5]);
 
         for size in &root.children[1].as_split().unwrap().sizes {
@@ -495,6 +467,10 @@ mod tests {
         ] {
             assert!(kinds.contains(&required), "default is missing {required:?}");
         }
+        assert!(
+            !kinds.contains(&WidgetKind::Search),
+            "search is a transient workspace, not a permanent presenter rail"
+        );
     }
 
     #[test]
@@ -551,9 +527,9 @@ mod tests {
             // Named for what the layout *is*, which is what the tree panel
             // shows: a presenter screen and a reader are not the same thing
             // with two names.
-            let expected = match LayoutMode::of(&layout) {
-                LayoutMode::Presentation => "Presenter screen",
-                LayoutMode::Document => "Reader",
+            let expected = match PrimaryViewer::of(&layout) {
+                PrimaryViewer::Slide => "Presenter screen",
+                PrimaryViewer::Document => "Reader",
             };
             assert_eq!(root.name.as_deref(), Some(expected), "{}", layout.name);
         }

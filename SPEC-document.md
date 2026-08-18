@@ -48,12 +48,19 @@ annotation dictionary associated with the page's `/Annots` array.
 The application MUST NOT imply that a visible handwritten signature is a
 cryptographic digital signature.
 
-## 2. Document mode is a layout
+## 2. Reader and Presenter are layouts, not modes
 
-Document mode is not a separate window stack, a separate state machine or a
-separate binary. It is a layout, in the existing sense of `crates/pulpit/src/
-layout/`: a tree of cells holding widgets, designed in the existing designer,
-stored and validated by the existing store.
+There is no document mode or presentation mode under the hood: no separate
+window stack, state machine, binary, interaction policy or persisted layout
+classification. Reader and Presenter are layouts in the existing sense of
+`crates/pulpit/src/layout/`: trees of cells holding widgets, designed in the
+same designer and stored and validated by the same store.
+
+The sole behavioral distinction is the primary viewer widget in that tree.
+`CurrentSlide` draws one page fitted to its cell with black filling the unused
+space. `DocumentPage` draws pages in continuous scroll. All other differences
+are widget placement and configuration and MUST NOT change interaction
+semantics elsewhere in the application.
 
 The widget catalog gains document widgets:
 

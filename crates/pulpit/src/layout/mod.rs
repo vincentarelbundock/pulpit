@@ -27,8 +27,7 @@ pub mod validate;
 
 pub use history::History;
 #[allow(unused_imports)]
-// reachable via `layout::model::LayoutPurpose` and the `LayoutMode` alias
-pub use model::{AspectRatio, Change, Layout, LayoutId, LayoutPurpose, Origin, Side};
+pub use model::{AspectRatio, Change, Layout, LayoutId, Origin, PrimaryViewer, Side};
 pub use store::LayoutStore;
 pub use tree::{
     Cell, CellBackground, Direction, Divider, EmptyBehavior, Frame, Node, NodeId, UnavailableWidget,

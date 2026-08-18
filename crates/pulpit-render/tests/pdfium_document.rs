@@ -741,6 +741,18 @@ fn finding_text_reports_hits_with_the_geometry_to_draw_them() {
         .collect();
     assert_eq!(marked, "2");
 
+    // Regex takes the worker's bounded full-page path, but preserves the same
+    // geometry contract as literal PDFium search.
+    let expression = Query::regex("[23]", false, false);
+    let regex = document
+        .find_text(&expression, 0..3)
+        .expect("a valid regular expression searches the text layer");
+    assert_eq!(
+        regex.hits.iter().map(|hit| hit.page).collect::<Vec<_>>(),
+        vec![PageIndex(1), PageIndex(2)]
+    );
+    assert!(regex.hits.iter().all(|hit| !hit.quads.is_empty()));
+
     // Nothing to find is an empty chunk, not an error and not "unsupported".
     let nothing = document
         .find_text(&Query::new("zzzz", false, false), 0..3)

@@ -676,6 +676,9 @@ fn widget_library<'a>(designer: &'a Designer) -> Element<'a, Message> {
         content = content.push(text(group.label()).size(12).color(theme::ambient::muted()));
         for kind in WidgetKind::ALL
             .into_iter()
+            // Search is application chrome now. Keep the legacy kind readable
+            // in stored layouts, but do not offer new permanent search cells.
+            .filter(|kind| *kind != WidgetKind::Search)
             .filter(|kind| kind.group() == group)
         {
             content = content.push(widget_card(designer, kind, is_placed(kind)));

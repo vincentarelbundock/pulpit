@@ -11,7 +11,7 @@
 //! file wins over anything here, and switching mode by hand is always one
 //! press away. Pure, so every case below is an ordinary unit test.
 
-use crate::layout::builtin::LayoutMode;
+use crate::layout::PrimaryViewer;
 
 /// How close two dimensions must be, in points, to be the same page size.
 ///
@@ -68,27 +68,27 @@ const SLIDE_RATIOS: [f32; 5] = [4.0 / 3.0, 16.0 / 9.0, 16.0 / 10.0, 5.0 / 4.0, 3
 /// 4. Anything else is a document. The Reader shows a deck perfectly well,
 ///    whereas the presenter screen shows a report as a slide that does not
 ///    fit, so the fallback goes the way that degrades gracefully.
-pub fn mode_for_page(width: f32, height: f32) -> LayoutMode {
+pub fn viewer_for_page(width: f32, height: f32) -> PrimaryViewer {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-        return LayoutMode::Document;
+        return PrimaryViewer::Document;
     }
     if is_paper(width, height) {
-        return LayoutMode::Document;
+        return PrimaryViewer::Document;
     }
     // Portrait pages are not slides in any of the shapes below, and the ratio
     // table is written landscape, so measure the long side over the short one
     // only for a page that is actually wider than it is tall.
     if height > width {
-        return LayoutMode::Document;
+        return PrimaryViewer::Document;
     }
     let ratio = width / height;
     let slide = SLIDE_RATIOS
         .iter()
         .any(|known| close_ratio(ratio, *known) || close_ratio(ratio, known * 2.0));
     if slide {
-        LayoutMode::Presentation
+        PrimaryViewer::Slide
     } else {
-        LayoutMode::Document
+        PrimaryViewer::Document
     }
 }
 
@@ -99,10 +99,10 @@ pub fn mode_for_page(width: f32, height: f32) -> LayoutMode {
 /// mixes sizes would answer for a page that is not in it. `None` — a document
 /// that measured no pages — is a document, on the same "degrades gracefully"
 /// grounds as the fallback above.
-pub fn mode_for_document(pages: &[pulpit_core::page::PageGeometry]) -> LayoutMode {
+pub fn viewer_for_document(pages: &[pulpit_core::page::PageGeometry]) -> PrimaryViewer {
     match pages.first() {
-        Some(first) => mode_for_page(first.width, first.height),
-        None => LayoutMode::Document,
+        Some(first) => viewer_for_page(first.width, first.height),
+        None => PrimaryViewer::Document,
     }
 }
 
@@ -143,8 +143,8 @@ mod tests {
             ("3:2", 1080.0, 720.0),
         ] {
             assert_eq!(
-                mode_for_page(width, height),
-                LayoutMode::Presentation,
+                viewer_for_page(width, height),
+                PrimaryViewer::Slide,
                 "{name} should present"
             );
         }
@@ -161,8 +161,8 @@ mod tests {
             ("powerpoint 16:9 with notes", 1920.0, 540.0),
         ] {
             assert_eq!(
-                mode_for_page(width, height),
-                LayoutMode::Presentation,
+                viewer_for_page(width, height),
+                PrimaryViewer::Slide,
                 "{name} should present"
             );
         }
@@ -183,8 +183,8 @@ mod tests {
             ("Tabloid", 792.0, 1224.0),
         ] {
             assert_eq!(
-                mode_for_page(width, height),
-                LayoutMode::Document,
+                viewer_for_page(width, height),
+                PrimaryViewer::Document,
                 "{name} should read"
             );
         }
@@ -194,35 +194,38 @@ mod tests {
     /// sheet of paper, and a slide rounded to whole points is the same slide.
     #[test]
     fn a_point_of_rounding_does_not_change_what_a_page_is() {
-        assert_eq!(mode_for_page(596.0, 843.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(594.0, 841.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(959.0, 540.0), LayoutMode::Presentation);
+        assert_eq!(viewer_for_page(596.0, 843.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(594.0, 841.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(959.0, 540.0), PrimaryViewer::Slide);
     }
 
     #[test]
     fn a_portrait_page_is_never_a_slide() {
         // 3:4 is 4:3 stood on end. Slides are not published portrait, and a
         // portrait page is the one shape the Reader is unambiguously for.
-        assert_eq!(mode_for_page(540.0, 720.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(300.0, 900.0), LayoutMode::Document);
+        assert_eq!(viewer_for_page(540.0, 720.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(300.0, 900.0), PrimaryViewer::Document);
     }
 
     #[test]
     fn an_unrecognised_shape_falls_back_to_the_reader() {
         // A square, and a banner: neither is a slide format, and the Reader
         // shows both without pretending they are.
-        assert_eq!(mode_for_page(600.0, 600.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(2000.0, 300.0), LayoutMode::Document);
+        assert_eq!(viewer_for_page(600.0, 600.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(2000.0, 300.0), PrimaryViewer::Document);
     }
 
     /// A page that measured to nothing is not a reason to guess, and it is
     /// certainly not a reason to divide by zero.
     #[test]
     fn a_degenerate_page_is_a_document_rather_than_a_panic() {
-        assert_eq!(mode_for_page(0.0, 0.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(-100.0, 200.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(f32::NAN, 500.0), LayoutMode::Document);
-        assert_eq!(mode_for_page(f32::INFINITY, 500.0), LayoutMode::Document);
+        assert_eq!(viewer_for_page(0.0, 0.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(-100.0, 200.0), PrimaryViewer::Document);
+        assert_eq!(viewer_for_page(f32::NAN, 500.0), PrimaryViewer::Document);
+        assert_eq!(
+            viewer_for_page(f32::INFINITY, 500.0),
+            PrimaryViewer::Document
+        );
     }
 
     #[test]
@@ -240,16 +243,16 @@ mod tests {
             user_unit: 1.0,
         };
 
-        assert_eq!(mode_for_document(&[]), LayoutMode::Document);
+        assert_eq!(viewer_for_document(&[]), PrimaryViewer::Document);
         // A deck whose later pages are a different size is still a deck.
         assert_eq!(
-            mode_for_document(&[page(960.0, 540.0), page(595.0, 842.0)]),
-            LayoutMode::Presentation
+            viewer_for_document(&[page(960.0, 540.0), page(595.0, 842.0)]),
+            PrimaryViewer::Slide
         );
         // …and a report with a wide foldout in it is still a report.
         assert_eq!(
-            mode_for_document(&[page(595.0, 842.0), page(960.0, 540.0)]),
-            LayoutMode::Document
+            viewer_for_document(&[page(595.0, 842.0), page(960.0, 540.0)]),
+            PrimaryViewer::Document
         );
     }
 }

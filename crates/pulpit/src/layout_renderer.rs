@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reader_collapses_the_whole_outline_and_search_rail() {
+    fn the_reader_collapses_its_outline_rail() {
         let layout =
             crate::layout::builtin::reader_default(crate::layout::AspectRatio::SixteenNine);
         let root = layout.root.as_split().expect("the reader root is split");
@@ -283,16 +283,10 @@ mod tests {
         let rail = &body.children[0];
         assert!(is_outline_rail(rail));
         assert!(contains(rail, WidgetKind::DocumentOutline));
-        assert!(contains(rail, WidgetKind::Search));
+        assert!(!contains(rail, WidgetKind::Search));
 
         let mut context = context(Mode::Live);
         context.reader.outline_reveal = 0.0;
         assert_eq!(pane_reveal(rail, &context, false), 0.0);
-        // Once the rail itself owns the transition, its children keep their
-        // proportions instead of independently folding inside it.
-        assert_eq!(
-            pane_reveal(&rail.as_split().unwrap().children[1], &context, true),
-            1.0
-        );
     }
 }

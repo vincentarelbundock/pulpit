@@ -99,8 +99,8 @@ pub fn validate(layout: &Layout, area: Frame) -> Vec<Issue> {
     // A document layout has neither and needs neither — a reader turns pages,
     // not slides — so asking a Reader for a current-slide widget would be
     // asking it to be something else (§2, §2.1).
-    let presenting = crate::layout::builtin::LayoutMode::of(layout)
-        == crate::layout::builtin::LayoutMode::Presentation;
+    let presenting =
+        crate::layout::PrimaryViewer::of(layout) == crate::layout::PrimaryViewer::Slide;
 
     if presenting && !widgets.iter().any(|widget| widget.shows_current_slide()) {
         issues.push(Issue::warning(

@@ -75,6 +75,9 @@ pub struct Query {
     text: String,
     pub case_sensitive: bool,
     pub whole_word: bool,
+    /// Interpret the text as a Rust regular expression rather than literally.
+    #[serde(default)]
+    pub regex: bool,
 }
 
 impl Query {
@@ -89,7 +92,25 @@ impl Query {
             text,
             case_sensitive,
             whole_word,
+            regex: false,
         }
+    }
+
+    /// Build an explicitly regular-expression query.
+    pub fn regex(text: &str, case_sensitive: bool, whole_word: bool) -> Query {
+        let mut query = Query::new(text, case_sensitive, whole_word);
+        query.regex = true;
+        query
+    }
+
+    /// Compile a regular expression before a document scan is started.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.regex || self.is_empty() {
+            return Ok(());
+        }
+        self.regular_expression()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     pub fn text(&self) -> &str {
@@ -110,6 +131,20 @@ impl Query {
     pub fn matches_in(&self, haystack: &str) -> Vec<TextMatch> {
         if self.is_empty() {
             return Vec::new();
+        }
+        if self.regex {
+            let Ok(expression) = self.regular_expression() else {
+                return Vec::new();
+            };
+            return expression
+                .find_iter(haystack)
+                .filter(|found| found.start() < found.end())
+                .take(MAX_HITS)
+                .map(|found| TextMatch {
+                    offset: haystack[..found.start()].chars().count(),
+                    len: haystack[found.start()..found.end()].chars().count(),
+                })
+                .collect();
         }
         let needle: Vec<char> = self.folded(self.text.trim());
         let hay: Vec<char> = self.folded(haystack);
@@ -132,6 +167,18 @@ impl Query {
             }
         }
         matches
+    }
+
+    fn regular_expression(&self) -> Result<regex::Regex, regex::Error> {
+        let pattern = if self.whole_word {
+            format!(r"\b(?:{})\b", self.text.trim())
+        } else {
+            self.text.trim().to_string()
+        };
+        regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!self.case_sensitive)
+            .size_limit(1 << 20)
+            .build()
     }
 
     fn folded(&self, text: &str) -> Vec<char> {
@@ -308,6 +355,8 @@ pub enum SearchProblem {
     /// matches: a scanned page and a backend that cannot search must not look
     /// the same to the person typing.
     Unsupported(String),
+    /// The regular expression could not be compiled.
+    InvalidPattern(String),
     /// The scan stopped early because [`MAX_HITS`] was reached.
     TooManyHits,
     /// The worker failed mid-scan.
@@ -318,6 +367,7 @@ impl std::fmt::Display for SearchProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SearchProblem::Unsupported(why) => write!(f, "this document cannot be searched: {why}"),
+            SearchProblem::InvalidPattern(why) => write!(f, "invalid regular expression: {why}"),
             SearchProblem::TooManyHits => {
                 write!(f, "more than {MAX_HITS} matches; narrow the search")
             }
@@ -679,6 +729,28 @@ mod tests {
         assert!(query("").matches_in("anything").is_empty());
         assert!(query("   ").matches_in("anything").is_empty());
         assert!(query("").is_empty());
+    }
+
+    #[test]
+    fn regular_expressions_match_notes_and_page_text_with_character_offsets() {
+        let expression = Query::regex(r"colou?r\s+theory", false, false);
+        assert_eq!(
+            expression.matches_in("color theory and colour theory"),
+            vec![
+                TextMatch { offset: 0, len: 12 },
+                TextMatch {
+                    offset: 17,
+                    len: 13
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_invalid_regular_expression_is_reported_before_scanning() {
+        assert!(Query::regex("[unfinished", false, false)
+            .validate()
+            .is_err());
     }
 
     #[test]
