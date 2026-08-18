@@ -143,13 +143,13 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::Next => "Next slide",
-            Action::Previous => "Previous slide",
-            Action::First => "First slide",
-            Action::Last => "Last slide",
+            Action::Next => "Next page",
+            Action::Previous => "Previous page",
+            Action::First => "First page",
+            Action::Last => "Last page",
             Action::PreviewNext => "Preview next",
             Action::PreviewPrevious => "Preview previous",
-            Action::CommitPreview => "Show the previewed slide",
+            Action::CommitPreview => "Show the previewed page",
             Action::CancelPreview => "Cancel preview",
             Action::Blank => "Blank",
             Action::BlankAlternate => "Blank (other colour)",
@@ -159,13 +159,13 @@ impl Action {
             Action::ToggleAudienceFullscreen => "Audience fullscreen",
             Action::OpenDocument => "Open…",
             Action::ReloadDocument => "Reload document",
-            Action::ShowOverview => "Slide overview",
+            Action::ShowOverview => "Page overview",
             Action::ShowLayouts => "Layouts",
             Action::ShowShortcuts => "Keyboard shortcuts",
-            Action::AnnotateInk => "Draw on the slide",
-            Action::AnnotateHighlighter => "Highlight on the slide",
+            Action::AnnotateInk => "Draw on the page",
+            Action::AnnotateHighlighter => "Highlight on the page",
             Action::AnnotateEraser => "Erase annotations",
-            Action::AnnotatePointer => "Point at the slide",
+            Action::AnnotatePointer => "Point at the page",
             Action::UndoAnnotation => "Undo the last stroke",
             Action::RedoAnnotation => "Redo the last stroke",
             Action::ClearAnnotations => "Clear annotations",
@@ -947,6 +947,15 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn shared_navigation_actions_use_page_vocabulary() {
+        assert_eq!(Action::Next.label(), "Next page");
+        assert_eq!(Action::Previous.label(), "Previous page");
+        assert_eq!(Action::First.label(), "First page");
+        assert_eq!(Action::Last.label(), "Last page");
+        assert_eq!(Action::ShowOverview.label(), "Page overview");
     }
 
     #[test]

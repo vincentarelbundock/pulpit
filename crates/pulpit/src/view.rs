@@ -605,12 +605,12 @@ fn overview(app: &App) -> Element<'_, Message> {
     // How far along the warming is, but only while there is something to
     // say: a bare count of pages is noise once they have all arrived.
     let progress: Element<'_, Message> = if ready < count {
-        text(format!("{ready} of {count} slides ready"))
+        text(format!("{ready} of {count} pages ready"))
             .size(type_scale::CAPTION)
             .color(theme::ambient::muted())
             .into()
     } else {
-        text(format!("{count} slides"))
+        text(format!("{count} pages"))
             .size(type_scale::CAPTION)
             .color(theme::ambient::muted())
             .into()
@@ -618,7 +618,7 @@ fn overview(app: &App) -> Element<'_, Message> {
 
     let body = column![
         row![
-            text("Slide overview").size(type_scale::TITLE),
+            text("Page overview").size(type_scale::TITLE),
             space::horizontal(),
             progress,
             button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
@@ -1052,7 +1052,7 @@ fn menu(app: &App) -> Element<'_, Message> {
     items = items.push(heading("View"));
     if app.state.document().is_some() {
         items = items.push(entry(
-            "Jump to slide…",
+            "Jump to page…",
             shortcut(Action::ShowOverview),
             Message::Do(Action::ShowOverview),
         ));

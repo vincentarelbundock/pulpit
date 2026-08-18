@@ -11852,7 +11852,7 @@ fn is_system_key(key: Option<&str>) -> bool {
 /// Is this key a modifier?
 ///
 /// Modifiers are pressed constantly and mean nothing on their own, so
-/// offering to bind one — "“Alt” is not bound. Use it for: Next slide…" — is
+/// offering to bind one — "“Alt” is not bound. Use it for: Next page…" — is
 /// noise in front of a live presentation. A remote's unnamed buttons, which
 /// is what the binding prompt exists for, are never modifiers.
 fn is_modifier(key: Option<&str>) -> bool {
