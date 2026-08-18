@@ -33,7 +33,8 @@ pub use overlay::{
 pub use page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect, PageRotation};
 pub use pdfpc::TextNotes;
 pub use search::{
-    Hit, HitChunk, HitSource, Query, SearchGeneration, SearchProblem, SearchState, TextMatch,
+    Hit, HitChunk, HitSource, PreparedQuery, Query, SearchGeneration, SearchProblem, SearchState,
+    TextMatch,
 };
 pub use state::{Blank, Changed, Command, PresentationState, SlideIndex};
 pub use timer::Timer;

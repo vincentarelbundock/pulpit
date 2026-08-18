@@ -482,6 +482,10 @@ impl Default for Keymap {
                 named("f3", Action::FindNext),
                 with("f3", Mods::shift(), Action::FindPrevious),
                 named("?", Action::FindPrevious),
+                // Zathura/Vim match traversal. Lowercase advances and the
+                // shifted form walks back through the same live result set.
+                named("n", Action::FindNext),
+                with("n", Mods::shift(), Action::FindPrevious),
                 // Reader transforms keep both Acrobat and Zathura muscle
                 // memory. One semantic action may have several bindings; a
                 // physical combination still resolves to only one action.

@@ -1073,6 +1073,7 @@ impl PdfBackend for PdfiumBackend {
         if query.is_empty() {
             return Ok(hits);
         }
+        let prepared = query.prepare();
         for page in pages {
             let found = self.with_page(document, page, |handle| {
                 let text_page = unsafe { self.bindings.FPDFText_LoadPage(handle) };
@@ -1087,7 +1088,7 @@ impl PdfBackend for PdfiumBackend {
                     text_page,
                     &geometry,
                     pulpit_core::page::PageIndex(page),
-                    query,
+                    &prepared,
                     MAX_HITS_PER_SEARCH,
                     MAX_QUADS_PER_HIT,
                 );

@@ -84,8 +84,7 @@ pub fn row_label(hit: &Hit) -> String {
     }
 }
 
-/// The row's text split around the match, so the middle can be drawn
-/// emphasised without the view doing character arithmetic.
+/// The excerpt split around its match for one flowing rich-text row.
 pub fn row_parts(hit: &Hit) -> (String, String, String) {
     let chars: Vec<char> = hit.context.chars().collect();
     let start = hit.highlight.offset.min(chars.len());
@@ -158,19 +157,20 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_split_around_its_match() {
-        let (before, matched, after) = row_parts(&hit(0, 0));
-        assert_eq!(before, "a ");
-        assert_eq!(matched, "needle");
-        assert_eq!(after, " here");
-    }
-
-    #[test]
     fn a_row_says_which_page_and_which_source() {
         assert_eq!(row_label(&hit(4, 0)), "p. 5");
         let mut from_notes = hit(4, 0);
         from_notes.source = HitSource::Notes;
         assert_eq!(row_label(&from_notes), "p. 5 · notes");
+    }
+
+    #[test]
+    fn a_row_is_split_around_its_match() {
+        let (before, matched, after) = row_parts(&hit(0, 0));
+        assert_eq!(
+            (before.as_str(), matched.as_str(), after.as_str()),
+            ("a ", "needle", " here")
+        );
     }
 
     #[test]

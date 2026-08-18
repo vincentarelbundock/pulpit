@@ -127,6 +127,8 @@ pub enum ReadCommand {
     /// screenful", and how much of the document that is depends on the zoom
     /// the window is at — which is the session's to know, not the key's.
     ScrollByWindows(i32),
+    /// Scroll by layout points: the small reading motion used by arrows.
+    ScrollByPoints(f32),
     /// Put a page's top at the top of the window.
     ///
     /// This is a *jump*, and the application records it in the navigation

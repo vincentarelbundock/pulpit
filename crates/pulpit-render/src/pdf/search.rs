@@ -14,7 +14,7 @@
 use pdfium_render::prelude::{PdfiumLibraryBindings, FPDF_PAGE, FPDF_TEXTPAGE};
 
 use pulpit_core::page::{PageGeometry, PageIndex, PageQuad, PageRect, PageRotation};
-use pulpit_core::search::{Hit, HitSource, Query, TextMatch};
+use pulpit_core::search::{Hit, HitSource, PreparedQuery, TextMatch};
 
 /// PDFium's own search flags: `FPDF_MATCHCASE` and `FPDF_MATCHWHOLEWORD`.
 const MATCH_CASE: std::os::raw::c_ulong = 0x0000_0001;
@@ -141,24 +141,25 @@ pub(crate) fn find_on_page(
     text_page: FPDF_TEXTPAGE,
     geometry: &PageGeometry,
     page: PageIndex,
-    query: &Query,
+    query: &PreparedQuery<'_>,
     most_hits: usize,
     most_quads: usize,
 ) -> Vec<Hit> {
-    let needle = query.text().trim();
+    let options = query.query();
+    let needle = options.text().trim();
     if needle.is_empty() {
         return Vec::new();
     }
-    if query.regex {
+    if options.regex {
         return find_regex_on_page(
             bindings, text_page, geometry, page, query, most_hits, most_quads,
         );
     }
     let mut flags = 0;
-    if query.case_sensitive {
+    if options.case_sensitive {
         flags |= MATCH_CASE;
     }
-    if query.whole_word {
+    if options.whole_word {
         flags |= MATCH_WHOLE_WORD;
     }
 
@@ -215,7 +216,7 @@ fn find_regex_on_page(
     text_page: FPDF_TEXTPAGE,
     geometry: &PageGeometry,
     page: PageIndex,
-    query: &Query,
+    query: &PreparedQuery<'_>,
     most_hits: usize,
     most_quads: usize,
 ) -> Vec<Hit> {
@@ -227,6 +228,12 @@ fn find_regex_on_page(
         count,
         count.saturating_add(1) as usize,
     );
+    let utf16_offsets: Vec<usize> = std::iter::once(0)
+        .chain(text.chars().scan(0, |offset, character| {
+            *offset += character.len_utf16();
+            Some(*offset)
+        }))
+        .collect();
     query
         .matches_in(&text)
         .into_iter()
@@ -235,8 +242,8 @@ fn find_regex_on_page(
         .map(|(ordinal, found)| {
             // PDFium addresses UTF-16 code units. `TextMatch` deliberately
             // addresses Rust characters so snippets remain Unicode-correct.
-            let start = utf16_offset(&text, found.offset);
-            let end = utf16_offset(&text, found.offset + found.len);
+            let start = utf16_offsets[found.offset];
+            let end = utf16_offsets[found.offset + found.len];
             let quads = quads_of(
                 bindings,
                 text_page,
@@ -250,19 +257,16 @@ fn find_regex_on_page(
         .collect()
 }
 
-fn utf16_offset(text: &str, char_offset: usize) -> usize {
-    text.chars().take(char_offset).map(char::len_utf16).sum()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::utf16_offset;
-
     #[test]
     fn rust_character_offsets_are_mapped_back_to_pdfium_utf16_offsets() {
-        assert_eq!(utf16_offset("a😀b", 0), 0);
-        assert_eq!(utf16_offset("a😀b", 1), 1);
-        assert_eq!(utf16_offset("a😀b", 2), 3);
-        assert_eq!(utf16_offset("a😀b", 3), 4);
+        let offsets: Vec<_> = std::iter::once(0)
+            .chain("a😀b".chars().scan(0, |offset, character| {
+                *offset += character.len_utf16();
+                Some(*offset)
+            }))
+            .collect();
+        assert_eq!(offsets, [0, 1, 3, 4]);
     }
 }

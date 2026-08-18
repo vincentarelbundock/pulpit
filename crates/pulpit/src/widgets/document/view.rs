@@ -8,7 +8,7 @@
 
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, slider, space, text,
-    text_editor, tooltip, Column, Row,
+    text_editor, text_input, tooltip, Column, Row,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -181,14 +181,20 @@ fn page_surface<'a, Message: Clone + 'static>(
         }
     }
 
-    // As wide as the column says the document is, and no wider: the column is
-    // never narrower than the cell, so this is the cell's width until a zoom
-    // makes the page wider than the window and exactly the page's width after
-    // that. A `Fill` here would have no meaning in a surface that scrolls
-    // sideways, where the space across is unbounded.
+    // Fill spare viewport width so alignment has space in which to centre a
+    // narrow page; retain the measured column width when zoom makes it wider,
+    // which preserves horizontal scrolling.
+    let content_width = if reader.column.width <= reader.viewport_width {
+        // Resolve against the live scrollable bounds. A cached numeric width
+        // can lag a layout pass; Fill cannot, and gives centring its real
+        // viewport rather than yesterday's measurement.
+        Length::Fill
+    } else {
+        Length::Fixed(reader.column.width.max(0.0))
+    };
     let scroller = scrollable(
         container(sheets)
-            .width(Length::Fixed(reader.column.width.max(0.0)))
+            .width(content_width)
             .align_x(Alignment::Center)
             // No padding: vertical padding would offset every page from where
             // the column placed it, and horizontal padding would make the
@@ -197,14 +203,10 @@ fn page_surface<'a, Message: Clone + 'static>(
             .padding(Padding::ZERO),
     )
     .id(page_surface_id())
-    // The bar the scrollable draws for itself is sized as a fraction of the
-    // content, which over a five-hundred-page document is a two-pixel sliver
-    // nobody can hit. The handle beside it is this widget's instead. The
-    // horizontal bar is hidden for a different reason: the hand is how a page
-    // wider than its window is moved across, and a bar under the page would be
-    // a second answer to the same question.
+    // The vertical bar is the same proportional native scrollbar every other
+    // scrolling surface uses. Horizontal movement remains gesture-only.
     .direction(scrollable::Direction::Both {
-        vertical: scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
+        vertical: crate::widgets::scroll::bar(),
         horizontal: scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
     })
     .width(Length::Fill)
@@ -212,9 +214,7 @@ fn page_surface<'a, Message: Clone + 'static>(
 
     // In the editor the surface is a representation, so it takes no events.
     if !mode.interactive() {
-        return row![scroller, scroll_handle(reader, mode, on_event)]
-            .height(Length::Fill)
-            .into();
+        return scroller.into();
     }
     // The widget's scroll position is the session's scroll offset: the
     // wheel, the handle and the keyboard all arrive here, and the session
@@ -231,66 +231,8 @@ fn page_surface<'a, Message: Clone + 'static>(
             viewport: viewport.bounds().height,
         }))
     });
-    row![scroller, scroll_handle(reader, mode, on_event)]
-        .height(Length::Fill)
-        .into()
+    scroller.into()
 }
-
-/// The reader's own scroll handle.
-///
-/// A slider rather than a scroll bar, because a scroll bar's thumb is as long
-/// as the window is a fraction of the document: at five hundred pages that is
-/// a couple of pixels, which is not something a hand can catch. A slider's
-/// handle is the same size whatever the document's length, which is the whole
-/// point of drawing one here.
-fn scroll_handle<Message: Clone + 'static>(
-    reader: &ReaderData<'_>,
-    mode: Mode,
-    on_event: fn(WidgetEvent) -> Message,
-) -> Element<'static, Message> {
-    let furthest = (reader.column.height - reader.viewport).max(0.0);
-    // A document that fits in its window does not scroll, and a handle for a
-    // movement that cannot happen is a control that lies.
-    if furthest <= 0.0 {
-        return space::horizontal()
-            .width(Length::Fixed(HANDLE_WIDTH))
-            .into();
-    }
-    // Inverted: a slider's range starts at the bottom, and the top of a
-    // document is the start of it.
-    let position = (furthest - reader.controls.offset.clamp(0.0, furthest)).max(0.0);
-    let control = iced::widget::vertical_slider(0.0..=furthest, position, move |value| {
-        on_event(WidgetEvent::Read(ReadCommand::DragScrollHandle(
-            furthest - value,
-        )))
-    })
-    .width(HANDLE_WIDTH)
-    .height(Length::Fill)
-    .style(|theme, status| {
-        let mut style = iced::widget::slider::default(theme, status);
-        style.handle.shape = iced::widget::slider::HandleShape::Rectangle {
-            width: HANDLE_LENGTH,
-            border_radius: 3.0.into(),
-        };
-        style
-    });
-    if mode.interactive() {
-        control.into()
-    } else {
-        space::horizontal()
-            .width(Length::Fixed(HANDLE_WIDTH))
-            .into()
-    }
-}
-
-/// How wide the scroll handle's lane is, in layout points.
-const HANDLE_WIDTH: f32 = 14.0;
-
-/// …and how long its handle is, whatever the document's length.
-///
-/// Big enough to catch with a mouse on the first try, which is the entire
-/// reason this is a slider and not the scrollable's own bar.
-const HANDLE_LENGTH: u16 = 48;
 
 /// The page surface's scrollable, so the application can put it where a page
 /// jump or a zoom moved the session's offset to.
@@ -1419,23 +1361,22 @@ fn navigation<Message: Clone + 'static>(
         hint(control, label)
     };
 
-    // The current number is also the way into the visual page overview, in
-    // the same place as the presenter's slide readout. The total remains a
-    // fact beside it rather than part of the control's value.
+    // Only the current page is editable. The slash and total remain a fact
+    // beside it, so selecting or replacing the input cannot overwrite them.
     let entry = {
-        let current = button(
-            text(reader.page_label())
-                .size(theme::type_scale::LABEL)
-                .align_x(iced::alignment::Horizontal::Center),
-        )
-        .width(Length::Fixed(48.0))
-        .padding(Padding::from([4.0, 6.0]))
-        .style(theme::ambient::tool_button);
-        let current = if live {
-            current.on_press(on_event(WidgetEvent::ShowOverview))
-        } else {
-            current
-        };
+        let value = reader
+            .page_entry
+            .clone()
+            .unwrap_or_else(|| reader.page_label());
+        let mut current = text_input("Page", &value)
+            .size(theme::type_scale::LABEL)
+            .width(Length::Fixed(48.0))
+            .padding(Padding::from([4.0, 6.0]));
+        if live {
+            current = current
+                .on_input(move |typed| send(ReadCommand::TypePage(typed)))
+                .on_submit(send(ReadCommand::CommitPage));
+        }
         row![
             current,
             text(reader.page_total())
@@ -1568,98 +1509,50 @@ fn outline<Message: Clone + 'static>(
     let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
 
     let view = reader.controls.outline;
-    let collapsed = reader.controls.outline_collapsed;
 
-    // The disclosure control is the rail's own: collapsing is a property of
-    // this widget, not of where the layout put it, so it lives in the header
-    // beside the view toggle rather than in the layout tree.
-    let disclosure = || {
-        let control = button(theme::icon::muted(
-            if collapsed {
-                theme::icon::Icon::ChevronRight
-            } else {
-                theme::icon::Icon::ChevronDown
-            },
-            theme::type_scale::LABEL,
-        ))
-        .padding(Padding::from([4.0, 6.0]))
-        .style(theme::ambient::tool_button);
-        if mode.interactive() {
-            control.on_press(send(ReadCommand::SetOutlineCollapsed(!collapsed)))
-        } else {
-            control
-        }
-    };
-
-    // Both views are named at once, and the one in front is underlined. A
-    // tab says what the rail can show; the button it replaces named only the
-    // view you were not looking at, which is the harder thing to read.
+    // The large heading names the current view. This row therefore offers
+    // only the alternatives; repeating the current name as a small centred
+    // tab and underlining it added hierarchy without adding information.
     let tab = |target: OutlineView| -> Element<'static, Message> {
-        let selected = target == view;
-        let label = text(target.label().to_string())
-            .size(theme::type_scale::LABEL)
-            .color(if selected {
-                theme::ambient::text()
-            } else {
-                theme::ambient::muted()
-            });
+        let label = text(match target {
+            OutlineView::Bookmarks => "Bookmarks",
+            _ => target.label(),
+        })
+        .size(theme::type_scale::LABEL)
+        .color(theme::ambient::muted());
         let control = button(label)
             .padding(Padding::from([2.0, 6.0]))
             .style(theme::ambient::tool_button);
-        // The tab in front is not a control: pressing it would change nothing,
-        // so it does not offer to.
-        let control = if live && !selected {
+        if live {
             control.on_press(send(ReadCommand::SetOutlineView(target)))
         } else {
             control
-        };
-        // A two-point rule under the selected tab, and nothing but space under
-        // the others, so the row does not move as the selection changes.
-        let underline: Element<'static, Message> = if selected {
-            container(space::horizontal().width(Length::Fill).height(2.0))
-                .style(theme::ambient::accent_rule)
-                .width(Length::Fill)
-                .into()
-        } else {
-            space::horizontal().width(Length::Fill).height(2.0).into()
-        };
-        column![control, underline]
-            .spacing(2.0)
-            .align_x(Alignment::Center)
-            .into()
+        }
+        .into()
     };
 
-    let mut tabs = row![tab(OutlineView::Bookmarks)]
-        .spacing(theme::space::XS)
-        .align_y(Alignment::Center);
+    let mut tabs = row![].spacing(theme::space::XS).align_y(Alignment::Center);
+    if view != OutlineView::Bookmarks {
+        tabs = tabs.push(tab(OutlineView::Bookmarks));
+    }
+    if view != OutlineView::Thumbnails {
+        tabs = tabs.push(tab(OutlineView::Thumbnails));
+    }
     // A third tab only where there is a form. The rail is the toggle: a
     // document with fields grows one more way to look at itself, and a deck of
     // slides is left exactly as it was.
-    if reader.has_form {
+    if reader.has_form && view != OutlineView::Fields {
         tabs = tabs.push(tab(OutlineView::Fields));
     }
 
-    let header = row![disclosure(), tabs]
-        .spacing(theme::space::XS)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-
-    if reader.outline_reveal <= f32::EPSILON {
-        // Collapsed, the rail keeps only its chevron and the name of what is
-        // put away: a row of tabs for a list nobody can see would be a control
-        // that does nothing visible.
-        let label = text(view.label().to_string())
-            .size(theme::type_scale::LABEL)
-            .color(theme::ambient::muted());
-        let shut = row![disclosure(), label]
-            .spacing(theme::space::XS)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-        return column![shut]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    }
+    // Search and outline occupy the same rail, so they begin with the same
+    // title scale and inset. The tabs are controls within the outline rather
+    // than a substitute for its title.
+    let header = column![
+        text(view.label()).size(theme::type_scale::TITLE),
+        tabs.width(Length::Fill)
+    ]
+    .spacing(theme::space::XS);
 
     let body: Element<'static, Message> = match view {
         OutlineView::Bookmarks if reader.outline.is_empty() => {
@@ -1669,25 +1562,41 @@ fn outline<Message: Clone + 'static>(
         }
         OutlineView::Bookmarks => {
             let mut list = column![].spacing(2.0);
-            for entry in reader.outline {
+            for (index, entry) in reader.outline.iter().enumerate() {
                 let indent = (entry.depth.min(6) as f32) * 12.0;
                 let label = text(entry.title.clone())
                     .size(theme::type_scale::LABEL)
                     .width(Length::Fill);
+                let focused = reader.outline_focus == Some(index);
+                let marker: Element<'static, Message> = if focused {
+                    container(space::vertical().width(3.0).height(Length::Fill))
+                        .style(theme::ambient::accent_rule)
+                        .into()
+                } else {
+                    space::horizontal().width(3.0).into()
+                };
                 let control = button(
-                    row![space::horizontal().width(Length::Fixed(indent)), label]
-                        .align_y(Alignment::Center),
+                    row![
+                        marker,
+                        space::horizontal().width(Length::Fixed(indent)),
+                        label
+                    ]
+                    .align_y(Alignment::Center),
                 )
                 .width(Length::Fill)
                 .padding(Padding::from([3.0, 6.0]))
-                .style(theme::ambient::tool_button);
+                .style(if focused {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                });
                 list = list.push(if live {
                     control.on_press(send(ReadCommand::GoToPage(entry.page)))
                 } else {
                     control
                 });
             }
-            scrollable(list)
+            crate::widgets::scroll::vertical(list)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1697,7 +1606,7 @@ fn outline<Message: Clone + 'static>(
         }
         OutlineView::Fields => {
             let mut list = column![].spacing(2.0);
-            for field in reader.fields {
+            for (index, field) in reader.fields.iter().enumerate() {
                 // A choice field with several selections has no single value,
                 // so "filled" asks both questions rather than only the first.
                 let filled = !field.value.is_empty() || !field.selected.is_empty();
@@ -1741,14 +1650,26 @@ fn outline<Message: Clone + 'static>(
                 } else {
                     theme::ambient::muted()
                 });
+                let focused = reader.outline_focus == Some(index);
+                let marker: Element<'static, Message> = if focused {
+                    container(space::vertical().width(3.0).height(Length::Fill))
+                        .style(theme::ambient::accent_rule)
+                        .into()
+                } else {
+                    space::horizontal().width(3.0).into()
+                };
                 let control = button(
-                    row![label, kind, status]
+                    row![marker, label, kind, status]
                         .spacing(theme::space::XS)
                         .align_y(Alignment::Center),
                 )
                 .width(Length::Fill)
                 .padding(Padding::from([3.0, 6.0]))
-                .style(theme::ambient::tool_button);
+                .style(if focused {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                });
                 // A field the producer placed nowhere has no page to go to, so
                 // the row says it exists and does not offer a jump it cannot
                 // make.
@@ -1761,7 +1682,7 @@ fn outline<Message: Clone + 'static>(
                     _ => control,
                 });
             }
-            scrollable(list)
+            crate::widgets::scroll::vertical(list)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1778,10 +1699,18 @@ fn outline<Message: Clone + 'static>(
                     } else {
                         theme::ambient::muted()
                     });
-                let control = button(label)
+                let focused = reader.outline_focus == Some(index);
+                let marker: Element<'static, Message> = if focused {
+                    container(space::vertical().width(3.0).height(Length::Fill))
+                        .style(theme::ambient::accent_rule)
+                        .into()
+                } else {
+                    space::horizontal().width(3.0).into()
+                };
+                let control = button(row![marker, label].spacing(theme::space::XS))
                     .width(Length::Fill)
                     .padding(Padding::from([3.0, 6.0]))
-                    .style(if selected {
+                    .style(if focused || selected {
                         theme::ambient::selected_button
                     } else {
                         theme::ambient::tool_button
@@ -1792,18 +1721,23 @@ fn outline<Message: Clone + 'static>(
                     control
                 });
             }
-            scrollable(list)
+            crate::widgets::scroll::vertical(list)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         }
     };
 
-    column![header, body]
-        .spacing(theme::space::XS)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    container(
+        column![header, body]
+            .spacing(theme::space::XS)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .padding(theme::space::S)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// The annotation toolbar: what a press does to the page.

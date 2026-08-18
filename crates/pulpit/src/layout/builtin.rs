@@ -228,7 +228,7 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     let body = b.split(
         "Document",
         Direction::Horizontal,
-        &[0.18, 0.82],
+        &[0.24, 0.76],
         body_children,
     );
 
@@ -332,7 +332,7 @@ mod tests {
             root.children[0].as_split().unwrap().sizes,
             vec![0.06, 0.47, 0.47]
         );
-        assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.18, 0.82]);
+        assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.24, 0.76]);
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();
         for required in [

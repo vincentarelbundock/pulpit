@@ -129,44 +129,22 @@ impl Query {
     /// Matches do not overlap: scanning resumes after the previous match, so
     /// "aa" in "aaa" is one hit, not two.
     pub fn matches_in(&self, haystack: &str) -> Vec<TextMatch> {
-        if self.is_empty() {
-            return Vec::new();
-        }
-        if self.regex {
-            let Ok(expression) = self.regular_expression() else {
-                return Vec::new();
-            };
-            return expression
-                .find_iter(haystack)
-                .filter(|found| found.start() < found.end())
-                .take(MAX_HITS)
-                .map(|found| TextMatch {
-                    offset: haystack[..found.start()].chars().count(),
-                    len: haystack[found.start()..found.end()].chars().count(),
-                })
-                .collect();
-        }
-        let needle: Vec<char> = self.folded(self.text.trim());
-        let hay: Vec<char> = self.folded(haystack);
-        if needle.is_empty() || hay.len() < needle.len() {
-            return Vec::new();
-        }
+        self.prepare().matches_in(haystack)
+    }
 
-        let mut matches = Vec::new();
-        let mut at = 0;
-        while at + needle.len() <= hay.len() {
-            if hay[at..at + needle.len()] == needle[..] && self.word_bounded(&hay, at, needle.len())
-            {
-                matches.push(TextMatch {
-                    offset: at,
-                    len: needle.len(),
-                });
-                at += needle.len();
-            } else {
-                at += 1;
-            }
+    /// Prepare this query for matching more than one run of text.
+    ///
+    /// Regex compilation and literal folding happen once here rather than
+    /// once per page, note, or bookmark. The prepared value borrows the query
+    /// so the serializable protocol type remains small and unsurprising.
+    pub fn prepare(&self) -> PreparedQuery<'_> {
+        let regex = self.regex.then(|| self.regular_expression().ok()).flatten();
+        let needle = (!self.regex && !self.is_empty()).then(|| self.folded(self.text.trim()));
+        PreparedQuery {
+            query: self,
+            regex,
+            needle,
         }
-        matches
     }
 
     fn regular_expression(&self) -> Result<regex::Regex, regex::Error> {
@@ -203,6 +181,115 @@ impl Query {
         let before = at.checked_sub(1).map(|i| hay[i]);
         let after = hay.get(at + len).copied();
         !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+    }
+}
+
+/// A query whose reusable matching work has already been performed.
+///
+/// Construct this once for a document scan with [`Query::prepare`].
+pub struct PreparedQuery<'a> {
+    query: &'a Query,
+    regex: Option<regex::Regex>,
+    needle: Option<Vec<char>>,
+}
+
+impl PreparedQuery<'_> {
+    pub fn query(&self) -> &Query {
+        self.query
+    }
+
+    /// Every non-overlapping match in `haystack`, in Rust character offsets.
+    pub fn matches_in(&self, haystack: &str) -> Vec<TextMatch> {
+        if self.query.is_empty() {
+            return Vec::new();
+        }
+        if self.query.regex {
+            let Some(expression) = self.regex.as_ref() else {
+                return Vec::new();
+            };
+            return expression
+                .find_iter(haystack)
+                .filter(|found| found.start() < found.end())
+                .take(MAX_HITS)
+                .scan((0, 0), |(previous_end, char_offset), found| {
+                    *char_offset += haystack[*previous_end..found.start()].chars().count();
+                    let len = haystack[found.start()..found.end()].chars().count();
+                    let matched = TextMatch {
+                        offset: *char_offset,
+                        len,
+                    };
+                    *char_offset += len;
+                    *previous_end = found.end();
+                    Some(matched)
+                })
+                .collect();
+        }
+        let literal = self.query.text.trim();
+        if literal.is_ascii() && haystack.is_ascii() {
+            return self.matches_ascii(haystack, literal);
+        }
+        let needle = self
+            .needle
+            .as_deref()
+            .expect("a non-empty literal query has a prepared needle");
+        let hay: Vec<char> = self.query.folded(haystack);
+        if needle.is_empty() || hay.len() < needle.len() {
+            return Vec::new();
+        }
+
+        let mut matches = Vec::new();
+        let mut at = 0;
+        while at + needle.len() <= hay.len() {
+            if hay[at..at + needle.len()] == needle[..]
+                && self.query.word_bounded(&hay, at, needle.len())
+            {
+                matches.push(TextMatch {
+                    offset: at,
+                    len: needle.len(),
+                });
+                at += needle.len();
+            } else {
+                at += 1;
+            }
+        }
+        matches
+    }
+
+    /// The overwhelmingly common deck-text case needs neither Unicode
+    /// folding nor a character-offset map: in ASCII, byte and character
+    /// offsets are identical. Keep the Unicode path above as the authority
+    /// for every other input.
+    fn matches_ascii(&self, haystack: &str, needle: &str) -> Vec<TextMatch> {
+        let hay = haystack.as_bytes();
+        let needle = needle.as_bytes();
+        let mut matches = Vec::new();
+        let mut at = 0;
+        while at + needle.len() <= hay.len() {
+            let candidate = &hay[at..at + needle.len()];
+            let equal = if self.query.case_sensitive {
+                candidate == needle
+            } else {
+                candidate.eq_ignore_ascii_case(needle)
+            };
+            let bounded = !self.query.whole_word
+                || (!at
+                    .checked_sub(1)
+                    .and_then(|before| hay.get(before))
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    && !hay
+                        .get(at + needle.len())
+                        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_'));
+            if equal && bounded {
+                matches.push(TextMatch {
+                    offset: at,
+                    len: needle.len(),
+                });
+                at += needle.len();
+            } else {
+                at += 1;
+            }
+        }
+        matches
     }
 }
 
@@ -502,9 +589,7 @@ impl SearchState {
         if generation != self.generation {
             return false;
         }
-        for hit in chunk.hits {
-            self.insert(hit);
-        }
+        self.merge_hits(chunk.hits);
         if chunk.truncated || self.hits.len() >= MAX_HITS {
             self.problem = Some(SearchProblem::TooManyHits);
             self.frontier = self.page_count;
@@ -536,30 +621,59 @@ impl SearchState {
     /// generation. These arrive before any page text and are held in the same
     /// ordering, so the results list is one list.
     pub fn absorb(&mut self, hits: impl IntoIterator<Item = Hit>) {
-        for hit in hits {
-            self.insert(hit);
-        }
+        self.merge_hits(hits);
         if self.cursor.is_none() && !self.hits.is_empty() {
             self.cursor = Some(0);
         }
     }
 
-    /// Insert one hit in document order, absorbing a repeat of one already
-    /// held. The cursor names a hit, not an index, so it is re-found after the
-    /// insertion rather than shifted.
-    fn insert(&mut self, hit: Hit) {
+    /// Merge an instalment in document order, replacing repeated hits.
+    ///
+    /// Page hits interleave with notes already held for later pages. Inserting
+    /// them one at a time shifts that tail once per hit; sorting the bounded
+    /// instalment and merging shifts each value only once.
+    fn merge_hits(&mut self, hits: impl IntoIterator<Item = Hit>) {
         if self.hits.len() >= MAX_HITS {
             return;
         }
         let current = self.current().map(Hit::key);
-        let key = hit.key();
-        match self.hits.binary_search_by(|held| held.key().cmp(&key)) {
-            Ok(at) => self.hits[at] = hit,
-            Err(at) => self.hits.insert(at, hit),
+        let mut incoming: Vec<_> = hits.into_iter().collect();
+        incoming.sort_by_key(Hit::key);
+        incoming.dedup_by_key(|hit| hit.key());
+        if incoming.is_empty() {
+            return;
         }
-        if let Some(current) = current {
-            self.cursor = self.hits.iter().position(|held| held.key() == current);
+
+        let held = std::mem::take(&mut self.hits);
+        let mut held = held.into_iter().peekable();
+        let mut incoming = incoming.into_iter().peekable();
+        let mut merged = Vec::with_capacity((held.len() + incoming.len()).min(MAX_HITS));
+        while merged.len() < MAX_HITS {
+            match (held.peek(), incoming.peek()) {
+                (Some(old), Some(new)) => match old.key().cmp(&new.key()) {
+                    std::cmp::Ordering::Less => {
+                        merged.push(held.next().expect("a peeked hit is present"));
+                    }
+                    std::cmp::Ordering::Equal => {
+                        held.next();
+                        merged.push(incoming.next().expect("a peeked hit is present"));
+                    }
+                    std::cmp::Ordering::Greater => {
+                        merged.push(incoming.next().expect("a peeked hit is present"));
+                    }
+                },
+                (Some(_), None) => {
+                    merged.extend(held.by_ref().take(MAX_HITS - merged.len()));
+                }
+                (None, Some(_)) => {
+                    merged.extend(incoming.by_ref().take(MAX_HITS - merged.len()));
+                }
+                (None, None) => break,
+            }
         }
+        self.hits = merged;
+        self.cursor =
+            current.and_then(|key| self.hits.binary_search_by(|hit| hit.key().cmp(&key)).ok());
     }
 
     /// Move to the next hit, wrapping at the end. Wrapping rather than
@@ -631,11 +745,12 @@ impl SearchState {
 /// printed on the slide.
 pub fn search_notes(query: &Query, notes: &TextNotes, page_count: usize) -> Vec<Hit> {
     let mut hits = Vec::new();
+    let prepared = query.prepare();
     for page in 0..page_count {
         let Some(text) = notes.for_page(page) else {
             continue;
         };
-        for (ordinal, found) in query.matches_in(text).into_iter().enumerate() {
+        for (ordinal, found) in prepared.matches_in(text).into_iter().enumerate() {
             hits.push(Hit::from_text(
                 PageIndex(page),
                 HitSource::Notes,
@@ -657,11 +772,12 @@ pub fn search_notes(query: &Query, notes: &TextNotes, page_count: usize) -> Vec<
 pub fn search_outline(query: &Query, outline: &Outline) -> Vec<Hit> {
     let mut hits: Vec<Hit> = Vec::new();
     let mut ordinals: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let prepared = query.prepare();
     for entry in outline.flattened() {
         let Some(page) = entry.page() else {
             continue;
         };
-        for found in query.matches_in(&entry.title) {
+        for found in prepared.matches_in(&entry.title) {
             let ordinal = ordinals.entry(page).or_default();
             hits.push(Hit::from_text(
                 PageIndex(page),
@@ -712,6 +828,26 @@ mod tests {
     }
 
     #[test]
+    fn ascii_fast_path_keeps_offsets_case_and_word_boundaries() {
+        let insensitive_query = Query::new("FORM", false, true);
+        let insensitive = insensitive_query.prepare();
+        assert_eq!(
+            insensitive.matches_in("a form, performance; FORM"),
+            [
+                TextMatch { offset: 2, len: 4 },
+                TextMatch { offset: 21, len: 4 },
+            ]
+        );
+
+        let sensitive_query = Query::new("FORM", true, false);
+        let sensitive = sensitive_query.prepare();
+        assert_eq!(
+            sensitive.matches_in("form FORM"),
+            [TextMatch { offset: 5, len: 4 }]
+        );
+    }
+
+    #[test]
     fn matches_do_not_overlap() {
         assert_eq!(query("aa").matches_in("aaa").len(), 1);
     }
@@ -744,6 +880,30 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_prepared_query_has_the_same_matches_across_many_texts() {
+        let queries = [
+            Query::new("PDF", false, false),
+            Query::new("form", true, true),
+            Query::regex(r"colou?r", false, false),
+            Query::regex(r"\p{Greek}+", true, true),
+        ];
+        let texts = [
+            "A PDF and a pdf",
+            "a form, but not performance",
+            "Color, colour, and COLOR",
+            "Latin Ελληνικά punctuation",
+            "",
+        ];
+
+        for query in queries {
+            let prepared = query.prepare();
+            for text in texts {
+                assert_eq!(prepared.matches_in(text), query.matches_in(text));
+            }
+        }
     }
 
     #[test]

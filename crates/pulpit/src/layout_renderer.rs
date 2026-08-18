@@ -8,7 +8,7 @@
 //! preview with sample content, and the editor canvas. Having one is what
 //! makes "what you designed is what you present" true rather than aspirational.
 
-use iced::widget::{container, space, Column, Row};
+use iced::widget::{container, row, space, Column, Row};
 use iced::{Element, Length, Padding};
 
 use crate::layout::{Direction, Layout, Node};
@@ -29,6 +29,34 @@ pub fn layout<'a, Message: Clone + 'static>(
     node(&layout.root, context, compose, on_event, false)
 }
 
+/// Put a transient side panel beside a working surface.
+///
+/// This is the application-owned half of a side panel: it controls geometry,
+/// clipping and the reveal animation. The caller supplies only the panel's
+/// contents, just as a layout cell supplies the outline widget's contents.
+pub fn side_panel<'a, Message: 'a>(
+    panel: impl Into<Element<'a, Message>>,
+    surface: impl Into<Element<'a, Message>>,
+    width: f32,
+    reveal: f32,
+) -> Element<'a, Message> {
+    let reveal = reveal.clamp(0.0, 1.0);
+    if reveal <= f32::EPSILON {
+        return surface.into();
+    }
+
+    row![
+        container(panel)
+            .width(Length::Fixed(revealed(width, reveal)))
+            .height(Length::Fill)
+            .clip(true),
+        surface.into(),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn node<'a, Message: Clone + 'static>(
     node: &Node,
     context: &Context<'_>,
@@ -39,6 +67,18 @@ fn node<'a, Message: Clone + 'static>(
     match node {
         Node::Leaf(cell) => {
             let content: Element<'a, Message> = match (&cell.widget, &cell.unavailable) {
+                (Some(widget), _)
+                    if widget.kind() == crate::widgets::WidgetKind::DocumentOutline
+                        && context.search_open =>
+                {
+                    self::widget_kind(
+                        crate::widgets::WidgetKind::Search,
+                        widget,
+                        context,
+                        compose,
+                        on_event,
+                    )
+                }
                 (Some(widget), _) => self::widget(widget, context, compose, on_event),
                 (None, Some(unavailable)) => unavailable_panel(unavailable),
                 (None, None) => blank_panel(),
@@ -129,10 +169,18 @@ fn node<'a, Message: Clone + 'static>(
 /// its siblings throughout the disclosure animation.
 fn pane_reveal(node: &Node, context: &Context<'_>, inside_outline_rail: bool) -> f32 {
     if !inside_outline_rail && is_outline_rail(node) {
-        context.reader.outline_reveal.clamp(0.0, 1.0)
+        revealed(
+            1.0,
+            context.reader.outline_reveal.max(context.search_reveal),
+        )
     } else {
         1.0
     }
+}
+
+/// The one reveal calculation used by both layout-owned and transient rails.
+fn revealed(full_extent: f32, reveal: f32) -> f32 {
+    full_extent * reveal.clamp(0.0, 1.0)
 }
 
 /// A rail is the largest subtree that contains the outline but not the page.
@@ -242,6 +290,22 @@ pub fn widget<'a, Message: Clone + 'static>(
     registry::dispatch(&ctx, widget)
 }
 
+fn widget_kind<'a, Message: Clone + 'static>(
+    kind: crate::widgets::WidgetKind,
+    host: &Widget,
+    context: &Context<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'a, Message> {
+    let accent = theme::ambient::accent();
+    let scale = host.style.scale.clamp(
+        crate::widgets::common::SCALE_RANGE.0,
+        crate::widgets::common::SCALE_RANGE.1,
+    );
+    let ctx = WidgetViewContext::new(context, compose, on_event, accent, scale);
+    registry::dispatch_kind(kind, &ctx, host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +352,12 @@ mod tests {
         let mut context = context(Mode::Live);
         context.reader.outline_reveal = 0.0;
         assert_eq!(pane_reveal(rail, &context, false), 0.0);
+
+        context.search_reveal = 1.0;
+        assert_eq!(
+            pane_reveal(rail, &context, false),
+            1.0,
+            "search reuses and reveals the outline rail"
+        );
     }
 }

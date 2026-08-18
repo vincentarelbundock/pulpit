@@ -403,6 +403,8 @@ pub struct ReaderData<'a> {
     pub column: &'a crate::widgets::document::model::Column,
     /// How tall the window onto the column is, in layout points.
     pub viewport: f32,
+    /// How wide that window is, so a narrow page can be centred in it.
+    pub viewport_width: f32,
     /// The pages currently in the window, with whatever frames exist.
     pub visible: Vec<ReaderPage>,
     pub controls: &'a crate::widgets::document::model::ReaderControls,
@@ -413,6 +415,9 @@ pub struct ReaderData<'a> {
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
     pub outline: &'a [OutlineRow],
+    /// The outline row owned by the keyboard, when the sidebar rather than
+    /// the document owns navigation.
+    pub outline_focus: Option<usize>,
     /// Does this document have fields at all (§8.6)? The navigator is offered
     /// only where there is something to navigate.
     pub has_form: bool,
@@ -516,6 +521,13 @@ pub struct Context<'a> {
     /// document layout are the same machinery, and the pane is placed in
     /// either.
     pub search: SearchData<'a>,
+    /// Whether Search, rather than the persistent panel widget, supplies the
+    /// panel contents. This changes immediately; `search_reveal` is geometry.
+    pub search_open: bool,
+    /// How much of the transient search panel is revealed. Panel placement
+    /// and animation belong to the layout infrastructure; the search widget
+    /// only supplies the contents.
+    pub search_reveal: f32,
 }
 
 /// What the search pane is allowed to know: the state, and nothing about
@@ -523,6 +535,7 @@ pub struct Context<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct SearchData<'a> {
     pub state: &'a pulpit_core::search::SearchState,
+    pub keyboard_focus: bool,
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ use pulpit_render::document::{
 
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
 use crate::widgets::document::model::{
-    Column, CropChoice, CropState, PageSpread, PlacedPage, ReaderControls, Zoom,
+    Column, CropChoice, CropState, OutlineView, PageSpread, PlacedPage, ReaderControls, Zoom,
 };
 use crate::widgets::event::ReadCommand;
 
@@ -1248,6 +1248,57 @@ impl ReaderSession {
 
     pub fn set_outline(&mut self, outline: Vec<OutlineRow>) {
         self.outline = outline;
+    }
+
+    pub fn outline_len(&self) -> usize {
+        match self.controls.outline {
+            OutlineView::Bookmarks => self.outline.len(),
+            OutlineView::Thumbnails => self.pages.len(),
+            OutlineView::Fields => self.fields.len(),
+        }
+    }
+
+    pub fn outline_command(&self, index: usize) -> Option<ReadCommand> {
+        match self.controls.outline {
+            OutlineView::Bookmarks => self
+                .outline
+                .get(index)
+                .map(|entry| ReadCommand::GoToPage(entry.page)),
+            OutlineView::Thumbnails => {
+                (index < self.pages.len()).then_some(ReadCommand::GoToPage(PageIndex(index)))
+            }
+            OutlineView::Fields => self.fields.get(index).and_then(|field| {
+                field.widgets.first().map(|widget| ReadCommand::GoToField {
+                    page: widget.page,
+                    name: field.name.clone(),
+                })
+            }),
+        }
+    }
+
+    pub fn nearest_outline_row(&self) -> Option<usize> {
+        let page = self.controls.page;
+        match self.controls.outline {
+            OutlineView::Bookmarks => self
+                .outline
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, entry)| entry.page <= page)
+                .map(|(index, _)| index)
+                .or_else(|| (!self.outline.is_empty()).then_some(0)),
+            OutlineView::Thumbnails => (!self.pages.is_empty()).then_some(page.get()),
+            OutlineView::Fields => self
+                .fields
+                .iter()
+                .position(|field| {
+                    field
+                        .widgets
+                        .first()
+                        .is_some_and(|widget| widget.page >= page)
+                })
+                .or_else(|| (!self.fields.is_empty()).then_some(self.fields.len() - 1)),
+        }
     }
 
     /// The worker applied something.
@@ -2909,6 +2960,10 @@ impl ReaderSession {
                 self.scroll_to(self.controls.offset + stride * *windows as f32);
                 true
             }
+            ReadCommand::ScrollByPoints(points) => {
+                self.scroll_to(self.controls.offset + points);
+                true
+            }
             ReadCommand::GoToPage(page) => {
                 let page = PageIndex(page.get().min(self.pages.len().saturating_sub(1)));
                 if let Some(offset) = self.column.offset_of(page) {
@@ -3440,6 +3495,7 @@ impl ReaderSession {
             page_count: self.pages.len(),
             column: &self.column,
             viewport: self.cell.1,
+            viewport_width: self.cell.0,
             visible,
             controls: &self.controls,
             // Live views replace this with the application's clocked Iced
@@ -3451,6 +3507,7 @@ impl ReaderSession {
             },
             scale: self.scale,
             outline: &self.outline,
+            outline_focus: None,
             has_form: self.has_form,
             fields: &self.fields,
             date_picker: self.date_picker.as_ref(),

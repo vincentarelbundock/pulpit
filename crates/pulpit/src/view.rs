@@ -270,9 +270,32 @@ fn presenter(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(gap::S);
+    // Side panels belong to the working surface. Keeping this boundary below
+    // the toolbar means neither their opening nor their closing can move the
+    // menu button or any of the controls in that band.
+    let has_outline_panel = app
+        .active_layout
+        .widgets()
+        .iter()
+        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+    let body = if has_outline_panel {
+        // The layout renderer substitutes Search into the outline's slot, so
+        // both panels have exactly the same position and extent.
+        framed.into()
+    } else {
+        // Presenter layouts have no outline slot. They retain a transient
+        // rail, but it still uses the same infrastructure and stays below
+        // the toolbar.
+        crate::layout_renderer::side_panel(
+            search_workspace(app),
+            framed,
+            280.0,
+            app.search_reveal(),
+        )
+    };
     let mut page: Element<'_, Message> = match presenter_toolbar(app) {
-        Some(toolbar) => column![toolbar, framed].into(),
-        None => framed.into(),
+        Some(toolbar) => column![toolbar, body].into(),
+        None => body,
     };
 
     if app.menu_open {
@@ -289,13 +312,6 @@ fn presenter(app: &App) -> Element<'_, Message> {
     if app.overview {
         page = stack![page, overview(app)].into();
     }
-    let search_reveal = app.search_reveal();
-    if search_reveal > f32::EPSILON {
-        page = row![search_workspace(app, search_reveal), page]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    }
     if let Some(prompt) = unbound_key(app) {
         page = stack![page, prompt].into();
     }
@@ -304,7 +320,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
 
 /// Search is a transient rail beside the working surface. The document's own
 /// outline remains mounted, so bookmarks and search can be consulted together.
-fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
+fn search_workspace(app: &App) -> Element<'_, Message> {
     use crate::widgets::event::FindCommand;
     use crate::widgets::search::model::{page_groups, summary, visible_group_range};
 
@@ -314,11 +330,10 @@ fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
     let current = state.position().map(|position| position - 1);
 
     let field = text_input("Find in document", state.query().text())
-        .id(crate::widgets::search::view::workspace_input_id())
+        .id(crate::widgets::search::view::input_id())
         .size(type_scale::BODY)
         .width(Length::Fill)
-        .on_input(|typed| Message::Find(FindCommand::Type(typed)))
-        .on_submit(Message::CloseSearchWorkspace);
+        .on_input(|typed| Message::Find(FindCommand::Type(typed)));
 
     let toggle = |label: &'static str, selected: bool, command: FindCommand| {
         button(text(label).size(type_scale::LABEL))
@@ -362,10 +377,6 @@ fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
             FindCommand::ToggleWholeWord,
         ),
         toggle(".*", state.query().regex, FindCommand::ToggleRegex),
-        button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
-            .padding(gap::XS)
-            .style(theme::ambient::tool_button)
-            .on_press(Message::CloseSearchWorkspace),
     ]
     .spacing(gap::XS)
     .align_y(Alignment::Center);
@@ -407,7 +418,7 @@ fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
                 )));
             }
 
-            scrollable(rows)
+            crate::widgets::scroll::vertical(rows)
                 .id(search_scrollable())
                 .height(Length::Fill)
                 .on_scroll(|viewport| Message::SearchScrolled(viewport.absolute_offset().y))
@@ -440,7 +451,7 @@ fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
     .padding(gap::M);
 
     container(body)
-        .width(Length::Fixed(280.0 * reveal.clamp(0.0, 1.0)))
+        .width(Length::Fill)
         .height(Length::Fill)
         .style(theme::ambient::dialog)
         .into()
@@ -690,6 +701,15 @@ fn overview(app: &App) -> Element<'_, Message> {
             viewport_height: size.height,
         });
 
+        // The first responsive pass exists to measure the grid. Do not show
+        // row zero while the next tick is positioning the actual selection.
+        if app.overview_is_positioning() {
+            return space::vertical()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
+
         let first = ((scroll / row_height).floor() as usize).saturating_sub(OVERSCAN_ROWS);
         let visible = (size.height / row_height).ceil() as usize + OVERSCAN_ROWS * 2 + 1;
         let last = (first + visible).min(plan.rows);
@@ -723,7 +743,7 @@ fn overview(app: &App) -> Element<'_, Message> {
             )));
         }
 
-        scrollable(content)
+        crate::widgets::scroll::vertical(content)
             .id(overview_scrollable())
             .height(Length::Fill)
             .on_scroll(|viewport| Message::OverviewScrolled(viewport.absolute_offset().y))

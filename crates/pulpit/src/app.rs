@@ -281,7 +281,6 @@ pub enum Message {
     /// Something asked of the search pane, in whatever view it is placed.
     Find(crate::widgets::event::FindCommand),
     /// Dismiss the transient search workspace without forgetting its query.
-    CloseSearchWorkspace,
     /// The workspace reports its offset so it can virtualize a long result set.
     SearchScrolled(f32),
     /// Put back the edits a previous run did not save, or do not.
@@ -694,6 +693,14 @@ enum SearchOrigin {
     Presenter(pulpit_core::Place),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KeyboardRegion {
+    #[default]
+    Document,
+    Search,
+    Outline(usize),
+}
+
 pub struct App {
     pub state: PresentationState,
     /// Where the presenter has been, for the two navigation buttons. Only
@@ -1089,6 +1096,14 @@ pub struct App {
     /// Search is a transient rail beside Reader or Presenter, never a layout
     /// cell that permanently takes document space.
     pub search_workspace: bool,
+    /// Which visible reading region owns arrows and activation. This is
+    /// explicit because widget focus alone cannot describe a selected row in
+    /// a virtualised sidebar.
+    keyboard_region: KeyboardRegion,
+    /// Ctrl-F mounts the Search widget during the same update that receives
+    /// the key. Focus it on the following tick, after the new widget tree has
+    /// been drawn, rather than racing an input that does not exist yet.
+    search_focus_pending: bool,
     /// The search rail's disclosure transition. Kept beside the outline's
     /// animation so opening either rail has the same timing and reduced-motion
     /// behaviour.
@@ -1500,6 +1515,8 @@ impl App {
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
             search_workspace: false,
+            keyboard_region: KeyboardRegion::Document,
+            search_focus_pending: false,
             search_origin: None,
             search_scroll: 0.0,
             reader_render: ReaderRenderState::default(),
@@ -1652,6 +1669,7 @@ impl App {
             || self.alarm_controls.ringing.is_some()
             || self.outline_animation.is_animating(self.now)
             || self.search_animation.is_animating(self.now)
+            || self.search_focus_pending
             || self.needs_reconcile
             // An edit on its way to the page: the worker has been asked and
             // has not answered, or it has and the snapshot the render pool
@@ -2157,6 +2175,86 @@ impl App {
                     }
                     return Task::none();
                 }
+                // The reading surface and its sidebar share arrows by owning
+                // them explicitly. Tab crosses that boundary; Escape gives
+                // the arrows back to the document without putting the rail
+                // away. This comes before `captured` because Up and Down in a
+                // one-line search box have no useful caret meaning.
+                if !control && !alt {
+                    if key.as_deref() == Some("Tab") {
+                        let was_search = self.keyboard_region == KeyboardRegion::Search;
+                        self.keyboard_region = if self.search_workspace {
+                            match self.keyboard_region {
+                                KeyboardRegion::Search => KeyboardRegion::Document,
+                                _ => KeyboardRegion::Search,
+                            }
+                        } else if self.reader.outline_len() > 0
+                            && !self.reader.controls().outline_collapsed
+                        {
+                            match self.keyboard_region {
+                                KeyboardRegion::Outline(_) => KeyboardRegion::Document,
+                                _ => KeyboardRegion::Outline(
+                                    self.reader.nearest_outline_row().unwrap_or(0),
+                                ),
+                            }
+                        } else {
+                            KeyboardRegion::Document
+                        };
+                        if self.search_workspace {
+                            return if self.keyboard_region == KeyboardRegion::Search {
+                                iced::widget::operation::focus(
+                                    crate::widgets::search::view::input_id(),
+                                )
+                            } else if was_search {
+                                // No document widget needs a caret. Focusing
+                                // an intentionally absent id makes Iced
+                                // unfocus every text/control widget while our
+                                // explicit region gives arrows to the page.
+                                iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                                    "pulpit-document-keyboard",
+                                ))
+                            } else {
+                                Task::none()
+                            };
+                        }
+                        return Task::none();
+                    }
+                    match (self.keyboard_region, key.as_deref()) {
+                        (KeyboardRegion::Search, Some("Down")) => {
+                            return self.on_find_command(crate::widgets::event::FindCommand::Next)
+                        }
+                        (KeyboardRegion::Search, Some("Up")) => {
+                            return self
+                                .on_find_command(crate::widgets::event::FindCommand::Previous)
+                        }
+                        (KeyboardRegion::Search, Some("Escape")) => {
+                            self.keyboard_region = KeyboardRegion::Document;
+                            return iced::widget::operation::focus(
+                                iced::advanced::widget::Id::new("pulpit-document-keyboard"),
+                            );
+                        }
+                        (KeyboardRegion::Outline(index), Some("Down")) => {
+                            let last = self.reader.outline_len().saturating_sub(1);
+                            self.keyboard_region = KeyboardRegion::Outline((index + 1).min(last));
+                            return Task::none();
+                        }
+                        (KeyboardRegion::Outline(index), Some("Up")) => {
+                            self.keyboard_region = KeyboardRegion::Outline(index.saturating_sub(1));
+                            return Task::none();
+                        }
+                        (KeyboardRegion::Outline(index), Some("Enter")) => {
+                            if let Some(command) = self.reader.outline_command(index) {
+                                return self.on_read_command(command);
+                            }
+                            return Task::none();
+                        }
+                        (KeyboardRegion::Outline(_), Some("Escape")) => {
+                            self.keyboard_region = KeyboardRegion::Document;
+                            return Task::none();
+                        }
+                        _ => {}
+                    }
+                }
                 // A widget that captured the event owns the keyboard. Its
                 // own message handles the press; the application keymap is
                 // only the fallback for an otherwise-unclaimed event.
@@ -2592,7 +2690,6 @@ impl App {
             }
             Message::Read(command) => self.on_read_command(command),
             Message::Find(command) => self.on_find_command(command),
-            Message::CloseSearchWorkspace => self.close_search(true),
             Message::SearchScrolled(offset) => {
                 self.search_scroll = offset.max(0.0);
                 Task::none()
@@ -2738,12 +2835,13 @@ impl App {
                 self.plan_thumbnails();
                 self.pump_thumbnails();
                 if self.overview {
-                    // Open on the slide the presenter is on, however far down
-                    // a long deck that is — and in a document layout that is
-                    // the page the reader is showing, not the session index.
-                    let slide = if crate::layout::PrimaryViewer::of(&self.active_layout)
-                        == crate::layout::PrimaryViewer::Document
-                    {
+                    // Open on what the active layout is showing. Ask the
+                    // layout what it contains rather than choosing a mode.
+                    let shows_document =
+                        self.active_layout.widgets().iter().any(|widget| {
+                            widget.kind() == crate::widgets::WidgetKind::DocumentPage
+                        });
+                    let slide = if shows_document {
                         let slide = self.slide_showing(self.reader.controls().page.get());
                         // The grid's cursor and accent read the preview slide,
                         // so it is seeded here rather than left where the last
@@ -2753,7 +2851,13 @@ impl App {
                     } else {
                         self.state.preview()
                     };
-                    return self.reveal_in_overview(slide);
+                    // The overlay is mounted by the view pass after this
+                    // update. Even when measurements survive an earlier
+                    // opening, scrolling now targets an absent widget and is
+                    // discarded. Defer every initial reveal until the tick
+                    // after the overview is in the tree.
+                    self.overview_reveal = Some(slide);
+                    return Task::none();
                 }
                 // A grid that is closed has nowhere to scroll to.
                 self.overview_reveal = None;
@@ -3398,6 +3502,10 @@ impl App {
                     reader.outline_reveal = self
                         .outline_animation
                         .interpolate(1.0_f32, 0.0_f32, self.now);
+                    reader.outline_focus = match self.keyboard_region {
+                        KeyboardRegion::Outline(index) => Some(index),
+                        _ => None,
+                    };
                     reader.composing = self.composing_mark.clone();
                     // Likewise the history: it spans both modes and outlives
                     // any one session, so the application is what knows it.
@@ -3417,7 +3525,10 @@ impl App {
                     // room the results want.
                     &crate::widgets::sample::SEARCH
                 },
+                keyboard_focus: live && self.keyboard_region == KeyboardRegion::Search,
             },
+            search_open: live && self.search_workspace,
+            search_reveal: if live { self.search_reveal() } else { 0.0 },
             audience: crate::widgets::context::AudienceData {
                 blank: self.state.blank(),
                 connected: self.coordinator.snapshot.len() > 1,
@@ -4082,6 +4193,18 @@ impl App {
         //     pass: a page render must not happen inside a draw.
         self.pump_reader();
         self.pump_search();
+
+        // Search replaces the outline in the view pass after Ctrl-F. By this
+        // tick the input is mounted, so focus and selection have a real
+        // target. The query itself lives only in this App instance: reopening
+        // offers the session's previous text for immediate replacement.
+        if std::mem::take(&mut self.search_focus_pending) {
+            let input = crate::widgets::search::view::input_id();
+            tasks.push(
+                iced::widget::operation::focus(input.clone())
+                    .chain(iced::widget::operation::select_all(input)),
+            );
+        }
 
         // 1b-i. A field's selection, copied out and now on its way to the
         //       clipboard. The pump has no `Task` to return, so the write
@@ -6770,6 +6893,20 @@ impl App {
 
         let key = key?;
 
+        // With neither sidebar holding a keyboard selection, arrows are the
+        // fine-grained reading motion. Page Up and Page Down remain the large
+        // viewport-sized motion below.
+        if self.keyboard_region == KeyboardRegion::Document && !control {
+            let points = match key {
+                "Down" => Some(48.0),
+                "Up" => Some(-48.0),
+                _ => None,
+            };
+            if let Some(points) = points {
+                return Some(self.on_read_command(ReadCommand::ScrollByPoints(points)));
+            }
+        }
+
         // Scrolling first: it is what the keys were bound to before anything
         // else was, and a reader pressing Page Down means the page.
         let windows = match key {
@@ -6867,6 +7004,10 @@ impl App {
     /// though it had been (A1, §9.2).
     fn on_read_command(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
         use crate::widgets::event::ReadCommand;
+
+        if matches!(command, ReadCommand::PagePressed) {
+            self.keyboard_region = KeyboardRegion::Document;
+        }
 
         // §31.3, A9: append-only mode refuses every content-mutating path —
         // annotation, form-filling and the rewriting Save As — while leaving
@@ -7192,6 +7333,15 @@ impl App {
                     });
                 }
                 let _needs_render = self.reader.apply(&command);
+                if matches!(command, ReadCommand::SetOutlineView(_))
+                    && matches!(self.keyboard_region, KeyboardRegion::Outline(_))
+                {
+                    self.keyboard_region = self
+                        .reader
+                        .nearest_outline_row()
+                        .map(KeyboardRegion::Outline)
+                        .unwrap_or(KeyboardRegion::Document);
+                }
                 if let Some(origin) = origin {
                     self.nav_history.record_jump(origin, self.current_place());
                 }
@@ -7214,6 +7364,7 @@ impl App {
                         | ReadCommand::CommitPage
                         | ReadCommand::DragScrollHandle(_)
                         | ReadCommand::ScrollByWindows(_)
+                        | ReadCommand::ScrollByPoints(_)
                         | ReadCommand::SetZoom(_)
                         | ReadCommand::ZoomIn
                         | ReadCommand::ZoomOut
@@ -8261,21 +8412,26 @@ impl App {
                 Task::none()
             }
             FindCommand::Next => {
+                if self.search_workspace {
+                    self.keyboard_region = KeyboardRegion::Search;
+                }
                 let hit = self.search.advance().cloned();
                 self.go_to_hit(hit)
             }
             FindCommand::Previous => {
+                if self.search_workspace {
+                    self.keyboard_region = KeyboardRegion::Search;
+                }
                 let hit = self.search.retreat().cloned();
                 self.go_to_hit(hit)
             }
             FindCommand::Focus(index) => {
+                self.keyboard_region = KeyboardRegion::Search;
                 let hit = self.search.focus(index).cloned();
-                // A pressed result is a choice, unlike keyboard stepping.
-                // Forgetting the origin before closing commits that choice.
+                // A pressed result is a choice, so closing Search later must
+                // not undo it. Search itself stays open for further matches.
                 self.search_origin = None;
-                let goto = self.go_to_hit(hit);
-                let close = self.close_search(false);
-                Task::batch([goto, close])
+                self.go_to_hit(hit)
             }
         }
     }
@@ -8294,17 +8450,21 @@ impl App {
             Some(SearchOrigin::Presenter(self.current_place()))
         };
         self.search_workspace = true;
+        self.keyboard_region = KeyboardRegion::Search;
+        self.search_focus_pending = true;
         self.search_animation = if self.motion.is_reduced() {
             iced::Animation::new(true).quick()
         } else {
             self.search_animation.clone().go(true, self.now)
         };
         self.overview = false;
-        iced::widget::operation::focus(crate::widgets::search::view::workspace_input_id())
+        Task::none()
     }
 
     fn close_search(&mut self, restore_origin: bool) -> Task<Message> {
         self.search_workspace = false;
+        self.keyboard_region = KeyboardRegion::Document;
+        self.search_focus_pending = false;
         self.search_animation = if self.motion.is_reduced() {
             iced::Animation::new(false).quick()
         } else {
@@ -9825,16 +9985,10 @@ impl App {
         }
         self.overview_reveal = None;
         let row = (slide / grid.columns.max(1)) as f32;
-        let top = row * grid.row_height;
-        let bottom = top + grid.row_height;
-        let offset = if top < self.overview_scroll {
-            top
-        } else if bottom > self.overview_scroll + grid.viewport_height {
-            bottom - grid.viewport_height
-        } else {
-            return Task::none();
-        };
-        let offset = offset.max(0.0);
+        let rows = self.state.slide_count().div_ceil(grid.columns.max(1));
+        let furthest = (rows as f32 * grid.row_height - grid.viewport_height).max(0.0);
+        let offset = (row * grid.row_height + grid.row_height / 2.0 - grid.viewport_height / 2.0)
+            .clamp(0.0, furthest);
         self.overview_scroll = offset;
         // This is the presenter's own choice, so it outranks any glide still
         // in flight, and there is nothing left to settle: the selection is
@@ -9845,6 +9999,12 @@ impl App {
             crate::view::overview_scrollable(),
             iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
         )
+    }
+
+    /// Whether Overview is waiting for its mounted grid before revealing its
+    /// selected page. Views use this to avoid flashing an incorrect first row.
+    pub fn overview_is_positioning(&self) -> bool {
+        self.overview_reveal.is_some()
     }
 
     /// The interactive overlay under the pointer, and where inside it.

@@ -116,6 +116,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         page_count: 0,
         column: &EMPTY_COLUMN,
         viewport: 600.0,
+        viewport_width: 800.0,
         visible: Vec::new(),
         date_picker: None,
         time_picker: None,
@@ -127,6 +128,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         outline_reveal: 1.0,
         scale: 1.0,
         outline: &[],
+        outline_focus: None,
         has_form: false,
         fields: &[],
         level: pulpit_render::document::CompatibilityLevel::AnnotateOnly,
@@ -211,7 +213,12 @@ pub fn context(mode: crate::widgets::Mode) -> crate::widgets::context::Context<'
 
     Context {
         mode,
-        search: SearchData { state: &SEARCH },
+        search: SearchData {
+            state: &SEARCH,
+            keyboard_focus: false,
+        },
+        search_open: false,
+        search_reveal: 0.0,
         slides: SlideData {
             current: SLIDE,
             preview: SLIDE,

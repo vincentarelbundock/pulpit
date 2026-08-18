@@ -5,7 +5,7 @@
 //! [`pulpit_core::search::SearchState`] in front of it, which is what makes
 //! "search in every view" one widget rather than two.
 
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{button, column, container, rich_text, row, space, span, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
@@ -20,12 +20,6 @@ use super::model::{row_label, row_parts, summary};
 /// search at a time, so one id.
 pub fn input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-search-query")
-}
-
-/// The transient workspace has its own caret target so an imported legacy
-/// layout containing the old search widget cannot steal focus behind it.
-pub fn workspace_input_id() -> iced::widget::Id {
-    iced::widget::Id::new("search-workspace-query")
 }
 
 pub fn view<'ctx, 'a, Message: Clone + 'static>(
@@ -85,8 +79,9 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
         clear = clear.on_press(on_event(WidgetEvent::Find(FindCommand::Clear)));
     }
 
+    // The query gets the whole rail width. The compact tool row below it is
+    // easier to scan and does not squeeze the input as options are added.
     let controls = row![
-        field,
         step("‹", FindCommand::Previous),
         step("›", FindCommand::Next),
         toggle(
@@ -115,7 +110,12 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
                 theme::ambient::muted()
             });
 
-    let mut pane = column![controls].spacing(theme::space::XS);
+    let mut pane = column![
+        text("Search").size(theme::type_scale::TITLE),
+        field,
+        controls
+    ]
+    .spacing(theme::space::XS);
     if !said.is_empty() {
         pane = pane.push(line);
     }
@@ -139,30 +139,36 @@ fn results<Message: Clone + 'static>(
     let mut rows = column![].spacing(2);
     for (index, hit) in state.hits().iter().enumerate() {
         let (before, matched, after) = row_parts(hit);
-        let body = row![
-            text(row_label(hit))
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::muted())
-                .width(Length::Fixed(72.0)),
-            // The match itself is the accent; its surroundings are context and
-            // are drawn as such, so a list of twenty rows can be scanned for
-            // the one whose sentence is the right one.
-            text(before)
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::muted()),
-            text(matched)
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::accent()),
-            text(after)
-                .size(theme::type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        ]
-        .spacing(theme::space::XS)
-        .align_y(Alignment::Center);
+        let mut highlight = theme::ambient::accent();
+        highlight.a = 0.18;
+        // These are spans in one text flow, not adjacent layout widgets: the
+        // page number stays beside the excerpt and the whole line wraps as a
+        // sentence when the panel is narrow.
+        let body = rich_text::<(), Message, iced::Theme, iced::Renderer>([
+            span(row_label(hit)).color(theme::ambient::muted()),
+            span("  "),
+            span(before).color(theme::ambient::muted()),
+            span(matched)
+                .color(theme::ambient::text())
+                .background(highlight)
+                .padding([0.0, 2.0]),
+            span(after).color(theme::ambient::muted()),
+        ])
+        .size(theme::type_scale::LABEL)
+        .width(Length::Fill);
 
-        let mut control = button(body)
+        let focused = search.keyboard_focus && Some(index) == current;
+        let marker: Element<'static, Message> = if focused {
+            container(space::vertical().width(3.0).height(Length::Fill))
+                .style(theme::ambient::accent_rule)
+                .into()
+        } else {
+            space::horizontal().width(3.0).into()
+        };
+        let mut control = button(row![marker, body].spacing(theme::space::XS))
             .padding(theme::space::XS)
-            .style(if Some(index) == current {
+            .width(Length::Fill)
+            .style(if focused {
                 theme::ambient::selected_button
             } else {
                 theme::ambient::tool_button
@@ -175,7 +181,7 @@ fn results<Message: Clone + 'static>(
     if state.hits().is_empty() {
         return space::vertical().height(Length::Fill).into();
     }
-    scrollable(rows)
+    crate::widgets::scroll::vertical(rows)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

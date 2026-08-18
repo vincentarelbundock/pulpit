@@ -204,6 +204,19 @@ macro_rules! widget_registry {
                 $( WidgetKind::$kind => $view(ctx, widget), )+
             }
         }
+
+        /// Render one kind using a host cell's common style. Side-panel
+        /// infrastructure uses this when a transient widget occupies a
+        /// persistent panel slot.
+        pub fn dispatch_kind<'ctx, 'a, Message: Clone + 'static>(
+            kind: WidgetKind,
+            ctx: &WidgetViewContext<'ctx, 'a, Message>,
+            host: &Widget,
+        ) -> Element<'a, Message> {
+            match kind {
+                $( WidgetKind::$kind => $view(ctx, host), )+
+            }
+        }
     };
 }
 

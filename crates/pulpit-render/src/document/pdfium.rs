@@ -3632,6 +3632,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
         if query.is_empty() {
             return Ok(chunk);
         }
+        let prepared = query.prepare();
         let bindings = self.backend.bindings();
         for page in pages {
             let geometry = self.geometry_of(PageIndex(page))?;
@@ -3649,7 +3650,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                         text_page,
                         &geometry,
                         PageIndex(page),
-                        query,
+                        &prepared,
                         limits::MAX_HITS_PER_SEARCH,
                         limits::MAX_QUADS_PER_HIT,
                     );

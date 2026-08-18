@@ -24,6 +24,7 @@ pub mod patch;
 pub mod plan;
 pub mod registry;
 pub mod sample;
+pub mod scroll;
 pub mod search;
 pub mod slides;
 pub mod status;
