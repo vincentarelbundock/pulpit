@@ -719,6 +719,11 @@ pub struct App {
     pub layouts: LayoutStore,
     /// The layout the presenter screen is drawn from.
     pub active_layout: Layout,
+    /// Whether a Reader temporarily gives the whole presenter window to its
+    /// document page. This is view state, not a layout mutation: the mounted
+    /// layout and the page surface's crop, spread, zoom, and scroll all stay
+    /// exactly where they are while its other widgets are hidden.
+    pub reader_fullscreen: bool,
     pub designer: Option<crate::designer::Designer>,
     pub layout_dialog: Option<LayoutDialog>,
     pub settings: Settings,
@@ -1378,6 +1383,7 @@ impl App {
             page: crate::designer::Page::Presenter,
             layouts,
             active_layout,
+            reader_fullscreen: false,
             designer: None,
             layout_dialog: None,
             cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
@@ -3200,6 +3206,7 @@ impl App {
     /// Mount a layout and remember it for its mode, without claiming the user
     /// asked for it on this particular document.
     fn mount_layout(&mut self, layout: Layout) {
+        self.reader_fullscreen = false;
         self.diagnostics
             .note(format!("presenter layout: {}", layout.name));
         // Each mode remembers its own (§2.3): choosing a presenter variant
@@ -3810,6 +3817,13 @@ impl App {
                 self.reconcile()
             }
             Action::ToggleAudienceFullscreen => {
+                if crate::layout::PrimaryViewer::of(&self.active_layout)
+                    == crate::layout::PrimaryViewer::Document
+                {
+                    self.reader_fullscreen = !self.reader_fullscreen;
+                    self.menu_open = false;
+                    return Task::none();
+                }
                 let wanted = !self.coordinator.roles.audience_fullscreen;
                 self.coordinator.roles.audience_fullscreen = wanted;
 

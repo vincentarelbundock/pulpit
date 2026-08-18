@@ -257,6 +257,21 @@ fn presenter(app: &App) -> Element<'_, Message> {
         &frame,
         crate::widgets::sample::NOTES,
     );
+    if app.reader_fullscreen {
+        if let Some(page) = app
+            .active_layout
+            .widgets()
+            .into_iter()
+            .find(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentPage)
+        {
+            return crate::layout_renderer::widget(
+                page,
+                &context,
+                app.compose_buffer(),
+                interaction,
+            );
+        }
+    }
     let body = crate::layout_renderer::layout(
         &app.active_layout,
         &context,
@@ -1006,7 +1021,15 @@ fn menu(app: &App) -> Element<'_, Message> {
         Message::Do(Action::SwapDisplays),
     ));
     items = items.push(entry(
-        if app.coordinator.roles.audience_fullscreen {
+        if crate::layout::PrimaryViewer::of(&app.active_layout)
+            == crate::layout::PrimaryViewer::Document
+        {
+            if app.reader_fullscreen {
+                "Page: fullscreen"
+            } else {
+                "Page: windowed"
+            }
+        } else if app.coordinator.roles.audience_fullscreen {
             "Audience: fullscreen"
         } else {
             "Audience: windowed"
