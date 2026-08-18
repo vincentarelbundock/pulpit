@@ -54,13 +54,6 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
             Page::Settings => settings_page(app),
         }
     };
-    // The empty-start surface passes through `presenter`, which owns the menu
-    // overlay there. An explicitly opened shortcut reference bypasses it, so
-    // mount the same menu at this level when its hamburger is used.
-    if app.shortcuts_open && app.menu_open {
-        page = stack![page, menu(app)].into();
-    }
-
     // A ringing cue washes the presenter window, under everything else so it
     // tints the page rather than covering any control — including the Snooze
     // and Dismiss buttons that answer it. Never on the audience window: the
@@ -79,78 +72,90 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     .fold(None::<f32>, |strongest, alpha| {
         Some(strongest.map_or(alpha, |current: f32| current.max(alpha)))
     });
-    if let Some(alpha) = alert {
-        page = stack![page, alarm_flash(alpha)].into();
-    }
-
-    // Toasts float above whatever page is showing, and never on the audience
-    // window.
-    if let Some(overlay) = toasts(app) {
-        page = stack![page, overlay].into();
-    }
-    if app.confirm_reset_colors {
-        page = stack![page, reset_colors_dialog()].into();
-    }
-    if let Some(editor) = app.signature_profile_editor.as_ref() {
-        page = stack![page, signature_profile_editor(app, editor)].into();
-    }
-    if let Some(removal) = app.signature_profile_removal.as_ref() {
-        page = stack![page, signature_profile_removal(app, removal)].into();
-    }
-    // What the open document asked to do to the reader's place in it. Above
-    // the page, because it is a question about the page.
-    if let Some(request) = app.pending_form_goto.as_ref() {
-        page = stack![page, form_navigation_dialog(request)].into();
-    }
-    // What a save would leave empty, asked before the file is written.
-    // A small always-present affordance for the signature panel (§31.4),
-    // whenever the open document has at least one signature to report on.
-    // Not folded into the reader toolbar's generic `Message` widget (see
-    // `widgets::document::view::tools`'s note) because the panel is `App`
-    // state, not `ReadCommand` state.
-    if !app.document_signatures.is_empty() && !app.signature_panel_open {
-        page = stack![page, signature_panel_toggle(app)].into();
-    }
-    if app.signature_panel_open {
-        page = stack![page, signature_panel(app)].into();
-    }
-    // §31.3, A9: offered before anything can mutate a document that already
-    // carries a signature. Above the page, non-dismissable except its own
-    // two buttons — declining silently would leave the reader guessing
-    // which mode they are in.
-    if app.pending_append_only_offer {
-        page = stack![page, append_only_offer_dialog()].into();
-    }
-    // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever step
-    // it is on.
-    if let Some(flow) = app.signing.as_ref() {
-        let on_page_zero = app
-            .reader
-            .current_page()
-            .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
-        page = stack![page, sign_dialog(app, flow, on_page_zero)].into();
-    }
-    if let Some(review) = app.pending_save_review.as_ref() {
-        page = stack![page, save_review_dialog(review)].into();
-    }
-    // The alarm popup is a top-level overlay rather than something drawn
-    // inside the clock's pane: a clock can be a narrow cell in a strip, and a
-    // popup anchored there would be clipped by its own widget.
-    if app.alarm_controls.open {
-        page = stack![page, alarms_dialog(app)].into();
-    }
-    if app.about_open {
-        page = stack![page, about_overlay()].into();
-    }
-    // The timer menu is the same kind of overlay, for the same reason.
-    if app.timer_controls.open {
-        page = stack![page, timer_dialog(app)].into();
-    }
-    // The same rule for a document: what a previous run left unsaved is
-    // offered, never applied, and the offer has no way out but an answer.
-    if let Some(journal) = app.reader_recovery.as_ref() {
-        page = stack![page, restore_edits_dialog(journal)].into();
-    }
+    let on_page_zero = app
+        .reader
+        .current_page()
+        .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
+    // Every layer below is always present in the stack, blank when its own
+    // condition is false — never mounted-and-unmounted with it. See `blank`
+    // and the scrub layer's note in `presenter` for why: a layer that came
+    // and went would change the shape of this stack the moment it toggled,
+    // and Iced discards all descendant widget state on a shape change.
+    page = stack![
+        page,
+        // The empty-start surface passes through `presenter`, which owns
+        // the menu overlay there. An explicitly opened shortcut reference
+        // bypasses it, so mount the same menu at this level when its
+        // hamburger is used.
+        layer(app.shortcuts_open && app.menu_open, || menu(app)),
+        match alert {
+            Some(alpha) => alarm_flash(alpha),
+            None => blank(),
+        },
+        // Toasts float above whatever page is showing, and never on the
+        // audience window.
+        match toasts(app) {
+            Some(overlay) => overlay,
+            None => blank(),
+        },
+        layer(app.confirm_reset_colors, reset_colors_dialog),
+        match app.signature_profile_editor.as_ref() {
+            Some(editor) => signature_profile_editor(app, editor),
+            None => blank(),
+        },
+        match app.signature_profile_removal.as_ref() {
+            Some(removal) => signature_profile_removal(app, removal),
+            None => blank(),
+        },
+        // What the open document asked to do to the reader's place in it.
+        // Above the page, because it is a question about the page.
+        match app.pending_form_goto.as_ref() {
+            Some(request) => form_navigation_dialog(request),
+            None => blank(),
+        },
+        // What a save would leave empty, asked before the file is written.
+        // A small always-present affordance for the signature panel
+        // (§31.4), whenever the open document has at least one signature to
+        // report on. Not folded into the reader toolbar's generic `Message`
+        // widget (see `widgets::document::view::tools`'s note) because the
+        // panel is `App` state, not `ReadCommand` state.
+        layer(
+            !app.document_signatures.is_empty() && !app.signature_panel_open,
+            || signature_panel_toggle(app),
+        ),
+        layer(app.signature_panel_open, || signature_panel(app)),
+        // §31.3, A9: offered before anything can mutate a document that
+        // already carries a signature. Above the page, non-dismissable
+        // except its own two buttons — declining silently would leave the
+        // reader guessing which mode they are in.
+        layer(app.pending_append_only_offer, append_only_offer_dialog),
+        // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever
+        // step it is on.
+        match app.signing.as_ref() {
+            Some(flow) => sign_dialog(app, flow, on_page_zero),
+            None => blank(),
+        },
+        match app.pending_save_review.as_ref() {
+            Some(review) => save_review_dialog(review),
+            None => blank(),
+        },
+        // The alarm popup is a top-level overlay rather than something
+        // drawn inside the clock's pane: a clock can be a narrow cell in a
+        // strip, and a popup anchored there would be clipped by its own
+        // widget.
+        layer(app.alarm_controls.open, || alarms_dialog(app)),
+        layer(app.about_open, about_overlay),
+        // The timer menu is the same kind of overlay, for the same reason.
+        layer(app.timer_controls.open, || timer_dialog(app)),
+        // The same rule for a document: what a previous run left unsaved is
+        // offered, never applied, and the offer has no way out but an
+        // answer.
+        match app.reader_recovery.as_ref() {
+            Some(journal) => restore_edits_dialog(journal),
+            None => blank(),
+        },
+    ]
+    .into();
     // Its own renderer, its own atlas, its own residency — exactly as the
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
@@ -371,20 +376,19 @@ fn presenter(app: &App) -> Element<'_, Message> {
         page = shortcut_reference_page(app, false);
     }
 
-    if app.menu_open {
-        page = stack![page, menu(app)].into();
-    }
-    if app.audience_start_menu_open {
-        page = stack![page, audience_start_menu(app)].into();
-    }
-    // The scrub layer is *always* stacked, empty when idle. Stacking it only
-    // while scrubbing changed the shape of the widget tree the moment the
-    // first thumbnail arrived, which threw away the slider's drag state
-    // mid-drag: the handle froze as soon as the preview appeared.
-    page = stack![page, scrub_layer(app)].into();
-    if app.overview {
-        page = stack![page, overview(app)].into();
-    }
+    page = stack![
+        page,
+        layer(app.menu_open, || menu(app)),
+        layer(app.audience_start_menu_open, || audience_start_menu(app)),
+        // The scrub layer is *always* stacked, empty when idle. Stacking it
+        // only while scrubbing changed the shape of the widget tree the
+        // moment the first thumbnail arrived, which threw away the
+        // slider's drag state mid-drag: the handle froze as soon as the
+        // preview appeared.
+        scrub_layer(app),
+        layer(app.overview, || overview(app)),
+    ]
+    .into();
     page
 }
 
@@ -398,6 +402,34 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         viewport: app.search_viewport.clone(),
     };
     crate::widgets::search::view::pane(search, true, false, interaction)
+}
+
+/// A blank, transparent, click-through filler for one slot in a fixed
+/// stack.
+///
+/// Iced diffs the widget tree positionally. An overlay that is stacked only
+/// while its condition holds changes the *shape* of the tree the instant
+/// the condition flips, and Iced discards all descendant widget state on a
+/// shape change — scroll offsets, drag state, focus, all of it. The scrub
+/// layer below learned this the hard way: it stays stacked always, blank
+/// when idle, rather than appearing only while scrubbing. Every conditional
+/// overlay in `view` and `presenter` follows the same rule, and this is
+/// what they render in the slot when their condition is false.
+fn blank<'a>() -> Element<'a, Message> {
+    container(space::horizontal())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Mount `build()` when `open`, else the blank filler, so the enclosing
+/// stack's shape never depends on `open`. See `blank`.
+fn layer<'a>(open: bool, build: impl FnOnce() -> Element<'a, Message>) -> Element<'a, Message> {
+    if open {
+        build()
+    } else {
+        blank()
+    }
 }
 
 /// What the slider is pointing at, while it is being dragged.
@@ -3604,10 +3636,14 @@ fn mappings(app: &App) -> Element<'_, Message> {
 
 fn library_page(app: &App) -> Element<'_, Message> {
     let page = designer_view::library(&app.layouts, Some(&app.active_layout.id));
-    match &app.layout_dialog {
-        None => page,
-        Some(dialog) => stack![page, layout_dialog(dialog)].into(),
-    }
+    stack![
+        page,
+        match &app.layout_dialog {
+            Some(dialog) => layout_dialog(dialog),
+            None => blank(),
+        },
+    ]
+    .into()
 }
 
 fn layout_dialog(dialog: &LayoutDialog) -> Element<'_, Message> {
