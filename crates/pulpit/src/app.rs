@@ -200,6 +200,11 @@ pub enum Message {
     MenuAction(Box<Message>),
     ToggleMenu,
     CloseMenu,
+    ToggleShortcuts,
+    CloseShortcuts,
+    ShowAbout,
+    CloseAbout,
+    OpenDocumentation,
     /// Start immediately with the saved display and fullscreen choices.
     StartAudience,
     /// Select a connected display and start the audience there immediately.
@@ -892,6 +897,10 @@ pub struct App {
     pub toasts: Toasts,
     /// Whether the main menu is open.
     pub menu_open: bool,
+    /// Whether the live-keymap reference is covering the presenter.
+    pub shortcuts_open: bool,
+    /// Whether the compact application information dialog is open.
+    pub about_open: bool,
     /// Whether the arrow beside Start has unrolled its alternate actions.
     pub audience_start_menu_open: bool,
     /// Intent, separate from the asynchronous Iced window lifecycle.
@@ -1448,6 +1457,8 @@ impl App {
             platform,
             toasts: Toasts::new(),
             menu_open: false,
+            shortcuts_open: false,
+            about_open: false,
             audience_start_menu_open: false,
             audience_started: false,
             presenter_window: None,
@@ -2259,11 +2270,15 @@ impl App {
                     return Task::none();
                 }
                 if key.as_deref() == Some("Escape")
-                    && (self.menu_open
+                    && (self.shortcuts_open
+                        || self.about_open
+                        || self.menu_open
                         || self.audience_start_menu_open
                         || self.unbound_key.is_some()
                         || self.overview)
                 {
+                    self.shortcuts_open = false;
+                    self.about_open = false;
                     self.menu_open = false;
                     self.audience_start_menu_open = false;
                     self.unbound_key = None;
@@ -2888,6 +2903,35 @@ impl App {
                 self.audience_start_menu_open = false;
                 Task::none()
             }
+            Message::ToggleShortcuts => {
+                self.menu_open = false;
+                self.shortcuts_open = !self.shortcuts_open;
+                Task::none()
+            }
+            Message::CloseShortcuts => {
+                self.shortcuts_open = false;
+                Task::none()
+            }
+            Message::ShowAbout => {
+                self.menu_open = false;
+                self.about_open = true;
+                Task::none()
+            }
+            Message::CloseAbout => {
+                self.about_open = false;
+                Task::none()
+            }
+            Message::OpenDocumentation => {
+                self.menu_open = false;
+                let outcome = self
+                    .platform
+                    .services
+                    .open("https://vincentarelbundock.github.io/pulpit/");
+                if let Some(problem) = outcome.describe() {
+                    self.notify(problem);
+                }
+                Task::none()
+            }
             Message::CloseMenu => {
                 self.menu_open = false;
                 self.audience_start_menu_open = false;
@@ -2938,6 +2982,8 @@ impl App {
             }
             Message::ShowSettings => {
                 self.menu_open = false;
+                self.shortcuts_open = false;
+                self.about_open = false;
                 self.page = crate::designer::Page::Settings;
                 Task::none()
             }
@@ -3630,6 +3676,38 @@ impl App {
         }))
     }
 
+    /// Every readable binding for an action, formatted for this desktop.
+    pub fn action_shortcuts(&self, action: crate::settings::keys::Action) -> Vec<String> {
+        self.settings
+            .keymap
+            .bindings
+            .iter()
+            .filter_map(|(binding, bound)| {
+                (*bound == action).then_some(binding).map(|binding| {
+                    use crate::platform::input::Modifier;
+                    use crate::platform::Shortcut;
+                    let KeyBinding::Named { key, mods } = binding else {
+                        return binding.describe();
+                    };
+                    let mut modifiers = Vec::new();
+                    if mods.ctrl {
+                        modifiers.push(Modifier::Primary);
+                    }
+                    if mods.alt {
+                        modifiers.push(Modifier::Alt);
+                    }
+                    if mods.shift {
+                        modifiers.push(Modifier::Shift);
+                    }
+                    self.platform.input.format(&Shortcut {
+                        modifiers,
+                        key: display_key(key),
+                    })
+                })
+            })
+            .collect()
+    }
+
     pub fn document_title(&self) -> String {
         self.state
             .document()
@@ -3863,6 +3941,7 @@ impl App {
             }
             Action::ShowOverview => self.update(Message::ToggleOverview),
             Action::ShowLayouts => self.update(Message::ShowLibrary),
+            Action::ShowShortcuts => self.update(Message::ToggleShortcuts),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
             Action::AnnotateHighlighter => self.arm_from_key(AnnotationTool::Highlighter),
             Action::AnnotateEraser => self.arm_from_key(AnnotationTool::Eraser),

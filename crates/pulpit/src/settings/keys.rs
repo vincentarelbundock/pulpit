@@ -45,6 +45,8 @@ pub enum Action {
     /// The presenter screen *is* the layout, so changing it is a first-class
     /// thing to do at the lectern rather than a setting to go looking for.
     ShowLayouts,
+    /// Show the live keyboard reference.
+    ShowShortcuts,
     // Annotations. Arming a tool is a toggle: the same key puts it down
     // again, so the presenter never has to find an "off" control while the
     // room is watching.
@@ -94,7 +96,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 41] = [
+    pub const ALL: [Action; 42] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -113,6 +115,7 @@ impl Action {
         Action::ReloadDocument,
         Action::ShowOverview,
         Action::ShowLayouts,
+        Action::ShowShortcuts,
         Action::AnnotateInk,
         Action::AnnotateHighlighter,
         Action::AnnotateEraser,
@@ -158,6 +161,7 @@ impl Action {
             Action::ReloadDocument => "Reload document",
             Action::ShowOverview => "Slide overview",
             Action::ShowLayouts => "Layouts",
+            Action::ShowShortcuts => "Keyboard shortcuts",
             Action::AnnotateInk => "Draw on the slide",
             Action::AnnotateHighlighter => "Highlight on the slide",
             Action::AnnotateEraser => "Erase annotations",
@@ -448,6 +452,7 @@ impl Default for Keymap {
                 // Layouts keep their mnemonic one row up, "l" itself being a
                 // navigation key now.
                 with("l", Mods::shift(), Action::ShowLayouts),
+                with("/", Mods::shift(), Action::ShowShortcuts),
                 // The four tools sit under the digits, in the order the
                 // palette draws them; the marks they make are cleared and
                 // taken back from the keys beside them.

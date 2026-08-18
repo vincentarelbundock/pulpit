@@ -37,8 +37,13 @@ Four ways to move through the deck:
 - *Back and forward buttons*, a widget you can place in any layout cell, with
   or without words beside the arrows.
 - *Slider*, a draggable track across the whole deck.
-- *Jump menu* (`j`), the whole deck as thumbnails, so you land on a slide by
+- *Jump menu* (`o`), the whole deck as thumbnails, so you land on a slide by
   eye rather than by number. Picking one closes the menu.
+
+Press `?` at any time to open the complete keyboard reference. It is built
+from the active keymap, so customised bindings and unbound commands are shown
+as they really are. The same reference fills the presenter when no document
+is open, beside the button that opens one.
 
 = Annotations
 

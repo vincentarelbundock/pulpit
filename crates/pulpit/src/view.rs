@@ -117,6 +117,12 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if app.alarm_controls.open {
         page = stack![page, alarms_dialog(app)].into();
     }
+    if app.shortcuts_open {
+        page = stack![page, shortcuts_overlay(app, true)].into();
+    }
+    if app.about_open {
+        page = stack![page, about_overlay()].into();
+    }
     // The timer menu is the same kind of overlay, for the same reason.
     if app.timer_controls.open {
         page = stack![page, timer_dialog(app)].into();
@@ -312,6 +318,13 @@ fn presenter(app: &App) -> Element<'_, Message> {
         Some(toolbar) => column![toolbar, body].into(),
         None => body,
     };
+
+    // With no file open, the layout has no useful content to draw. Make the
+    // keyboard-first interface teach itself, using the very same reference
+    // as the Help command so startup documentation cannot go stale.
+    if app.state.document().is_none() {
+        page = stack![page, shortcuts_overlay(app, false)].into();
+    }
 
     if app.menu_open {
         page = stack![page, menu(app)].into();
@@ -976,6 +989,18 @@ fn menu(app: &App) -> Element<'_, Message> {
     // Every shortcut here is read from the keymap, so a rebinding shows up in
     // the menu and a moved default cannot leave a stale key behind.
     let shortcut = |action: Action| app.action_shortcut(action);
+    let heading = |label: &'static str| {
+        container(
+            text(label)
+                .size(type_scale::CAPTION)
+                .color(theme::ambient::muted()),
+        )
+        .padding(iced::Padding {
+            top: gap::S,
+            left: gap::S,
+            ..iced::Padding::from(0.0)
+        })
+    };
 
     let mut items = Column::new()
         .spacing(gap::XS)
@@ -988,6 +1013,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         )
         .height(Length::Fixed(MENU_HEADER)),
     );
+    items = items.push(heading("File"));
     items = items.push(entry(
         "Open…",
         shortcut(Action::OpenDocument),
@@ -1001,6 +1027,7 @@ fn menu(app: &App) -> Element<'_, Message> {
     if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
         items = items.push(entry("Show in file manager", None, Message::RevealDocument));
     }
+    items = items.push(heading("View"));
     if app.state.document().is_some() {
         items = items.push(entry(
             "Jump to slide…",
@@ -1014,7 +1041,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         Message::ShowLibrary,
     ));
     items = items.push(entry("Settings…", None, Message::ShowSettings));
-
+    items = items.push(heading("Presentation"));
     items = items.push(entry(
         "Swap displays",
         shortcut(Action::SwapDisplays),
@@ -1037,7 +1064,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         shortcut(Action::ToggleAudienceFullscreen),
         Message::Do(Action::ToggleAudienceFullscreen),
     ));
-
+    items = items.push(heading("Timer"));
     // The timer has no control of its own unless a clock widget is on the
     // layout, so its two commands are always reachable from here as well.
     items = items.push(entry(
@@ -1054,6 +1081,16 @@ fn menu(app: &App) -> Element<'_, Message> {
         shortcut(Action::ResetTimer),
         Message::Do(Action::ResetTimer),
     ));
+
+    items = items.push(heading("Help"));
+    items = items.push(entry(
+        "Keyboard shortcuts…",
+        shortcut(Action::ShowShortcuts),
+        Message::ToggleShortcuts,
+    ));
+    items = items.push(entry("Documentation", None, Message::OpenDocumentation));
+    items = items.push(entry("Diagnostics…", None, Message::ShowSettings));
+    items = items.push(entry("About Pulpit", None, Message::ShowAbout));
 
     items = items.push(
         container(space::vertical().height(Length::Fixed(1.0)))
@@ -1110,6 +1147,218 @@ fn menu(app: &App) -> Element<'_, Message> {
         )
         .push(beside)
         .into()
+}
+
+/// The complete live keymap, grouped by the work each command performs.
+fn shortcuts_overlay(app: &App, dismissable: bool) -> Element<'_, Message> {
+    const GROUPS: [(&str, &[Action]); 6] = [
+        (
+            "Navigation",
+            &[
+                Action::Next,
+                Action::Previous,
+                Action::First,
+                Action::Last,
+                Action::ShowOverview,
+            ],
+        ),
+        (
+            "Preview",
+            &[
+                Action::PreviewNext,
+                Action::PreviewPrevious,
+                Action::CommitPreview,
+                Action::CancelPreview,
+            ],
+        ),
+        (
+            "Presentation",
+            &[
+                Action::Blank,
+                Action::BlankAlternate,
+                Action::ToggleTimer,
+                Action::ResetTimer,
+                Action::SwapDisplays,
+                Action::ToggleAudienceFullscreen,
+            ],
+        ),
+        (
+            "Annotations",
+            &[
+                Action::AnnotateInk,
+                Action::AnnotateHighlighter,
+                Action::AnnotateEraser,
+                Action::AnnotatePointer,
+                Action::UndoAnnotation,
+                Action::RedoAnnotation,
+                Action::ClearAnnotations,
+                Action::ToggleAnnotationAudience,
+            ],
+        ),
+        (
+            "Reader",
+            &[
+                Action::ToggleReader,
+                Action::ToggleOutline,
+                Action::FocusSearch,
+                Action::FindNext,
+                Action::FindPrevious,
+                Action::ZoomIn,
+                Action::ZoomOut,
+                Action::ZoomReset,
+                Action::FitPage,
+                Action::FitWidth,
+                Action::RotateReader,
+                Action::ToggleDualPage,
+                Action::FocusNextLink,
+                Action::FocusPreviousLink,
+            ],
+        ),
+        (
+            "Application",
+            &[
+                Action::OpenDocument,
+                Action::ReloadDocument,
+                Action::ShowLayouts,
+                Action::ShowShortcuts,
+                Action::Quit,
+            ],
+        ),
+    ];
+
+    let group = |name: &'static str, actions: &'static [Action]| {
+        let mut content = Column::new().spacing(gap::XS).push(
+            text(name)
+                .size(type_scale::LABEL)
+                .color(theme::ambient::text()),
+        );
+        for action in actions {
+            let keys = app.action_shortcuts(*action);
+            let keys = if keys.is_empty() {
+                "Unbound".to_string()
+            } else {
+                keys.join("  ·  ")
+            };
+            content = content.push(
+                row![
+                    text(action.label()).size(type_scale::CAPTION),
+                    space::horizontal(),
+                    text(keys)
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                ]
+                .spacing(gap::M),
+            );
+        }
+        container(content).width(Length::Fill).padding(gap::S)
+    };
+
+    let first = Column::new()
+        .spacing(gap::M)
+        .push(group(GROUPS[0].0, GROUPS[0].1))
+        .push(group(GROUPS[3].0, GROUPS[3].1));
+    let second = Column::new()
+        .spacing(gap::M)
+        .push(group(GROUPS[1].0, GROUPS[1].1))
+        .push(group(GROUPS[4].0, GROUPS[4].1));
+    let third = Column::new()
+        .spacing(gap::M)
+        .push(group(GROUPS[2].0, GROUPS[2].1))
+        .push(group(GROUPS[5].0, GROUPS[5].1));
+    let title = if dismissable {
+        "Keyboard shortcuts"
+    } else {
+        "Open a PDF — or start from the keyboard"
+    };
+    let mut header = Row::new()
+        .align_y(Alignment::Center)
+        .push(text(title).size(type_scale::TITLE));
+    if dismissable {
+        header = header.push(space::horizontal()).push(
+            button(text("Close"))
+                .style(theme::ambient::tool_button)
+                .on_press(Message::CloseShortcuts),
+        );
+    } else {
+        header = header.push(space::horizontal()).push(
+            button(text("Open…"))
+                .style(theme::ambient::forward_button)
+                .on_press(Message::OpenDialog),
+        );
+    }
+    let mut content = Column::new().spacing(gap::M).push(header).push(
+        row![
+            first.width(Length::Fill),
+            second.width(Length::Fill),
+            third.width(Length::Fill),
+        ]
+        .spacing(gap::L),
+    );
+    if dismissable {
+        content = content.push(
+            container(
+                button(text("Customize shortcuts…"))
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::ShowSettings),
+            )
+            .width(Length::Fill)
+            .align_x(Alignment::End),
+        );
+    }
+    let card = container(content)
+        .padding(gap::L)
+        .max_width(1100.0)
+        .style(theme::ambient::dialog);
+    let layer = container(scrollable(card).style(theme::ambient::scrollbar))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .padding(gap::L);
+    if dismissable {
+        let backdrop = mouse_area(
+            container(space::vertical())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::ambient::scrim),
+        )
+        .on_press(Message::CloseShortcuts);
+        stack![backdrop, layer].into()
+    } else {
+        layer.into()
+    }
+}
+
+fn about_overlay() -> Element<'static, Message> {
+    let card = container(
+        column![
+            text("Pulpit").size(type_scale::TITLE),
+            text(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(type_scale::BODY),
+            text("A PDF presenter built for unreliable, changing display topologies.")
+                .size(type_scale::BODY)
+                .color(theme::ambient::muted()),
+            button(text("Close"))
+                .style(theme::ambient::tool_button)
+                .on_press(Message::CloseAbout),
+        ]
+        .spacing(gap::M),
+    )
+    .padding(gap::L)
+    .max_width(520.0)
+    .style(theme::ambient::dialog);
+    let backdrop = mouse_area(
+        container(space::vertical())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::ambient::scrim),
+    )
+    .on_press(Message::CloseAbout);
+    let layer = container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+    stack![backdrop, layer].into()
 }
 
 /// A toggle that shows whether it is the current choice. Selection uses the

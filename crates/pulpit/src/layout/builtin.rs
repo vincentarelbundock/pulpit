@@ -215,13 +215,16 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     // instead of on a strip of its own that costs the page another line.
     let band_children = vec![
         b.button(WidgetKind::MainMenu),
-        b.panel(WidgetKind::DocumentNav),
-        b.panel(WidgetKind::AnnotationTools),
+        // These are icon runs just like the menu button. The ordinary panel
+        // inset puts 24 points plus the split gutter between neighbouring
+        // runs; the button inset packs the whole band around its icons.
+        b.button(WidgetKind::DocumentNav),
+        b.button(WidgetKind::AnnotationTools),
     ];
     let band = b.split(
         "Navigation and tools",
         Direction::Horizontal,
-        &[0.06, 0.47, 0.47],
+        &[0.05, 0.475, 0.475],
         band_children,
     );
 
@@ -331,9 +334,12 @@ mod tests {
         assert_eq!(root.sizes, vec![0.07, 0.93]);
         assert_eq!(
             root.children[0].as_split().unwrap().sizes,
-            vec![0.06, 0.47, 0.47]
+            vec![0.05, 0.475, 0.475]
         );
         assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.24, 0.76]);
+        for cell in root.children[0].cells() {
+            assert_eq!(cell.padding, 4.0, "Reader controls should hug their icons");
+        }
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();
         for required in [

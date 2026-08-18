@@ -1192,6 +1192,13 @@ arrow) still hang from the top-left corner. They are positioned by
 arithmetic, and that arithmetic knows only whether the strip is drawing the
 control, not where on the layout the presenter put it.
 
+The hamburger remains the one global command menu. It groups file, view,
+presentation, timer and help commands; live controls such as Start and Stop
+remain outside it. Its keyboard-reference command opens a presenter-only
+overlay generated from the active keymap. The no-document surface uses that
+same generated reference as its main content, so the advertised keys cannot
+drift from settings or from the overlay.
+
 === Media Transport
 
 Play, pause and scrub whatever video or animation is on the slide the
