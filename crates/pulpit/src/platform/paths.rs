@@ -4,6 +4,7 @@
 //! one platform's convention. Environment overrides exist so tests never
 //! touch a real user's configuration.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 /// Where this application keeps its things.
@@ -83,6 +84,13 @@ impl Directories {
         self.config.join("layouts")
     }
 
+    /// Encrypted signing credentials managed by pulpit. They stay separate
+    /// from the human-readable settings file, which must never contain key
+    /// material or passphrases.
+    pub fn signing_credentials(&self) -> PathBuf {
+        self.config.join("signatures")
+    }
+
     /// Where the single-instance claim is recorded. It belongs with the
     /// cache: it is state about this machine right now, not configuration.
     pub fn instance_lock(&self) -> PathBuf {
@@ -110,6 +118,24 @@ impl Directories {
             logs: root.join("logs"),
         }
     }
+}
+
+/// Create a new file containing private material with the narrowest native
+/// permissions available at creation time.
+///
+/// Unix needs an explicit mode so a permissive umask cannot briefly expose
+/// the file. Windows inherits the application-data directory's ACL; the
+/// `create_new` contract still prevents following or overwriting an existing
+/// destination.
+pub fn create_owner_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 fn home() -> PathBuf {
@@ -140,6 +166,9 @@ mod tests {
         // The layout library is a child of the configuration directory, so a
         // user moving their configuration takes their layouts with them.
         assert!(directories.layouts().starts_with(&directories.config));
+        assert!(directories
+            .signing_credentials()
+            .starts_with(&directories.config));
         assert!(directories.settings_file().starts_with(&directories.config));
     }
 

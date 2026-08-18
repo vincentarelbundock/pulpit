@@ -9,8 +9,8 @@
 //! the editor is exactly what appears here.
 
 use iced::widget::{
-    button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, space,
-    stack, text, text_input, Column, Row,
+    button, canvas, column, container, image, mouse_area, pick_list, responsive, row, scrollable,
+    space, stack, text, text_input, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -78,6 +78,12 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if app.confirm_reset_colors {
         page = stack![page, reset_colors_dialog()].into();
     }
+    if let Some(editor) = app.signature_profile_editor.as_ref() {
+        page = stack![page, signature_profile_editor(app, editor)].into();
+    }
+    if let Some(removal) = app.signature_profile_removal.as_ref() {
+        page = stack![page, signature_profile_removal(app, removal)].into();
+    }
     // What the open document asked to do to the reader's place in it. Above
     // the page, because it is a question about the page.
     if let Some(request) = app.pending_form_goto.as_ref() {
@@ -109,7 +115,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
             .reader
             .current_page()
             .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
-        page = stack![page, sign_dialog(flow, on_page_zero)].into();
+        page = stack![page, sign_dialog(app, flow, on_page_zero)].into();
     }
     if let Some(review) = app.pending_save_review.as_ref() {
         page = stack![page, save_review_dialog(review)].into();
@@ -1670,6 +1676,8 @@ fn settings_page(app: &App) -> Element<'_, Message> {
 
     body = body.push(section("Notes mapping", mappings(app)));
 
+    body = body.push(section("Signatures", signature_profiles_settings(app)));
+
     // Diagnostics. Rebuilt at most once a second: the report is a multi-KB
     // string whose paragraph iced re-shapes whenever its content changes,
     // and building it per view pass re-shaped it twenty times a second for
@@ -1710,6 +1718,438 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::ambient::scrollbar)
         .into()
+}
+
+fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
+    use crate::signature_profiles::ProfileMsg;
+
+    let mut profiles = Column::new().spacing(gap::S);
+    if app.settings.signatures.profiles.is_empty() {
+        profiles = profiles.push(
+            text("No signature profiles have been created.")
+                .size(type_scale::BODY)
+                .color(theme::ambient::muted()),
+        );
+    }
+    for profile in &app.settings.signatures.profiles {
+        let is_default =
+            app.settings.signatures.default_profile.as_deref() == Some(profile.id.as_str());
+        let credential_kind = match profile.credential {
+            crate::settings::StoredCredential::Managed => "Managed credential",
+            crate::settings::StoredCredential::External { .. } => "External credential",
+        };
+        let mut actions = Row::new().spacing(gap::S).align_y(Alignment::Center);
+        if is_default {
+            actions = actions.push(
+                text("Default")
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+            );
+        } else {
+            actions = actions.push(
+                button(text("Make default").size(type_scale::CAPTION))
+                    .padding(gap::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::SignatureProfile(ProfileMsg::SetDefault(
+                        profile.id.clone(),
+                    ))),
+            );
+        }
+        actions = actions
+            .push(
+                button(text("Edit").size(type_scale::CAPTION))
+                    .padding(gap::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::SignatureProfile(ProfileMsg::StartEdit(
+                        profile.id.clone(),
+                    ))),
+            )
+            .push(
+                button(text("Remove…").size(type_scale::CAPTION))
+                    .padding(gap::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::SignatureProfile(ProfileMsg::AskRemove(
+                        profile.id.clone(),
+                    ))),
+            );
+
+        let fingerprint = &profile.identity.sha256_fingerprint;
+        let short_fingerprint = if fingerprint.len() > 16 {
+            format!(
+                "{}…{}",
+                &fingerprint[..8],
+                &fingerprint[fingerprint.len() - 8..]
+            )
+        } else {
+            fingerprint.clone()
+        };
+        profiles = profiles.push(
+            container(
+                row![
+                    column![
+                        text(profile.name.clone()).size(type_scale::BODY),
+                        text(format!(
+                            "{} · {} · {}",
+                            crate::signature_profiles::common_name(&profile.identity.subject),
+                            profile.identity.key_algorithm,
+                            short_fingerprint
+                        ))
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                        text(credential_kind)
+                            .size(type_scale::CAPTION)
+                            .color(theme::ambient::muted()),
+                    ]
+                    .spacing(gap::XS)
+                    .width(Length::Fill),
+                    actions,
+                ]
+                .spacing(gap::M)
+                .align_y(Alignment::Center),
+            )
+            .padding(gap::M)
+            .width(Length::Fill)
+            .style(theme::ambient::surface),
+        );
+    }
+
+    column![
+        text("Signing identities and their visible appearances. Passphrases are never stored.")
+            .size(type_scale::CAPTION)
+            .color(theme::ambient::muted()),
+        profiles,
+        button(text("Add signature profile…").size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(theme::ambient::selected_button)
+            .on_press(Message::SignatureProfile(ProfileMsg::StartAdd)),
+    ]
+    .spacing(gap::M)
+    .into()
+}
+
+fn signature_profile_editor<'a>(
+    app: &'a App,
+    editor: &'a crate::signature_profiles::ProfileEditor,
+) -> Element<'a, Message> {
+    use crate::settings::{StoredSignatureContent, StoredSignaturePosition, StoredSignatureSize};
+    use crate::signature_profiles::{ProfileMsg, ProfileSource, SignaturePad};
+
+    let title = if editor.is_editing() {
+        "Edit signature profile"
+    } else {
+        "Add signature profile"
+    };
+    let mut body = Column::new()
+        .spacing(gap::M)
+        .push(text(title).size(type_scale::TITLE))
+        .push(dialog_section(
+            "Profile name",
+            text_input("Personal, Work…", &editor.name)
+                .on_input(|value| Message::SignatureProfile(ProfileMsg::NameChanged(value)))
+                .style(theme::ambient::text_field)
+                .padding(gap::S),
+        ));
+
+    if editor.is_editing() {
+        if let Some(identity) = editor.identity.as_ref() {
+            body = body.push(dialog_section(
+                "Signing identity",
+                column![
+                    text(identity.subject.clone()).size(type_scale::BODY),
+                    text(format!(
+                        "{} · valid {} — {}",
+                        identity.key_algorithm, identity.not_before, identity.not_after
+                    ))
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+                    text(format!("SHA-256 {}", identity.sha256_fingerprint))
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                    text("Changing the certificate creates a new profile.")
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                ]
+                .spacing(gap::XS),
+            ));
+        }
+    } else {
+        let mut sources = Row::new().spacing(gap::S);
+        for source in ProfileSource::ALL {
+            sources = sources.push(
+                selectable(
+                    button(text(source.label()).size(type_scale::LABEL)),
+                    editor.source == source,
+                )
+                .on_press(Message::SignatureProfile(ProfileMsg::SourceChanged(source))),
+            );
+        }
+        body = body.push(dialog_section("Credential", sources));
+
+        match editor.source {
+            ProfileSource::Create => {
+                body = body
+                    .push(dialog_section(
+                        "Full name",
+                        text_input("Name in the certificate", &editor.full_name)
+                            .on_input(|value| {
+                                Message::SignatureProfile(ProfileMsg::FullNameChanged(value))
+                            })
+                            .style(theme::ambient::text_field)
+                            .padding(gap::S),
+                    ))
+                    .push(dialog_section(
+                        "Organization (optional)",
+                        text_input("Organization", &editor.organization)
+                            .on_input(|value| {
+                                Message::SignatureProfile(ProfileMsg::OrganizationChanged(value))
+                            })
+                            .style(theme::ambient::text_field)
+                            .padding(gap::S),
+                    ))
+                    .push(dialog_section(
+                        "Email (optional)",
+                        text_input("name@example.com", &editor.email)
+                            .on_input(|value| {
+                                Message::SignatureProfile(ProfileMsg::EmailChanged(value))
+                            })
+                            .style(theme::ambient::text_field)
+                            .padding(gap::S),
+                    ))
+                    .push(
+                        text(
+                            "Pulpit will create an encrypted, self-signed ECDSA P-256 credential. Its signatures prove integrity, but other software will not automatically trust the identity.",
+                        )
+                        .size(type_scale::CAPTION)
+                        .color(theme::ambient::muted()),
+                    );
+            }
+            ProfileSource::Existing => {
+                let path = editor.external_path.as_ref().map_or_else(
+                    || "No credential selected".to_string(),
+                    |path| path.display().to_string(),
+                );
+                body = body.push(dialog_section(
+                    "Credential file",
+                    column![
+                        text(path).size(type_scale::CAPTION),
+                        button(text("Choose .p12 or .pfx…").size(type_scale::LABEL))
+                            .padding(gap::S)
+                            .style(theme::ambient::tool_button)
+                            .on_press(Message::SignatureProfile(ProfileMsg::ChooseExternal)),
+                    ]
+                    .spacing(gap::S),
+                ));
+            }
+        }
+
+        let mut passphrases = column![text_input("Passphrase", &editor.passphrase)
+            .secure(true)
+            .on_input(|value| { Message::SignatureProfile(ProfileMsg::PassphraseChanged(value)) })
+            .style(theme::ambient::text_field)
+            .padding(gap::S),]
+        .spacing(gap::S);
+        if editor.source == ProfileSource::Create {
+            passphrases = passphrases.push(
+                text_input("Confirm passphrase", &editor.confirm_passphrase)
+                    .secure(true)
+                    .on_input(|value| {
+                        Message::SignatureProfile(ProfileMsg::ConfirmPassphraseChanged(value))
+                    })
+                    .style(theme::ambient::text_field)
+                    .padding(gap::S),
+            );
+        }
+        passphrases = passphrases.push(
+            text("The passphrase cannot be recovered and is never stored by Pulpit.")
+                .size(type_scale::CAPTION)
+                .color(theme::ambient::muted()),
+        );
+        body = body.push(dialog_section("Passphrase", passphrases));
+    }
+
+    let mut content_choices = Row::new().spacing(gap::S);
+    for content in StoredSignatureContent::ALL {
+        content_choices = content_choices.push(
+            selectable(
+                button(text(content.label()).size(type_scale::CAPTION)),
+                editor.appearance.content == content,
+            )
+            .on_press(Message::SignatureProfile(ProfileMsg::ContentChanged(
+                content,
+            ))),
+        );
+    }
+    body = body.push(dialog_section("Appearance", content_choices));
+
+    if editor.appearance.content.uses_ink() {
+        let pad = canvas(SignaturePad {
+            strokes: &editor.appearance.strokes,
+            stroke_width: editor.appearance.stroke_width,
+            palette: app.theme.palette,
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(180.0));
+        body = body.push(dialog_section(
+            "Draw signature",
+            column![
+                container(pad)
+                    .width(Length::Fill)
+                    .style(theme::ambient::canvas),
+                button(text("Clear ink").size(type_scale::CAPTION))
+                    .padding(gap::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press_maybe(
+                        (!editor.appearance.strokes.is_empty())
+                            .then_some(Message::SignatureProfile(ProfileMsg::ClearInk),)
+                    ),
+            ]
+            .spacing(gap::S),
+        ));
+    }
+
+    let visible = row![
+        selectable(
+            button(text("Visible").size(type_scale::CAPTION)),
+            editor.appearance.visible,
+        )
+        .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(true))),
+        selectable(
+            button(text("Invisible").size(type_scale::CAPTION)),
+            !editor.appearance.visible,
+        )
+        .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(false))),
+    ]
+    .spacing(gap::S);
+    body = body.push(dialog_section("Default visibility", visible));
+
+    if editor.appearance.visible {
+        let mut positions = Row::new().spacing(gap::XS);
+        for position in StoredSignaturePosition::ALL {
+            positions = positions.push(
+                selectable(
+                    button(text(position.label()).size(type_scale::CAPTION)),
+                    editor.appearance.position == position,
+                )
+                .on_press(Message::SignatureProfile(ProfileMsg::PositionChanged(
+                    position,
+                ))),
+            );
+        }
+        let mut sizes = Row::new().spacing(gap::XS);
+        for size in StoredSignatureSize::ALL {
+            sizes = sizes.push(
+                selectable(
+                    button(text(size.label()).size(type_scale::CAPTION)),
+                    editor.appearance.size == size,
+                )
+                .on_press(Message::SignatureProfile(ProfileMsg::SizeChanged(size))),
+            );
+        }
+        body = body
+            .push(dialog_section("Default position", positions.wrap()))
+            .push(dialog_section("Default size", sizes));
+    }
+
+    if let Some(error) = editor.error.as_ref() {
+        body = body.push(
+            text(error.clone())
+                .size(type_scale::BODY)
+                .color(theme::ambient::alert()),
+        );
+    }
+    let primary_label = if editor.busy {
+        "Creating credential…"
+    } else if editor.is_editing() {
+        "Save changes"
+    } else {
+        "Create profile"
+    };
+    body = body.push(
+        row![
+            button(text("Cancel").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press_maybe(
+                    (!editor.busy).then_some(Message::SignatureProfile(ProfileMsg::CancelEdit,))
+                ),
+            button(text(primary_label).size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::selected_button)
+                .on_press_maybe(
+                    (!editor.busy).then_some(Message::SignatureProfile(ProfileMsg::Save,))
+                ),
+        ]
+        .spacing(gap::S),
+    );
+
+    panel(
+        scrollable(body)
+            .height(Length::FillPortion(9))
+            .style(theme::ambient::scrollbar),
+        (!editor.busy).then_some(Message::SignatureProfile(ProfileMsg::CancelEdit)),
+    )
+}
+
+fn signature_profile_removal<'a>(
+    app: &'a App,
+    removal: &'a crate::signature_profiles::ProfileRemoval,
+) -> Element<'a, Message> {
+    use crate::settings::StoredCredential;
+    use crate::signature_profiles::ProfileMsg;
+
+    let Some(profile) = app.settings.signatures.profile(&removal.id) else {
+        return space().into();
+    };
+    let managed = matches!(profile.credential, StoredCredential::Managed);
+    let mut actions = row![
+        button(text("Cancel").size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::SignatureProfile(ProfileMsg::CancelRemove)),
+        button(text("Remove profile only").size(type_scale::LABEL))
+            .padding(gap::S)
+            .style(if managed {
+                theme::ambient::tool_button
+            } else {
+                theme::ambient::alert_button
+            })
+            .on_press(Message::SignatureProfile(ProfileMsg::ConfirmRemove {
+                delete_credential: false,
+            })),
+    ]
+    .spacing(gap::S);
+    if managed {
+        actions = actions.push(
+            button(text("Remove and delete credential").size(type_scale::LABEL))
+                .padding(gap::S)
+                .style(theme::ambient::alert_button)
+                .on_press(Message::SignatureProfile(ProfileMsg::ConfirmRemove {
+                    delete_credential: true,
+                })),
+        );
+    }
+    let mut body = column![
+        text(format!("Remove “{}”?", profile.name)).size(type_scale::TITLE),
+        text(if managed {
+            "Removing the profile can leave its encrypted credential file in place, or delete both. Documents already signed with it are unaffected."
+        } else {
+            "Pulpit will forget this profile. The external credential file will not be deleted."
+        })
+        .size(type_scale::BODY),
+        actions,
+    ]
+    .spacing(gap::M);
+    if let Some(error) = removal.error.as_ref() {
+        body = body.push(
+            text(error.clone())
+                .size(type_scale::BODY)
+                .color(theme::ambient::alert()),
+        );
+    }
+    panel(
+        body,
+        Some(Message::SignatureProfile(ProfileMsg::CancelRemove)),
+    )
 }
 
 fn color_editor(app: &App) -> Element<'_, Message> {
@@ -2497,7 +2937,11 @@ fn append_only_offer_dialog() -> Element<'static, Message> {
 }
 
 /// The Sign flow (SPEC-signing.md §31.1), one dialog per step.
-fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Element<'_, Message> {
+fn sign_dialog<'a>(
+    app: &'a App,
+    flow: &'a crate::signing::SigningFlow,
+    on_page_zero: bool,
+) -> Element<'a, Message> {
     use crate::signing::SigningFlow;
     use pulpit_render::sign::SigningProfile;
 
@@ -2516,6 +2960,58 @@ fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Elemen
             ]
             .spacing(gap::M);
             panel(body, None)
+        }
+        SigningFlow::ChooseProfile => {
+            let mut profiles = Column::new().spacing(gap::S);
+            let default_id = app.settings.signatures.default_profile.as_deref();
+            for profile in &app.settings.signatures.profiles {
+                let is_default = default_id == Some(profile.id.as_str());
+                let label = if is_default {
+                    format!("{} (default)", profile.name)
+                } else {
+                    profile.name.clone()
+                };
+                profiles = profiles.push(
+                    button(
+                        column![
+                            text(label).size(type_scale::LABEL),
+                            text(format!(
+                                "{} · {}",
+                                crate::signature_profiles::common_name(&profile.identity.subject),
+                                profile.identity.key_algorithm,
+                            ))
+                            .size(type_scale::CAPTION)
+                            .color(theme::ambient::muted()),
+                        ]
+                        .spacing(gap::XS),
+                    )
+                    .padding(gap::S)
+                    .width(Length::Fill)
+                    .style(if is_default {
+                        theme::ambient::selected_button
+                    } else {
+                        theme::ambient::tool_button
+                    })
+                    .on_press(Message::Sign(
+                        crate::signing::SignMsg::ProfileChosen(profile.id.clone()),
+                    )),
+                );
+            }
+            let body = column![
+                text("Sign").size(type_scale::TITLE),
+                text("Choose a signature profile.").size(type_scale::BODY),
+                profiles,
+                row![
+                    cancel(),
+                    button(text("Use another .p12/.pfx…").size(type_scale::LABEL))
+                        .padding(gap::S)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::Sign(crate::signing::SignMsg::UseAnotherCredential,)),
+                ]
+                .spacing(gap::S),
+            ]
+            .spacing(gap::M);
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::ChooseCredential => {
             let body = column![

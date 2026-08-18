@@ -40,6 +40,23 @@ no clock reads (time is passed in). That is what makes the hard cases —
 reconnect at a new index, an unequal mirror, a partial write, a stale delayed
 notification — ordinary unit tests that run in CI without a graphical session.
 
+== Signing identity boundary
+
+Reusable signature profiles are ordinary schema-versioned settings: a name,
+certificate summary, credential reference, and appearance defaults. The
+settings file contains neither passphrases nor key bytes. A generated
+credential is an encrypted PKCS#12 file beside the settings in `signatures/`,
+created atomically with owner-private permissions; an imported credential is
+only referenced and is never deleted by Pulpit.
+
+PKCS#12 loading and local ECDSA P-256 generation live in `pulpit-render`'s
+signing module, but the UI supervisor owns the key for the short signing
+session. It is never sent to the PDFium document worker or renderer workers.
+Passphrases and decoded key material use zeroizing buffers, and the editor
+clears its passphrase fields when it closes. The Settings signature pad stores
+only normalized ink points: those are appearance data, not a cryptographic
+signature or a secret.
+
 == The three rules
 
 *1. One reconciliation function.*

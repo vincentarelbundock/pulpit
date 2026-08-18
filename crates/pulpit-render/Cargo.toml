@@ -37,7 +37,7 @@ zip = { workspace = true }
 
 # Cryptographic signing
 cms = { workspace = true }
-x509-cert = { workspace = true }
+x509-cert = { workspace = true, features = ["builder"] }
 der = { workspace = true }
 rsa = { workspace = true }
 p256 = { workspace = true }
@@ -54,9 +54,9 @@ signature = { workspace = true }
 ecdsa = { workspace = true }
 hex = { workspace = true }
 p12-keystore = { version = "0.3.1", optional = true }
+rand = "0.8"
 
 [dev-dependencies]
 pulpit-testkit = { workspace = true }
 tempfile = { workspace = true }
 rcgen = "0.12"
-rand = "0.8"

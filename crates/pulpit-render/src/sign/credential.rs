@@ -8,6 +8,8 @@ use pkcs8::DecodePrivateKey;
 use sha2::Digest;
 use x509_cert::Certificate;
 use zeroize::Zeroize;
+#[cfg(feature = "p12-keystore")]
+use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub struct Credential {
@@ -147,7 +149,7 @@ pub fn load_pkcs12_impl(
                 p12_keystore::KeyStoreEntry::PrivateKeyChain(chain) => {
                     // Get the private key DER (PKCS#8 format) via PrivateKey::as_der()
                     let key_bytes = chain.key().as_der();
-                    key_der = Some(key_bytes.to_vec());
+                    key_der = Some(Zeroizing::new(key_bytes.to_vec()));
 
                     // Get the certificate chain - certs() returns &[Certificate]
                     let certs = chain.certs();
@@ -189,7 +191,7 @@ pub fn load_pkcs12_impl(
         Ok(Credential {
             signer_certificate: signer_cert,
             cert_chain,
-            key_material: ZeroizingKeyMaterial::new(key_type, key_der),
+            key_material: ZeroizingKeyMaterial::new(key_type, key_der.to_vec()),
             public_key_info,
         })
     }
@@ -385,8 +387,8 @@ impl Credential {
         };
 
         Ok(CredentialSummary {
-            subject: format!("{:?}", self.signer_certificate.tbs_certificate.subject),
-            issuer: format!("{:?}", self.signer_certificate.tbs_certificate.issuer),
+            subject: self.signer_certificate.tbs_certificate.subject.to_string(),
+            issuer: self.signer_certificate.tbs_certificate.issuer.to_string(),
             serial: hex::encode(
                 self.signer_certificate
                     .tbs_certificate

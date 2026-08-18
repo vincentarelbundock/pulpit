@@ -235,6 +235,9 @@ pub enum Message {
     StopAudience,
     ToggleAudienceStartMenu,
     ShowSettings,
+    /// Create, edit, select, or remove a reusable signing identity from the
+    /// standalone Settings section.
+    SignatureProfile(crate::signature_profiles::ProfileMsg),
     SetAppearance(crate::platform::Appearance),
     SetBlankColor(crate::settings::BlankColor),
     SetMotion(crate::platform::MotionSetting),
@@ -828,6 +831,10 @@ pub struct App {
     pub color_drafts:
         std::collections::BTreeMap<(crate::settings::ColorScheme, crate::theme::ColorRole), String>,
     pub confirm_reset_colors: bool,
+    /// The standalone signature-profile editor shown over Settings.
+    pub signature_profile_editor: Option<crate::signature_profiles::ProfileEditor>,
+    /// Destructive confirmation for forgetting a known signing identity.
+    pub signature_profile_removal: Option<crate::signature_profiles::ProfileRemoval>,
     /// A jump the open document's own JavaScript asked for, waiting on an
     /// answer (§8.6).
     ///
@@ -863,6 +870,12 @@ pub struct App {
     /// render worker, which is why this lives on `App` rather than being
     /// routed through `reader_link`).
     pub signing: Option<crate::signing::SigningFlow>,
+    /// Saved identity selected for the current signing flow. `None` means
+    /// the user chose an ad-hoc credential file.
+    pub signing_profile: Option<String>,
+    /// Saved copy to sign when the flow first had to write unsaved edits.
+    /// Otherwise the active document remains the source.
+    signing_source: Option<PathBuf>,
     /// Whether the document open right now is being kept append-only
     /// (SPEC-signing.md §31.3), because it was found to already carry a
     /// signature. `None` when the question has not been answered yet, or
@@ -1478,11 +1491,15 @@ impl App {
             },
             color_drafts: std::collections::BTreeMap::new(),
             confirm_reset_colors: false,
+            signature_profile_editor: None,
+            signature_profile_removal: None,
             pending_form_goto: None,
             form_clipboard: None,
             form_clipboard_text: None,
             pending_save_review: None,
             signing: None,
+            signing_profile: None,
+            signing_source: None,
             append_only: None,
             pending_append_only_offer: false,
             document_signatures: Vec::new(),
@@ -2713,7 +2730,14 @@ impl App {
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
-            Message::SaveDocumentTo(None) => Task::none(),
+            Message::SaveDocumentTo(None) => {
+                if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
+                    self.signing = None;
+                    self.signing_profile = None;
+                    self.signing_source = None;
+                }
+                Task::none()
+            }
             Message::Sign(msg) => self.handle_sign(msg),
             Message::AcceptAppendOnly => {
                 self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
@@ -3059,6 +3083,7 @@ impl App {
                 self.page = crate::designer::Page::Settings;
                 Task::none()
             }
+            Message::SignatureProfile(message) => self.handle_signature_profile(message),
             Message::SetAppearance(appearance) => {
                 self.settings.appearance.appearance = appearance;
                 self.apply_appearance();
@@ -5527,6 +5552,12 @@ impl App {
                     if let Some(journal) = self.reader_journal.as_mut() {
                         journal.finish();
                     }
+                    if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
+                        self.signing_source = Some(saved.path.clone());
+                        self.signing = Some(crate::signing::SigningFlow::start(
+                            !self.settings.signatures.profiles.is_empty(),
+                        ));
+                    }
                 }
                 crate::reader_link::Told::EditFailed { message, fatal } => {
                     // This answered one mutation, and only that one: the queue
@@ -7969,6 +8000,320 @@ impl App {
         Task::none()
     }
 
+    // --- Signing profiles ----------------------------------------------
+
+    fn handle_signature_profile(
+        &mut self,
+        message: crate::signature_profiles::ProfileMsg,
+    ) -> Task<Message> {
+        use crate::settings::{SigningIdentityProfile, StoredCredential};
+        use crate::signature_profiles::{ProfileEditor, ProfileMsg, ProfileRemoval, ProfileSource};
+
+        match message {
+            ProfileMsg::StartAdd => {
+                match crate::signature_profiles::random_profile_id() {
+                    Ok(id) => self.signature_profile_editor = Some(ProfileEditor::create(id)),
+                    Err(error) => self.notify(error),
+                }
+                Task::none()
+            }
+            ProfileMsg::StartEdit(id) => {
+                if let Some(profile) = self.settings.signatures.profile(&id) {
+                    self.signature_profile_editor = Some(ProfileEditor::edit(profile));
+                }
+                Task::none()
+            }
+            ProfileMsg::CancelEdit => {
+                self.signature_profile_editor = None;
+                Task::none()
+            }
+            ProfileMsg::NameChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.name = value;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::FullNameChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.full_name = value;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::OrganizationChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.organization = value;
+                }
+                Task::none()
+            }
+            ProfileMsg::EmailChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.email = value;
+                }
+                Task::none()
+            }
+            ProfileMsg::SourceChanged(source) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.source = source;
+                    editor.external_path = None;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::ChooseExternal => Task::perform(
+                async move {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("PKCS#12 credential", &["p12", "pfx"])
+                        .pick_file()
+                        .await
+                        .map(|handle| handle.path().to_path_buf())
+                },
+                |path| Message::SignatureProfile(ProfileMsg::ExternalChosen(path)),
+            ),
+            ProfileMsg::ExternalChosen(path) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    if path.is_some() {
+                        editor.external_path = path;
+                    }
+                }
+                Task::none()
+            }
+            ProfileMsg::PassphraseChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.passphrase = value;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::ConfirmPassphraseChanged(value) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.confirm_passphrase = value;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::ContentChanged(content) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.appearance.content = content;
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            ProfileMsg::VisibleChanged(visible) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.appearance.visible = visible;
+                }
+                Task::none()
+            }
+            ProfileMsg::PositionChanged(position) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.appearance.position = position;
+                }
+                Task::none()
+            }
+            ProfileMsg::SizeChanged(size) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.appearance.size = size;
+                }
+                Task::none()
+            }
+            ProfileMsg::StrokeCommitted(stroke) => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    if stroke.len() >= 2
+                        && editor.appearance.strokes.len()
+                            < crate::signature_profiles::MAX_PROFILE_STROKES
+                    {
+                        editor.appearance.strokes.push(stroke);
+                        editor.error = None;
+                    }
+                }
+                Task::none()
+            }
+            ProfileMsg::ClearInk => {
+                if let Some(editor) = self.signature_profile_editor.as_mut() {
+                    editor.appearance.strokes.clear();
+                }
+                Task::none()
+            }
+            ProfileMsg::Save => {
+                let Some(editor) = self.signature_profile_editor.as_mut() else {
+                    return Task::none();
+                };
+                if let Err(error) = editor.validate_for_save() {
+                    editor.error = Some(error);
+                    return Task::none();
+                }
+
+                if let Some(id) = editor.editing_id.clone() {
+                    if let Some(profile) = self.settings.signatures.profile_mut(&id) {
+                        profile.name = editor.name.trim().to_string();
+                        profile.appearance = editor.appearance.clone();
+                    }
+                    self.signature_profile_editor = None;
+                    self.persist();
+                    return Task::none();
+                }
+
+                let id = editor.id.clone();
+                let name = editor.name.trim().to_string();
+                let full_name = editor.full_name.trim().to_string();
+                let organization = non_empty(&editor.organization);
+                let email = non_empty(&editor.email);
+                let source = editor.source;
+                let external_path = editor.external_path.clone();
+                let appearance = editor.appearance.clone();
+                let passphrase = std::mem::take(&mut editor.passphrase);
+                zeroize::Zeroize::zeroize(&mut editor.confirm_passphrase);
+                editor.busy = true;
+                editor.error = None;
+                let store = self.store.clone();
+
+                Task::perform(
+                    async move {
+                        let passphrase = pulpit_render::sign::Zeroizing::new(passphrase);
+                        let (identity, credential) = match source {
+                            ProfileSource::Create => {
+                                let now = std::time::SystemTime::now();
+                                let not_before = now
+                                    .checked_sub(std::time::Duration::from_secs(300))
+                                    .unwrap_or(now);
+                                let not_after = now
+                                    .checked_add(std::time::Duration::from_secs(
+                                        5 * 365 * 24 * 60 * 60,
+                                    ))
+                                    .ok_or_else(|| {
+                                        "could not calculate the certificate validity window"
+                                            .to_string()
+                                    })?;
+                                let generated = pulpit_render::sign::generate_self_signed_pkcs12(
+                                    &pulpit_render::sign::NewCredentialIdentity {
+                                        common_name: full_name,
+                                        organization,
+                                        email,
+                                        not_before,
+                                        not_after,
+                                    },
+                                    passphrase,
+                                )
+                                .map_err(|error| error.to_string())?;
+                                store
+                                    .write_managed_credential(&id, &generated.bytes)
+                                    .map_err(|error| {
+                                        format!(
+                                            "The credential was generated but could not be saved: {error}. No profile was created."
+                                        )
+                                    })?;
+                                (
+                                    crate::signature_profiles::stored_summary(generated.summary),
+                                    StoredCredential::Managed,
+                                )
+                            }
+                            ProfileSource::Existing => {
+                                let path = external_path.ok_or_else(|| {
+                                    "No PKCS#12 credential file was selected.".to_string()
+                                })?;
+                                let bytes = std::fs::read(&path).map_err(|error| {
+                                    format!("Could not read {}: {error}", path.display())
+                                })?;
+                                let credential =
+                                    pulpit_render::sign::load_pkcs12(&bytes, passphrase)
+                                        .map_err(|error| error.to_string())?;
+                                let summary =
+                                    credential.summary().map_err(|error| error.to_string())?;
+                                (
+                                    crate::signature_profiles::stored_summary(summary),
+                                    StoredCredential::External { path },
+                                )
+                            }
+                        };
+                        Ok(SigningIdentityProfile {
+                            id,
+                            name,
+                            identity,
+                            credential,
+                            appearance,
+                        })
+                    },
+                    |result| {
+                        Message::SignatureProfile(ProfileMsg::CreationFinished(Box::new(result)))
+                    },
+                )
+            }
+            ProfileMsg::CreationFinished(result) => match *result {
+                Ok(profile) => {
+                    let id = profile.id.clone();
+                    self.settings.signatures.profiles.push(profile);
+                    if self.settings.signatures.default_profile.is_none() {
+                        self.settings.signatures.default_profile = Some(id);
+                    }
+                    self.signature_profile_editor = None;
+                    self.persist();
+                    Task::none()
+                }
+                Err(error) => {
+                    if let Some(editor) = self.signature_profile_editor.as_mut() {
+                        editor.busy = false;
+                        editor.error = Some(error);
+                    }
+                    Task::none()
+                }
+            },
+            ProfileMsg::SetDefault(id) => {
+                if self.settings.signatures.profile(&id).is_some() {
+                    self.settings.signatures.default_profile = Some(id);
+                    self.persist();
+                }
+                Task::none()
+            }
+            ProfileMsg::AskRemove(id) => {
+                if self.settings.signatures.profile(&id).is_some() {
+                    self.signature_profile_removal = Some(ProfileRemoval { id, error: None });
+                }
+                Task::none()
+            }
+            ProfileMsg::CancelRemove => {
+                self.signature_profile_removal = None;
+                Task::none()
+            }
+            ProfileMsg::ConfirmRemove { delete_credential } => {
+                let Some(removal) = self.signature_profile_removal.as_mut() else {
+                    return Task::none();
+                };
+                let id = removal.id.clone();
+                let managed = self
+                    .settings
+                    .signatures
+                    .profile(&id)
+                    .is_some_and(|profile| matches!(profile.credential, StoredCredential::Managed));
+                if delete_credential && managed {
+                    if let Err(error) = self.store.remove_managed_credential(&id) {
+                        removal.error = Some(format!(
+                            "The credential file could not be deleted: {error}. The profile is still present."
+                        ));
+                        return Task::none();
+                    }
+                }
+                self.settings.signatures.remove(&id);
+                self.signature_profile_removal = None;
+                self.persist();
+                Task::none()
+            }
+        }
+    }
+
+    pub fn signature_profile_credential_path(
+        &self,
+        profile: &crate::settings::SigningIdentityProfile,
+    ) -> Option<PathBuf> {
+        match &profile.credential {
+            crate::settings::StoredCredential::Managed => {
+                self.store.managed_credential_path(&profile.id)
+            }
+            crate::settings::StoredCredential::External { path } => Some(path.clone()),
+        }
+    }
+
     // --- Signing (SPEC-signing.md §31) --------------------------------
 
     /// The Sign flow's state machine, driven from `Message::Sign`.
@@ -7983,6 +8328,8 @@ impl App {
 
         match msg {
             SignMsg::Start => {
+                self.signing_profile = None;
+                self.signing_source = None;
                 // §31.1 step 3: unsaved edits are saved first, and the
                 // signature is applied to the saved bytes. A document kept
                 // append-only by construction has no unsaved edits, so this
@@ -7991,11 +8338,51 @@ impl App {
                     self.signing = Some(SigningFlow::SavingFirst);
                     return self.ask_where_to_save_document();
                 }
-                self.signing = Some(SigningFlow::start());
+                self.signing = Some(SigningFlow::start(
+                    !self.settings.signatures.profiles.is_empty(),
+                ));
                 Task::none()
             }
             SignMsg::Cancel => {
                 self.signing = None;
+                self.signing_profile = None;
+                self.signing_source = None;
+                Task::none()
+            }
+            SignMsg::ProfileChosen(id) => {
+                let Some(profile) = self.settings.signatures.profile(&id) else {
+                    self.signing = Some(SigningFlow::Failed {
+                        detail: "That signature profile no longer exists.".to_string(),
+                    });
+                    return Task::none();
+                };
+                let Some(credential_path) = self.signature_profile_credential_path(profile) else {
+                    self.signing = Some(SigningFlow::Failed {
+                        detail: "The profile's credential location is invalid.".to_string(),
+                    });
+                    return Task::none();
+                };
+                if !credential_path.is_file() {
+                    self.signing = Some(SigningFlow::Failed {
+                        detail: format!(
+                            "The credential for profile “{}” is missing at {}.",
+                            profile.name,
+                            credential_path.display()
+                        ),
+                    });
+                    return Task::none();
+                }
+                self.signing_profile = Some(id);
+                self.signing = Some(SigningFlow::EnterPassphrase {
+                    credential_path,
+                    passphrase: String::new(),
+                    error: None,
+                });
+                Task::none()
+            }
+            SignMsg::UseAnotherCredential => {
+                self.signing_profile = None;
+                self.signing = Some(SigningFlow::ChooseCredential);
                 Task::none()
             }
             SignMsg::ChooseCredentialFile => Task::perform(
@@ -8009,6 +8396,7 @@ impl App {
                 |path| Message::Sign(SignMsg::CredentialFileChosen(path)),
             ),
             SignMsg::CredentialFileChosen(Some(credential_path)) => {
+                self.signing_profile = None;
                 self.signing = Some(SigningFlow::EnterPassphrase {
                     credential_path,
                     passphrase: String::new(),
@@ -8119,13 +8507,26 @@ impl App {
                 }
                 let candidates = self.sign_target_candidates();
                 let target = candidates.first().cloned();
+                let mut options = crate::signing::SigningOptions {
+                    target,
+                    ..Default::default()
+                };
+                let on_page_zero = self
+                    .reader
+                    .current_page()
+                    .is_some_and(|page| page == pulpit_core::page::PageIndex(0));
+                if let Some(appearance) = self
+                    .signing_profile
+                    .as_deref()
+                    .and_then(|id| self.settings.signatures.profile(id))
+                    .map(|profile| &profile.appearance)
+                {
+                    crate::signing::apply_profile_defaults(&mut options, appearance, on_page_zero);
+                }
                 self.signing = Some(SigningFlow::Options {
                     credential,
                     info,
-                    options: crate::signing::SigningOptions {
-                        target,
-                        ..Default::default()
-                    },
+                    options,
                     candidates,
                 });
                 Task::none()
@@ -8252,6 +8653,8 @@ impl App {
             }
             SignMsg::Done => {
                 self.signing = None;
+                self.signing_profile = None;
+                self.signing_source = None;
                 Task::none()
             }
         }
@@ -8289,6 +8692,14 @@ impl App {
         self.reader.can_undo()
     }
 
+    fn signing_source_path(&self) -> Option<PathBuf> {
+        self.signing_source.clone().or_else(|| {
+            self.documents
+                .active()
+                .map(|document| document.path.clone())
+        })
+    }
+
     /// §31.1 step 5's target field candidates, computed from a cheap
     /// preflight pass over the document as it stands on disk.
     ///
@@ -8310,7 +8721,7 @@ impl App {
         if self.append_only != Some(AppendOnlyMode::AppendOnly) {
             return vec![TargetChoice::NewField];
         }
-        let Some(path) = self.documents.active().map(|d| d.path.clone()) else {
+        let Some(path) = self.signing_source_path() else {
             return Vec::new();
         };
         let Ok(bytes) = std::fs::read(&path) else {
@@ -8331,10 +8742,9 @@ impl App {
     fn sign_pick_destination(&mut self) -> Task<Message> {
         use crate::signing::SignMsg;
 
-        let Some(document) = self.documents.active() else {
+        let Some(source) = self.signing_source_path() else {
             return Task::none();
         };
-        let source = document.path.clone();
         Task::perform(pick_derived_pdf(source, "signed"), |path| {
             Message::Sign(SignMsg::DestinationChosen(path))
         })
@@ -8353,6 +8763,11 @@ impl App {
         else {
             return Task::none();
         };
+        let profile_appearance = self
+            .signing_profile
+            .as_deref()
+            .and_then(|id| self.settings.signatures.profile(id))
+            .map(|profile| profile.appearance.clone());
         // §25.5: build a visible appearance when requested. The engine only
         // accepts page_index 0, and the Options step only lets Visible be
         // turned on while page 0 is showing (SignMsg::VisibleChanged), so
@@ -8365,21 +8780,21 @@ impl App {
             let signing_time_label = time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_default();
-            crate::signing::appearance_for(
+            crate::signing::appearance_for_profile(
                 &options,
+                profile_appearance.as_ref(),
                 &signer_cn,
                 &signing_time_label,
                 geometry.width as f64,
                 geometry.height as f64,
             )
         });
-        let Some(document) = self.documents.active() else {
+        let Some(source) = self.signing_source_path() else {
             self.signing = Some(SigningFlow::Failed {
                 detail: "There is no document open to sign.".to_string(),
             });
             return Task::none();
         };
-        let source = document.path.clone();
         let Some(target) = options
             .target
             .as_ref()

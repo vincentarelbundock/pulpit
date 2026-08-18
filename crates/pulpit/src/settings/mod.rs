@@ -27,7 +27,7 @@ use pulpit_display::DisplayRoles;
 use serde::{Deserialize, Serialize};
 
 /// Current settings schema version. Bump it *and* add a migration.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// How pulpit reacts when a second display appears mid-talk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -61,6 +61,178 @@ pub struct Settings {
     pub layout: LayoutSettings,
     pub appearance: AppearanceSettings,
     pub reading: ReadingSettings,
+    pub signatures: SignatureSettings,
+}
+
+/// Reusable signing identities known to this installation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SignatureSettings {
+    pub profiles: Vec<SigningIdentityProfile>,
+    pub default_profile: Option<String>,
+}
+
+impl SignatureSettings {
+    pub fn profile(&self, id: &str) -> Option<&SigningIdentityProfile> {
+        self.profiles.iter().find(|profile| profile.id == id)
+    }
+
+    pub fn profile_mut(&mut self, id: &str) -> Option<&mut SigningIdentityProfile> {
+        self.profiles.iter_mut().find(|profile| profile.id == id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<SigningIdentityProfile> {
+        let index = self.profiles.iter().position(|profile| profile.id == id)?;
+        let removed = self.profiles.remove(index);
+        if self.default_profile.as_deref() == Some(id) {
+            self.default_profile = self.profiles.first().map(|profile| profile.id.clone());
+        }
+        Some(removed)
+    }
+
+    pub fn sanitise(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.profiles.retain_mut(|profile| {
+            let keep = profile.has_valid_id() && seen.insert(profile.id.clone());
+            if keep {
+                profile.appearance.sanitise();
+            }
+            keep
+        });
+        let default_exists = self
+            .default_profile
+            .as_deref()
+            .is_some_and(|id| self.profiles.iter().any(|profile| profile.id == id));
+        if !default_exists {
+            self.default_profile = self.profiles.first().map(|profile| profile.id.clone());
+        }
+    }
+}
+
+/// A profile combines one signing identity with its visible appearance.
+/// Passphrases and private-key bytes are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SigningIdentityProfile {
+    /// 128 random bits, lowercase hexadecimal. Managed credential filenames
+    /// are derived from this after validation, never read from settings.
+    pub id: String,
+    pub name: String,
+    pub identity: StoredCredentialSummary,
+    pub credential: StoredCredential,
+    pub appearance: StoredSignatureAppearance,
+}
+
+impl SigningIdentityProfile {
+    pub fn has_valid_id(&self) -> bool {
+        self.id.len() == 32
+            && self
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum StoredCredential {
+    /// An encrypted `{profile-id}.p12` below the application configuration
+    /// directory. No persisted absolute path is needed.
+    Managed,
+    /// A credential owned elsewhere. Removing the profile never removes it.
+    External { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredCredentialSummary {
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub not_before: String,
+    pub not_after: String,
+    pub sha256_fingerprint: String,
+    pub key_algorithm: String,
+    pub key_bits: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredSignatureContent {
+    Ink,
+    #[default]
+    Text,
+    InkAndText,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SignaturePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredSignaturePosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+    Center,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredSignatureSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoredSignatureAppearance {
+    pub content: StoredSignatureContent,
+    pub strokes: Vec<Vec<SignaturePoint>>,
+    pub stroke_width: f32,
+    pub visible: bool,
+    pub position: StoredSignaturePosition,
+    pub size: StoredSignatureSize,
+}
+
+impl Default for StoredSignatureAppearance {
+    fn default() -> Self {
+        Self {
+            content: StoredSignatureContent::Text,
+            strokes: Vec::new(),
+            stroke_width: 2.0,
+            visible: true,
+            position: StoredSignaturePosition::BottomRight,
+            size: StoredSignatureSize::Medium,
+        }
+    }
+}
+
+impl StoredSignatureAppearance {
+    fn sanitise(&mut self) {
+        const MAX_STROKES: usize = 64;
+        const MAX_POINTS_PER_STROKE: usize = 4096;
+
+        if !self.stroke_width.is_finite() {
+            self.stroke_width = 2.0;
+        }
+        self.stroke_width = self.stroke_width.clamp(1.0, 12.0);
+        self.strokes.truncate(MAX_STROKES);
+        for stroke in &mut self.strokes {
+            stroke.truncate(MAX_POINTS_PER_STROKE);
+            stroke.retain(|point| point.x.is_finite() && point.y.is_finite());
+            for point in stroke.iter_mut() {
+                point.x = point.x.clamp(0.0, 1.0);
+                point.y = point.y.clamp(0.0, 1.0);
+            }
+        }
+        self.strokes.retain(|stroke| stroke.len() >= 2);
+    }
 }
 
 /// Which presenter layout is in use. Stored as a plain identifier so the
@@ -310,6 +482,7 @@ impl Default for Settings {
             layout: LayoutSettings::default(),
             appearance: AppearanceSettings::default(),
             reading: ReadingSettings::default(),
+            signatures: SignatureSettings::default(),
         }
     }
 }

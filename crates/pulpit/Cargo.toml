@@ -8,8 +8,9 @@ repository.workspace = true
 description = "A Snappy and Snazzy PDF Projector"
 
 [features]
-default = ["pdfium"]
+default = ["pdfium", "p12-keystore"]
 pdfium = ["pulpit-render/pdfium"]
+p12-keystore = ["pulpit-render/p12-keystore"]
 
 [dependencies]
 pulpit-core = { workspace = true }
@@ -32,6 +33,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "unst
 # clock or a CSPRNG heavier than this crate already pulls in transitively.
 time = { version = "0.3", default-features = false, features = ["parsing", "formatting"] }
 getrandom = "0.2"
+zeroize = { workspace = true }
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"

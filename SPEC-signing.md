@@ -991,6 +991,7 @@ document produced in an earlier process.
 | Source | Notes |
 |---|---|
 | PKCS#12 (`.p12`/`.pfx`) | Passphrase prompted, never stored, zeroized after use |
+| Pulpit-generated PKCS#12 | Self-signed ECDSA P-256 identity, encrypted with a user passphrase and stored as an owner-private managed credential |
 
 PEM/DER key material is deferred (§36.8); hardware tokens and platform
 keychains are deferred (§36.4).
@@ -1008,6 +1009,22 @@ keychains are deferred (§36.4).
 - The passphrase prompt is modal, and cancelling it aborts cleanly with the
   source and export untouched.
 
+### 30.3 Reusable profiles
+
+Settings has a **Signatures** section with a list of known profiles and Add,
+Edit, Remove, and Make default actions. A profile stores a display name,
+certificate summary, either a validated managed-credential identifier or an
+external `.p12`/`.pfx` path, and visible-appearance defaults (ink, text, or
+both; visibility; position; and size). It never stores a passphrase or raw key
+bytes.
+
+Add can import an existing PKCS#12 container or create one locally. Local
+creation generates a self-signed ECDSA P-256 certificate and private key,
+encrypts them into PKCS#12, writes the container atomically with owner-private
+permissions, and drops the unencrypted key material. Remove never deletes an
+external credential; for a managed credential it explicitly offers either
+forgetting only the profile or deleting both.
+
 ---
 
 ## 31. UI specification
@@ -1024,8 +1041,11 @@ keychains are deferred (§36.4).
    signature is applied to the saved bytes, never to a mutable working state.
    In the countersigning case there are no unsaved edits by construction, and
    the signature is appended to the file as opened.
-4. Credential chooser: subject, issuer, validity window, key usage, SHA-256
-   fingerprint, and a prominent warning for anything expired or not yet valid.
+4. Credential chooser: known profiles are offered first, with the configured
+   default highlighted and an escape hatch to another `.p12`/`.pfx`. After the
+   passphrase is entered, show subject, issuer, validity window, key usage,
+   SHA-256 fingerprint, and a prominent warning for anything expired or not
+   yet valid.
 5. Options: reason, location, contact, visible or invisible, page and position if
    visible, ink or text appearance, timestamp authority. (Certify vs approve and
    DocMDP level return with §36.7; v1 always produces an approval signature.)

@@ -27,6 +27,7 @@ mod reader_link;
 mod residency;
 mod session;
 mod settings;
+mod signature_profiles;
 mod signing;
 mod theme;
 mod thumbnails;

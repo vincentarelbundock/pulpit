@@ -84,9 +84,10 @@ impl SettingsStore {
             });
         }
         migrate(&mut value, schema)?;
-        let settings: Settings = value
+        let mut settings: Settings = value
             .try_into()
             .map_err(|e: toml::de::Error| SettingsError::Parse(e.to_string()))?;
+        settings.signatures.sanitise();
         Ok(settings)
     }
 
@@ -122,6 +123,71 @@ impl SettingsStore {
         }
         Ok(())
     }
+
+    /// Resolve a managed credential only after validating the profile id.
+    pub fn managed_credential_path(&self, id: &str) -> Option<PathBuf> {
+        valid_profile_id(id).then(|| {
+            self.path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("signatures")
+                .join(format!("{id}.p12"))
+        })
+    }
+
+    /// Atomically write a newly generated encrypted credential without ever
+    /// exposing a partial or broadly-permissioned live file.
+    pub fn write_managed_credential(
+        &self,
+        id: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, SettingsError> {
+        let destination = self
+            .managed_credential_path(id)
+            .ok_or_else(|| SettingsError::Parse("invalid signature profile id".to_string()))?;
+        let directory = destination.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(directory)?;
+        if destination.exists() {
+            return Err(SettingsError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a credential already exists for this profile",
+            )));
+        }
+        let temporary = destination.with_extension("p12.tmp");
+        let result = (|| -> Result<(), SettingsError> {
+            let mut file = crate::platform::paths::create_owner_private_file(&temporary)?;
+            file.write_all(bytes)?;
+            file.flush()?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &destination)?;
+            if let Ok(handle) = std::fs::File::open(directory) {
+                let _ = handle.sync_all();
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result.map(|()| destination)
+    }
+
+    pub fn remove_managed_credential(&self, id: &str) -> Result<(), SettingsError> {
+        let path = self
+            .managed_credential_path(id)
+            .ok_or_else(|| SettingsError::Parse("invalid signature profile id".to_string()))?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn valid_profile_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Explicit, versioned migrations. Each step upgrades one version.
@@ -144,6 +210,10 @@ fn migrate(value: &mut toml::Value, from: u32) -> Result<(), SettingsError> {
                     table.remove("keymap");
                 }
             }
+            // Reusable signing profiles were added in schema 4. Serde's
+            // default is an empty profile list, so old files need no value
+            // transformation.
+            3 => {}
             other => {
                 return Err(SettingsError::Parse(format!(
                     "no migration from schema {other}"
@@ -169,13 +239,35 @@ pub fn save(settings: &Settings) -> Result<(), SettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::HotplugPolicy;
+    use crate::settings::{
+        HotplugPolicy, SigningIdentityProfile, StoredCredential, StoredCredentialSummary,
+        StoredSignatureAppearance,
+    };
     use crate::theme::ColorRole;
 
     fn store() -> (tempfile::TempDir, SettingsStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(dir.path().join("settings.toml"));
         (dir, store)
+    }
+
+    fn profile(id: &str) -> SigningIdentityProfile {
+        SigningIdentityProfile {
+            id: id.to_string(),
+            name: "Work".to_string(),
+            identity: StoredCredentialSummary {
+                subject: "CN=Jane Doe".to_string(),
+                issuer: "CN=Jane Doe".to_string(),
+                serial: "01".to_string(),
+                not_before: "2026-01-01T00:00:00Z".to_string(),
+                not_after: "2031-01-01T00:00:00Z".to_string(),
+                sha256_fingerprint: "AA".repeat(32),
+                key_algorithm: "ECDSA P-256".to_string(),
+                key_bits: Some(256),
+            },
+            credential: StoredCredential::Managed,
+            appearance: StoredSignatureAppearance::default(),
+        }
     }
 
     #[test]
@@ -190,6 +282,9 @@ mod tests {
             ColorRole::Accent,
             "#123456".into(),
         );
+        let id = "0123456789abcdef0123456789abcdef";
+        settings.signatures.profiles.push(profile(id));
+        settings.signatures.default_profile = Some(id.to_string());
 
         store.save(&settings).unwrap();
         let loaded = store.load();
@@ -207,6 +302,62 @@ mod tests {
             &PathBuf::from("/decks/talk.pdf")
         );
         assert_eq!(loaded.schema, SCHEMA_VERSION);
+        assert_eq!(loaded.signatures, settings.signatures);
+    }
+
+    #[test]
+    fn managed_credentials_are_private_atomic_and_removable() {
+        let (_dir, store) = store();
+        let id = "0123456789abcdef0123456789abcdef";
+        let path = store
+            .write_managed_credential(id, b"encrypted-p12")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"encrypted-p12");
+        assert!(store.write_managed_credential(id, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"encrypted-p12");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        store.remove_managed_credential(id).unwrap();
+        assert!(!path.exists());
+        store.remove_managed_credential(id).unwrap();
+    }
+
+    #[test]
+    fn an_untrusted_profile_id_cannot_escape_the_signatures_directory() {
+        let (_dir, store) = store();
+        assert!(store.managed_credential_path("../../elsewhere").is_none());
+        assert!(store
+            .write_managed_credential("../../elsewhere", b"no")
+            .is_err());
+    }
+
+    #[test]
+    fn loaded_profiles_repair_duplicate_ids_and_unbounded_ink() {
+        let (_dir, store) = store();
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut first = profile(id);
+        first.appearance.stroke_width = 100.0;
+        first.appearance.strokes = vec![vec![
+            crate::settings::SignaturePoint { x: -1.0, y: 0.5 },
+            crate::settings::SignaturePoint { x: 2.0, y: 1.5 },
+        ]];
+        let mut settings = Settings::default();
+        settings.signatures.profiles = vec![first, profile(id)];
+        store.save(&settings).unwrap();
+
+        let loaded = store.load();
+        assert_eq!(loaded.signatures.profiles.len(), 1);
+        let appearance = &loaded.signatures.profiles[0].appearance;
+        assert_eq!(appearance.stroke_width, 12.0);
+        assert_eq!(appearance.strokes[0][0].x, 0.0);
+        assert_eq!(appearance.strokes[0][1].x, 1.0);
+        assert_eq!(appearance.strokes[0][1].y, 1.0);
     }
 
     #[test]
@@ -328,5 +479,15 @@ bindings = [[{ kind = "named", key = "x" }, "next"]]
         store.save(&loaded).unwrap();
         let saved = std::fs::read_to_string(store.path()).unwrap();
         assert!(!saved.contains("[keymap]"));
+    }
+
+    #[test]
+    fn schema_three_gains_an_empty_signature_profile_list() {
+        let (_dir, store) = store();
+        std::fs::write(store.path(), "schema = 3\n").unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.schema, SCHEMA_VERSION);
+        assert!(loaded.signatures.profiles.is_empty());
+        assert!(loaded.signatures.default_profile.is_none());
     }
 }

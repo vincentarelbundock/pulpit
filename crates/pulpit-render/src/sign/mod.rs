@@ -11,6 +11,7 @@ pub mod apply;
 mod cms_builder;
 mod credential;
 mod errors;
+mod generate;
 mod mechanism;
 
 pub use apply::{
@@ -19,6 +20,9 @@ pub use apply::{
 };
 pub use credential::{Credential, CredentialSummary};
 pub use errors::SigningError;
+pub use generate::{
+    generate_self_signed_pkcs12, CredentialGenerationError, GeneratedPkcs12, NewCredentialIdentity,
+};
 pub use mechanism::{DigestAlgorithm, SigningMechanism};
 /// Re-exported so callers can build the passphrase buffer [`load_pkcs12`]
 /// requires without taking a direct `zeroize` dependency.

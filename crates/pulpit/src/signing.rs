@@ -10,15 +10,14 @@
 //!
 //! ## Scope of this v1
 //!
-//! - Visible signatures place a text-only appearance (§25.5's default
-//!   template) via a small set of position/size presets rather than a
+//! - Visible signatures place either the selected profile's saved ink,
+//!   text, or combined appearance, or §25.5's default text template for an
+//!   ad-hoc credential. Placement uses a small set of presets rather than a
 //!   free-form box-drawing interaction — see [`Placement`]'s doc comment for
 //!   why the annotation system's rubber-band gesture (`SPEC-document.md`
 //!   §8.4) is not reused here. No ink is composited: there is no
-//!   signature-mark capture UI (a single freehand glyph scoped to a
-//!   signature widget, distinct from the page-lifetime annotation ink
-//!   tool) to draw it from, so `AppearanceContent::InkAndText` is never
-//!   built by this module.
+//!   page box-drawing interaction. Profile ink is captured in Settings by a
+//!   signature-specific pad, distinct from the page annotation ink tool.
 //! - The engine only accepts `page_index == 0` (`pulpit-render`'s
 //!   `SignApplyError::Unsupported`), so v1 offers the Visible choice only
 //!   while the reader is showing the first page; elsewhere it is disabled
@@ -288,6 +287,7 @@ pub fn text_appearance_content(
 /// size in points (`PageGeometry::width`/`height`); the caller is
 /// responsible for only calling this when the target page is page 0 — the
 /// only page index `pulpit-render` accepts (§25.5).
+#[cfg(test)]
 pub fn appearance_for(
     options: &SigningOptions,
     signer_cn: &str,
@@ -300,6 +300,93 @@ pub fn appearance_for(
         rect: placement.rect(page_width, page_height),
         page_index: 0,
         content: text_appearance_content(signer_cn, signing_time_label),
+    })
+}
+
+/// Seed the per-document options with a profile's saved visibility and box
+/// presets. A visible default is suppressed away from page zero because the
+/// signing engine cannot currently place appearances on another page.
+pub fn apply_profile_defaults(
+    options: &mut SigningOptions,
+    appearance: &crate::settings::StoredSignatureAppearance,
+    on_page_zero: bool,
+) {
+    if !appearance.visible || !on_page_zero {
+        options.set_visible(false);
+        return;
+    }
+    options.visible_requested = true;
+    options.placement = Some(Placement {
+        position: match appearance.position {
+            crate::settings::StoredSignaturePosition::TopLeft => PlacementPosition::TopLeft,
+            crate::settings::StoredSignaturePosition::TopRight => PlacementPosition::TopRight,
+            crate::settings::StoredSignaturePosition::BottomLeft => PlacementPosition::BottomLeft,
+            crate::settings::StoredSignaturePosition::BottomRight => PlacementPosition::BottomRight,
+            crate::settings::StoredSignaturePosition::Center => PlacementPosition::Center,
+        },
+        size: match appearance.size {
+            crate::settings::StoredSignatureSize::Small => PlacementSize::Small,
+            crate::settings::StoredSignatureSize::Medium => PlacementSize::Medium,
+            crate::settings::StoredSignatureSize::Large => PlacementSize::Large,
+        },
+    });
+}
+
+/// Build an appearance using a saved profile's content. Passing `None`
+/// preserves the ad-hoc credential flow's text-only appearance.
+pub fn appearance_for_profile(
+    options: &SigningOptions,
+    profile: Option<&crate::settings::StoredSignatureAppearance>,
+    signer_cn: &str,
+    signing_time_label: &str,
+    page_width: f64,
+    page_height: f64,
+) -> Option<pulpit_render::sign::SignAppearance> {
+    let placement = options.placement?;
+    let text = || text_appearance_content(signer_cn, signing_time_label);
+    let content = match profile {
+        None => text(),
+        Some(appearance) => {
+            let strokes = appearance
+                .strokes
+                .iter()
+                .map(|stroke| {
+                    stroke
+                        .iter()
+                        .map(|point| (f64::from(point.x), f64::from(point.y)))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            match appearance.content {
+                crate::settings::StoredSignatureContent::Ink => {
+                    pulpit_render::sign::AppearanceContent::Ink {
+                        strokes,
+                        stroke_width: f64::from(appearance.stroke_width),
+                    }
+                }
+                crate::settings::StoredSignatureContent::Text => text(),
+                crate::settings::StoredSignatureContent::InkAndText => {
+                    let pulpit_render::sign::AppearanceContent::Text {
+                        signer_name,
+                        time_label,
+                    } = text()
+                    else {
+                        unreachable!("text appearance constructor returned non-text content")
+                    };
+                    pulpit_render::sign::AppearanceContent::InkAndText {
+                        strokes,
+                        stroke_width: f64::from(appearance.stroke_width),
+                        signer_name,
+                        time_label,
+                    }
+                }
+            }
+        }
+    };
+    Some(pulpit_render::sign::SignAppearance {
+        rect: placement.rect(page_width, page_height),
+        page_index: 0,
+        content,
     })
 }
 
@@ -357,6 +444,8 @@ pub enum SigningFlow {
     /// can start. The flow resumes at [`SigningFlow::ChooseCredential`] once
     /// the save completes.
     SavingFirst,
+    /// Step 4 when at least one saved profile is known.
+    ChooseProfile,
     /// Step 4, before a credential file has been chosen.
     ChooseCredential,
     /// Step 4: a `.p12`/`.pfx` was chosen; waiting for a passphrase.
@@ -418,8 +507,12 @@ pub enum SigningFlow {
 }
 
 impl SigningFlow {
-    pub fn start() -> Self {
-        SigningFlow::ChooseCredential
+    pub fn start(has_profiles: bool) -> Self {
+        if has_profiles {
+            SigningFlow::ChooseProfile
+        } else {
+            SigningFlow::ChooseCredential
+        }
     }
 }
 
@@ -433,6 +526,8 @@ pub enum SignMsg {
     /// Cancel at any step. Always safe (§33): nothing has been written yet,
     /// or the write was to a temporary file that is now discarded.
     Cancel,
+    ProfileChosen(String),
+    UseAnotherCredential,
     ChooseCredentialFile,
     CredentialFileChosen(Option<PathBuf>),
     PassphraseChanged(String),
@@ -606,8 +701,12 @@ mod tests {
     #[test]
     fn flow_starts_at_choose_credential() {
         assert!(matches!(
-            SigningFlow::start(),
+            SigningFlow::start(false),
             SigningFlow::ChooseCredential
+        ));
+        assert!(matches!(
+            SigningFlow::start(true),
+            SigningFlow::ChooseProfile
         ));
     }
 
@@ -829,6 +928,60 @@ mod tests {
             appearance.rect,
             options.placement.unwrap().rect(612.0, 792.0)
         );
+    }
+
+    #[test]
+    fn profile_defaults_and_ink_are_carried_into_the_pdf_appearance() {
+        let profile = crate::settings::StoredSignatureAppearance {
+            content: crate::settings::StoredSignatureContent::InkAndText,
+            strokes: vec![vec![
+                crate::settings::SignaturePoint { x: 0.1, y: 0.2 },
+                crate::settings::SignaturePoint { x: 0.8, y: 0.7 },
+            ]],
+            stroke_width: 3.0,
+            visible: true,
+            position: crate::settings::StoredSignaturePosition::TopLeft,
+            size: crate::settings::StoredSignatureSize::Large,
+        };
+        let mut options = SigningOptions::default();
+        apply_profile_defaults(&mut options, &profile, true);
+        assert_eq!(
+            options.placement,
+            Some(Placement {
+                position: PlacementPosition::TopLeft,
+                size: PlacementSize::Large,
+            })
+        );
+        let appearance =
+            appearance_for_profile(&options, Some(&profile), "Jane Doe", "now", 612.0, 792.0)
+                .unwrap();
+        match appearance.content {
+            pulpit_render::sign::AppearanceContent::InkAndText {
+                strokes,
+                stroke_width,
+                signer_name,
+                ..
+            } => {
+                assert_eq!(strokes.len(), 1);
+                assert_eq!(strokes[0].len(), 2);
+                for (actual, expected) in strokes[0].iter().zip([(0.1, 0.2), (0.8, 0.7)]) {
+                    assert!((actual.0 - expected.0).abs() < 1e-6);
+                    assert!((actual.1 - expected.1).abs() < 1e-6);
+                }
+                assert_eq!(stroke_width, 3.0);
+                assert_eq!(signer_name, "Digitally signed by Jane Doe.");
+            }
+            other => panic!("expected combined profile appearance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_visible_profile_default_is_safely_suppressed_off_page_zero() {
+        let profile = crate::settings::StoredSignatureAppearance::default();
+        let mut options = SigningOptions::default();
+        apply_profile_defaults(&mut options, &profile, false);
+        assert!(!options.visible_requested);
+        assert!(options.placement.is_none());
     }
 
     #[test]
