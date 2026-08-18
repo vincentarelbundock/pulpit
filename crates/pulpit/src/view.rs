@@ -9,8 +9,8 @@
 //! the editor is exactly what appears here.
 
 use iced::widget::{
-    button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, space,
-    stack, text, text_input, Column, Row,
+    button, column, container, image, mouse_area, pick_list, progress_bar, responsive, row,
+    scrollable, space, stack, text, text_input, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -289,10 +289,248 @@ fn presenter(app: &App) -> Element<'_, Message> {
     if app.overview {
         page = stack![page, overview(app)].into();
     }
+    if app.search_workspace {
+        page = stack![page, search_workspace(app)].into();
+    }
     if let Some(prompt) = unbound_key(app) {
         page = stack![page, prompt].into();
     }
     page
+}
+
+/// Search temporarily becomes the working surface in Reader and Presenter.
+///
+/// The same page-grouped stream is used in both modes. It builds only the
+/// cards near the viewport, so a thousand-page document costs one window of
+/// widgets rather than one widget tree per match.
+fn search_workspace(app: &App) -> Element<'_, Message> {
+    use crate::widgets::event::FindCommand;
+    use crate::widgets::search::model::{page_groups, summary, visible_group_range};
+
+    let state = &app.search;
+    let groups = page_groups(state.hits());
+    let group_count = groups.len();
+    let current = state.position().map(|position| position - 1);
+
+    let field = text_input("Find in document", state.query().text())
+        .id(crate::widgets::search::view::workspace_input_id())
+        .size(type_scale::BODY)
+        .width(Length::Fill)
+        .on_input(|typed| Message::Find(FindCommand::Type(typed)))
+        .on_submit(Message::Find(FindCommand::Next));
+
+    let toggle = |label: &'static str, selected: bool, command: FindCommand| {
+        button(text(label).size(type_scale::LABEL))
+            .padding(gap::XS)
+            .style(if selected {
+                theme::ambient::selected_button
+            } else {
+                theme::ambient::tool_button
+            })
+            .on_press(Message::Find(command))
+    };
+
+    let status = summary(state);
+    let page_status = if group_count == 0 {
+        status
+    } else if status.is_empty() {
+        format!("{group_count} matching pages")
+    } else {
+        format!("{status} on {group_count} pages")
+    };
+
+    let controls = row![
+        field,
+        toggle(
+            "Aa",
+            state.query().case_sensitive,
+            FindCommand::ToggleCaseSensitive,
+        ),
+        toggle(
+            "|ab|",
+            state.query().whole_word,
+            FindCommand::ToggleWholeWord,
+        ),
+        toggle(".*", state.query().regex, FindCommand::ToggleRegex),
+        button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::CloseSearchWorkspace),
+    ]
+    .spacing(gap::XS)
+    .align_y(Alignment::Center);
+
+    let stream: Element<'_, Message> = if groups.is_empty() {
+        let message = if state.query().is_empty() {
+            "Type to search page text, notes, and the outline"
+        } else if state.scanning() {
+            "Searching the document…"
+        } else {
+            "No matching pages"
+        };
+        container(
+            text(message)
+                .size(type_scale::BODY)
+                .color(theme::ambient::muted()),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    } else {
+        responsive(move |size| {
+            use crate::widgets::search::model::RESULT_ROW_HEIGHT;
+
+            let visible = visible_group_range(groups.len(), app.search_scroll, size.height);
+            let mut rows = Column::new();
+            if visible.start > 0 {
+                rows = rows.push(
+                    space::horizontal()
+                        .height(Length::Fixed(visible.start as f32 * RESULT_ROW_HEIGHT)),
+                );
+            }
+            for group in groups[visible.clone()].iter().cloned() {
+                rows = rows.push(search_result_card(app, group, current));
+            }
+            if visible.end < groups.len() {
+                rows = rows.push(space::horizontal().height(Length::Fixed(
+                    (groups.len() - visible.end) as f32 * RESULT_ROW_HEIGHT,
+                )));
+            }
+
+            scrollable(rows)
+                .id(search_scrollable())
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::SearchScrolled(viewport.absolute_offset().y))
+                .into()
+        })
+        .into()
+    };
+
+    let activity: Element<'_, Message> = if state.scanning() {
+        progress_bar(0.0..=1.0, state.progress()).into()
+    } else {
+        space::vertical().height(Length::Fixed(4.0)).into()
+    };
+
+    let body = column![
+        text("Search document").size(type_scale::TITLE),
+        controls,
+        activity,
+        text(page_status)
+            .size(type_scale::CAPTION)
+            .color(if state.problem().is_some() {
+                theme::ambient::alert()
+            } else {
+                theme::ambient::muted()
+            }),
+        stream,
+    ]
+    .spacing(gap::S)
+    .padding(gap::M);
+
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::ambient::dialog)
+        .into()
+}
+
+fn search_scrollable() -> iced::widget::Id {
+    iced::widget::Id::new("search-workspace-results")
+}
+
+fn search_result_card(
+    app: &App,
+    group: crate::widgets::search::model::PageGroup,
+    current: Option<usize>,
+) -> Element<'_, Message> {
+    use crate::widgets::event::FindCommand;
+    use crate::widgets::search::model::RESULT_ROW_HEIGHT;
+
+    let hits = &app.search.hits()[group.hit_range.clone()];
+    let count = hits.len();
+    let selected = current.is_some_and(|index| group.hit_range.contains(&index));
+    let source = if hits
+        .iter()
+        .all(|hit| hit.source == pulpit_core::search::HitSource::PageText)
+    {
+        String::new()
+    } else {
+        let mut labels = Vec::new();
+        for hit in hits {
+            let label = hit.source.label();
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        format!(" · {}", labels.join(", "))
+    };
+    let heading = format!(
+        "Page {} · {count} {}{source}",
+        group.page,
+        if count == 1 { "match" } else { "matches" },
+    );
+
+    let preview: Element<'_, Message> = match app.thumbnails.get(group.page.get()) {
+        Some(handle) => container(
+            image(handle)
+                .content_fit(ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fixed(184.0))
+        .height(Length::Fixed(112.0))
+        .style(theme::ambient::canvas)
+        .into(),
+        None => container(
+            text(format!("{}", group.page))
+                .size(type_scale::TITLE)
+                .color(theme::ambient::muted()),
+        )
+        .center_x(Length::Fixed(184.0))
+        .center_y(Length::Fixed(112.0))
+        .style(theme::ambient::canvas)
+        .into(),
+    };
+
+    let mut excerpts =
+        Column::new()
+            .spacing(gap::XS)
+            .push(text(heading).size(type_scale::BODY).color(if selected {
+                theme::ambient::accent()
+            } else {
+                theme::ambient::text()
+            }));
+    for hit in hits.iter().take(2) {
+        excerpts = excerpts.push(
+            text(hit.context.clone())
+                .size(type_scale::LABEL)
+                .color(theme::ambient::muted()),
+        );
+    }
+    if count > 2 {
+        excerpts = excerpts.push(
+            text(format!("+{} more on this page", count - 2))
+                .size(type_scale::CAPTION)
+                .color(theme::ambient::accent()),
+        );
+    }
+
+    button(
+        row![preview, container(excerpts).width(Length::Fill)]
+            .spacing(gap::M)
+            .align_y(Alignment::Center),
+    )
+    .padding(gap::S)
+    .width(Length::Fill)
+    .height(Length::Fixed(RESULT_ROW_HEIGHT))
+    .style(if selected {
+        theme::ambient::selected_button
+    } else {
+        theme::ambient::tool_button
+    })
+    .on_press(Message::Find(FindCommand::Focus(group.hit_range.start)))
+    .into()
 }
 
 /// What the slider is pointing at, while it is being dragged.

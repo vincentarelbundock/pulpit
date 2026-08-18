@@ -4964,6 +4964,7 @@ dependencies = [
 name = "pulpit-core"
 version = "0.0.5"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

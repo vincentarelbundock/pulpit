@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Presentation state, notes mapping and timing for pulpit. Pure, no UI."
 
 [dependencies]
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -280,6 +280,10 @@ pub enum Message {
     Read(crate::widgets::event::ReadCommand),
     /// Something asked of the search pane, in whatever view it is placed.
     Find(crate::widgets::event::FindCommand),
+    /// Dismiss the transient search workspace without forgetting its query.
+    CloseSearchWorkspace,
+    /// The workspace reports its offset so it can virtualize a long result set.
+    SearchScrolled(f32),
     /// Put back the edits a previous run did not save, or do not.
     RestoreReaderEdits,
     DiscardReaderEdits,
@@ -1067,6 +1071,11 @@ pub struct App {
     /// through a different layout, and two models would be two answers to one
     /// question.
     pub search: pulpit_core::search::SearchState,
+    /// Search is an activity over the whole Reader or Presenter, never a cell
+    /// that permanently takes document space.
+    pub search_workspace: bool,
+    /// Vertical offset of the page-grouped result stream.
+    pub search_scroll: f32,
     /// The thread talking to this document's worker, when document mode is
     /// available for it. `None` when nothing is open, or when the worker
     /// could not be started — presentation mode does not depend on it.
@@ -1466,6 +1475,8 @@ impl App {
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
+            search_workspace: false,
+            search_scroll: 0.0,
             reader_render: ReaderRenderState::default(),
             reader_crop: pulpit_core::notes::Region::FULL,
             reader_link: None,
@@ -2174,6 +2185,10 @@ impl App {
                 {
                     return self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop);
                 }
+                if key.as_deref() == Some("Escape") && self.search_workspace {
+                    self.search_workspace = false;
+                    return Task::none();
+                }
                 // The editor owns the keyboard while it is open: presenter
                 // shortcuts must not blank the audience while someone is
                 // typing a layout name.
@@ -2551,6 +2566,14 @@ impl App {
             }
             Message::Read(command) => self.on_read_command(command),
             Message::Find(command) => self.on_find_command(command),
+            Message::CloseSearchWorkspace => {
+                self.search_workspace = false;
+                Task::none()
+            }
+            Message::SearchScrolled(offset) => {
+                self.search_scroll = offset.max(0.0);
+                Task::none()
+            }
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
@@ -3641,10 +3664,6 @@ impl App {
     fn on_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::ToggleReader => self.toggle_reader(),
-            // The caret goes to the box wherever the layout put it. Nothing
-            // is opened or mounted: a layout without a search pane has
-            // nowhere for the caret to go, and the key does nothing rather
-            // than rearranging the presenter's screen mid-talk.
             // The rail collapses in place, wherever the layout put it, and a
             // layout without an outline pane simply has nothing to collapse.
             Action::ToggleOutline => {
@@ -3653,8 +3672,12 @@ impl App {
                     !collapsed,
                 ))
             }
+            // Search temporarily takes the whole working surface in Reader and
+            // Presenter alike. It is never a layout cell or a permanent rail.
             Action::FocusSearch => {
-                iced::widget::operation::focus(crate::widgets::search::view::input_id())
+                self.search_workspace = true;
+                self.overview = false;
+                iced::widget::operation::focus(crate::widgets::search::view::workspace_input_id())
             }
             Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
             Action::FindPrevious => {
@@ -8174,21 +8197,26 @@ impl App {
         use crate::widgets::event::FindCommand;
         match command {
             FindCommand::Type(typed) => {
-                let query = pulpit_core::search::Query::new(
+                let mut query = pulpit_core::search::Query::new(
                     &typed,
                     self.search.query().case_sensitive,
                     self.search.query().whole_word,
                 );
+                query.regex = self.search.query().regex;
                 self.restart_search(query);
                 Task::none()
             }
-            FindCommand::ToggleCaseSensitive | FindCommand::ToggleWholeWord => {
+            FindCommand::ToggleCaseSensitive
+            | FindCommand::ToggleWholeWord
+            | FindCommand::ToggleRegex => {
                 let current = self.search.query();
                 let case_sensitive =
                     current.case_sensitive ^ (command == FindCommand::ToggleCaseSensitive);
                 let whole_word = current.whole_word ^ (command == FindCommand::ToggleWholeWord);
-                let query =
+                let regex = current.regex ^ (command == FindCommand::ToggleRegex);
+                let mut query =
                     pulpit_core::search::Query::new(current.text(), case_sensitive, whole_word);
+                query.regex = regex;
                 self.restart_search(query);
                 Task::none()
             }
@@ -8198,14 +8226,21 @@ impl App {
             }
             FindCommand::Next => {
                 let hit = self.search.advance().cloned();
+                if hit.is_some() {
+                    self.search_workspace = false;
+                }
                 self.go_to_hit(hit)
             }
             FindCommand::Previous => {
                 let hit = self.search.retreat().cloned();
+                if hit.is_some() {
+                    self.search_workspace = false;
+                }
                 self.go_to_hit(hit)
             }
             FindCommand::Focus(index) => {
                 let hit = self.search.focus(index).cloned();
+                self.search_workspace = false;
                 self.go_to_hit(hit)
             }
         }
@@ -8213,6 +8248,7 @@ impl App {
 
     /// Point the search at the open document under a new query.
     fn restart_search(&mut self, query: pulpit_core::search::Query) {
+        self.search_scroll = 0.0;
         // The page count comes from whichever half is open. In document mode
         // the reader knows it; in presentation mode the deck does.
         let pages = if self.reader.is_open() {
@@ -8224,8 +8260,16 @@ impl App {
                 .unwrap_or(0)
         };
         self.search.open(pages);
-        self.search.set_query(query);
+        let invalid = query.validate().err();
+        let generation = self.search.set_query(query);
         if self.search.query().is_empty() {
+            return;
+        }
+        if let Some(problem) = invalid {
+            self.search.fail(
+                generation,
+                pulpit_core::search::SearchProblem::InvalidPattern(problem),
+            );
             return;
         }
         // Notes and bookmarks are already in this process, so they are

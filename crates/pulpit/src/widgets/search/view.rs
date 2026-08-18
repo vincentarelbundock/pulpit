@@ -22,6 +22,12 @@ pub fn input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-search-query")
 }
 
+/// The transient workspace has its own caret target so an imported legacy
+/// layout containing the old search widget cannot steal focus behind it.
+pub fn workspace_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("search-workspace-query")
+}
+
 pub fn view<'ctx, 'a, Message: Clone + 'static>(
     ctx: &WidgetViewContext<'ctx, 'a, Message>,
     _widget: &Widget,
@@ -93,6 +99,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             state.query().whole_word,
             FindCommand::ToggleWholeWord
         ),
+        toggle(".*", state.query().regex, FindCommand::ToggleRegex),
         clear,
     ]
     .spacing(theme::space::XS)
