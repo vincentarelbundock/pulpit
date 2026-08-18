@@ -7657,7 +7657,7 @@ impl App {
                         gained: false,
                     });
                 }
-                let _needs_render = self.reader.apply(&command);
+                let needs_render = self.reader.apply(&command);
                 if matches!(command, ReadCommand::SetOutlineView(_))
                     && self.keyboard_region == KeyboardRegion::Outline
                     && !self.reader.focus_nearest_outline_item()
@@ -7674,7 +7674,16 @@ impl App {
                 // and applying the restore first would be undone by it.
                 if matches!(command, ReadCommand::ScrollTo { .. }) && self.apply_pending_position()
                 {
+                    self.request_reader_renders();
                     return self.scroll_surface_to_reader();
+                }
+                // ReaderSession deliberately reports which commands change
+                // the raster plan. Honour that in the same turn: waiting for
+                // an unrelated worker reply can leave a zoom showing the
+                // coarse frame forever when the coarse request was already
+                // satisfied from cache.
+                if needs_render {
+                    self.request_reader_renders();
                 }
                 // A page jump or a zoom moves the session's offset, and the
                 // scrollable has no way of knowing that: it is told. A scroll

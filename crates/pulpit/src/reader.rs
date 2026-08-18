@@ -1214,7 +1214,7 @@ impl ReaderSession {
         // move away from it.
         self.controls.page = page;
         if let Some(zoom) = zoom {
-            self.set_zoom(zoom);
+            self.set_zoom_anchored(zoom, page);
         }
         // After the zoom, because the column's geometry depends on it and the
         // fraction is a fraction of the page as laid out at that zoom.
@@ -3523,16 +3523,40 @@ impl ReaderSession {
     }
 
     fn set_zoom(&mut self, zoom: Zoom) {
-        // Zooming keeps the reader where they were reading rather than
-        // returning them to the top: the page under the middle of the window
-        // stays under the middle of the window.
-        let anchor = self.controls.page;
+        // The scroll offset is the live authority on what is visible. The
+        // cached page counter normally agrees with it, but a scroll report
+        // and a toolbar press can arrive on adjacent event-loop turns. Using
+        // the counter in that gap made a fit occasionally jump back to page
+        // one even though the surface was showing a later page.
+        let anchor = self
+            .column
+            .current(self.controls.offset, self.cell.1)
+            .unwrap_or(self.controls.page);
+        self.set_zoom_anchored(zoom, anchor);
+    }
+
+    /// Rebuild the column at `zoom`, keeping the supplied page at the top.
+    ///
+    /// Interactive zoom derives `anchor` from the live surface; restoring a
+    /// saved position supplies the page from the record. Keeping that choice
+    /// outside this helper prevents a newly opened surface at offset zero
+    /// from overriding an explicit restore with page one.
+    fn set_zoom_anchored(&mut self, zoom: Zoom, anchor: PageIndex) {
+        // Fits use the anchor page's geometry as their reference, so name it
+        // before rebuilding a mixed-size document.
+        self.controls.page = anchor;
         self.controls.zoom = zoom;
         self.relayout();
         if let Some(offset) = self.column.offset_of(anchor) {
             self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
             self.controls.page = anchor;
         }
+        // A zoom changes the column's coordinates, not because the reader is
+        // scrolling. If the new offset were compared with the old column's
+        // offset, the next plan would ask only for a coarse moving preview;
+        // when that preview was already cached, no worker reply remained to
+        // trigger the sharp request and the page stayed fuzzy indefinitely.
+        self.last_render_offset = self.controls.offset;
     }
 
     /// The facet the reader's widgets are drawn from.
@@ -4633,6 +4657,44 @@ mod tests {
         );
         session.apply(&ReadCommand::ZoomOut);
         assert_eq!(session.controls().zoom, Zoom::Fixed(1.0));
+    }
+
+    #[test]
+    fn fit_page_anchors_to_the_live_scroll_offset() {
+        let mut session = open(10);
+        let wanted = PageIndex(6);
+        // The surface has moved, but its scroll report and the toolbar press
+        // have landed on adjacent turns, so the cached counter is one event
+        // behind. The offset is what is actually on screen.
+        session.controls.offset = session.column.offset_of(wanted).expect("page six exists");
+        session.controls.page = PageIndex(0);
+
+        session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
+
+        assert_eq!(session.controls.page, wanted);
+        assert_eq!(
+            session.controls.offset,
+            session.column.offset_of(wanted).expect("page six remains")
+        );
+    }
+
+    #[test]
+    fn fit_page_requests_a_sharp_frame_without_waiting_for_a_scroll_reply() {
+        use pulpit_render::protocol::Quality;
+
+        let mut session = open(10);
+        session.apply(&ReadCommand::GoToPage(PageIndex(4)));
+        // Settle the previous navigation so the regression specifically
+        // exercises the coordinate change made by the zoom.
+        let _ = session.render_plan(2.0);
+        let _ = session.render_plan(2.0);
+
+        session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
+        let plan = session.render_plan(2.0);
+
+        assert!(plan.iter().any(|entry| {
+            entry.page == PageIndex(4) && entry.visible && entry.quality == Quality::Refined
+        }));
     }
 
     #[test]
