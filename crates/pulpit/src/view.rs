@@ -126,7 +126,9 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if app.alarm_controls.open {
         page = stack![page, alarms_dialog(app)].into();
     }
-    if app.shortcuts_open {
+    // With no document open the landing page already *is* the full reference,
+    // so the overlay would only cover an identical list with a dimmer copy.
+    if app.shortcuts_open && app.state.document().is_some() {
         page = stack![page, shortcuts_overlay(app)].into();
     }
     if app.about_open {
@@ -1231,46 +1233,52 @@ fn shortcut_group<'a>(
         .into()
 }
 
+/// One keymap group in its own card, so each block of keys reads as a
+/// self-contained unit rather than as one undifferentiated list.
+fn shortcut_card<'a>(
+    app: &'a App,
+    title: &'static str,
+    actions: &'static [Action],
+) -> Element<'a, Message> {
+    container(shortcut_group(app, title, actions))
+        .width(Length::Fill)
+        .padding(gap::M)
+        .style(theme::ambient::dialog)
+        .into()
+}
+
 /// A mode-neutral welcome surface. Opening a document from here still runs
-/// the ordinary shape-based Reader/Presenter detection.
+/// the ordinary shape-based Reader/Presenter detection. It carries the
+/// complete keymap: with no document open there is nothing to read behind an
+/// overlay, so the reference is the page rather than a layer above it.
 fn landing_page(app: &App) -> Element<'_, Message> {
-    use crate::settings::keys::{PRESENTING_ACTIONS, QUICK_START_ACTIONS};
+    use crate::settings::keys::SHORTCUT_GROUPS;
 
     let guide = responsive(move |size| {
-        let getting_started = shortcut_group(app, "Getting started", &[Action::ShowShortcuts]);
-        let once_open = shortcut_group(app, "Once a PDF is open", &QUICK_START_ACTIONS[..7]);
-        let presenting = shortcut_group(app, "Once presenting", &PRESENTING_ACTIONS);
-        if size.width < 760.0 {
-            column![getting_started, once_open, presenting]
+        let column_for = |indices: &[usize]| {
+            let mut column = Column::new().spacing(gap::L);
+            for index in indices {
+                let group = SHORTCUT_GROUPS[*index];
+                column = column.push(shortcut_card(app, group.title, group.actions));
+            }
+            column.width(Length::Fill)
+        };
+        if size.width < 620.0 {
+            column_for(&[0, 1, 2, 3, 4, 5, 6]).into()
+        } else if size.width < 1000.0 {
+            row![column_for(&[0, 2, 4, 5]), column_for(&[1, 3, 6])]
                 .spacing(gap::L)
                 .into()
         } else {
             row![
-                column![getting_started, presenting]
-                    .spacing(gap::L)
-                    .width(Length::Fill),
-                once_open,
+                column_for(&[0, 1]),
+                column_for(&[2, 3]),
+                column_for(&[4, 5, 6]),
             ]
-            .spacing(gap::XL)
+            .spacing(gap::L)
             .into()
         }
     });
-
-    let hero = column![
-        text("Pulpit").size(type_scale::TITLE),
-        text("A calm place to read a PDF or present it on another screen.")
-            .size(type_scale::BODY)
-            .color(theme::ambient::muted()),
-        button(text("Open a PDF    Ctrl+O").size(type_scale::BODY))
-            .padding(iced::Padding::from([gap::M, gap::XL]))
-            .style(theme::ambient::forward_button)
-            .on_press(Message::OpenDialog),
-        text("Acrobat / standard keys  (Vim/Zathura keys)")
-            .size(type_scale::LABEL)
-            .color(theme::ambient::muted()),
-    ]
-    .spacing(gap::M)
-    .align_x(Alignment::Center);
 
     let website = button(
         text("vincentarelbundock.github.io/pulpit  ↗")
@@ -1280,10 +1288,28 @@ fn landing_page(app: &App) -> Element<'_, Message> {
     .style(theme::ambient::tool_button)
     .on_press(Message::OpenDocumentation);
 
-    let content = column![hero, guide, website]
+    let hero = column![
+        text("Pulpit").size(type_scale::TITLE),
+        text("A calm place to read a PDF or present it on another screen.")
+            .size(type_scale::BODY)
+            .color(theme::ambient::muted()),
+        website,
+        button(text("Open a PDF    Ctrl+O").size(type_scale::BODY))
+            .padding(iced::Padding::from([gap::M, gap::XL]))
+            .style(theme::ambient::forward_button)
+            .on_press(Message::OpenDialog),
+        text(
+            "Acrobat / standard keys are shown first; Vim/Zathura alternatives are in parentheses."
+        )
+        .size(type_scale::LABEL)
+        .color(theme::ambient::muted()),
+    ]
+    .spacing(gap::M)
+    .align_x(Alignment::Center);
+
+    let content = column![hero, guide]
         .spacing(gap::XL)
-        .align_x(Alignment::Center)
-        .max_width(1000.0);
+        .align_x(Alignment::Center);
     // The centring has to happen *inside* the scrollable. A vertical
     // scrollable hands its child a full-width, infinite-height box, so the
     // outer container has nothing narrower than itself to centre and the
@@ -1291,12 +1317,10 @@ fn landing_page(app: &App) -> Element<'_, Message> {
     let centred = container(content)
         .width(Length::Fill)
         .align_x(Alignment::Center)
-        .padding(gap::XXL);
+        .padding(gap::XL);
     container(scrollable(centred).style(theme::ambient::scrollbar))
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
         .style(theme::ambient::surface)
         .into()
 }
@@ -1310,7 +1334,7 @@ fn shortcuts_overlay(app: &App) -> Element<'_, Message> {
             let mut column = Column::new().spacing(gap::M);
             for index in indices {
                 let group = SHORTCUT_GROUPS[*index];
-                column = column.push(shortcut_group(app, group.title, group.actions));
+                column = column.push(shortcut_card(app, group.title, group.actions));
             }
             column.width(Length::Fill)
         };

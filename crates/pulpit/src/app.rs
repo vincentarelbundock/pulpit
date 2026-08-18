@@ -2977,8 +2977,11 @@ impl App {
                                 if self.active_layout.id == id {
                                     // The active layout was deleted: fall back
                                     // to a built-in rather than to nothing.
+                                    // Mounted, not adopted — this is what is
+                                    // left after a deletion, not a choice the
+                                    // user made about the open document.
                                     if let Some(layout) = self.layouts.built_in().first().cloned() {
-                                        self.adopt_layout(layout);
+                                        self.mount_layout(layout);
                                     }
                                 }
                             }
@@ -7886,7 +7889,13 @@ impl App {
             self.notify("There is no document open to read.".to_string());
             return Task::none();
         }
-        self.adopt_layout(layout);
+        // Mounted, not adopted. Flipping mode says "show me this file the
+        // other way for a moment", not "this file is a document" — and
+        // `adopt_layout` would write the latter down against the file for
+        // good, so a deck read in the Reader once would never open as a deck
+        // again however plainly its pages say 16:9. Each mode still remembers
+        // its own layout, which is all this toggle promises.
+        self.mount_layout(layout);
         Task::none()
     }
 
