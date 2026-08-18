@@ -10,7 +10,7 @@
 
 use iced::widget::{
     button, canvas, column, container, image, mouse_area, pick_list, responsive, row, scrollable,
-    space, stack, text, text_input, Column, Row,
+    space, stack, text, text_input, tooltip, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -1022,36 +1022,8 @@ fn recent_menu_label(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
         .unwrap_or_else(|| path.as_os_str().to_string_lossy())
 }
 
-/// Fit the five visible filenames while keeping the flyout on screen.
-///
-/// One body-size unit per character is deliberately conservative for the
-/// proportional UI font. The cap is the viewport minus the panel's padding
-/// and a small right margin; exceptionally long names therefore stay inside
-/// the window instead of making the whole overlay wider than it.
-fn recent_menu_width(
-    recent: &std::collections::VecDeque<std::path::PathBuf>,
-    viewport_width: f32,
-) -> f32 {
-    let longest = recent_menu_documents(recent)
-        .map(|path| recent_menu_label(path).chars().count())
-        .max()
-        .unwrap_or(0) as f32;
-    let wanted = (longest * type_scale::BODY + gap::S * 2.0).max(MENU_WIDTH);
-    let shell = gap::M * 2.0 + gap::S * 2.0;
-    wanted.min((viewport_width - shell).max(MENU_WIDTH))
-}
-
 /// The main menu: the handful of commands that are not on the layout.
 fn menu(app: &App) -> Element<'_, Message> {
-    responsive(move |size| menu_at_width(app, size.width)).into()
-}
-
-fn menu_at_width(app: &App, viewport_width: f32) -> Element<'_, Message> {
-    let menu_width = if app.recent_menu_open {
-        recent_menu_width(&app.settings.recent, viewport_width)
-    } else {
-        MENU_WIDTH
-    };
     let entry = |label: &'static str, shortcut: Option<String>, message: Message| {
         let mut row = Row::new()
             .spacing(gap::M)
@@ -1088,13 +1060,15 @@ fn menu_at_width(app: &App, viewport_width: f32) -> Element<'_, Message> {
     };
     let recent_entry = |path: &std::path::Path| {
         let label = recent_menu_label(path).into_owned();
-        button(
+        let control = button(
             container(
-                text(label)
+                text(label.clone())
                     .size(type_scale::BODY)
                     .wrapping(iced::widget::text::Wrapping::None),
             )
+            .width(Length::Fill)
             .center_y(Length::Fill)
+            .clip(true)
             .padding(iced::Padding::from([0.0, gap::S])),
         )
         .width(Length::Fill)
@@ -1102,12 +1076,19 @@ fn menu_at_width(app: &App, viewport_width: f32) -> Element<'_, Message> {
         .style(theme::ambient::tool_button)
         .on_press(Message::MenuAction(Box::new(Message::Opened(Some(
             path.to_path_buf(),
-        )))))
+        )))));
+        tooltip(
+            control,
+            container(text(label).size(type_scale::CAPTION))
+                .padding(gap::S)
+                .style(theme::ambient::dialog),
+            tooltip::Position::Right,
+        )
     };
 
     let mut items = Column::new()
         .spacing(gap::XS)
-        .width(Length::Fixed(menu_width));
+        .width(Length::Fixed(MENU_WIDTH));
     items = items.push(
         container(
             text("pulpit")
@@ -1297,7 +1278,7 @@ fn menu_at_width(app: &App, viewport_width: f32) -> Element<'_, Message> {
     Row::new()
         .push(
             column![spacer(above), panel, rest()]
-                .width(Length::Fixed(menu_width + gap::M * 2.0 + gap::S)),
+                .width(Length::Fixed(MENU_WIDTH + gap::M * 2.0 + gap::S)),
         )
         .push(beside)
         .into()
@@ -3729,14 +3710,9 @@ mod tests {
     }
 
     #[test]
-    fn recent_menu_fits_the_longest_visible_name_without_leaving_the_viewport() {
-        let long_name = format!("{}.pdf", "quarterly-presentation-".repeat(2));
-        let recent = std::collections::VecDeque::from([
-            std::path::PathBuf::from("short.pdf"),
-            std::path::PathBuf::from(long_name),
-        ]);
-        assert!(recent_menu_width(&recent, 1_000.0) > MENU_WIDTH);
-        assert_eq!(recent_menu_width(&recent, 400.0), 360.0);
+    fn recent_menu_labels_show_only_the_filename() {
+        let path = std::path::Path::new("/talks/quarterly-presentation.pdf");
+        assert_eq!(recent_menu_label(path), "quarterly-presentation.pdf");
     }
 
     #[test]
