@@ -26,7 +26,7 @@ pub fn layout<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
-    node(&layout.root, context, compose, on_event)
+    node(&layout.root, context, compose, on_event, false)
 }
 
 fn node<'a, Message: Clone + 'static>(
@@ -34,6 +34,7 @@ fn node<'a, Message: Clone + 'static>(
     context: &Context<'_>,
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
+    inside_outline_rail: bool,
 ) -> Element<'a, Message> {
     match node {
         Node::Leaf(cell) => {
@@ -58,6 +59,8 @@ fn node<'a, Message: Clone + 'static>(
             let visible: Vec<usize> = (0..split.children.len())
                 .filter(|index| {
                     !(context.mode.collapse_empty() && is_collapsed(&split.children[*index]))
+                        && pane_reveal(&split.children[*index], context, inside_outline_rail)
+                            > f32::EPSILON
                 })
                 .collect();
             if visible.is_empty() {
@@ -66,7 +69,12 @@ fn node<'a, Message: Clone + 'static>(
 
             // Proportions become fill portions, so the layout scales to any
             // window without letterboxing or reflow.
-            let portion = |index: usize| (split.sizes[index] * 1000.0).max(1.0) as u16;
+            let portion = |index: usize| {
+                (split.sizes[index]
+                    * pane_reveal(&split.children[index], context, inside_outline_rail)
+                    * 1000.0)
+                    .max(1.0) as u16
+            };
 
             match split.direction {
                 Direction::Horizontal => {
@@ -81,9 +89,11 @@ fn node<'a, Message: Clone + 'static>(
                                 context,
                                 compose,
                                 on_event,
+                                inside_outline_rail || is_outline_rail(&split.children[index]),
                             ))
                             .width(Length::FillPortion(portion(index)))
-                            .height(Length::Fill),
+                            .height(Length::Fill)
+                            .clip(true),
                         );
                     }
                     content.width(Length::Fill).height(Length::Fill).into()
@@ -100,15 +110,46 @@ fn node<'a, Message: Clone + 'static>(
                                 context,
                                 compose,
                                 on_event,
+                                inside_outline_rail || is_outline_rail(&split.children[index]),
                             ))
                             .width(Length::Fill)
-                            .height(Length::FillPortion(portion(index))),
+                            .height(Length::FillPortion(portion(index)))
+                            .clip(true),
                         );
                     }
                     content.width(Length::Fill).height(Length::Fill).into()
                 }
             }
         }
+    }
+}
+
+/// The outline is a layout pane, not content folded inside one. Scaling its
+/// portion gives the released width (or height in a custom layout) back to
+/// its siblings throughout the disclosure animation.
+fn pane_reveal(node: &Node, context: &Context<'_>, inside_outline_rail: bool) -> f32 {
+    if !inside_outline_rail && is_outline_rail(node) {
+        context.reader.outline_reveal.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// A rail is the largest subtree that contains the outline but not the page.
+/// In the built-in Reader this includes Search, so collapsing means the whole
+/// sidebar disappears rather than leaving its lower half behind.
+fn is_outline_rail(node: &Node) -> bool {
+    contains(node, crate::widgets::WidgetKind::DocumentOutline)
+        && !contains(node, crate::widgets::WidgetKind::DocumentPage)
+}
+
+fn contains(node: &Node, kind: crate::widgets::WidgetKind) -> bool {
+    match node {
+        Node::Leaf(cell) => cell
+            .widget
+            .as_ref()
+            .is_some_and(|widget| widget.kind() == kind),
+        Node::Split(split) => split.children.iter().any(|child| contains(child, kind)),
     }
 }
 
@@ -229,5 +270,29 @@ mod tests {
                 let _: iced::Element<'_, ()> = layout(&built_in, &context, None, |_| ());
             }
         }
+    }
+
+    #[test]
+    fn the_reader_collapses_the_whole_outline_and_search_rail() {
+        let layout =
+            crate::layout::builtin::reader_default(crate::layout::AspectRatio::SixteenNine);
+        let root = layout.root.as_split().expect("the reader root is split");
+        let body = root.children[1]
+            .as_split()
+            .expect("the reader body is split");
+        let rail = &body.children[0];
+        assert!(is_outline_rail(rail));
+        assert!(contains(rail, WidgetKind::DocumentOutline));
+        assert!(contains(rail, WidgetKind::Search));
+
+        let mut context = context(Mode::Live);
+        context.reader.outline_reveal = 0.0;
+        assert_eq!(pane_reveal(rail, &context, false), 0.0);
+        // Once the rail itself owns the transition, its children keep their
+        // proportions instead of independently folding inside it.
+        assert_eq!(
+            pane_reveal(&rail.as_split().unwrap().children[1], &context, true),
+            1.0
+        );
     }
 }

@@ -760,6 +760,10 @@ pub struct App {
     /// Whether pulpit keeps its own motion down, resolved from the
     /// desktop preference and the application setting.
     pub motion: crate::platform::Motion,
+    /// The outline's disclosure transition. Its target mirrors the reader's
+    /// semantic collapsed flag; keeping the clocked interpolation here keeps
+    /// time out of the pure reader session.
+    outline_animation: iced::Animation<bool>,
     pub editing_colors: crate::settings::ColorScheme,
     /// Incomplete HEX input belongs to the editor, never to persisted
     /// settings. A valid value moves from here into the sparse overrides.
@@ -1361,6 +1365,7 @@ impl App {
             // Settled properly by `apply_appearance` once the platform can be
             // asked; full motion until then, so nothing is reduced on a guess.
             motion: crate::platform::Motion::Full,
+            outline_animation: iced::Animation::new(false).quick(),
             editing_colors: match theme.resolved {
                 crate::platform::appearance::Resolved::Light => crate::settings::ColorScheme::Light,
                 crate::platform::appearance::Resolved::Dark
@@ -1614,6 +1619,7 @@ impl App {
             // would arrive in about five steps and read as a stutter rather
             // than a fade.
             || self.alarm_controls.ringing.is_some()
+            || self.outline_animation.is_animating(self.now)
             || self.needs_reconcile
             // An edit on its way to the page: the worker has been asked and
             // has not answered, or it has and the snapshot the render pool
@@ -2715,6 +2721,10 @@ impl App {
             }
             Message::GoToFromOverview(slide) => {
                 self.overview = false;
+                // The overview is a jump, never a continuation of a slider
+                // drag. In particular the reader path below does not pass
+                // through `Message::Nav`, which normally clears this flag.
+                self.scrubbing = false;
                 // In a document layout the grid is a way of moving the reader,
                 // not of showing a slide to a room: the session index would
                 // change with nothing on screen following it.
@@ -3345,6 +3355,9 @@ impl App {
                 // The half-written mark belongs to the application, and the
                 // page surface is where it is drawn (§8.5).
                 if live {
+                    reader.outline_reveal = self
+                        .outline_animation
+                        .interpolate(1.0_f32, 0.0_f32, self.now);
                     reader.composing = self.composing_mark.clone();
                     // Likewise the history: it spans both modes and outlives
                     // any one session, so the application is what knows it.
@@ -7113,6 +7126,13 @@ impl App {
                 Task::none()
             }
             _ => {
+                if let ReadCommand::SetOutlineCollapsed(collapsed) = &command {
+                    self.outline_animation = if self.motion.is_reduced() {
+                        iced::Animation::new(*collapsed).quick()
+                    } else {
+                        self.outline_animation.clone().go(*collapsed, self.now)
+                    };
+                }
                 // The reader's jumps: a page chosen in the overview, typed
                 // into the page box, or arrived at by following a link. A
                 // scroll — by wheel, by hand or by `ScrollByWindows` from the

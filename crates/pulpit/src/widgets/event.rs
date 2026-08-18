@@ -21,6 +21,8 @@ pub enum WidgetEvent {
     Previous,
     ScrubTo(usize),
     CommitScrub,
+    /// Open the page overview from the current page/slide readout.
+    ShowOverview,
     /// The pointer moved over the current-slide panel. Coordinates are
     /// normalised to the drawn slide content: `(0, 0)` is its top-left,
     /// `(1, 1)` its bottom-right; values outside that range mean the pointer

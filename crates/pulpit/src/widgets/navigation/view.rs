@@ -40,7 +40,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             .into()
         }
         WidgetKind::SlideSlider => scrubber(slides, mode, on),
-        WidgetKind::SlideCounter => counter(slides, scale, accent),
+        WidgetKind::SlideCounter => counter(slides, scale, accent, mode, on),
         WidgetKind::PauseResume => {
             action("Pause / Resume", WidgetEvent::ToggleTimer, mode, on, false)
         }
@@ -155,7 +155,7 @@ fn scrubber<Message: Clone + 'static>(
             container(scrubber_from(count, preview, mode, on))
                 .width(Length::Fill)
                 .center_y(Length::Fill),
-            container(
+            button(
                 text(label.clone())
                     .size(size)
                     .wrapping(iced::widget::text::Wrapping::None)
@@ -163,7 +163,10 @@ fn scrubber<Message: Clone + 'static>(
                     .color(theme::ambient::text()),
             )
             .width(Length::Fixed(reading_width))
-            .center_y(Length::Fill),
+            .height(Length::Fill)
+            .padding(0)
+            .style(theme::ambient::tool_button)
+            .on_press_maybe(mode.interactive().then(|| on(WidgetEvent::ShowOverview))),
         ]
         .spacing(SPACING)
         .align_y(iced::Alignment::Center)
@@ -221,16 +224,18 @@ fn scrub_event(mode: Mode, slide: usize) -> WidgetEvent {
     }
 }
 
-fn counter<Message: 'static>(
+fn counter<Message: Clone + 'static>(
     slides: &SlideData<'_>,
     scale: f32,
     accent: iced::Color,
+    mode: Mode,
+    on: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let label = slides.label(slides.current);
     responsive(move |area| {
         // "12 / 40" fills its pane like any other reading.
         let size = fitted_size(area, label.chars().count(), 0.5) * scale;
-        container(
+        button(
             column![
                 text("SLIDE")
                     .size((size * 0.34).clamp(9.0, 14.0))
@@ -240,8 +245,11 @@ fn counter<Message: 'static>(
             .spacing(2)
             .align_x(iced::Alignment::Center),
         )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(0)
+        .style(theme::ambient::tool_button)
+        .on_press_maybe(mode.interactive().then(|| on(WidgetEvent::ShowOverview)))
         .into()
     })
     .into()

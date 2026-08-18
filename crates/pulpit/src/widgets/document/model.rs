@@ -566,7 +566,9 @@ pub struct ReaderControls {
     /// pen has a width control and type had nothing, which left the one
     /// measure a reader most often wants to change with no way to change it.
     pub text_size: f32,
-    /// Whether the outline rail shows bookmarks or thumbnails.
+    /// What the outline rail shows. Pages are deliberately absent: page
+    /// navigation belongs to the document controls, while this rail is for
+    /// the document's authored structure (and form review where applicable).
     pub outline: OutlineView,
     /// One page across the column, or two facing pages.
     pub spread: PageSpread,
@@ -630,7 +632,7 @@ pub enum OutlineView {
 impl OutlineView {
     pub fn label(self) -> &'static str {
         match self {
-            OutlineView::Bookmarks => "Bookmarks",
+            OutlineView::Bookmarks => "Sections",
             OutlineView::Thumbnails => "Pages",
             OutlineView::Fields => "Fields",
         }
@@ -908,7 +910,7 @@ mod tests {
     #[test]
     fn the_outline_rail_has_two_views_and_opens_on_the_bookmarks() {
         assert_eq!(OutlineView::default(), OutlineView::Bookmarks);
-        assert_eq!(OutlineView::Bookmarks.label(), "Bookmarks");
+        assert_eq!(OutlineView::Bookmarks.label(), "Sections");
         assert_eq!(OutlineView::Thumbnails.label(), "Pages");
         // Each tab names itself, so a view that is in front is still labelled.
         assert!(!ReaderControls::default().outline_collapsed);

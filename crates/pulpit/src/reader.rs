@@ -3442,6 +3442,13 @@ impl ReaderSession {
             viewport: self.cell.1,
             visible,
             controls: &self.controls,
+            // Live views replace this with the application's clocked Iced
+            // animation. Facets used in tests and previews are fully open.
+            outline_reveal: if self.controls.outline_collapsed {
+                0.0
+            } else {
+                1.0
+            },
             scale: self.scale,
             outline: &self.outline,
             has_form: self.has_form,

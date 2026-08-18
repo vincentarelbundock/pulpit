@@ -124,6 +124,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         choice_list: None,
         date_language: crate::datefield::Locale::default(),
         controls: &READER_CONTROLS,
+        outline_reveal: 1.0,
         scale: 1.0,
         outline: &[],
         has_form: false,

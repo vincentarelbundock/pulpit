@@ -406,6 +406,10 @@ pub struct ReaderData<'a> {
     /// The pages currently in the window, with whatever frames exist.
     pub visible: Vec<ReaderPage>,
     pub controls: &'a crate::widgets::document::model::ReaderControls,
+    /// How much of the outline body is revealed, from shut (`0`) to open
+    /// (`1`). The application owns the clock that drives this value; the
+    /// widget only turns it into geometry.
+    pub outline_reveal: f32,
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
     pub outline: &'a [OutlineRow],

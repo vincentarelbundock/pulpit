@@ -207,9 +207,9 @@ pub fn presenter_default() -> Layout {
 /// the outline and search.
 ///
 /// The band is the height of a button and no more. The rail is narrower than
-/// the presenter's, because it holds page thumbnails and bookmark titles
-/// rather than notes set as prose, and every point past what those need is a
-/// point the page is not getting.
+/// the presenter's, because it holds section titles and search results rather
+/// than notes set as prose, and every point past what those need is a point
+/// the page is not getting.
 pub fn reader_default(ratio: AspectRatio) -> Layout {
     let mut b = Builder::new();
 

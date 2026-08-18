@@ -1160,6 +1160,7 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
         // when the slider is released.
         crate::widgets::WidgetEvent::ScrubTo(slide) => Message::Nav(Nav::PreviewGoTo(slide)),
         crate::widgets::WidgetEvent::CommitScrub => Message::Nav(Nav::CommitPreview),
+        crate::widgets::WidgetEvent::ShowOverview => Message::ToggleOverview,
         crate::widgets::WidgetEvent::SlideCursor { x, y } => Message::SlideCursor { x, y },
         crate::widgets::WidgetEvent::SlidePressed => Message::SlidePressed,
         crate::widgets::WidgetEvent::Annotate(command) => Message::Annotate(command),

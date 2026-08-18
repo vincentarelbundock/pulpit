@@ -8,7 +8,7 @@
 
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, slider, space, text,
-    text_editor, text_input, tooltip, Column, Row,
+    text_editor, tooltip, Column, Row,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -1419,27 +1419,25 @@ fn navigation<Message: Clone + 'static>(
         hint(control, label)
     };
 
-    // Only the page number is typed into. The total is a fact about the
-    // document, not a thing a reader can decide, so it sits beside the box as
-    // text rather than inside it where a stray keystroke could eat it.
+    // The current number is also the way into the visual page overview, in
+    // the same place as the presenter's slide readout. The total remains a
+    // fact beside it rather than part of the control's value.
     let entry = {
-        let value = reader
-            .page_entry
-            .clone()
-            .unwrap_or_else(|| reader.page_label());
-        let field = text_input("", &value)
-            .size(theme::type_scale::LABEL)
-            .width(Length::Fixed(48.0))
-            .align_x(Alignment::Center);
-        let field = if live {
-            field
-                .on_input(move |typed| send(ReadCommand::TypePage(typed)))
-                .on_submit(send(ReadCommand::CommitPage))
+        let current = button(
+            text(reader.page_label())
+                .size(theme::type_scale::LABEL)
+                .align_x(iced::alignment::Horizontal::Center),
+        )
+        .width(Length::Fixed(48.0))
+        .padding(Padding::from([4.0, 6.0]))
+        .style(theme::ambient::tool_button);
+        let current = if live {
+            current.on_press(on_event(WidgetEvent::ShowOverview))
         } else {
-            field
+            current
         };
         row![
-            field,
+            current,
             text(reader.page_total())
                 .size(theme::type_scale::LABEL)
                 .color(theme::ambient::muted()),
@@ -1559,7 +1557,8 @@ fn navigation<Message: Clone + 'static>(
         .into()
 }
 
-/// The outline rail: bookmarks, or the pages themselves.
+/// The document's authored outline. Page numbers live in the navigation band,
+/// so this rail does not duplicate them as another page list.
 fn outline<Message: Clone + 'static>(
     reader: &ReaderData<'_>,
     mode: Mode,
@@ -1630,7 +1629,7 @@ fn outline<Message: Clone + 'static>(
             .into()
     };
 
-    let mut tabs = row![tab(OutlineView::Bookmarks), tab(OutlineView::Thumbnails)]
+    let mut tabs = row![tab(OutlineView::Bookmarks)]
         .spacing(theme::space::XS)
         .align_y(Alignment::Center);
     // A third tab only where there is a form. The rail is the toggle: a
@@ -1645,7 +1644,7 @@ fn outline<Message: Clone + 'static>(
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-    if collapsed {
+    if reader.outline_reveal <= f32::EPSILON {
         // Collapsed, the rail keeps only its chevron and the name of what is
         // put away: a row of tabs for a list nobody can see would be a control
         // that does nothing visible.
