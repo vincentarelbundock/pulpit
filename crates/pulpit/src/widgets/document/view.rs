@@ -7,7 +7,7 @@
 //! without a window.
 
 use iced::widget::{
-    button, column, container, image, mouse_area, row, scrollable, slider, space, text,
+    button, column, container, image, mouse_area, responsive, row, scrollable, slider, space, text,
     text_editor, text_input, tooltip, Column, Row,
 };
 use iced::{Alignment, Element, Length, Padding};
@@ -102,136 +102,210 @@ fn page_surface<'a, Message: Clone + 'static>(
         return nothing("This document has no pages.");
     }
 
-    // No spacing: every gap between two sheets is pushed explicitly, because
-    // the content built here has to be exactly as tall as
-    // [`super::model::Column`] says the document is and has to put each page
-    // exactly where the column puts it. A scroll offset that means one thing
-    // to the model and another to the widget is a document that stops
-    // scrolling part way down.
-    let mut sheets = column![].spacing(0.0);
-    // A leading spacer stands for every page above the window, so the pages
-    // that *are* built land where the column says they do rather than at the
-    // top of the cell.
-    if let Some(first) = reader.visible.first() {
-        if first.placed.top > 0.0 {
-            sheets = sheets.push(space::vertical().height(Length::Fixed(first.placed.top)));
-        }
-    }
-    let pointer = Pointer {
-        armed: reader.controls.tool,
-        marqueeing: reader.controls.crop.takes_the_pointer(),
-        panning: reader.panning,
-    };
-    // Pages that share a top are one row, which in a two-page spread is a
-    // pair of facing sheets: the column decided that, and this only has to
-    // draw what it decided.
-    let mut rows: Vec<Vec<&crate::widgets::context::ReaderPage>> = Vec::new();
-    for page in reader.visible.iter() {
-        match rows.last_mut() {
-            Some(row) if (row[0].placed.top - page.placed.top).abs() < f32::EPSILON.max(0.01) => {
-                row.push(page)
-            }
-            _ => rows.push(vec![page]),
-        }
-    }
-    for (index, pages) in rows.iter().enumerate() {
-        if index > 0 {
-            sheets = sheets.push(space::vertical().height(Length::Fixed(super::model::PAGE_GAP)));
-        }
-        // Aligned to the top, not stretched: two facing pages of unequal
-        // height stand on the same line as they would on a desk.
-        let mut facing = row![]
-            .spacing(super::model::PAGE_GAP)
-            .align_y(Alignment::Start);
-        for page in pages {
-            // The half-written mark goes to the sheet it was placed on, and to
-            // no other: the editor is drawn where the mark will land.
-            let composing = reader
-                .composing
-                .as_ref()
-                .filter(|composing| composing.page == page.placed.page);
-            facing = facing.push(sheet(
-                page,
-                mode,
-                pointer,
-                composing,
-                compose,
-                reader.date_picker,
-                reader.time_picker,
-                reader.choice_list,
-                reader.date_language,
-                reader.focused_widget,
-                reader.focused_hint,
-                on_event,
-            ));
-        }
-        sheets = sheets.push(facing);
-    }
-    // …and a trailing one stands for every page below it, which is what makes
-    // the scroll bar the whole document's rather than the window's: without
-    // it the content ends at the last built sheet and the reader cannot get
-    // past the pages they can already see.
-    if let Some(last) = reader.visible.last() {
-        // The *row's* bottom: two facing pages need not be the same height,
-        // and a spacer measured from the shorter one would make the content
-        // shorter than the column says the document is.
-        let rest = reader.column.height - last.placed.row_bottom;
-        if rest > 0.0 {
-            sheets = sheets.push(space::vertical().height(Length::Fixed(rest)));
-        }
-    }
+    let surface = PageSurface::from(reader);
+    responsive(move |viewport| {
+        let sheets = surface.sheets(compose, mode, on_event);
+        let scroller = scrollable(
+            container(sheets)
+                // A horizontally scrolling surface lays fluid children out
+                // at their intrinsic width. Use the live viewport explicitly
+                // so there is spare space in which to centre a fitted page,
+                // while a page wider than the viewport keeps its full width
+                // and remains horizontally scrollable.
+                .width(Length::Fixed(page_surface_width(
+                    surface.column_width,
+                    viewport.width,
+                )))
+                .align_x(Alignment::Center)
+                // No padding: vertical padding would offset every page from
+                // where the column placed it, and horizontal padding would
+                // make the content wider than the column and so give a
+                // fitted page a sideways scroll it has no room to use.
+                .padding(Padding::ZERO),
+        )
+        .id(page_surface_id())
+        // The vertical bar is the same proportional native scrollbar every
+        // other scrolling surface uses. Horizontal movement remains
+        // gesture-only.
+        .direction(scrollable::Direction::Both {
+            vertical: crate::widgets::scroll::bar(),
+            horizontal: scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
 
-    // Fill spare viewport width so alignment has space in which to centre a
-    // narrow page; retain the measured column width when zoom makes it wider,
-    // which preserves horizontal scrolling.
-    let content_width = if reader.column.width <= reader.viewport_width {
-        // Resolve against the live scrollable bounds. A cached numeric width
-        // can lag a layout pass; Fill cannot, and gives centring its real
-        // viewport rather than yesterday's measurement.
-        Length::Fill
-    } else {
-        Length::Fixed(reader.column.width.max(0.0))
-    };
-    let scroller = scrollable(
-        container(sheets)
-            .width(content_width)
-            .align_x(Alignment::Center)
-            // No padding: vertical padding would offset every page from where
-            // the column placed it, and horizontal padding would make the
-            // content wider than the column and so give a fitted page a
-            // sideways scroll it has no room to use.
-            .padding(Padding::ZERO),
-    )
-    .id(page_surface_id())
-    // The vertical bar is the same proportional native scrollbar every other
-    // scrolling surface uses. Horizontal movement remains gesture-only.
-    .direction(scrollable::Direction::Both {
-        vertical: crate::widgets::scroll::bar(),
-        horizontal: scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
+        // In the editor the surface is a representation, so it takes no
+        // events.
+        if !mode.interactive() {
+            return scroller.into();
+        }
+        // The widget's scroll position is the session's scroll offset: the
+        // wheel, the handle and the keyboard all arrive here, and the session
+        // decides from it which pages are on screen and which need drawing.
+        // The surface's own size comes back with every scroll event, which is
+        // how a fit is fitted to the window that exists rather than to the
+        // cell the layout asked for.
+        scroller
+            .on_scroll(move |viewport| {
+                on_event(WidgetEvent::Read(ReadCommand::ScrollTo {
+                    offset: viewport.absolute_offset().y,
+                    offset_x: viewport.absolute_offset().x,
+                    viewport: viewport.bounds().height,
+                }))
+            })
+            .into()
     })
-    .width(Length::Fill)
-    .height(Length::Fill);
+    .into()
+}
 
-    // In the editor the surface is a representation, so it takes no events.
-    if !mode.interactive() {
-        return scroller.into();
+/// The owned part of a page surface.
+///
+/// [`responsive`] rebuilds its child during layout, after the context borrowed
+/// by [`view`] is gone. Keeping this small snapshot lets it use the viewport's
+/// real width without tying the returned element to that short-lived context.
+struct PageSurface {
+    pages: Vec<crate::widgets::context::ReaderPage>,
+    column_height: f32,
+    column_width: f32,
+    pointer: Pointer,
+    composing: Option<crate::widgets::context::ComposingMark>,
+    date_picker: Option<crate::reader::DatePicker>,
+    time_picker: Option<crate::reader::TimePicker>,
+    choice_list: Option<crate::reader::ChoiceList>,
+    date_language: crate::datefield::Locale,
+    focused_widget: Option<pulpit_render::document::protocol::FocusedWidget>,
+    focused_hint: Option<String>,
+}
+
+impl From<&ReaderData<'_>> for PageSurface {
+    fn from(reader: &ReaderData<'_>) -> Self {
+        Self {
+            pages: reader.visible.clone(),
+            column_height: reader.column.height,
+            column_width: reader.column.width,
+            pointer: Pointer {
+                armed: reader.controls.tool,
+                marqueeing: reader.controls.crop.takes_the_pointer(),
+                panning: reader.panning,
+            },
+            composing: reader.composing.clone(),
+            date_picker: reader.date_picker.cloned(),
+            time_picker: reader.time_picker.cloned(),
+            choice_list: reader.choice_list.cloned(),
+            date_language: reader.date_language,
+            focused_widget: reader.focused_widget.cloned(),
+            focused_hint: reader.focused_hint.map(str::to_owned),
+        }
     }
-    // The widget's scroll position is the session's scroll offset: the
-    // wheel, the handle and the keyboard all arrive here, and the session
-    // decides from it which pages are on screen and which need drawing.
-    // The surface's own size comes back with every one of these, which is how
-    // a fit is fitted to the window that exists rather than to the cell the
-    // layout asked for. Iced sends one whenever the bounds change as well as
-    // when the reader scrolls, so a resize corrects the fit without anybody
-    // having to scroll first.
-    let scroller = scroller.on_scroll(move |viewport| {
-        on_event(WidgetEvent::Read(ReadCommand::ScrollTo {
-            offset: viewport.absolute_offset().y,
-            offset_x: viewport.absolute_offset().x,
-            viewport: viewport.bounds().height,
-        }))
-    });
-    scroller.into()
+}
+
+impl PageSurface {
+    fn sheets<'a, Message: Clone + 'static>(
+        &self,
+        compose: Option<&'a iced::widget::text_editor::Content>,
+        mode: Mode,
+        on_event: fn(WidgetEvent) -> Message,
+    ) -> Column<'a, Message> {
+        // No spacing: every gap between two sheets is pushed explicitly, because
+        // the content built here has to be exactly as tall as
+        // [`super::model::Column`] says the document is and has to put each page
+        // exactly where the column puts it. A scroll offset that means one thing
+        // to the model and another to the widget is a document that stops
+        // scrolling part way down.
+        let mut sheets = column![].spacing(0.0);
+        // A leading spacer stands for every page above the window, so the pages
+        // that *are* built land where the column says they do rather than at the
+        // top of the cell.
+        if let Some(first) = self.pages.first() {
+            if first.placed.top > 0.0 {
+                sheets = sheets.push(space::vertical().height(Length::Fixed(first.placed.top)));
+            }
+        }
+        // Pages that share a top are one row, which in a two-page spread is a
+        // pair of facing sheets: the column decided that, and this only has to
+        // draw what it decided.
+        let mut rows: Vec<Vec<&crate::widgets::context::ReaderPage>> = Vec::new();
+        for page in &self.pages {
+            match rows.last_mut() {
+                Some(row)
+                    if (row[0].placed.top - page.placed.top).abs() < f32::EPSILON.max(0.01) =>
+                {
+                    row.push(page)
+                }
+                _ => rows.push(vec![page]),
+            }
+        }
+        for (index, pages) in rows.iter().enumerate() {
+            if index > 0 {
+                sheets =
+                    sheets.push(space::vertical().height(Length::Fixed(super::model::PAGE_GAP)));
+            }
+            // Aligned to the top, not stretched: two facing pages of unequal
+            // height stand on the same line as they would on a desk.
+            let mut facing = row![]
+                .spacing(super::model::PAGE_GAP)
+                .align_y(Alignment::Start);
+            for page in pages {
+                // The half-written mark goes to the sheet it was placed on, and to
+                // no other: the editor is drawn where the mark will land.
+                let composing = self
+                    .composing
+                    .as_ref()
+                    .filter(|composing| composing.page == page.placed.page);
+                facing = facing.push(sheet(
+                    page,
+                    mode,
+                    self.pointer,
+                    composing,
+                    compose,
+                    self.date_picker.as_ref(),
+                    self.time_picker.as_ref(),
+                    self.choice_list.as_ref(),
+                    self.date_language,
+                    self.focused_widget.as_ref(),
+                    self.focused_hint.as_deref(),
+                    on_event,
+                ));
+            }
+            sheets = sheets.push(facing);
+        }
+        // …and a trailing one stands for every page below it, which is what makes
+        // the scroll bar the whole document's rather than the window's: without
+        // it the content ends at the last built sheet and the reader cannot get
+        // past the pages they can already see.
+        if let Some(last) = self.pages.last() {
+            // The *row's* bottom: two facing pages need not be the same height,
+            // and a spacer measured from the shorter one would make the content
+            // shorter than the column says the document is.
+            let rest = self.column_height - last.placed.row_bottom;
+            if rest > 0.0 {
+                sheets = sheets.push(space::vertical().height(Length::Fixed(rest)));
+            }
+        }
+        sheets
+    }
+}
+
+fn page_surface_width(column_width: f32, viewport_width: f32) -> f32 {
+    column_width.max(viewport_width).max(0.0)
+}
+
+#[cfg(test)]
+mod page_surface_tests {
+    use super::page_surface_width;
+
+    #[test]
+    fn a_fitted_document_tracks_the_live_viewport_width() {
+        let document = 600.0;
+
+        assert_eq!(page_surface_width(document, 720.0), 720.0);
+        assert_eq!(page_surface_width(document, 960.0), 960.0);
+    }
+
+    #[test]
+    fn a_document_wider_than_the_viewport_keeps_its_scrollable_width() {
+        assert_eq!(page_surface_width(1_200.0, 960.0), 1_200.0);
+    }
 }
 
 /// The page surface's scrollable, so the application can put it where a page
