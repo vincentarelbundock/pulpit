@@ -201,7 +201,7 @@ pub fn presenter_default() -> Layout {
 ///
 /// The page gets everything that is not a control: a shallow band along the
 /// top carries navigation and the annotation tools, and a narrow rail carries
-/// the outline. Search is a transient peer rail inserted beside the layout.
+/// the outline. Search and outline share that rail.
 ///
 /// The band is the height of a button and no more. The rail is narrower than
 /// the presenter's, because it holds section titles and search results rather

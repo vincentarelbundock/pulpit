@@ -62,6 +62,10 @@ pub enum WidgetEvent {
 pub enum PanelCommand {
     FocusDocument,
     FocusSidebar,
+    /// Show search in the shared document sidebar.
+    ShowSearch,
+    /// Show the outline in the shared document sidebar.
+    ShowOutline,
 }
 
 /// What the search pane can ask for.

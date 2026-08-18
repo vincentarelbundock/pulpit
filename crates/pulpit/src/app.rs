@@ -254,11 +254,6 @@ pub enum Message {
     ReviewRequiredFields,
     /// Decline the save and change nothing else.
     CancelSaveReview,
-    /// Put the interrupted session back. Sent only by the restore dialog's
-    /// confirming button: nothing else in the application may reach it.
-    RestoreSession,
-    /// Start fresh and forget the interrupted session.
-    DiscardSession,
     DismissToast(u64),
     DismissAllToasts,
     /// Put the diagnostics report on the clipboard.
@@ -880,13 +875,13 @@ pub struct App {
     pub color_picker_open: Option<crate::theme::ColorRole>,
     /// Where the crash-recovery snapshot lives.
     pub session: crate::session::SessionStore,
-    /// The offer made by an interrupted previous run, until it is answered.
+    /// The interrupted previous run, until startup begins applying it.
     ///
     /// While this is `Some` the application is a fresh start in every way the
     /// audience can see: nothing from the snapshot has been applied, and no
     /// new snapshot is written over it.
     pub pending_restore: Option<crate::session::RestorePlan>,
-    /// A confirmed restore waiting for its document to finish opening, so the
+    /// A restore waiting for its document to finish opening, so the
     /// slide is set on the deck it was taken against.
     restoring_into_document: Option<crate::session::RestorePlan>,
     /// Keeps snapshot writing off the tick path.
@@ -1342,10 +1337,9 @@ impl App {
         let now = Instant::now();
 
         // A snapshot that survived the last run means that run did not go
-        // through `quit`, which deletes it: this is the crash signal. The
-        // snapshot is only turned into an offer here — nothing from it is
-        // applied until the presenter confirms, so startup proceeds exactly
-        // as it would with no snapshot at all.
+        // through `quit`, which deletes it: this is the crash signal. Turn it
+        // into a restore plan now; startup applies it automatically once the
+        // application has been assembled.
         let session = crate::session::SessionStore::default();
         let pending_restore = session
             .load()
@@ -1358,7 +1352,7 @@ impl App {
                 snapshot.plan(current.as_ref())
             });
         if pending_restore.is_some() {
-            tracing::info!("a previous session did not exit cleanly; offering to restore it");
+            tracing::info!("a previous session did not exit cleanly; restoring it");
         }
 
         // The layout library lives beside the settings file.
@@ -1621,7 +1615,10 @@ impl App {
             role: Role::Presenter,
             id,
         })];
-        if let Some(path) = initial {
+        let restoring = app.pending_restore.is_some();
+        if restoring {
+            tasks.push(app.restore_session());
+        } else if let Some(path) = initial {
             tasks.push(Task::done(Message::Opened(Some(path))));
         }
         // Read the UTC offset now, on purpose: it is cached in a OnceLock
@@ -2195,10 +2192,26 @@ impl App {
                     }
                     return Task::none();
                 }
-                // A widget that captured the event owns the keyboard. Its
-                // own message handles the press; the application keymap is
-                // only the fallback for an otherwise-unclaimed event.
+                // A widget that captured the event owns the keyboard. The
+                // two sidebar selectors are the narrow exception: Ctrl-B in
+                // Search must still reach Outline, and the Search binding
+                // must close the Search tab it opened. Ordinary text input
+                // and every other shortcut remain owned by the widget.
                 if captured {
+                    let action = self.settings.keymap.resolve_with_mods(
+                        key.as_deref(),
+                        crate::settings::Mods::new(control, shift, alt),
+                        scancode,
+                    );
+                    if self.search_workspace
+                        && self.uses_document_viewer()
+                        && action == Some(Action::ToggleOutline)
+                    {
+                        return self.on_action(Action::ToggleOutline);
+                    }
+                    if self.search_workspace && action == Some(Action::FocusSearch) {
+                        return self.on_action(Action::FocusSearch);
+                    }
                     return Task::none();
                 }
                 if key.as_deref() == Some("Escape") && self.confirm_reset_colors {
@@ -2206,8 +2219,8 @@ impl App {
                     return Task::none();
                 }
                 // Escape declines what the document asked for. Safe as a
-                // default, unlike the restore offer: declining leaves the
-                // reader exactly where they already are.
+                // default: declining leaves the reader exactly where they
+                // already are.
                 if key.as_deref() == Some("Escape") && self.pending_form_goto.is_some() {
                     self.pending_form_goto = None;
                     return Task::none();
@@ -3144,14 +3157,6 @@ impl App {
                 self.persist();
                 Task::none()
             }
-            Message::RestoreSession => self.restore_session(),
-            Message::DiscardSession => {
-                // Declining is final: the snapshot goes, so the offer cannot
-                // reappear on the next start.
-                self.pending_restore = None;
-                self.session.clear();
-                Task::none()
-            }
             Message::DismissToast(id) => {
                 self.toasts.dismiss(id);
                 Task::none()
@@ -3818,6 +3823,16 @@ impl App {
             // The rail collapses in place, wherever the layout put it, and a
             // layout without an outline pane simply has nothing to collapse.
             Action::ToggleOutline => {
+                if self.search_workspace && self.uses_document_viewer() {
+                    let mut tasks = vec![self.close_search(false)];
+                    tasks.push(self.on_read_command(
+                        crate::widgets::event::ReadCommand::SetOutlineCollapsed(false),
+                    ));
+                    tasks.push(
+                        self.on_panel_command(crate::widgets::event::PanelCommand::FocusSidebar),
+                    );
+                    return Task::batch(tasks);
+                }
                 let collapsed = self.reader.controls().outline_collapsed;
                 self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineCollapsed(
                     !collapsed,
@@ -3900,7 +3915,13 @@ impl App {
                 {
                     self.reader_fullscreen = !self.reader_fullscreen;
                     self.menu_open = false;
-                    return Task::none();
+                    // Fullscreen and the ordinary layout mount different
+                    // widget trees. The new scrollable therefore starts at
+                    // zero even though the reader session still owns the
+                    // real page and offset. Push that position into the newly
+                    // mounted surface after this update so leaving fullscreen
+                    // cannot visually jump back to page one.
+                    return self.scroll_surface_to_reader();
                 }
                 let wanted = !self.coordinator.roles.audience_fullscreen;
                 self.coordinator.roles.audience_fullscreen = wanted;
@@ -3994,7 +4015,7 @@ impl App {
         iced::exit()
     }
 
-    /// Put the interrupted session back, having been told to.
+    /// Put an interrupted session back during startup.
     ///
     /// Everything audience-visible happens here and nowhere else. The
     /// snapshot is cleared first: a restore that itself crashes should be
@@ -4050,7 +4071,7 @@ impl App {
                 self.reconcile()
             }
         };
-        self.notify_done("Restored the interrupted session.".to_string());
+        self.diagnostics.note("restored the interrupted session");
         task
     }
 
@@ -4068,7 +4089,7 @@ impl App {
         self.timer_controls.set_target(seconds);
     }
 
-    /// Finish a confirmed restore once its document has been promoted.
+    /// Finish a restore once its document has been promoted.
     fn resume_restore_into_document(&mut self) {
         let Some(plan) = self.restoring_into_document.as_ref() else {
             return;
@@ -4095,9 +4116,9 @@ impl App {
     /// Write the crash-recovery snapshot, at most once per interval and only
     /// when something actually changed.
     ///
-    /// Nothing is written while a restore offer is unanswered: overwriting
-    /// the snapshot with the fresh, empty session would silently destroy the
-    /// very thing being offered.
+    /// Nothing is written while startup still holds an unapplied restore:
+    /// overwriting the snapshot with a fresh, empty session would silently
+    /// destroy the state being recovered.
     fn save_session(&mut self, now: Instant) {
         if self.pending_restore.is_some() || !self.session_throttle.due(now) {
             return;
@@ -4350,7 +4371,7 @@ impl App {
         // 4. Placement requests the window manager has not honoured yet.
         tasks.push(self.retry_placements(now));
 
-        // 4b. A confirmed restore whose document has now finished opening,
+        // 4b. A restore whose document has now finished opening,
         //     and the throttled crash-recovery snapshot.
         self.resume_restore_into_document();
         self.record_reading_position();
@@ -8523,14 +8544,20 @@ impl App {
         direction: crate::widgets::scroll::RevealDirection,
     ) -> Task<Message> {
         let (current, viewport) = self.reader.outline_scroll_position();
-        let offset = crate::widgets::scroll::reveal_offset(
-            index,
-            crate::widgets::document::view::OUTLINE_ROW_HEIGHT,
-            current,
-            viewport,
-            self.reader.outline_len(),
-            direction,
-        );
+        let offset = if let Some(heights) = self.reader.bookmark_row_heights() {
+            crate::widgets::scroll::reveal_variable_offset(
+                index, &heights, current, viewport, direction,
+            )
+        } else {
+            crate::widgets::scroll::reveal_offset(
+                index,
+                crate::widgets::document::view::OUTLINE_ROW_HEIGHT,
+                current,
+                viewport,
+                self.reader.outline_len(),
+                direction,
+            )
+        };
         if (offset - current).abs() <= f32::EPSILON {
             return Task::none();
         }
@@ -8569,6 +8596,8 @@ impl App {
     fn on_panel_command(&mut self, command: crate::widgets::event::PanelCommand) -> Task<Message> {
         use crate::widgets::event::PanelCommand;
         match command {
+            PanelCommand::ShowSearch => self.open_search(),
+            PanelCommand::ShowOutline => self.close_search(false),
             PanelCommand::FocusDocument => {
                 self.keyboard_region = KeyboardRegion::Document;
                 iced::advanced::widget::operate(
@@ -11760,7 +11789,7 @@ fn shared_pixels(pixels: &std::sync::Arc<Vec<u8>>) -> bytes::Bytes {
 /// letter or a digit — which is what most stray presses are — must do
 /// nothing, or the offer becomes a nag in the middle of a talk.
 fn offers_binding(key: Option<&str>) -> bool {
-    if is_modifier(key) {
+    if is_modifier(key) || is_system_key(key) {
         return false;
     }
     match key {
@@ -11770,6 +11799,15 @@ fn offers_binding(key: Option<&str>) -> bool {
         // A single character is someone touching the keyboard.
         Some(name) => name.chars().count() > 1,
     }
+}
+
+/// Is this a power-management notification rather than an intentional key?
+///
+/// Some keyboards and compositors emit `WakeUp` when the machine resumes.
+/// Offering to bind that notification puts a configuration prompt in front
+/// of the presentation before the presenter has pressed anything.
+fn is_system_key(key: Option<&str>) -> bool {
+    matches!(key, Some("WakeUp" | "Power" | "Sleep" | "Standby"))
 }
 
 /// Is this key a modifier?
@@ -11822,10 +11860,11 @@ fn back_to_presenter_key(
 /// Is this warning worth putting in front of the presenter at all?
 ///
 /// Working on one screen is a normal way to run: rehearsing, writing the
-/// talk, or presenting from a laptop before the projector is plugged in. The
-/// layout already shows the audience status, so a notice about it would be
-/// nagging about a state the presenter chose. Both single-screen warnings
-/// stay in the log and the diagnostics bundle, where they belong.
+/// talk, or presenting from a laptop before the projector is plugged in.
+/// Likewise, a moment with no enumerated display is expected during startup,
+/// suspend and compositor handover. The layout already shows audience status,
+/// so notices about these states would be nags rather than calls to action.
+/// They stay in the log and diagnostics bundle, where they remain inspectable.
 fn shows_a_notice(warning: &pulpit_display::Warning) -> bool {
     use pulpit_display::Warning as W;
     // AwaitingFirstFrame is internal bookkeeping — the audience window is
@@ -11833,7 +11872,7 @@ fn shows_a_notice(warning: &pulpit_display::Warning) -> bool {
     // behaviour working as designed, not news for the presenter.
     !matches!(
         warning,
-        W::NoSecondaryDisplay | W::SharedDisplay | W::AwaitingFirstFrame
+        W::NoDisplays | W::NoSecondaryDisplay | W::SharedDisplay | W::AwaitingFirstFrame
     )
 }
 
@@ -12229,7 +12268,9 @@ mod save_review_tests {
 
 #[cfg(test)]
 mod key_prompt_tests {
-    use super::{back_to_presenter_key, is_modifier, offers_binding};
+    use super::{
+        back_to_presenter_key, is_modifier, is_system_key, offers_binding, shows_a_notice,
+    };
     use crate::designer::Page;
 
     #[test]
@@ -12282,6 +12323,32 @@ mod key_prompt_tests {
             assert!(is_modifier(Some(key)));
             assert!(!offers_binding(Some(key)));
         }
+    }
+
+    #[test]
+    fn power_management_notifications_never_offer_a_binding() {
+        for key in ["WakeUp", "Power", "Sleep", "Standby"] {
+            assert!(is_system_key(Some(key)));
+            assert!(!offers_binding(Some(key)));
+        }
+    }
+
+    #[test]
+    fn expected_display_states_stay_out_of_the_presenters_way() {
+        use pulpit_display::Warning;
+
+        for warning in [
+            Warning::NoDisplays,
+            Warning::NoSecondaryDisplay,
+            Warning::SharedDisplay,
+            Warning::AwaitingFirstFrame,
+        ] {
+            assert!(!shows_a_notice(&warning), "{warning:?} should stay passive");
+        }
+
+        assert!(shows_a_notice(&Warning::SelectedDisplayMissing {
+            role: pulpit_display::Role::Audience,
+        }));
     }
 }
 

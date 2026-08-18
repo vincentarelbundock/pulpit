@@ -305,6 +305,7 @@ pub struct ReaderSession {
     outline_focus: Option<OutlineItemId>,
     outline_scroll: [f32; 3],
     outline_viewport: [std::rc::Rc<std::cell::Cell<f32>>; 3],
+    outline_width: [std::rc::Rc<std::cell::Cell<f32>>; 3],
     level: CompatibilityLevel,
     warnings: Vec<DocumentWarning>,
     /// Whether this document has fields that can be filled at all (§8.6).
@@ -498,6 +499,7 @@ impl ReaderSession {
             outline_viewport: std::array::from_fn(|_| {
                 std::rc::Rc::new(std::cell::Cell::new(600.0))
             }),
+            outline_width: std::array::from_fn(|_| std::rc::Rc::new(std::cell::Cell::new(280.0))),
             ..ReaderSession::default()
         }
     }
@@ -1410,6 +1412,27 @@ impl ReaderSession {
     pub fn outline_scroll_position(&self) -> (f32, f32) {
         let slot = self.outline_slot();
         (self.outline_scroll[slot], self.outline_viewport[slot].get())
+    }
+
+    pub fn outline_width(&self) -> f32 {
+        self.outline_width[self.outline_slot()].get()
+    }
+
+    pub fn bookmark_row_heights(&self) -> Option<Vec<f32>> {
+        (self.controls.outline == OutlineView::Bookmarks).then(|| {
+            let width = self.outline_width();
+            self.outline
+                .iter()
+                .map(|entry| {
+                    crate::widgets::document::view::bookmark_row_geometry(
+                        &entry.title,
+                        entry.depth,
+                        width,
+                    )
+                    .1
+                })
+                .collect()
+        })
     }
 
     pub fn report_outline_scroll(&mut self, offset: f32, viewport: f32) {
@@ -3641,6 +3664,7 @@ impl ReaderSession {
             outline_focus: self.outline_focus.as_ref(),
             outline_scroll: self.outline_scroll_position().0,
             outline_viewport: self.outline_viewport[self.outline_slot()].clone(),
+            outline_width: self.outline_width[self.outline_slot()].clone(),
             document_keyboard_focus: false,
             has_form: self.has_form,
             fields: &self.fields,

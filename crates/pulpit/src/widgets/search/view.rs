@@ -6,9 +6,7 @@
 //! "search in every view" one widget rather than two.
 
 use iced::keyboard::{key::Named, Key};
-use iced::widget::{
-    button, column, container, responsive, rich_text, row, space, span, text, Column,
-};
+use iced::widget::{button, container, responsive, rich_text, row, space, span, text, Column};
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
@@ -30,15 +28,21 @@ pub fn input_id() -> iced::advanced::widget::Id {
 
 pub fn view<'ctx, 'a, Message: Clone + 'static>(
     ctx: &WidgetViewContext<'ctx, 'a, Message>,
-    _widget: &Widget,
+    widget: &Widget,
 ) -> Element<'a, Message> {
     let search = ctx.context.search.clone();
-    pane(search, ctx.context.mode.interactive(), ctx.on_event)
+    pane(
+        search,
+        ctx.context.mode.interactive(),
+        widget.kind() == crate::widgets::WidgetKind::DocumentOutline,
+        ctx.on_event,
+    )
 }
 
 pub fn pane<Message: Clone + 'static>(
     search: SearchData<'_>,
     live: bool,
+    shares_outline_sidebar: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let state = search.state;
@@ -126,12 +130,16 @@ pub fn pane<Message: Clone + 'static>(
                 theme::ambient::muted()
             });
 
-    let mut pane = column![
-        text("Search").size(theme::type_scale::TITLE),
-        field,
-        controls
-    ]
-    .spacing(theme::space::XS);
+    let mut pane = Column::new().spacing(theme::space::XS);
+    if shares_outline_sidebar {
+        pane = pane.push(crate::widgets::document::view::sidebar_tabs(
+            true, live, on_event,
+        ));
+    }
+    pane = pane
+        .push(text("Search").size(theme::type_scale::TITLE))
+        .push(field)
+        .push(controls);
     if !said.is_empty() {
         pane = pane.push(line);
     }

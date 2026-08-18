@@ -127,12 +127,6 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     if app.timer_controls.open {
         page = stack![page, timer_dialog(app)].into();
     }
-    // The restore offer sits above everything else in the presenter window,
-    // and has no counterpart on the audience window: the audience must learn
-    // nothing about the interrupted session until it is confirmed.
-    if let Some(plan) = app.pending_restore.as_ref() {
-        page = stack![page, restore_session_dialog(plan)].into();
-    }
     // The same rule for a document: what a previous run left unsaved is
     // offered, never applied, and the offer has no way out but an answer.
     if let Some(journal) = app.reader_recovery.as_ref() {
@@ -270,12 +264,20 @@ fn presenter(app: &App) -> Element<'_, Message> {
             .into_iter()
             .find(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentPage)
         {
-            return crate::layout_renderer::widget(
+            // Fullscreen removes the layout cell that normally paints the
+            // page's mount. Use the same absolute-black surround as a slide:
+            // any space left around the sheet should disappear into the
+            // screen rather than inheriting the reader theme's light canvas.
+            return container(crate::layout_renderer::widget(
                 page,
                 &context,
                 app.compose_buffer(),
                 interaction,
-            );
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::ambient::slide_letterbox)
+            .into();
         }
     }
     let body = crate::layout_renderer::layout(
@@ -346,8 +348,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
     page
 }
 
-/// Search is a transient rail beside the working surface. The document's own
-/// outline remains mounted, so bookmarks and search can be consulted together.
+/// Search is a transient rail beside the working surface.
 fn search_workspace(app: &App) -> Element<'_, Message> {
     let search = crate::widgets::context::SearchData {
         state: &app.search,
@@ -356,7 +357,7 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         scroll: app.search_scroll,
         viewport: app.search_viewport.clone(),
     };
-    crate::widgets::search::view::pane(search, true, interaction)
+    crate::widgets::search::view::pane(search, true, false, interaction)
 }
 
 /// What the slider is pointing at, while it is being dragged.
@@ -2870,41 +2871,6 @@ fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Elemen
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Done)))
         }
     }
-}
-
-/// The offer to recover an interrupted talk.
-///
-/// Deliberately a question with two answers and no default: restoring puts a
-/// slide in front of an audience and may move windows between displays, so it
-/// happens on a press and never on a timeout or a stray key.
-fn restore_session_dialog(plan: &crate::session::RestorePlan) -> Element<'static, Message> {
-    let body = column![
-        text("Restore the interrupted session?").size(type_scale::TITLE),
-        text(match plan.saved_ago_now() {
-            Some(ago) => format!("Pulpit did not shut down cleanly — {ago}."),
-            None => "Pulpit did not shut down cleanly last time.".to_string(),
-        })
-        .size(type_scale::BODY),
-        text(plan.summary()).size(type_scale::BODY),
-        text("Nothing is shown to the audience until you choose.").size(type_scale::LABEL),
-        row![
-            button(text("Start fresh").size(type_scale::LABEL))
-                .padding(gap::S)
-                .style(theme::ambient::tool_button)
-                .on_press(Message::DiscardSession),
-            button(text("Restore").size(type_scale::LABEL))
-                .padding(gap::S)
-                .style(theme::ambient::alert_button)
-                .on_press(Message::RestoreSession),
-        ]
-        .spacing(gap::S),
-    ]
-    .spacing(gap::M);
-
-    // No way out but an answer: restoring puts a slide in front of an
-    // audience, and a stray press on the ground behind must not decide that
-    // either way.
-    panel(body, None)
 }
 
 /// Offer back the edits a previous run did not save (§11.4).

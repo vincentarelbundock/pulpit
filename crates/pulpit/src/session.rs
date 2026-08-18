@@ -1,4 +1,4 @@
-//! Crash recovery: what the last run was doing, and how it is offered back.
+//! Crash recovery: what the last run was doing, and how it is restored.
 //!
 //! Pulpit writes a small snapshot of the live session beside the settings
 //! file while it runs, and deletes that file on a clean quit. The presence of
@@ -8,15 +8,12 @@
 //!
 //! Two rules shape everything here.
 //!
-//! 1. **Nothing audience-visible is restored without an answer.** The snapshot
-//!    is turned into a [`RestorePlan`], which is inert: constructing one
-//!    cannot move the audience, blank it, or reassign a display. Only
-//!    [`RestorePlan::apply_to`] does that, and it is reached from exactly one
-//!    message, sent by exactly one button. Until the presenter answers,
-//!    pulpit behaves like a fresh start.
-//! 2. **The offer is honest.** A slide index means nothing if the deck was
+//! 1. **Planning is inert.** The snapshot is turned into a [`RestorePlan`];
+//!    constructing one cannot move the audience, blank it, or reassign a
+//!    display. Only [`RestorePlan::apply_to`] does that during startup.
+//! 2. **The plan is honest.** A slide index means nothing if the deck was
 //!    rebuilt under us, so the plan checks a fingerprint of the file and
-//!    offers only the parts that still apply.
+//!    restores only the parts that still apply.
 //!
 //! The snapshot is JSON rather than the TOML the settings use: it is machine
 //! state written unattended, never hand-edited, and JSON has no rule about
@@ -190,8 +187,8 @@ impl SessionSnapshot {
             && self.timer.elapsed_secs.abs_diff(other.timer.elapsed_secs) < 30
     }
 
-    /// Whether there is anything here worth offering back. A snapshot of an
-    /// empty session with a stopped clock is not worth a dialog.
+    /// Whether there is anything here worth restoring. A snapshot of an
+    /// empty session with a stopped clock is not meaningful recovery.
     pub fn is_worth_offering(&self) -> bool {
         self.document.is_some()
             || self.committed != 0
@@ -199,11 +196,11 @@ impl SessionSnapshot {
             || self.blank.is_blanked()
     }
 
-    /// Decide what may be offered, given what the document looks like *now*.
+    /// Decide what may be restored, given what the document looks like *now*.
     ///
     /// `current` is the fingerprint taken at startup, or `None` when the file
     /// has gone. Nothing here changes anything: the result is a description
-    /// of an offer, and applying it is a separate, explicit step.
+    /// of the recovery, and applying it is a separate step.
     pub fn plan(&self, current: Option<&DocumentFingerprint>) -> RestorePlan {
         let document = match (&self.document, current) {
             (None, _) => DocumentStatus::NoDocument,
@@ -238,11 +235,11 @@ impl DocumentStatus {
     }
 }
 
-/// An offer, not an action.
+/// A recovery plan, not an action.
 ///
 /// Holding one has no effect on the presentation. Everything it can change
 /// happens inside [`RestorePlan::apply_to`] and [`RestorePlan::document`],
-/// which the application calls only after the presenter says yes.
+/// which the application calls during startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RestorePlan {
     pub document_status: DocumentStatus,
@@ -291,78 +288,6 @@ impl RestorePlan {
         &self.snapshot.roles
     }
 
-    /// How long ago the snapshot was written, in words.
-    ///
-    /// A presenter deciding whether to restore needs to know whether this is
-    /// the talk they were just giving or one from last week — "did not shut
-    /// down cleanly" alone does not say. Rounded, because the exact second is
-    /// not what the question turns on.
-    ///
-    /// `None` when the clock has moved backwards since, which a machine that
-    /// resynchronised its time can do; claiming a session was saved in the
-    /// future would be worse than saying nothing.
-    pub fn saved_ago(&self, now_unix: u64) -> Option<String> {
-        let elapsed = now_unix.checked_sub(self.snapshot.saved_at)?;
-        Some(match elapsed {
-            0..=90 => "moments ago".to_string(),
-            91..=5400 => format!("about {} minutes ago", (elapsed + 30) / 60),
-            5401..=172_800 => format!("about {} hours ago", (elapsed + 1800) / 3600),
-            _ => format!("about {} days ago", (elapsed + 43_200) / 86_400),
-        })
-    }
-
-    /// [`RestorePlan::saved_ago`] against the current clock.
-    pub fn saved_ago_now(&self) -> Option<String> {
-        self.saved_ago(unix_now())
-    }
-
-    /// The file name the offer should mention, if any.
-    pub fn document_name(&self) -> Option<String> {
-        self.snapshot
-            .document
-            .as_ref()
-            .and_then(|d| d.path.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-    }
-
-    /// One sentence saying what is and is not on offer, so the presenter is
-    /// never asked to approve something vaguer than what will happen.
-    pub fn summary(&self) -> String {
-        let clock = format!(
-            "the clock at {}",
-            format_duration(self.snapshot.timer.elapsed_secs)
-        );
-        match self.document_status {
-            DocumentStatus::Unchanged => {
-                let name = self.document_name().unwrap_or_else(|| "the deck".into());
-                format!(
-                    "Pulpit can reopen {name} on slide {}, restore {clock}, \
-                     and put the presenter layout and displays back as they were.",
-                    self.snapshot.committed + 1
-                )
-            }
-            DocumentStatus::Changed => {
-                let name = self.document_name().unwrap_or_else(|| "the deck".into());
-                format!(
-                    "{name} has changed since then, so the slide it was on no longer means \
-                     the same page. Only {clock}, the presenter layout and the displays can \
-                     be restored."
-                )
-            }
-            DocumentStatus::Missing => {
-                let name = self.document_name().unwrap_or_else(|| "the deck".into());
-                format!(
-                    "{name} is no longer there, so no slide can be restored. Only {clock}, \
-                     the presenter layout and the displays can be restored."
-                )
-            }
-            DocumentStatus::NoDocument => format!(
-                "No document was open. Pulpit can restore {clock}, the presenter layout \
-                 and the displays."
-            ),
-        }
-    }
-
     /// Apply everything that lives in presentation state.
     ///
     /// This is the only function in this module that can move the audience,
@@ -381,10 +306,6 @@ impl RestorePlan {
         *state.timer_mut() = self.snapshot.timer.to_timer(now);
         *roles = self.snapshot.roles.clone();
     }
-}
-
-fn format_duration(seconds: u64) -> String {
-    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 fn unix_now() -> u64 {
@@ -537,8 +458,8 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Forget the interrupted session. Called on a clean quit and when the
-    /// presenter declines the offer, so a restore is never proposed twice.
+    /// Forget the interrupted session. Called on a clean quit and before a
+    /// restore is applied, so a failed restore is never replayed forever.
     pub fn clear(&self) {
         if let Err(e) = std::fs::remove_file(&self.path) {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -550,7 +471,7 @@ impl SessionStore {
 }
 
 /// Fingerprint a document on disk. `None` when it cannot be read at all,
-/// which is itself the answer the restore offer needs.
+/// which tells the restore plan which document state can still be trusted.
 pub fn fingerprint(path: &Path) -> Option<DocumentFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     Some(DocumentFingerprint {
@@ -767,64 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn the_offer_says_how_old_it_is_in_words_a_presenter_can_act_on() {
-        // "Did not shut down cleanly" does not say whether this is the talk
-        // you were just giving or one from last week.
-        let snapshot = SessionSnapshot {
-            saved_at: 1_000_000,
-            ..Default::default()
-        };
-        let plan = snapshot.plan(None);
-
-        assert_eq!(plan.saved_ago(1_000_000).as_deref(), Some("moments ago"));
-        assert_eq!(plan.saved_ago(1_000_060).as_deref(), Some("moments ago"));
-        assert_eq!(
-            plan.saved_ago(1_000_300).as_deref(),
-            Some("about 5 minutes ago")
-        );
-        assert_eq!(
-            plan.saved_ago(1_000_000 + 3 * 3600).as_deref(),
-            Some("about 3 hours ago")
-        );
-        assert_eq!(
-            plan.saved_ago(1_000_000 + 3 * 86_400).as_deref(),
-            Some("about 3 days ago")
-        );
-    }
-
-    #[test]
-    fn a_clock_that_moved_backwards_says_nothing_rather_than_the_future() {
-        // A machine that resynchronised its time can land before the
-        // snapshot; "saved in 4 minutes" would be worse than silence.
-        let snapshot = SessionSnapshot {
-            saved_at: 1_000_000,
-            ..Default::default()
-        };
-        assert_eq!(snapshot.plan(None).saved_ago(999_000), None);
-    }
-
-    #[test]
-    fn the_offer_says_out_loud_what_it_cannot_restore() {
-        let snapshot = snapshot_of_an_interrupted_talk();
-        let fresh = snapshot.plan(Some(&unchanged_fingerprint())).summary();
-        assert!(fresh.contains("slide 12"), "1-based for a human: {fresh}");
-        assert!(fresh.contains("12:34"), "and the clock: {fresh}");
-
-        let missing = snapshot.plan(None).summary();
-        assert!(missing.contains("no longer there"), "{missing}");
-        assert!(!missing.contains("slide 12"), "{missing}");
-
-        let changed = snapshot
-            .plan(Some(&DocumentFingerprint {
-                size: Some(1),
-                ..unchanged_fingerprint()
-            }))
-            .summary();
-        assert!(changed.contains("has changed"), "{changed}");
-        assert!(!changed.contains("slide 12"), "{changed}");
-    }
-
-    #[test]
     fn an_unconfirmed_restore_changes_nothing_the_audience_can_see() {
         // The whole point of the feature: a snapshot may be loaded, planned
         // and described without the audience learning anything about it.
@@ -833,7 +696,6 @@ mod tests {
 
         let snapshot = store.load().expect("the crashed run left one");
         let plan = snapshot.plan(Some(&unchanged_fingerprint()));
-        let _ = plan.summary();
         let _ = plan.document();
         let _ = plan.slides();
 

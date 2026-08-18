@@ -38,6 +38,42 @@ pub fn virtual_window(count: usize, row_height: f32, offset: f32, viewport: f32)
     }
 }
 
+/// The finite window for a list whose rows have content-driven heights.
+pub fn variable_window(heights: &[f32], offset: f32, viewport: f32) -> VirtualWindow {
+    let total: f32 = heights.iter().sum();
+    if heights.is_empty() || viewport <= 0.0 {
+        return VirtualWindow {
+            rows: 0..0,
+            before: 0.0,
+            after: total,
+        };
+    }
+    let offset = offset.max(0.0);
+    let mut top = 0.0;
+    let first = heights
+        .iter()
+        .position(|height| {
+            top += height.max(0.0);
+            top > offset
+        })
+        .unwrap_or(heights.len());
+    let mut bottom = top;
+    let mut last = first;
+    while last < heights.len() && bottom < offset + viewport {
+        bottom += heights[last].max(0.0);
+        last += 1;
+    }
+    let start = first.saturating_sub(OVERSCAN_ROWS);
+    let end = (last + OVERSCAN_ROWS).min(heights.len());
+    let before = heights[..start].iter().sum();
+    let after = heights[end..].iter().sum();
+    VirtualWindow {
+        rows: start..end,
+        before,
+        after,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevealDirection {
     Up,
@@ -74,6 +110,35 @@ pub fn reveal_offset(
         RevealDirection::Nearest => target,
     };
     directional.clamp(0.0, (count as f32 * row_height - viewport).max(0.0))
+}
+
+pub fn reveal_variable_offset(
+    index: usize,
+    heights: &[f32],
+    offset: f32,
+    viewport: f32,
+    direction: RevealDirection,
+) -> f32 {
+    if heights.is_empty() || viewport <= 0.0 {
+        return 0.0;
+    }
+    let index = index.min(heights.len() - 1);
+    let row_top: f32 = heights[..index].iter().sum();
+    let row_bottom = row_top + heights[index];
+    let nearest = if row_top < offset {
+        row_top
+    } else if row_bottom > offset + viewport {
+        row_bottom - viewport
+    } else {
+        return offset;
+    };
+    let target = match direction {
+        RevealDirection::Up => row_top,
+        RevealDirection::Down => row_bottom - viewport,
+        RevealDirection::Nearest => nearest,
+    };
+    let total: f32 = heights.iter().sum();
+    target.clamp(0.0, (total - viewport).max(0.0))
 }
 
 /// The shared track and thumb geometry.
@@ -120,6 +185,20 @@ mod tests {
         assert_eq!(
             reveal_offset(1, 32.0, 96.0, 160.0, 100, RevealDirection::Up),
             32.0
+        );
+    }
+
+    #[test]
+    fn variable_rows_keep_exact_spacers_and_reveal_tall_entries() {
+        let heights = [20.0, 40.0, 20.0, 60.0, 20.0];
+        let window = variable_window(&heights, 60.0, 40.0);
+        assert_eq!(
+            window.before + heights[window.rows.clone()].iter().sum::<f32>() + window.after,
+            160.0
+        );
+        assert_eq!(
+            reveal_variable_offset(3, &heights, 0.0, 80.0, RevealDirection::Down),
+            60.0
         );
     }
 }

@@ -421,6 +421,7 @@ pub struct ReaderData<'a> {
     pub outline_focus: Option<&'a crate::widgets::document::model::OutlineItemId>,
     pub outline_scroll: f32,
     pub outline_viewport: std::rc::Rc<std::cell::Cell<f32>>,
+    pub outline_width: std::rc::Rc<std::cell::Cell<f32>>,
     pub document_keyboard_focus: bool,
     /// Does this document have fields at all (§8.6)? The navigator is offered
     /// only where there is something to navigate.

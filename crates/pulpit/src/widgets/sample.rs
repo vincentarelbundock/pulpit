@@ -131,6 +131,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         outline_focus: None,
         outline_scroll: 0.0,
         outline_viewport: std::rc::Rc::new(std::cell::Cell::new(600.0)),
+        outline_width: std::rc::Rc::new(std::cell::Cell::new(280.0)),
         document_keyboard_focus: true,
         has_form: false,
         fields: &[],

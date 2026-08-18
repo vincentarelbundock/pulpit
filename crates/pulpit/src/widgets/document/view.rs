@@ -321,8 +321,8 @@ fn page_surface_width(column_width: f32, viewport_width: f32) -> f32 {
 }
 
 #[cfg(test)]
-mod page_surface_tests {
-    use super::page_surface_width;
+mod layout_tests {
+    use super::{bookmark_row_geometry, page_surface_width, OUTLINE_COMPACT_ROW_HEIGHT};
 
     #[test]
     fn a_fitted_document_tracks_the_live_viewport_width() {
@@ -335,6 +335,23 @@ mod page_surface_tests {
     #[test]
     fn a_document_wider_than_the_viewport_keeps_its_scrollable_width() {
         assert_eq!(page_surface_width(1_200.0, 960.0), 1_200.0);
+    }
+
+    #[test]
+    fn long_bookmarks_gain_lines_only_when_the_rail_needs_them() {
+        let title = "A long chapter title whose words need room to remain readable";
+        let (_, narrow) = bookmark_row_geometry(title, 2, 170.0);
+        let (_, wide) = bookmark_row_geometry(title, 2, 420.0);
+        assert!(narrow > wide);
+        assert!(wide >= OUTLINE_COMPACT_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn narrow_deep_outlines_preserve_more_room_for_words() {
+        let (narrow_indent, _) = bookmark_row_geometry("Methods", 6, 170.0);
+        let (wide_indent, _) = bookmark_row_geometry("Methods", 6, 420.0);
+        assert!(narrow_indent < wide_indent);
+        assert!(narrow_indent <= 170.0 * 0.32);
     }
 }
 
@@ -1656,6 +1673,7 @@ fn outline<Message: Clone + 'static>(
     // title scale and inset. The tabs are controls within the outline rather
     // than a substitute for its title.
     let header = column![
+        sidebar_tabs(false, live, on_event),
         text(view.label()).size(theme::type_scale::TITLE),
         tabs.width(Length::Fill)
     ]
@@ -1670,55 +1688,14 @@ fn outline<Message: Clone + 'static>(
         OutlineView::Bookmarks => {
             let entries = reader.outline.to_vec();
             let focus = reader.outline_focus.cloned();
-            virtual_outline(
-                entries.len(),
+            virtual_bookmark_outline(
+                entries,
+                focus,
                 reader.outline_scroll,
                 reader.outline_viewport.clone(),
+                reader.outline_width.clone(),
+                live,
                 on_event,
-                move |index| {
-                    let entry = &entries[index];
-                    let id = OutlineItemId::Bookmark {
-                        source_ordinal: entry.source_ordinal,
-                    };
-                    let indent = (entry.depth.min(6) as f32) * 12.0;
-                    let label = text(entry.title.clone())
-                        .size(theme::type_scale::LABEL)
-                        .width(Length::Fill);
-                    let focused = focus.as_ref() == Some(&id);
-                    let marker: Element<'static, Message> = if focused {
-                        container(space::vertical().width(3.0).height(Length::Fill))
-                            .style(theme::ambient::accent_rule)
-                            .into()
-                    } else {
-                        space::horizontal().width(3.0).into()
-                    };
-                    let control = button(
-                        row![
-                            marker,
-                            space::horizontal().width(Length::Fixed(indent)),
-                            label
-                        ]
-                        .align_y(Alignment::Center),
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
-                    .padding(Padding::from([3.0, 6.0]))
-                    .style(if focused {
-                        theme::ambient::focus_button
-                    } else {
-                        theme::ambient::tool_button
-                    });
-                    let control = if live {
-                        control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
-                    } else {
-                        control
-                    };
-                    container(control)
-                        .id(outline_item_id(&id))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT))
-                        .into()
-                },
             )
         }
         OutlineView::Fields if reader.fields.is_empty() => {
@@ -1912,6 +1889,168 @@ fn outline<Message: Clone + 'static>(
             _ => None,
         }
     })
+}
+
+/// Select the contents of the document's one shared sidebar.
+pub fn sidebar_tabs<Message: Clone + 'static>(
+    search_selected: bool,
+    live: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    use crate::widgets::event::PanelCommand;
+
+    let tab = |icon, label, selected, command| {
+        // These are the primary selectors for the rail, so give their glyphs
+        // the same visual scale as the title naming the selected section.
+        let mut control = button(theme::icon::icon(icon, theme::type_scale::TITLE))
+            .padding(theme::space::XS)
+            .style(if selected {
+                theme::ambient::selected_button
+            } else {
+                theme::ambient::tool_button
+            });
+        if live && !selected {
+            control = control.on_press(on_event(WidgetEvent::Panel(command)));
+        }
+        hint(control, label)
+    };
+
+    row![
+        tab(
+            theme::Icon::Outline,
+            "Outline",
+            !search_selected,
+            PanelCommand::ShowOutline
+        ),
+        tab(
+            theme::Icon::Search,
+            "Search",
+            search_selected,
+            PanelCommand::ShowSearch
+        ),
+    ]
+    .spacing(theme::space::XS)
+    .into()
+}
+
+const OUTLINE_LINE_HEIGHT: f32 = 15.0;
+const OUTLINE_ROW_PADDING: f32 = 8.0;
+const OUTLINE_COMPACT_ROW_HEIGHT: f32 = 24.0;
+
+/// Responsive geometry for an authored bookmark.
+///
+/// Continuation lines begin where the first line begins (the depth spacer is
+/// outside the text), producing a hanging indent. Deep trees surrender some
+/// indentation on narrow rails so hierarchy never consumes the title.
+pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32) -> (f32, f32) {
+    let width = width.max(80.0);
+    let indent_step = (width / 30.0).clamp(6.0, 10.0);
+    let indent = (depth.min(6) as f32 * indent_step).min(width * 0.32);
+    let label_width = (width - indent - 31.0).max(36.0);
+    let ems = title.chars().map(|character| match character {
+        ' ' | '\t' => 0.32,
+        'i' | 'l' | 'I' | '.' | ',' | ':' | ';' | '!' | '|' => 0.34,
+        'm' | 'w' | 'M' | 'W' => 0.9,
+        character if character.is_ascii_uppercase() => 0.68,
+        _ => 0.56,
+    });
+    // A small allowance covers word wrapping: the renderer moves a whole
+    // word when it does not fit, while the estimate above is continuous.
+    let estimated_width = ems.sum::<f32>() * theme::type_scale::LABEL * 1.08;
+    let lines = (estimated_width / label_width).ceil().max(1.0);
+    let height =
+        (lines * OUTLINE_LINE_HEIGHT + OUTLINE_ROW_PADDING).max(OUTLINE_COMPACT_ROW_HEIGHT);
+    (indent, height)
+}
+
+fn virtual_bookmark_outline<Message: Clone + 'static>(
+    entries: Vec<crate::widgets::context::OutlineRow>,
+    focus: Option<crate::widgets::document::model::OutlineItemId>,
+    scroll: f32,
+    measured_viewport: std::rc::Rc<std::cell::Cell<f32>>,
+    measured_width: std::rc::Rc<std::cell::Cell<f32>>,
+    live: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    responsive(move |size| {
+        use crate::widgets::document::model::OutlineItemId;
+
+        measured_viewport.set(size.height);
+        measured_width.set(size.width);
+        let geometry: Vec<(f32, f32)> = entries
+            .iter()
+            .map(|entry| bookmark_row_geometry(&entry.title, entry.depth, size.width))
+            .collect();
+        let heights: Vec<f32> = geometry.iter().map(|(_, height)| *height).collect();
+        let window = crate::widgets::scroll::variable_window(&heights, scroll, size.height);
+        let mut rows = Column::new();
+        if window.before > 0.0 {
+            rows = rows.push(space::vertical().height(window.before));
+        }
+        for index in window.rows {
+            let entry = &entries[index];
+            let (indent, height) = geometry[index];
+            let id = OutlineItemId::Bookmark {
+                source_ordinal: entry.source_ordinal,
+            };
+            let focused = focus.as_ref() == Some(&id);
+            let marker: Element<'static, Message> = if focused {
+                container(space::vertical().width(3.0).height(Length::Fill))
+                    .style(theme::ambient::accent_rule)
+                    .into()
+            } else {
+                space::horizontal().width(3.0).into()
+            };
+            let label = text(entry.title.clone())
+                .size(theme::type_scale::LABEL)
+                .line_height(iced::widget::text::LineHeight::Absolute(iced::Pixels(
+                    OUTLINE_LINE_HEIGHT,
+                )))
+                .width(Length::Fill);
+            let mut control = button(
+                row![
+                    marker,
+                    space::horizontal().width(Length::Fixed(indent)),
+                    label
+                ]
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(height - 2.0))
+            .padding(Padding::from([4.0, 6.0]))
+            .style(if focused {
+                theme::ambient::focus_button
+            } else {
+                theme::ambient::tool_button
+            });
+            if live {
+                control = control.on_press(on_event(WidgetEvent::Read(
+                    ReadCommand::ActivateOutlineItem(id.clone()),
+                )));
+            }
+            rows = rows.push(
+                container(control)
+                    .id(outline_item_id(&id))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(height)),
+            );
+        }
+        if window.after > 0.0 {
+            rows = rows.push(space::vertical().height(window.after));
+        }
+        crate::widgets::scroll::vertical(rows)
+            .id(outline_scrollable_id())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_scroll(move |viewport| {
+                on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
+                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                    viewport: viewport.bounds().height.max(0.0).round() as u32,
+                }))
+            })
+            .into()
+    })
+    .into()
 }
 
 /// Build only the fixed-height outline rows near the viewport while keeping
