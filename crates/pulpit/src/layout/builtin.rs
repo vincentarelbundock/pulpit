@@ -141,8 +141,8 @@ fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
     layout
 }
 
-/// **Presenter** — the layout a presentation opens with. Most of the width is
-/// the live slide; the remaining rail stacks the two readings (clock and timer
+/// **Presenter** — the live-presentation layout. Most of the width is the live
+/// slide; the remaining rail stacks the two readings (clock and timer
 /// side by side), the next slide, and the notes; a shallow band along the
 /// bottom carries the controls.
 ///
@@ -210,7 +210,7 @@ pub fn presenter_default() -> Layout {
     )
 }
 
-/// **Reader** — the layout a document opens with.
+/// **Reader** — the layout a new document opens with.
 ///
 /// The page gets everything that is not a control: a shallow band along the
 /// top carries navigation and the annotation tools, and a narrow rail carries
@@ -261,8 +261,8 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
 /// The built-ins in canonical presentation-first order. The layout library's
 /// view may choose a different display order without changing this fallback.
 ///
-/// The list is bimodal (§2.1): **Presenter** is what a presentation opens with
-/// and **Reader** is what a document opens with, and neither is a variant of
+/// The list is bimodal (§2.1): **Reader** is what a new PDF opens with and
+/// **Presenter** is the live-presentation view, and neither is a variant of
 /// the other. `built_in_layouts` passes the `SixteenNine` fallback so the list
 /// stays parameterless, display-free and testable; a caller with a live window
 /// builds a Reader at that window's ratio instead.
@@ -275,8 +275,7 @@ pub fn built_in_layouts() -> Vec<Layout> {
 
 /// Which built-in a mode opens with (§2.3).
 ///
-/// A property of the document rather than of a global setting: choosing a
-/// presenter variant never changes what a PDF opens into, and the reverse.
+/// The fallback for one viewer when it has no last-used layout.
 pub fn default_for(viewer: PrimaryViewer) -> LayoutId {
     match viewer {
         PrimaryViewer::Slide => LayoutId("presenter-default".to_string()),
@@ -329,7 +328,7 @@ mod tests {
         assert_eq!(
             default_for(PrimaryViewer::Slide),
             layouts[0].id,
-            "a presentation opens into the first presenter built-in"
+            "the slide viewer falls back to the first presenter built-in"
         );
 
         let reader = reader_default(AspectRatio::SixteenNine);

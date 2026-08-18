@@ -252,10 +252,9 @@ pub struct LayoutSettings {
     /// The layout a specific file was last put into by hand, keyed by the
     /// hash of its contents.
     ///
-    /// Only a deliberate choice is recorded here. What the shape of the first
-    /// page suggested is a guess and is re-made every time the file is opened;
-    /// what the user chose while reading that file is an answer, and an answer
-    /// outranks a guess for as long as the file is the same bytes.
+    /// Only a deliberate choice is recorded here. A file with no entry opens
+    /// in the Reader; what the user chose while that file was open replaces
+    /// that default for as long as the file is the same bytes.
     ///
     /// By content rather than by path so that moving or renaming a file does
     /// not lose the choice, and so that two copies of the same document agree.
@@ -1067,8 +1066,8 @@ mod tests {
         );
     }
 
-    /// A file nobody chose a layout for hands its copy nothing, so the copy is
-    /// detected on its own shape like any other file opened for the first time.
+    /// A file nobody chose a layout for hands its copy nothing, so the copy
+    /// opens in the Reader like any other file opened for the first time.
     #[test]
     fn a_copy_of_an_unremembered_file_stays_unremembered() {
         let mut layout = LayoutSettings::default();

@@ -357,9 +357,8 @@ fn presenter(app: &App) -> Element<'_, Message> {
     };
 
     // Empty startup is its own mode-neutral surface. It must not mount a
-    // Reader or Presenter layout: opening a document still gets the ordinary
-    // shape-based mode detection with no remembered empty-state choice in
-    // the way.
+    // Reader or Presenter layout: opening a document starts in the Reader
+    // unless that exact file carries an explicit remembered choice.
     if app.state.document().is_none() {
         page = landing_page(app);
     }
@@ -1082,19 +1081,12 @@ fn menu(app: &App) -> Element<'_, Message> {
         Message::Do(Action::SwapDisplays),
     ));
     items = items.push(entry(
-        if crate::layout::PrimaryViewer::of(&app.active_layout)
-            == crate::layout::PrimaryViewer::Document
-        {
-            if app.reader_fullscreen {
-                "Page: fullscreen"
-            } else {
-                "Page: windowed"
-            }
-        } else if app.coordinator.roles.audience_fullscreen {
-            "Audience: fullscreen"
-        } else {
-            "Audience: windowed"
-        },
+        fullscreen_action_label(
+            crate::layout::PrimaryViewer::of(&app.active_layout)
+                == crate::layout::PrimaryViewer::Document,
+            app.reader_fullscreen,
+            app.coordinator.roles.audience_fullscreen,
+        ),
         shortcut(Action::ToggleAudienceFullscreen),
         Message::Do(Action::ToggleAudienceFullscreen),
     ));
@@ -1203,6 +1195,24 @@ fn shortcut_hint<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
     hint.into()
 }
 
+/// The fullscreen menu item names the state pressing it will enter.
+fn fullscreen_action_label(
+    document_viewer: bool,
+    reader_fullscreen: bool,
+    audience_fullscreen: bool,
+) -> &'static str {
+    let fullscreen = if document_viewer {
+        reader_fullscreen
+    } else {
+        audience_fullscreen
+    };
+    if fullscreen {
+        "Windowed"
+    } else {
+        "Fullscreen"
+    }
+}
+
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
     Row::new()
         .spacing(gap::M)
@@ -1247,10 +1257,10 @@ fn shortcut_card<'a>(
         .into()
 }
 
-/// A mode-neutral welcome surface. Opening a document from here still runs
-/// the ordinary shape-based Reader/Presenter detection. It carries the
-/// complete keymap: with no document open there is nothing to read behind an
-/// overlay, so the reference is the page rather than a layer above it.
+/// A mode-neutral welcome surface. Opening a new document from here starts in
+/// the Reader. It carries the complete keymap: with no document open there is
+/// nothing to read behind an overlay, so the reference is the page rather
+/// than a layer above it.
 fn landing_page(app: &App) -> Element<'_, Message> {
     use crate::settings::keys::SHORTCUT_GROUPS;
 
@@ -3602,6 +3612,14 @@ fn local_offset_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_menu_item_names_the_action_not_the_current_state() {
+        assert_eq!(fullscreen_action_label(true, false, false), "Fullscreen");
+        assert_eq!(fullscreen_action_label(true, true, false), "Windowed");
+        assert_eq!(fullscreen_action_label(false, false, false), "Fullscreen");
+        assert_eq!(fullscreen_action_label(false, false, true), "Windowed");
+    }
 
     #[test]
     fn the_clock_is_within_a_day() {

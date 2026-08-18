@@ -1347,8 +1347,8 @@ what the checks say.
   stroke: none,
   inset: 0.55em,
   [*Layout*], [*For*],
-  [*Presenter*], [What a presentation opens with: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
-  [*Reader*], [What a document opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail that becomes an overlay drawer in a narrow window.],
+  [*Presenter*], [The live-presentation view: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
+  [*Reader*], [What a new PDF opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail that becomes an overlay drawer in a narrow window.],
 )
 
 There are two and no more, one per mode, and neither is a variant of the
@@ -1359,30 +1359,12 @@ opens it.
 
 == Which layout a file opens into
 
-A deck and a report are the same file format, so the only honest signal at
-open is the shape of the first page. `layout/detect.rs` reads it, in this
-order:
+A new PDF opens in the Reader. Page size and aspect ratio do not participate:
+a deck and a report are the same file format, and Pulpit does not guess what
+the user intends from their geometry.
 
-+ a *known paper size* --- A4, A3, A5, B5, Letter, Legal or Tabloid, within
-  three points, in either orientation --- is a document. Size is checked
-  before shape because US Letter landscape is 1.294:1, close enough to 4:3
-  that a shape-only test would open every landscape handout as a talk;
-+ a *known slide ratio* --- 4:3, 16:9, 16:10, 5:4 or 3:2, within a percent ---
-  is a presentation;
-+ *twice* a known slide ratio is a presentation too, which is a beamer deck
-  built with `show notes on second screen`: the slide and its notes side by
-  side on one double-wide page;
-+ anything else is a document. The Reader shows a deck perfectly well, whereas
-  the presenter screen shows a report as a slide that does not fit, so the
-  fallback goes the way that degrades gracefully.
-
-The function is pure and every case above is a unit test. It chooses the
-*mode*, not the layout: which layout that mode opens into is the one the user
-was last in, so somebody who works in their own presenter layout gets theirs
-rather than the built-in.
-
-It is a guess, and it gives way to an answer. A layout chosen by hand while a
-document is open is recorded in `layout.per_document` against the BLAKE3 of
+A layout chosen by hand while a document is open --- including the *Read or
+present* switch --- is recorded in `layout.per_document` against the BLAKE3 of
 that file's bytes, and that choice wins on every later open of the same file.
 By contents rather than by path, so moving or renaming a document keeps the
 choice and two copies of one document agree; `session::fingerprint`, which

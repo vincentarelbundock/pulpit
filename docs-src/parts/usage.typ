@@ -49,8 +49,8 @@ rather than a settings editor.
 With no document open, Pulpit shows a mode-neutral welcome page instead of a
 Reader or Presenter layout. It leads with *Open a PDF*, teaches compact
 getting-started and presenting subsets of the same fixed shortcuts, and links
-to the online documentation. Opening a file from there still uses the shape
-of its first page to choose Reader or Presenter automatically.
+to the online documentation. A new PDF opens in the Reader. If you explicitly
+switch that file to Presenter, Pulpit remembers the choice for later sessions.
 
 = Annotations
 

@@ -1221,6 +1221,10 @@ pub struct App {
     /// file could not be read — in which case this file simply remembers
     /// nothing rather than borrowing somebody else's memory.
     document_hash: Option<String>,
+    /// An explicit layout choice made while the content hash is still being
+    /// prepared. Once the hash arrives it is recorded against the same file;
+    /// opening another file clears it first.
+    pending_document_layout: Option<String>,
     /// Where this document was left last time, waiting for a window to be
     /// restored into.
     ///
@@ -1610,6 +1614,7 @@ impl App {
             reader_journal: None,
             pending_reader_recovery: None,
             document_hash: None,
+            pending_document_layout: None,
             pending_position: None,
             reader_recovery: None,
             presenter_interaction: pulpit_core::annotate::AnnotationInteraction::new(),
@@ -3327,16 +3332,18 @@ impl App {
     /// presenter screen alone.
     ///
     /// A choice made while a document is open is remembered against *that*
-    /// document as well as against its mode, and outranks what the shape of
-    /// the page would have suggested next time the same file is opened. This
-    /// is the only path that records one: what auto-detection mounts is a
-    /// guess, and a guess that wrote itself down would be indistinguishable
-    /// from an answer the moment it was wrong.
+    /// document as well as against its mode. This is the only path that
+    /// records one: merely opening a new file in the Reader is a default, not
+    /// a choice about that file.
     fn adopt_layout(&mut self, layout: Layout) {
         if let Some(hash) = self.document_hash.clone() {
             self.settings
                 .layout
                 .remember_layout_for_document(hash, layout.id.0.clone());
+        } else if !self.documents.path().as_os_str().is_empty() {
+            // Hashing runs off the event loop. A quick explicit switch still
+            // belongs to this file and is written down when preparation ends.
+            self.pending_document_layout = Some(layout.id.0.clone());
         }
         self.mount_layout(layout);
     }
@@ -5069,6 +5076,7 @@ impl App {
         self.file_wakeup = None;
         self.document_serial += 1;
         self.document_hash = None;
+        self.pending_document_layout = None;
         // A fresh document starts with no signing question answered yet;
         // discovery below decides whether one needs asking (§31.3, A9).
         self.append_only = None;
@@ -5088,6 +5096,12 @@ impl App {
         self.reader_wakeup = None;
         self.reader_journal = None;
         self.forget_per_document_edit_state();
+
+        // A PDF without a deliberate per-file choice always opens for
+        // reading. Do this at the open boundary rather than after the reader
+        // worker has measured every page, so advancing through a deck can
+        // never be interrupted by a late layout decision.
+        self.mount_default_reader_layout();
 
         let preparation = self.prepare_document_task(path.clone(), self.document_serial);
         let actions = self.documents.open_initial(self.now);
@@ -5149,6 +5163,18 @@ impl App {
             return Task::none();
         };
         self.document_hash = prepared.content_hash.take();
+        if let (Some(hash), Some(layout)) = (
+            self.document_hash.clone(),
+            self.pending_document_layout.take(),
+        ) {
+            self.settings
+                .layout
+                .remember_layout_for_document(hash, layout);
+            self.persist();
+        }
+        // The hash is the identity of a deliberate per-file choice. Restore
+        // it as soon as it exists; no page geometry participates.
+        self.restore_layout_for_document();
         self.pending_reader_recovery = prepared.recovery.take();
         self.document_signatures = prepared.signatures;
         self.pending_append_only_offer = !self.document_signatures.is_empty();
@@ -5320,9 +5346,6 @@ impl App {
                             })
                             .collect(),
                     );
-                    // Now that the pages have been measured, the file can say
-                    // what it is for.
-                    self.settle_layout_for_document();
                     // …and where it was last read. Only looked up here; the
                     // window it is restored into does not exist yet.
                     self.find_reading_position();
@@ -5540,8 +5563,8 @@ impl App {
                     // it, and it hashes differently, so it would open as a
                     // stranger. Give it whatever this file was remembered as
                     // — and only that: a file with no remembered choice hands
-                    // its copy nothing, so the copy is auto-detected on its
-                    // own shape like any other new file.
+                    // its copy nothing, so the copy opens in the Reader like
+                    // any other new file.
                     if let (Some(from), Some(to)) = (
                         self.document_hash.clone(),
                         crate::session::content_hash(&saved.path),
@@ -7771,69 +7794,47 @@ impl App {
         Task::none()
     }
 
-    /// Put the newly opened document into the layout it belongs in.
-    ///
-    /// Called once, as soon as the document has described itself, because the
-    /// first page's size is the whole of the evidence and it does not exist
-    /// until then. In order:
-    ///
-    /// 1. **What the user chose for this exact file**, keyed by content hash.
-    ///    An answer, and it wins outright.
-    /// 2. **What the shape of the first page suggests** — a talk-shaped page
-    ///    presents, a paper-shaped page reads. A guess, and it only picks the
-    ///    *mode*: which layout that mode opens into is still the one the user
-    ///    was last in, so somebody who works in their own presenter layout
-    ///    gets theirs and not the built-in.
-    ///
-    /// Nothing happens when the answer is the layout already mounted, which is
-    /// the common case: no toast, no relayout, no entry in the diagnostics.
-    fn settle_layout_for_document(&mut self) {
-        let remembered = self
-            .document_hash
-            .as_ref()
-            .and_then(|hash| self.settings.layout.layout_for_document(hash))
-            .map(|id| LayoutId(id.to_string()))
-            // A layout the user has since deleted is not an answer any more.
-            .filter(|id| self.layouts.get(id).is_some());
-
-        let chosen = remembered.is_some();
-        let id = match remembered {
-            Some(id) => id,
-            None => {
-                // The first page is the evidence, and a document that measured
-                // no pages is no evidence at all — which is not a reason to
-                // move a presentation into the Reader.
-                let Some(first) = self.reader.page_geometry(pulpit_core::page::PageIndex(0)) else {
-                    return;
-                };
-                let viewer = crate::layout::detect::viewer_for_page(first.width, first.height);
-                let last_used = match viewer {
-                    crate::layout::PrimaryViewer::Slide => self.settings.layout.active.clone(),
-                    crate::layout::PrimaryViewer::Document => {
-                        self.settings.layout.active_document.clone()
-                    }
-                };
-                last_used
-                    .map(LayoutId)
-                    .filter(|id| self.layouts.get(id).is_some())
-                    .unwrap_or_else(|| crate::layout::builtin::default_for(viewer))
-            }
-        };
-
-        // Already there, which is the common case: opening a second deck while
-        // the presenter screen is up should be a document change and nothing
-        // more.
+    /// Mount the Reader layout used for files without a per-file choice.
+    fn mount_default_reader_layout(&mut self) {
+        let id = self
+            .settings
+            .layout
+            .active_document
+            .clone()
+            .map(LayoutId)
+            .filter(|id| self.layouts.get(id).is_some())
+            .unwrap_or_else(|| {
+                crate::layout::builtin::default_for(crate::layout::PrimaryViewer::Document)
+            });
         if id == self.active_layout.id {
             return;
         }
         let Some(layout) = self.layouts.get(&id).cloned() else {
             return;
         };
-        self.diagnostics.note(format!(
-            "document layout: {} ({})",
-            layout.name,
-            if chosen { "remembered" } else { "detected" }
-        ));
+        self.mount_layout(layout);
+    }
+
+    /// Restore the layout explicitly chosen for this exact file, if any.
+    fn restore_layout_for_document(&mut self) {
+        let Some(id) = self
+            .document_hash
+            .as_ref()
+            .and_then(|hash| self.settings.layout.layout_for_document(hash))
+            .map(|id| LayoutId(id.to_string()))
+            // A layout the user has since deleted is not an answer any more.
+            .filter(|id| self.layouts.get(id).is_some())
+        else {
+            return;
+        };
+        if id == self.active_layout.id {
+            return;
+        }
+        let Some(layout) = self.layouts.get(&id).cloned() else {
+            return;
+        };
+        self.diagnostics
+            .note(format!("document layout: {} (remembered)", layout.name));
         self.mount_layout(layout);
     }
 
@@ -7942,13 +7943,10 @@ impl App {
             self.notify("There is no document open to read.".to_string());
             return Task::none();
         }
-        // Mounted, not adopted. Flipping mode says "show me this file the
-        // other way for a moment", not "this file is a document" — and
-        // `adopt_layout` would write the latter down against the file for
-        // good, so a deck read in the Reader once would never open as a deck
-        // again however plainly its pages say 16:9. Each mode still remembers
-        // its own layout, which is all this toggle promises.
-        self.mount_layout(layout);
+        // This is an explicit choice about the open file, so it is restored
+        // next time the same bytes are opened. Switching back records the
+        // Reader in exactly the same way.
+        self.adopt_layout(layout);
         Task::none()
     }
 
