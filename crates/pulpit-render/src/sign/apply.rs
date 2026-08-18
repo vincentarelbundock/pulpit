@@ -447,6 +447,15 @@ struct RevisionPlan {
 }
 
 fn plan_revision(source: &[u8], request: &SignRequest) -> Result<RevisionPlan, SignApplyError> {
+    // Every target reaches this point, but only the ExistingField branch runs
+    // `preflight_sign`, so the refusal has to sit here to cover creating a new
+    // field as well. We append plaintext and carry no encryption layer
+    // (§23.2), so signing an encrypted document could only ever produce a file
+    // no reader accepts.
+    if crate::verify::is_encrypted(source) {
+        return Err(PreflightRefusal::EncryptedDocument.into());
+    }
+
     let previous_signatures = count_signatures(source)?;
 
     match &request.field {

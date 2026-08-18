@@ -19,7 +19,7 @@
 //! This module provides specialized READ-side checks on an opened document.
 //! The sign module must not depend on preflight, and preflight must not depend on sign.
 
-use super::{find_catalog_ref, find_fields_array, find_object, MdpPerm};
+use super::{find_catalog_ref, find_fields_array, find_object, is_encrypted, MdpPerm};
 use crate::pdfwrite::PdfTokenizer;
 use thiserror::Error;
 
@@ -39,6 +39,14 @@ pub enum PreflightRefusal {
 
     #[error("Signature field '{field}' is already signed")]
     FieldAlreadySigned { field: String },
+
+    /// The signing path appends plaintext objects and has no encryption layer
+    /// (SPEC-signing §23.2: `/Contents` is never encrypted). Appending to an
+    /// encrypted document therefore produces a file no reader will accept, so
+    /// §35 Milestone S0 step 5 requires refusing it outright rather than
+    /// half-supporting it.
+    #[error("This document is encrypted, and pulpit cannot sign an encrypted document")]
+    EncryptedDocument,
 
     #[error("No empty signature field exists in the document")]
     NoEmptySignatureField,
@@ -91,6 +99,10 @@ pub type Result<T> = std::result::Result<T, PreflightRefusal>;
 /// Check 1: Certifying requires an unsigned document.
 /// If any /Sig field with a non-null /V exists, refuse with CertificationNotAllowed.
 pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
+    if is_encrypted(bytes) {
+        return Err(PreflightRefusal::EncryptedDocument);
+    }
+
     let catalog_ref = find_catalog_ref(bytes)
         .map_err(|e| PreflightRefusal::InvalidState(format!("Failed to find catalog: {}", e)))?;
 
@@ -123,6 +135,14 @@ pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
 /// - Checks that the target field is not locked by prior signature FieldMDP transforms.
 /// - Returns the target field name and whether seed value dict exists.
 pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<PreflightOk> {
+    // Refuse up front. Without this the run still fails safe — the §32 gate
+    // cannot re-read the candidate, so nothing is promoted — but only after
+    // writing one, and it reports "cannot re-read" rather than naming the
+    // actual reason.
+    if is_encrypted(bytes) {
+        return Err(PreflightRefusal::EncryptedDocument);
+    }
+
     let catalog_ref = find_catalog_ref(bytes)
         .map_err(|e| PreflightRefusal::InvalidState(format!("Failed to find catalog: {}", e)))?;
 
@@ -1100,6 +1120,34 @@ mod tests {
 
     fn create_minimal_unsigned_pdf() -> Vec<u8> {
         base("").build_with_trailer(TRAILER)
+    }
+
+    /// A document whose trailer declares `/Encrypt`, which the sign path has no
+    /// layer to honour (§23.2).
+    fn create_encrypted_pdf() -> Vec<u8> {
+        let mut pdf = base("");
+        pdf.add("<</Filter /Standard /V 2 /R 3 /Length 128 /P -1340>>");
+        pdf.build_with_trailer(&format!("{TRAILER} /Encrypt 4 0 R"))
+    }
+
+    /// §35 S0 step 5: refuse an encrypted document up front rather than
+    /// half-supporting it. Without this the run still failed safe — the §32
+    /// gate cannot re-read the candidate — but only after writing one, and it
+    /// blamed "cannot re-read" instead of naming the reason.
+    #[test]
+    fn an_encrypted_document_is_refused_before_anything_is_written() {
+        let pdf = create_encrypted_pdf();
+        assert_eq!(
+            preflight_sign(&pdf, None).unwrap_err(),
+            PreflightRefusal::EncryptedDocument
+        );
+        assert_eq!(
+            preflight_certify(&pdf).unwrap_err(),
+            PreflightRefusal::EncryptedDocument
+        );
+        // The same document without /Encrypt must still be signable, so the
+        // check is not just refusing everything.
+        assert!(preflight_certify(&create_minimal_unsigned_pdf()).is_ok());
     }
 
     fn create_pdf_with_empty_sig_field() -> Vec<u8> {
