@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "name": "Presenter Default",
+  "name": "Presenter",
   "design_ratio": "sixteen-nine",
   "root": {
     "type": "split",

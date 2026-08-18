@@ -66,7 +66,10 @@ pub fn library<'a>(store: &'a LayoutStore, active: Option<&'a LayoutId>) -> Elem
     .padding(gap::XL);
 
     let mut built_in = Row::new().spacing(gap::L);
-    for layout in store.built_in() {
+    // Reader first: the library presents the document-oriented surface before
+    // the more specialised live-presentation screen, without changing the
+    // built-in order used by startup and shape-based document detection.
+    for layout in store.built_in().iter().rev() {
         built_in = built_in.push(layout_card(layout, active, true));
     }
     body = body.push(built_in.wrap());

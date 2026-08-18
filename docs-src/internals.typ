@@ -1307,7 +1307,7 @@ what the checks say.
   stroke: none,
   inset: 0.55em,
   [*Layout*], [*For*],
-  [*Presenter Default*], [What a presentation opens with: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
+  [*Presenter*], [What a presentation opens with: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
   [*Reader*], [What a document opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail that becomes an overlay drawer in a narrow window.],
 )
 

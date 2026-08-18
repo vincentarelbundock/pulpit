@@ -596,7 +596,7 @@ mod tests {
         let copy = store.get(&id).unwrap();
         assert_eq!(copy.origin, Origin::Custom);
         assert!(copy.is_editable());
-        assert_eq!(copy.name, "Presenter Default copy");
+        assert_eq!(copy.name, "Presenter copy");
         assert_eq!(copy.widgets().len(), presenter_default().widgets().len());
 
         // Duplicating again does not collide.
@@ -604,7 +604,7 @@ mod tests {
             .duplicate(&LayoutId("presenter-default".into()))
             .unwrap();
         assert_ne!(id, second);
-        assert_eq!(store.get(&second).unwrap().name, "Presenter Default copy 2");
+        assert_eq!(store.get(&second).unwrap().name, "Presenter copy 2");
     }
 
     #[test]

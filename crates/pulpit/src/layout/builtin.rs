@@ -1,4 +1,4 @@
-//! The immutable built-in layouts, led by the one a first run opens with.
+//! The immutable built-in layouts, led by the presentation-mode default.
 //!
 //! These are the layouts a first-time user meets, and the reference for what
 //! a good presenter screen looks like: strong hierarchy, readable at a
@@ -128,10 +128,10 @@ fn finish(name: &str, id: &str, root: Node, ratio: AspectRatio) -> Layout {
     layout
 }
 
-/// **Presenter Default** — the layout a first run opens with. Most of the
-/// width is the live slide; the remaining rail stacks the two readings (clock
-/// and timer side by side), the next slide, and the notes; a shallow band
-/// along the bottom carries the controls.
+/// **Presenter** — the layout a presentation opens with. Most of the width is
+/// the live slide; the remaining rail stacks the two readings (clock and timer
+/// side by side), the next slide, and the notes; a shallow band along the
+/// bottom carries the controls.
 ///
 /// The rail is a little over a quarter of the width, which is what the notes
 /// want: text set in a narrower column than this wraps every few words. The
@@ -190,7 +190,7 @@ pub fn presenter_default() -> Layout {
         vec![stage, controls],
     );
     finish(
-        "Presenter Default",
+        "Presenter",
         "presenter-default",
         root,
         AspectRatio::SixteenNine,
@@ -245,13 +245,14 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     finish("Reader", "reader-default", root, ratio)
 }
 
-/// The built-ins, in the order the library shows them.
+/// The built-ins in canonical presentation-first order. The layout library's
+/// view may choose a different display order without changing this fallback.
 ///
-/// The list is bimodal (§2.1): **Presenter Default** is what a presentation
-/// opens with and **Reader** is what a document opens with, and neither is a
-/// variant of the other. `built_in_layouts` passes the `SixteenNine` fallback
-/// so the list stays parameterless, display-free and testable; a caller with a
-/// live window builds a Reader at that window's ratio instead.
+/// The list is bimodal (§2.1): **Presenter** is what a presentation opens with
+/// and **Reader** is what a document opens with, and neither is a variant of
+/// the other. `built_in_layouts` passes the `SixteenNine` fallback so the list
+/// stays parameterless, display-free and testable; a caller with a live window
+/// builds a Reader at that window's ratio instead.
 pub fn built_in_layouts() -> Vec<Layout> {
     vec![
         presenter_default(),
@@ -287,6 +288,8 @@ mod tests {
         }
         let ids: Vec<&str> = layouts.iter().map(|layout| layout.id.0.as_str()).collect();
         assert_eq!(ids, vec!["presenter-default", "reader-default"]);
+        let names: Vec<&str> = layouts.iter().map(|layout| layout.name.as_str()).collect();
+        assert_eq!(names, vec!["Presenter", "Reader"]);
     }
 
     /// The primary viewer is always derived from the widget tree.
