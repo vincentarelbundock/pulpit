@@ -720,9 +720,9 @@ pub struct App {
     /// The layout the presenter screen is drawn from.
     pub active_layout: Layout,
     /// Whether a Reader temporarily gives the whole presenter window to its
-    /// document page. This is view state, not a layout mutation: the mounted
-    /// layout and the page surface's crop, spread, zoom, and scroll all stay
-    /// exactly where they are while its other widgets are hidden.
+    /// document page. This is view state, not a layout mutation: the zoom
+    /// choice, crop and spread stay in force, while fitted geometry and the
+    /// scroll offset are remapped to keep the same page under the new surface.
     pub reader_fullscreen: bool,
     pub designer: Option<crate::designer::Designer>,
     pub layout_dialog: Option<LayoutDialog>,
@@ -3915,6 +3915,13 @@ impl App {
                 {
                     self.reader_fullscreen = !self.reader_fullscreen;
                     self.menu_open = false;
+                    // The normal layout cell and the fullscreen mount are two
+                    // geometries for the same reader. Resolve a fit against
+                    // the one being entered, keeping the logical page (and
+                    // any page reached while fullscreen) across the change.
+                    if let Some(cell) = self.page_surface_size() {
+                        self.reader.remount_cell(cell.0, cell.1);
+                    }
                     // Fullscreen and the ordinary layout mount different
                     // widget trees. The new scrollable therefore starts at
                     // zero even though the reader session still owns the
@@ -6778,6 +6785,12 @@ impl App {
     /// does to draw the cell, run here so the reader can fit a page to a cell
     /// whose size the view never has to report back.
     fn page_surface_size(&self) -> Option<(f32, f32)> {
+        if self.reader_fullscreen {
+            return Some((
+                self.presenter_size.width.max(0.0),
+                self.presenter_size.height.max(0.0),
+            ));
+        }
         let frame = crate::layout::Frame::new(
             0.0,
             0.0,

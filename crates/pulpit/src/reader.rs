@@ -2956,6 +2956,24 @@ impl ReaderSession {
         }
     }
 
+    /// The page surface was replaced by another mount with its own geometry.
+    ///
+    /// Fullscreen and the ordinary reader layout use different scrollable
+    /// widget trees. A fit therefore has to be resolved again against the new
+    /// surface, while the page and the place within it remain the reader's.
+    /// The old surface's reported viewport cannot remain authoritative for
+    /// the new one; its first scroll report may refine the supplied height.
+    pub fn remount_cell(&mut self, width: f32, height: f32) {
+        let anchor = self
+            .reading_position()
+            .map(|(page, _zoom, fraction)| (page, fraction));
+        self.viewport_reported = false;
+        self.set_cell(width, height);
+        if let Some((page, fraction)) = anchor {
+            self.restore_position(page, None, fraction);
+        }
+    }
+
     /// Put the column at `offset`, and say which page that is.
     fn scroll_to(&mut self, offset: f32) {
         self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
@@ -4414,6 +4432,59 @@ mod tests {
             (session.scale - 300.0 / 792.0).abs() < 1e-4,
             "{}",
             session.scale
+        );
+    }
+
+    #[test]
+    fn remounting_recomputes_each_fit_for_the_new_surface_and_keeps_the_page() {
+        for (zoom, expected) in [
+            (Zoom::FitPage, 800.0 / 792.0),
+            (Zoom::FitHeight, 800.0 / 792.0),
+            (Zoom::FitWidth, 1_000.0 / 612.0),
+        ] {
+            let mut session = open(8);
+            // Once a surface has reported its viewport it outranks the
+            // layout estimate. A remount must retire that authority or the
+            // fullscreen fit would keep using the old surface's height.
+            session.apply(&ReadCommand::ScrollTo {
+                offset: 0.0,
+                offset_x: 0.0,
+                viewport: 300.0,
+            });
+            session.apply(&ReadCommand::SetZoom(zoom));
+            session.apply(&ReadCommand::GoToPage(PageIndex(4)));
+
+            session.remount_cell(1_000.0, 800.0);
+
+            assert_eq!(session.controls().zoom, zoom);
+            assert_eq!(session.controls().page, PageIndex(4));
+            assert!((session.scale - expected).abs() < 1e-4);
+            assert_eq!(
+                session.controls().offset,
+                session.column.offset_of(PageIndex(4)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_a_remounted_surface_keeps_the_page_reached_there() {
+        let mut session = open(8);
+        session.apply(&ReadCommand::SetZoom(Zoom::FitWidth));
+        session.apply(&ReadCommand::GoToPage(PageIndex(2)));
+        session.remount_cell(1_224.0, 900.0);
+
+        // Navigation while the fullscreen surface is mounted belongs to the
+        // reader, so the normal layout must return to this page rather than
+        // the page fullscreen began on.
+        session.apply(&ReadCommand::GoToPage(PageIndex(6)));
+        session.remount_cell(612.0, 400.0);
+
+        assert_eq!(session.controls().zoom, Zoom::FitWidth);
+        assert_eq!(session.controls().page, PageIndex(6));
+        assert!((session.scale - 1.0).abs() < 1e-4);
+        assert_eq!(
+            session.controls().offset,
+            session.column.offset_of(PageIndex(6)).unwrap()
         );
     }
 
