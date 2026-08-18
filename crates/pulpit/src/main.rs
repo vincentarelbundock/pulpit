@@ -57,6 +57,7 @@ fn main() -> iced::Result {
     let mut arguments = std::env::args_os().skip(1);
     let mut document: Option<PathBuf> = None;
     let mut worker = false;
+    let mut restore_interrupted_session = true;
     let mut start_page = StartPage::Presenter;
     while let Some(argument) = arguments.next() {
         let arg_bytes = argument.as_bytes();
@@ -89,6 +90,8 @@ fn main() -> iced::Result {
             }
         } else if argument == "--layouts" {
             start_page = StartPage::Library;
+        } else if argument == "--no-restore" {
+            restore_interrupted_session = false;
         } else if argument == "--edit-layout" {
             start_page = match arguments.next() {
                 Some(id) => match id.into_string() {
@@ -169,7 +172,14 @@ fn main() -> iced::Result {
     install_startup_panic_hook();
 
     let daemon = iced::daemon(
-        move || app::App::new(document.clone(), start_page.clone(), settings.clone()),
+        move || {
+            app::App::new(
+                document.clone(),
+                start_page.clone(),
+                settings.clone(),
+                restore_interrupted_session,
+            )
+        },
         app::App::update,
         view::view,
     );
@@ -266,6 +276,7 @@ fn print_help() {
          Options:\n\
            --layouts         open the layout library\n\
            --edit-layout ID  open a layout in the designer\n\
+           --no-restore      start without restoring an interrupted session\n\
            --render-worker   run as a renderer worker process (internal)\n\
            --document-worker=FILE\n\
                              run as a document worker process (internal)\n\

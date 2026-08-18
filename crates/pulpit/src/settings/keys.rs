@@ -42,6 +42,8 @@ pub enum Action {
     ReloadDocument,
     /// The whole deck as thumbnails, to jump by eye rather than by number.
     ShowOverview,
+    /// Mount the next usable layout in library order, wrapping at the end.
+    CycleLayout,
     /// The layout library, without going through the menu first.
     ///
     /// The presenter screen *is* the layout, so changing it is a first-class
@@ -179,6 +181,7 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
         actions: &[
             Action::OpenDocument,
             Action::ReloadDocument,
+            Action::CycleLayout,
             Action::ShowLayouts,
             Action::ShowShortcuts,
             Action::Quit,
@@ -210,7 +213,7 @@ pub const PRESENTING_ACTIONS: [Action; 6] = [
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 42] = [
+    pub const ALL: [Action; 43] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -228,6 +231,7 @@ impl Action {
         Action::OpenDocument,
         Action::ReloadDocument,
         Action::ShowOverview,
+        Action::CycleLayout,
         Action::ShowLayouts,
         Action::ShowShortcuts,
         Action::AnnotateInk,
@@ -274,6 +278,7 @@ impl Action {
             Action::OpenDocument => "Open…",
             Action::ReloadDocument => "Reload document",
             Action::ShowOverview => "Page overview",
+            Action::CycleLayout => "Next layout",
             Action::ShowLayouts => "Layouts",
             Action::ShowShortcuts => "Keyboard shortcuts",
             Action::AnnotateInk => "Draw on the page",
@@ -553,8 +558,9 @@ impl Default for Keymap {
                 // This binding existed before and never fired, because the
                 // timer reset had taken "r" earlier in the list.
                 named("r", Action::ToggleReader),
-                // Keep layout selection behind a modifier so the small bare
-                // letter vocabulary stays reserved for live actions.
+                // Cycling is the live layout action; the shifted form opens
+                // the library when a specific layout is wanted.
+                named("l", Action::CycleLayout),
                 with("l", Mods::shift(), Action::ShowLayouts),
                 with("/", Mods::shift(), Action::ShowShortcuts),
                 // The four tools sit under the digits, in the order the
@@ -1096,7 +1102,7 @@ mod tests {
                 "{key}"
             );
         }
-        for key in ["l", "h", "Down", "Up", "Space", "Backspace"] {
+        for key in ["h", "Down", "Up", "Space", "Backspace"] {
             assert_eq!(keymap.resolve(Some(key), None), None, "{key} is excessive");
         }
     }
@@ -1132,6 +1138,16 @@ mod tests {
             Some(Action::ResetTimer)
         );
         assert_eq!(keymap.resolve(Some("t"), None), Some(Action::ToggleTimer));
+    }
+
+    #[test]
+    fn layout_keys_cycle_or_open_the_library() {
+        let keymap = Keymap::default();
+        assert_eq!(keymap.resolve(Some("l"), None), Some(Action::CycleLayout));
+        assert_eq!(
+            keymap.resolve_with_mods(Some("L"), Mods::shift(), None),
+            Some(Action::ShowLayouts)
+        );
     }
 
     #[test]

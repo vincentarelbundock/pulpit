@@ -28,6 +28,8 @@ use crate::display::{self, DisplayCoordinator};
 use crate::theme::ThemeState;
 use crate::toast::{Intent, Toasts};
 
+pub(crate) const DOCUMENTATION_URL: &str = "https://vincentarelbundock.github.io/pulpit/";
+
 /// Cadence for animations and short UI deadlines. Worker delivery is
 /// event-driven and does not wait for this clock.
 const TICK: Duration = Duration::from_millis(50);
@@ -214,6 +216,7 @@ pub enum Message {
     /// Run a command selected from the hamburger menu after dismissing it.
     MenuAction(Box<Message>),
     ToggleMenu,
+    ToggleRecentMenu,
     CloseMenu,
     ToggleShortcuts,
     CloseShortcuts,
@@ -935,6 +938,8 @@ pub struct App {
     pub toasts: Toasts,
     /// Whether the main menu is open.
     pub menu_open: bool,
+    /// Whether the main menu is showing its recent-document submenu.
+    pub recent_menu_open: bool,
     /// Whether the live-keymap reference is covering the presenter.
     pub shortcuts_open: bool,
     /// Whether the compact application information dialog is open.
@@ -1328,6 +1333,28 @@ fn annotation_options_in(layout: &Layout) -> crate::widgets::AnnotationOptions {
         .unwrap_or_default()
 }
 
+/// The layout after `active` among those usable in the current document
+/// state. Input order is preserved and the end wraps to the beginning.
+fn next_usable_layout<'a>(
+    layouts: impl IntoIterator<Item = &'a Layout>,
+    active: &LayoutId,
+    document_open: bool,
+) -> Option<&'a Layout> {
+    let candidates: Vec<_> = layouts
+        .into_iter()
+        .filter(|layout| {
+            document_open
+                || crate::layout::PrimaryViewer::of(layout)
+                    != crate::layout::PrimaryViewer::Document
+        })
+        .collect();
+    let next = candidates
+        .iter()
+        .position(|layout| &layout.id == active)
+        .map_or(0, |index| (index + 1) % candidates.len());
+    candidates.get(next).copied()
+}
+
 /// `None` for a field the reader left blank, so `SignRequest`'s optional
 /// reason/location/contact stay `None` rather than `Some(String::new())`.
 fn non_empty(value: &str) -> Option<String> {
@@ -1340,6 +1367,7 @@ impl App {
         initial: Option<PathBuf>,
         start_page: crate::StartPage,
         settings: crate::settings::Settings,
+        restore_interrupted_session: bool,
     ) -> (Self, Task<Message>) {
         // `main` already loaded the settings to configure logging; they are
         // passed in rather than read and parsed a second time.
@@ -1397,16 +1425,20 @@ impl App {
         // into a restore plan now; startup applies it automatically once the
         // application has been assembled.
         let session = crate::session::SessionStore::default();
-        let pending_restore = session
-            .load()
-            .filter(|snapshot| snapshot.is_worth_offering())
-            .map(|snapshot| {
-                let current = snapshot
-                    .document
-                    .as_ref()
-                    .and_then(|document| crate::session::fingerprint(&document.path));
-                snapshot.plan(current.as_ref())
-            });
+        let pending_restore = if restore_interrupted_session {
+            session
+                .load()
+                .filter(|snapshot| snapshot.is_worth_offering())
+                .map(|snapshot| {
+                    let current = snapshot
+                        .document
+                        .as_ref()
+                        .and_then(|document| crate::session::fingerprint(&document.path));
+                    snapshot.plan(current.as_ref())
+                })
+        } else {
+            None
+        };
         if pending_restore.is_some() {
             tracing::info!("a previous session did not exit cleanly; restoring it");
         }
@@ -1521,6 +1553,7 @@ impl App {
             platform,
             toasts: Toasts::new(),
             menu_open: false,
+            recent_menu_open: false,
             shortcuts_open: false,
             about_open: false,
             audience_start_menu_open: false,
@@ -2999,16 +3032,23 @@ impl App {
             }
             Message::MenuAction(message) => {
                 self.menu_open = false;
+                self.recent_menu_open = false;
                 self.audience_start_menu_open = false;
                 self.dispatch(*message)
             }
             Message::ToggleMenu => {
                 self.menu_open = !self.menu_open;
+                self.recent_menu_open = false;
                 self.audience_start_menu_open = false;
+                Task::none()
+            }
+            Message::ToggleRecentMenu => {
+                self.recent_menu_open = self.menu_open && !self.recent_menu_open;
                 Task::none()
             }
             Message::ToggleShortcuts => {
                 self.menu_open = false;
+                self.recent_menu_open = false;
                 self.shortcuts_open = !self.shortcuts_open;
                 Task::none()
             }
@@ -3018,6 +3058,7 @@ impl App {
             }
             Message::ShowAbout => {
                 self.menu_open = false;
+                self.recent_menu_open = false;
                 self.about_open = true;
                 Task::none()
             }
@@ -3027,10 +3068,8 @@ impl App {
             }
             Message::OpenDocumentation => {
                 self.menu_open = false;
-                let outcome = self
-                    .platform
-                    .services
-                    .open("https://vincentarelbundock.github.io/pulpit/");
+                self.recent_menu_open = false;
+                let outcome = self.platform.services.open(DOCUMENTATION_URL);
                 if let Some(problem) = outcome.describe() {
                     self.notify(problem);
                 }
@@ -3038,6 +3077,7 @@ impl App {
             }
             Message::CloseMenu => {
                 self.menu_open = false;
+                self.recent_menu_open = false;
                 self.audience_start_menu_open = false;
                 Task::none()
             }
@@ -4086,6 +4126,7 @@ impl App {
                 self.run_document_actions(actions)
             }
             Action::ShowOverview => self.update(Message::ToggleOverview),
+            Action::CycleLayout => self.cycle_layout(),
             Action::ShowLayouts => self.update(Message::ShowLibrary),
             Action::ShowShortcuts => self.update(Message::ToggleShortcuts),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
@@ -7966,6 +8007,25 @@ impl App {
         // next time the same bytes are opened. Switching back records the
         // Reader in exactly the same way.
         self.adopt_layout(layout);
+        Task::none()
+    }
+
+    /// Mount the next layout in the library's canonical order.
+    ///
+    /// A layout whose primary viewer is the document is not usable before a
+    /// PDF is open. Otherwise built-ins and saved layouts participate in the
+    /// exact order [`LayoutStore::all`] provides, and adopting rather than
+    /// merely mounting preserves the per-document choice.
+    fn cycle_layout(&mut self) -> Task<Message> {
+        let next = next_usable_layout(
+            self.layouts.all(),
+            &self.active_layout.id,
+            self.state.document().is_some(),
+        )
+        .cloned();
+        if let Some(layout) = next {
+            self.adopt_layout(layout);
+        }
         Task::none()
     }
 
@@ -12866,6 +12926,44 @@ mod shell_key_tests {
         assert!(shows_a_notice(&Warning::SelectedDisplayMissing {
             role: pulpit_display::Role::Audience,
         }));
+    }
+}
+
+#[cfg(test)]
+mod layout_cycle_tests {
+    use super::next_usable_layout;
+    use crate::layout::builtin::{presenter_default, reader_default};
+    use crate::layout::{AspectRatio, LayoutId, Origin};
+
+    fn layouts() -> Vec<crate::layout::Layout> {
+        let mut saved = presenter_default();
+        saved.id = LayoutId("saved".into());
+        saved.name = "Saved".into();
+        saved.origin = Origin::Custom;
+        vec![
+            presenter_default(),
+            reader_default(AspectRatio::SixteenNine),
+            saved,
+        ]
+    }
+
+    #[test]
+    fn cycling_preserves_input_order_and_wraps() {
+        let layouts = layouts();
+        let next = |active: &str| {
+            next_usable_layout(layouts.iter(), &LayoutId(active.into()), true)
+                .map(|layout| layout.id.0.as_str())
+        };
+        assert_eq!(next("presenter-default"), Some("reader-default"));
+        assert_eq!(next("reader-default"), Some("saved"));
+        assert_eq!(next("saved"), Some("presenter-default"));
+    }
+
+    #[test]
+    fn cycling_skips_document_layouts_until_a_pdf_is_open() {
+        let layouts = layouts();
+        let next = next_usable_layout(layouts.iter(), &LayoutId("presenter-default".into()), false);
+        assert_eq!(next.map(|layout| layout.id.0.as_str()), Some("saved"));
     }
 }
 

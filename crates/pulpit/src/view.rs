@@ -21,7 +21,7 @@ use pulpit_render::cache::FrameKind;
 
 use crate::platform::Appearance;
 
-use crate::app::{App, LayoutDialog, Message};
+use crate::app::{App, LayoutDialog, Message, DOCUMENTATION_URL};
 use crate::designer::Page;
 use crate::designer_view;
 use crate::panel::panel;
@@ -999,6 +999,16 @@ const MENU_WIDTH: f32 = 300.0;
 /// flyout is positioned by arithmetic, so the rows cannot be free-sized.
 const MENU_ROW: f32 = target::MINIMUM;
 const MENU_HEADER: f32 = 20.0;
+const RECENT_MENU_LIMIT: usize = 5;
+
+fn recent_menu_documents(
+    recent: &std::collections::VecDeque<std::path::PathBuf>,
+) -> impl Iterator<Item = &std::path::Path> {
+    recent
+        .iter()
+        .take(RECENT_MENU_LIMIT)
+        .map(std::path::PathBuf::as_path)
+}
 
 /// The main menu: the handful of commands that are not on the layout.
 fn menu(app: &App) -> Element<'_, Message> {
@@ -1036,6 +1046,23 @@ fn menu(app: &App) -> Element<'_, Message> {
             ..iced::Padding::from(0.0)
         })
     };
+    let recent_entry = |path: &std::path::Path| {
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        button(
+            container(text(label).size(type_scale::BODY))
+                .center_y(Length::Fill)
+                .padding(iced::Padding::from([0.0, gap::S])),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(MENU_ROW))
+        .style(theme::ambient::tool_button)
+        .on_press(Message::MenuAction(Box::new(Message::Opened(Some(
+            path.to_path_buf(),
+        )))))
+    };
 
     let mut items = Column::new()
         .spacing(gap::XS)
@@ -1048,88 +1075,140 @@ fn menu(app: &App) -> Element<'_, Message> {
         )
         .height(Length::Fixed(MENU_HEADER)),
     );
-    items = items.push(heading("File"));
-    items = items.push(entry(
-        "Open…",
-        shortcut(Action::OpenDocument),
-        Message::OpenDialog,
-    ));
-    items = items.push(entry(
-        "Reload",
-        shortcut(Action::ReloadDocument),
-        Message::Do(Action::ReloadDocument),
-    ));
-    if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
-        items = items.push(entry("Show in file manager", None, Message::RevealDocument));
-    }
-    items = items.push(heading("View"));
-    if app.state.document().is_some() {
+    if app.recent_menu_open {
+        let recent_back = button(
+            container(
+                row![
+                    theme::icon::icon(theme::Icon::ArrowLeft, type_scale::LABEL),
+                    text("Open recent").size(type_scale::BODY),
+                ]
+                .spacing(gap::S)
+                .align_y(Alignment::Center),
+            )
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(MENU_ROW))
+        .padding(iced::Padding::from([0.0, gap::S]))
+        .style(theme::ambient::tool_button)
+        .on_press(Message::ToggleRecentMenu);
+        items = items.push(recent_back);
+        if app.settings.recent.is_empty() {
+            items = items.push(
+                container(
+                    text("No recent files")
+                        .size(type_scale::BODY)
+                        .color(theme::ambient::muted()),
+                )
+                .height(Length::Fixed(MENU_ROW))
+                .padding(iced::Padding::from([gap::S, gap::S])),
+            );
+        } else {
+            for path in recent_menu_documents(&app.settings.recent) {
+                items = items.push(recent_entry(path));
+            }
+        }
+    } else {
+        items = items.push(heading("File"));
         items = items.push(entry(
-            "Jump to page…",
-            shortcut(Action::ShowOverview),
-            Message::Do(Action::ShowOverview),
+            "Open…",
+            shortcut(Action::OpenDocument),
+            Message::OpenDialog,
+        ));
+        let recent_toggle = button(
+            container(
+                row![
+                    text("Open recent…").size(type_scale::BODY),
+                    space::horizontal(),
+                    theme::icon::icon(theme::Icon::ChevronRight, type_scale::LABEL),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(MENU_ROW))
+        .padding(iced::Padding::from([0.0, gap::S]))
+        .style(theme::ambient::tool_button)
+        .on_press(Message::ToggleRecentMenu);
+        items = items.push(recent_toggle);
+        items = items.push(entry(
+            "Reload",
+            shortcut(Action::ReloadDocument),
+            Message::Do(Action::ReloadDocument),
+        ));
+        if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
+            items = items.push(entry("Show in file manager", None, Message::RevealDocument));
+        }
+        items = items.push(heading("View"));
+        if app.state.document().is_some() {
+            items = items.push(entry(
+                "Jump to page…",
+                shortcut(Action::ShowOverview),
+                Message::Do(Action::ShowOverview),
+            ));
+        }
+        items = items.push(entry(
+            "Layouts…",
+            shortcut(Action::ShowLayouts),
+            Message::ShowLibrary,
+        ));
+        items = items.push(entry("Settings…", None, Message::ShowSettings));
+        items = items.push(heading("Presentation"));
+        items = items.push(entry(
+            "Swap displays",
+            shortcut(Action::SwapDisplays),
+            Message::Do(Action::SwapDisplays),
+        ));
+        items = items.push(entry(
+            fullscreen_action_label(
+                crate::layout::PrimaryViewer::of(&app.active_layout)
+                    == crate::layout::PrimaryViewer::Document,
+                app.reader_fullscreen,
+                app.coordinator.roles.audience_fullscreen,
+            ),
+            shortcut(Action::ToggleAudienceFullscreen),
+            Message::Do(Action::ToggleAudienceFullscreen),
+        ));
+        items = items.push(heading("Timer"));
+        // The timer has no control of its own unless a clock widget is on the
+        // layout, so its two commands are always reachable from here as well.
+        items = items.push(entry(
+            if app.state.timer().is_running() {
+                "Pause timer"
+            } else {
+                "Start timer"
+            },
+            shortcut(Action::ToggleTimer),
+            Message::Do(Action::ToggleTimer),
+        ));
+        items = items.push(entry(
+            "Reset timer",
+            shortcut(Action::ResetTimer),
+            Message::Do(Action::ResetTimer),
+        ));
+
+        items = items.push(heading("Help"));
+        items = items.push(entry(
+            "Keyboard shortcuts…",
+            shortcut(Action::ShowShortcuts),
+            Message::ToggleShortcuts,
+        ));
+        items = items.push(entry("Documentation", None, Message::OpenDocumentation));
+        items = items.push(entry("Diagnostics…", None, Message::ShowSettings));
+        items = items.push(entry("About Pulpit", None, Message::ShowAbout));
+
+        items = items.push(
+            container(space::vertical().height(Length::Fixed(1.0)))
+                .width(Length::Fill)
+                .style(theme::ambient::separator),
+        );
+        items = items.push(entry(
+            "Exit",
+            shortcut(Action::Quit),
+            Message::Do(Action::Quit),
         ));
     }
-    items = items.push(entry(
-        "Layouts…",
-        shortcut(Action::ShowLayouts),
-        Message::ShowLibrary,
-    ));
-    items = items.push(entry("Settings…", None, Message::ShowSettings));
-    items = items.push(heading("Presentation"));
-    items = items.push(entry(
-        "Swap displays",
-        shortcut(Action::SwapDisplays),
-        Message::Do(Action::SwapDisplays),
-    ));
-    items = items.push(entry(
-        fullscreen_action_label(
-            crate::layout::PrimaryViewer::of(&app.active_layout)
-                == crate::layout::PrimaryViewer::Document,
-            app.reader_fullscreen,
-            app.coordinator.roles.audience_fullscreen,
-        ),
-        shortcut(Action::ToggleAudienceFullscreen),
-        Message::Do(Action::ToggleAudienceFullscreen),
-    ));
-    items = items.push(heading("Timer"));
-    // The timer has no control of its own unless a clock widget is on the
-    // layout, so its two commands are always reachable from here as well.
-    items = items.push(entry(
-        if app.state.timer().is_running() {
-            "Pause timer"
-        } else {
-            "Start timer"
-        },
-        shortcut(Action::ToggleTimer),
-        Message::Do(Action::ToggleTimer),
-    ));
-    items = items.push(entry(
-        "Reset timer",
-        shortcut(Action::ResetTimer),
-        Message::Do(Action::ResetTimer),
-    ));
-
-    items = items.push(heading("Help"));
-    items = items.push(entry(
-        "Keyboard shortcuts…",
-        shortcut(Action::ShowShortcuts),
-        Message::ToggleShortcuts,
-    ));
-    items = items.push(entry("Documentation", None, Message::OpenDocumentation));
-    items = items.push(entry("Diagnostics…", None, Message::ShowSettings));
-    items = items.push(entry("About Pulpit", None, Message::ShowAbout));
-
-    items = items.push(
-        container(space::vertical().height(Length::Fixed(1.0)))
-            .width(Length::Fill)
-            .style(theme::ambient::separator),
-    );
-    items = items.push(entry(
-        "Exit",
-        shortcut(Action::Quit),
-        Message::Do(Action::Quit),
-    ));
 
     let panel = container(
         container(items)
@@ -1219,22 +1298,17 @@ fn fullscreen_action_label(
 }
 
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
-    column![
-        container(
-            row![
-                container(text(action.label()).size(type_scale::LABEL))
-                    .width(Length::FillPortion(2)),
-                container(shortcut_hint(app, action))
-                    .width(Length::FillPortion(3))
-                    .align_x(Alignment::End),
-            ]
-            .spacing(gap::S)
-            .align_y(Alignment::Center),
-        )
-        .padding(iced::Padding::from([2.0, gap::S])),
-        table_rule(),
-    ]
-    .spacing(0)
+    container(
+        row![
+            container(text(action.label()).size(type_scale::LABEL)).width(Length::FillPortion(2)),
+            container(shortcut_hint(app, action))
+                .width(Length::FillPortion(3))
+                .align_x(Alignment::Start),
+        ]
+        .spacing(gap::S)
+        .align_y(Alignment::Center),
+    )
+    .padding(iced::Padding::from([gap::XS, gap::S]))
     .into()
 }
 
@@ -1259,17 +1333,10 @@ fn shortcut_group<'a>(
     content.into()
 }
 
-fn table_rule() -> Element<'static, Message> {
-    container(space::vertical())
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(theme::ambient::divider(false))
-        .into()
-}
-
 const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5, 6];
 const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 2, 4];
 const SHORTCUT_TABLE_RIGHT: &[usize] = &[3, 5, 6];
+const SHORTCUT_TABLE_WIDTH: f32 = 540.0;
 
 fn split_shortcut_tables(width: f32) -> bool {
     width >= 1_100.0
@@ -1278,99 +1345,96 @@ fn split_shortcut_tables(width: f32) -> bool {
 fn shortcut_table<'a>(app: &'a App, groups: &[usize]) -> Element<'a, Message> {
     use crate::settings::keys::SHORTCUT_GROUPS;
 
-    let heading = container(
-        row![
-            container(text("Command").size(type_scale::CAPTION)).width(Length::FillPortion(2)),
-            container(text("Keys").size(type_scale::CAPTION))
-                .width(Length::FillPortion(3))
-                .align_x(Alignment::End),
-        ]
-        .spacing(gap::S),
-    )
-    .padding(iced::Padding::from([gap::XS, gap::S]));
-    let mut table = Column::new().spacing(0).push(heading).push(table_rule());
+    let mut table = Column::new().spacing(0);
     for index in groups {
         let group = SHORTCUT_GROUPS[*index];
         table = table.push(shortcut_group(app, group.title, group.actions));
     }
-    container(table)
-        .width(Length::Fill)
-        .style(theme::ambient::surface)
+    container(table).width(Length::Fill).into()
+}
+
+fn shortcut_table_separator() -> Element<'static, Message> {
+    let line = container(space::horizontal())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(theme::ambient::separator);
+    container(line)
+        .width(Length::Fixed(gap::L))
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
         .into()
 }
 
 /// The one mode-neutral welcome and shortcut-reference surface.
 ///
-/// Opening a new document from here starts in the Reader. If a document is
-/// already open, `can_go_back` exposes the document again without making a
-/// second, subtly different help layout.
+/// If a document is already open, `can_go_back` exposes it again without
+/// making a second, subtly different help layout.
 fn shortcut_reference_page(app: &App, can_go_back: bool) -> Element<'_, Message> {
     let guide = responsive(move |size| {
         if split_shortcut_tables(size.width) {
-            row![
-                shortcut_table(app, SHORTCUT_TABLE_LEFT),
-                shortcut_table(app, SHORTCUT_TABLE_RIGHT),
-            ]
-            .spacing(gap::L)
-            .align_y(Alignment::Start)
+            container(
+                row![
+                    container(shortcut_table(app, SHORTCUT_TABLE_LEFT))
+                        .width(Length::Fixed(SHORTCUT_TABLE_WIDTH)),
+                    shortcut_table_separator(),
+                    container(shortcut_table(app, SHORTCUT_TABLE_RIGHT))
+                        .width(Length::Fixed(SHORTCUT_TABLE_WIDTH)),
+                ]
+                .align_y(Alignment::Start),
+            )
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
             .into()
         } else {
-            shortcut_table(app, SHORTCUT_TABLE_ALL)
+            container(
+                container(shortcut_table(app, SHORTCUT_TABLE_ALL))
+                    .width(Length::Fill)
+                    .max_width(SHORTCUT_TABLE_WIDTH),
+            )
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .into()
         }
     });
 
-    let brand = column![
-        text("Pulpit").size(type_scale::TITLE),
-        text("Read a PDF or present it on another screen.")
-            .size(type_scale::LABEL)
-            .color(theme::ambient::muted()),
-    ]
-    .spacing(2.0);
     let documentation = button(
-        text("Documentation  ↗")
+        text(DOCUMENTATION_URL)
             .size(type_scale::LABEL)
             .color(theme::ambient::accent()),
     )
     .style(theme::ambient::tool_button)
     .on_press(Message::OpenDocumentation);
-    let open = button(
-        row![
-            text("Open PDF").size(type_scale::BODY),
-            shortcut_hint(app, Action::OpenDocument),
-        ]
-        .spacing(gap::S)
-        .align_y(Alignment::Center),
+    let brand = container(
+        column![text("Pulpit").size(type_scale::TITLE), documentation]
+            .spacing(2.0)
+            .align_x(Alignment::Center),
     )
-    .padding(iced::Padding::from([gap::S, gap::L]))
-    .style(theme::ambient::forward_button)
-    .on_press(Message::OpenDialog);
-
-    let mut header = Row::new()
-        .spacing(gap::M)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-    if can_go_back {
+    .width(Length::Fill)
+    .align_x(Alignment::Center);
+    let header: Element<'_, Message> = if can_go_back {
         let back = button(
             row![
                 theme::icon::icon(theme::Icon::ArrowLeft, type_scale::BODY),
                 text("Back").size(type_scale::BODY),
-                shortcut_keycap("Esc".into()),
             ]
             .spacing(gap::S)
             .align_y(Alignment::Center),
         )
         .style(theme::ambient::tool_button)
         .on_press(Message::CloseShortcuts);
-        header = header.push(back);
-    }
-    header = header
-        .push(brand)
-        .push(documentation)
-        .push(space::horizontal())
-        .push(open);
-    let content = column![header.wrap(), guide]
-        .spacing(gap::M)
-        .width(Length::Fill);
+        stack![
+            brand,
+            container(back)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Start)
+                .align_y(Alignment::Center),
+        ]
+        .into()
+    } else {
+        brand.into()
+    };
+    let content = column![header, guide].spacing(gap::M).width(Length::Fill);
 
     // The centring has to happen *inside* the scrollable. A vertical
     // scrollable hands its child a full-width, infinite-height box, so the
@@ -3600,6 +3664,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recent_menu_keeps_the_five_newest_paths_in_order() {
+        let recent = (0..7)
+            .map(|index| std::path::PathBuf::from(format!("deck-{index}.pdf")))
+            .collect();
+        let shown: Vec<_> = recent_menu_documents(&recent).collect();
+        assert_eq!(shown.len(), 5);
+        assert_eq!(
+            shown.first().copied(),
+            Some(std::path::Path::new("deck-0.pdf"))
+        );
+        assert_eq!(
+            shown.last().copied(),
+            Some(std::path::Path::new("deck-4.pdf"))
+        );
+    }
+
+    #[test]
     fn every_shortcut_remains_its_own_keycap_and_alternates_stand_beside_the_others() {
         let labels = shortcut_labels(
             vec!["\u{2192}".into(), "PgDn".into()],
@@ -3621,7 +3702,10 @@ mod tests {
                 .map(|index| SHORTCUT_GROUPS[*index].actions.len())
                 .sum::<usize>()
         };
-        assert_eq!(actions(SHORTCUT_TABLE_LEFT), actions(SHORTCUT_TABLE_RIGHT));
+        assert!(
+            actions(SHORTCUT_TABLE_LEFT).abs_diff(actions(SHORTCUT_TABLE_RIGHT)) <= 1,
+            "the two tables should remain balanced"
+        );
     }
 
     #[test]

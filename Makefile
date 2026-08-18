@@ -56,8 +56,8 @@ launch:  ## Launch the app in the dev shell (optionally: make launch DECK=deck.p
 # the optimised library it ships as but every frame copy and every worker
 # response around it is not. A debug session reads as a sluggish application
 # and measures as one, which has already cost a long investigation.
-launch-release: ## Launch the optimised build — the only one worth timing
-	nix develop . --command $(CARGO) run --release -p pulpit -- $(DECK)
+launch-release: ## Launch the optimised build empty — the only one worth timing
+	nix develop . --command $(CARGO) run --release -p pulpit -- --no-restore
 
 # A file target, so the download happens once and again only when the pin
 # moves: the script carries the release tag and per-platform hashes.
