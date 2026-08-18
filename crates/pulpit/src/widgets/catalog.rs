@@ -295,8 +295,9 @@ pub const CATALOG: [WidgetDefinition; 26] = [
         // menu, and the open one would have to be told which was pressed.
         placement: PlacementPolicy::single(),
         capabilities: NO_CAPS,
-        // One square button and nothing else.
-        minimum_size: (40.0, 40.0),
+        // One square toolbar button and nothing else. Its height matches the
+        // document controls that share the built-in Reader's top band.
+        minimum_size: (32.0, 32.0),
         thumbnail: ThumbnailContent::Buttons(1),
     },
     WidgetDefinition {
@@ -427,7 +428,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
         // show two armed tools and only one of them could be telling the truth.
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::ShowsDocument],
-        minimum_size: (300.0, 26.0),
+        minimum_size: (300.0, 32.0),
         thumbnail: ThumbnailContent::Marks,
     },
     WidgetDefinition {

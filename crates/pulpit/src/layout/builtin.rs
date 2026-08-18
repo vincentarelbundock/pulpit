@@ -239,7 +239,7 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     let root = b.split(
         "Reader",
         Direction::Vertical,
-        &[0.085, 0.915],
+        &[0.07, 0.93],
         vec![band, body],
     );
     finish("Reader", "reader-default", root, ratio)
@@ -334,7 +334,7 @@ mod tests {
         let reader = reader_default(AspectRatio::SixteenNine);
         let root = reader.root.as_split().unwrap();
         assert_eq!(root.name.as_deref(), Some("Reader"));
-        assert_eq!(root.sizes, vec![0.085, 0.915]);
+        assert_eq!(root.sizes, vec![0.07, 0.93]);
         assert_eq!(
             root.children[0].as_split().unwrap().sizes,
             vec![0.05, 0.475, 0.475]
@@ -343,6 +343,16 @@ mod tests {
         for cell in root.children[0].cells() {
             assert_eq!(cell.padding, 4.0, "Reader controls should hug their icons");
         }
+        let heights: Vec<f32> = root.children[0]
+            .cells()
+            .into_iter()
+            .filter_map(|cell| cell.widget.as_ref())
+            .map(|widget| widget.minimum_size().1)
+            .collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] == pair[1]),
+            "Reader controls should have one height, got {heights:?}"
+        );
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();
         for required in [
