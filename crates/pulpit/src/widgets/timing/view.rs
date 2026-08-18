@@ -50,7 +50,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             let colour = if reading.overtime || reading.warning {
                 theme::ambient::alert()
             } else {
-                theme::ambient::accent()
+                theme::ambient::text()
             };
             // The reading gives up a strip to the mode line, the way the clock
             // does to its alarms, so the two widgets sit at the same height
@@ -77,7 +77,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             let colour = if ringing.is_some() {
                 theme::ambient::alert()
             } else {
-                theme::ambient::accent()
+                theme::ambient::text()
             };
             let clock = reading_block(
                 clock_options.format(timing.seconds_of_day),
@@ -166,7 +166,7 @@ fn timer_row<Message: Clone + 'static>(
                 ),
                 answer("Dismiss".to_string(), TimerCommand::Dismiss),
             ]
-            .spacing(6)
+            .spacing(theme::space::S)
             .align_y(iced::Alignment::Center),
         )
         .center_x(Length::Fill)
@@ -246,7 +246,7 @@ fn alarm_row<Message: Clone + 'static>(
                 answer("Snooze", AlarmCommand::Snooze),
                 answer("Dismiss", AlarmCommand::Dismiss),
             ]
-            .spacing(6)
+            .spacing(theme::space::S)
             .align_y(iced::Alignment::Center),
         )
         .center_x(Length::Fill)
@@ -314,6 +314,7 @@ fn reading_block<Message: 'static>(
 
     container(
         text(value)
+            .font(theme::font::READOUT)
             .size(size)
             // A tight line box, because this line is digits. The default
             // leaves room over and under for ascenders and descenders that a

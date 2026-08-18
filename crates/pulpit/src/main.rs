@@ -141,15 +141,20 @@ fn main() -> iced::Result {
     // hook so the user gets an explanation rather than a backtrace.
     install_startup_panic_hook();
 
-    let result = iced::daemon(
+    let daemon = iced::daemon(
         move || app::App::new(document.clone(), start_page.clone(), settings.clone()),
         app::App::update,
         view::view,
-    )
-    .title(app::App::title)
-    .theme(app::App::theme)
-    .subscription(app::App::subscription)
-    .run();
+    );
+    // Typst already bundles DejaVu Sans Mono for annotations. Register those
+    // same licensed assets with Iced so technical readouts are identical on
+    // every platform without adding another font payload to the binary.
+    let daemon = typst_assets::fonts().fold(daemon, |daemon, font| daemon.font(font));
+    let result = daemon
+        .title(app::App::title)
+        .theme(app::App::theme)
+        .subscription(app::App::subscription)
+        .run();
 
     if let Err(e) = &result {
         explain_startup_failure(e);

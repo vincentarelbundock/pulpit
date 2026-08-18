@@ -13,7 +13,6 @@ pub fn labelled<Message: 'static>(
     label: &'static str,
     value: String,
     scale: f32,
-    accent: iced::Color,
     align: Align,
 ) -> Element<'static, Message> {
     responsive(move |area| {
@@ -23,7 +22,7 @@ pub fn labelled<Message: 'static>(
                 text(label.to_uppercase())
                     .size((size * 0.5).clamp(9.0, 14.0))
                     .color(theme::ambient::muted()),
-                text(value.clone()).size(size).color(accent),
+                text(value.clone()).size(size).color(theme::ambient::text()),
             ]
             .spacing(2)
             .align_x(alignment(align)),
@@ -65,10 +64,10 @@ pub fn status_line<Message: 'static>(
                 }),
                 text(value).size(size).color(colour),
             ]
-            .spacing(8)
+            .spacing(theme::space::S)
             .align_y(Alignment::Center),
         ]
-        .spacing(4)
+        .spacing(theme::space::XS)
         .align_x(Alignment::Center);
 
         container(body)
@@ -191,7 +190,7 @@ pub fn misdirected<Message: 'static>(
     debug_assert!(false, "{kind:?} was handed to the wrong family");
     container(
         text(format!("{} (not drawn)", kind.label()))
-            .size(12)
+            .size(theme::type_scale::LABEL)
             .color(theme::ambient::muted()),
     )
     .center_x(Length::Fill)

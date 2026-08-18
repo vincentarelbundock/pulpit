@@ -14,12 +14,12 @@ pub mod tokens;
 
 pub use icon::Icon;
 
-use iced::widget::{button, container, overlay::menu, pick_list};
+use iced::widget::{button, container, overlay::menu, pick_list, scrollable, text_input};
 use iced::{Background, Border, Color, Theme};
 
 use crate::layout::CellBackground;
 use crate::platform::appearance::Resolved;
-pub use tokens::{radius, space, target, type_scale, ColorRole, Palette};
+pub use tokens::{font, radius, space, target, type_scale, ColorRole, Palette};
 
 /// The palette in use, plus how it was chosen.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -277,6 +277,65 @@ pub fn drop_down_menu(palette: Palette) -> impl Fn(&Theme) -> menu::Style + Copy
     }
 }
 
+/// The shared editable-field recipe: surface fill, quiet edge at rest, and
+/// the accent reserved for keyboard focus.
+pub fn text_field(
+    palette: Palette,
+) -> impl Fn(&Theme, text_input::Status) -> text_input::Style + Copy {
+    move |_, status| text_input::Style {
+        background: Background::Color(palette.surface),
+        border: Border {
+            color: match status {
+                text_input::Status::Focused { .. } => palette.accent,
+                text_input::Status::Hovered => palette.strong_border(),
+                text_input::Status::Disabled | text_input::Status::Active => palette.border(),
+            },
+            width: if matches!(status, text_input::Status::Focused { .. }) {
+                2.0
+            } else {
+                1.0
+            },
+            radius: radius::SMALL.into(),
+        },
+        icon: palette.muted,
+        placeholder: palette.muted,
+        value: if matches!(status, text_input::Status::Disabled) {
+            palette.muted
+        } else {
+            palette.text
+        },
+        selection: Palette::tinted(palette.accent, 0.32),
+    }
+}
+
+/// Quiet at rest, clearer under the pointer, and accented only while dragged.
+pub fn scrollbar(
+    palette: Palette,
+) -> impl Fn(&Theme, scrollable::Status) -> scrollable::Style + Copy {
+    move |theme, status| {
+        let mut style = scrollable::default(theme, status);
+        let colour = match status {
+            scrollable::Status::Dragged { .. } => palette.accent,
+            scrollable::Status::Hovered { .. } => palette.strong_border(),
+            scrollable::Status::Active { .. } => palette.border(),
+        };
+        let rail = scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller: scrollable::Scroller {
+                background: Background::Color(colour),
+                border: Border {
+                    radius: radius::SMALL.into(),
+                    ..Border::default()
+                },
+            },
+        };
+        style.vertical_rail = rail;
+        style.horizontal_rail = rail;
+        style
+    }
+}
+
 pub fn scrim(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
     move |_| container::Style {
         background: Some(Background::Color(Palette::tinted(palette.canvas, 0.78))),
@@ -377,16 +436,38 @@ pub fn forward_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> bu
                     Color::TRANSPARENT
                 },
                 width: 2.0,
-                radius: radius::MEDIUM.into(),
+                radius: radius::SMALL.into(),
             },
             ..button::Style::default()
         }
     }
 }
 
-/// Back: the same as forward.
+/// Back is deliberately quieter than Forward: it remains fully visible and
+/// equally sized, but does not spend the one primary-action accent.
 pub fn back_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
-    forward_button(palette)
+    move |_, status| {
+        let background = match status {
+            button::Status::Hovered => Palette::tinted(palette.accent, 0.14),
+            button::Status::Pressed => Palette::tinted(palette.accent, 0.24),
+            button::Status::Disabled => Palette::tinted(palette.surface, 0.45),
+            button::Status::Active => palette.surface,
+        };
+        button::Style {
+            background: Some(Background::Color(background)),
+            text_color: if matches!(status, button::Status::Disabled) {
+                palette.muted
+            } else {
+                palette.text
+            },
+            border: Border {
+                color: palette.strong_border(),
+                width: 1.0,
+                radius: radius::SMALL.into(),
+            },
+            ..button::Style::default()
+        }
+    }
 }
 
 /// Ordinary commands: menu entries, toolbar buttons, list rows.
@@ -694,6 +775,53 @@ mod tests {
     }
 
     #[test]
+    fn fields_share_geometry_and_reserve_accent_for_focus() {
+        for palette in [tokens::DARK, tokens::LIGHT, tokens::HIGH_CONTRAST] {
+            let theme = iced_theme(palette);
+            let active = text_field(palette)(&theme, text_input::Status::Active);
+            let focused =
+                text_field(palette)(&theme, text_input::Status::Focused { is_hovered: false });
+            assert_eq!(active.border.radius.top_left, radius::SMALL);
+            assert_eq!(active.border.width, 1.0);
+            assert_ne!(active.border.color, palette.accent);
+            assert_eq!(focused.border.color, palette.accent);
+            assert_eq!(focused.border.width, 2.0);
+        }
+    }
+
+    #[test]
+    fn scrollbar_strength_tracks_rest_hover_and_drag() {
+        let palette = tokens::DARK;
+        let theme = iced_theme(palette);
+        let style = scrollbar(palette);
+        let active = style(
+            &theme,
+            scrollable::Status::Active {
+                is_horizontal_scrollbar_disabled: true,
+                is_vertical_scrollbar_disabled: false,
+            },
+        );
+        let dragged = style(
+            &theme,
+            scrollable::Status::Dragged {
+                is_horizontal_scrollbar_dragged: false,
+                is_vertical_scrollbar_dragged: true,
+                is_horizontal_scrollbar_disabled: true,
+                is_vertical_scrollbar_disabled: false,
+            },
+        );
+        assert_eq!(active.vertical_rail.background, None);
+        assert_ne!(
+            active.vertical_rail.scroller.background,
+            Background::Color(palette.accent)
+        );
+        assert_eq!(
+            dragged.vertical_rail.scroller.background,
+            Background::Color(palette.accent)
+        );
+    }
+
+    #[test]
     fn passive_layout_cells_never_draw_a_perimeter_border() {
         for palette in [tokens::DARK, tokens::LIGHT, tokens::HIGH_CONTRAST] {
             let theme = iced_theme(palette);
@@ -749,13 +877,48 @@ mod tests {
     }
 
     #[test]
+    fn views_use_tokens_for_non_optical_type_spacing_and_padding() {
+        let views = [
+            ("shell", include_str!("../view.rs")),
+            ("designer", include_str!("../designer_view.rs")),
+            ("common", include_str!("../widgets/common/view.rs")),
+            ("document", include_str!("../widgets/document/view.rs")),
+            ("navigation", include_str!("../widgets/navigation/view.rs")),
+            ("notes", include_str!("../widgets/notes/view.rs")),
+            ("search", include_str!("../widgets/search/view.rs")),
+            ("slides", include_str!("../widgets/slides/view.rs")),
+            ("status", include_str!("../widgets/status/view.rs")),
+            ("timing", include_str!("../widgets/timing/view.rs")),
+        ];
+        for (name, source) in views {
+            for method in [".size(", ".spacing(", ".padding("] {
+                for suffix in source.split(method).skip(1) {
+                    let literal: String = suffix
+                        .chars()
+                        .take_while(|character| character.is_ascii_digit() || *character == '.')
+                        .collect();
+                    if literal.is_empty() {
+                        continue;
+                    }
+                    let value: f32 = literal.parse().expect("a numeric style literal");
+                    assert!(
+                        value <= 2.0,
+                        "{name} uses {method}{literal}); use a design token unless this is 0–2px optical geometry"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn views_draw_icons_rather_than_typing_them() {
         // A glyph in a `text` widget is whatever the system font decides it
         // is: a different weight and a different optical size than the Lucide
         // drawing beside it, and on a machine missing the character, a
         // tofu box. Every one of these has an [`icon::Icon`] instead.
         let typed = [
-            '✕', '✖', '×', '☰', '↺', '↻', '▾', '▴', '✎', '←', '→', '↑', '↓',
+            '✕', '✖', '×', '☰', '↺', '↻', '▾', '▴', '✎', '←', '→', '↑', '↓', '‹', '›', '▲', '▼',
+            '✓',
         ];
         let views = [
             ("shell", include_str!("../view.rs")),
@@ -859,6 +1022,12 @@ pub mod ambient {
     }
     pub fn drop_down(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         super::drop_down(palette())(theme, status)
+    }
+    pub fn text_field(theme: &Theme, status: text_input::Status) -> text_input::Style {
+        super::text_field(palette())(theme, status)
+    }
+    pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+        super::scrollbar(palette())(theme, status)
     }
     pub fn drop_down_menu(theme: &Theme) -> menu::Style {
         super::drop_down_menu(palette())(theme)

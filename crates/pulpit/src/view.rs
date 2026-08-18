@@ -1423,7 +1423,8 @@ fn settings_page(app: &App) -> Element<'_, Message> {
                 })
             )
             .height(Length::Fixed(260.0))
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .style(theme::ambient::scrollbar),
             copy,
         ])
         .style(theme::ambient::surface)
@@ -1433,6 +1434,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     scrollable(body)
         .width(Length::Fill)
         .height(Length::Fill)
+        .style(theme::ambient::scrollbar)
         .into()
 }
 
@@ -1462,6 +1464,7 @@ fn color_editor(app: &App) -> Element<'_, Message> {
         let swatch = parsed.unwrap_or_else(|| palette.color(role));
         let field = text_input("#RRGGBB", &value)
             .on_input(move |value| Message::SetColor(role, value))
+            .style(theme::ambient::text_field)
             .width(Length::Fixed(124.0));
         let mut role_row = column![row![
             column![
@@ -1800,6 +1803,7 @@ fn time_picker<'a>(
             // Enter commits from either half: a presenter who typed the hour
             // and meant o'clock should not have to cross the colon first.
             .on_submit(submit.clone())
+            .style(theme::ambient::text_field)
             .size(type_scale::TITLE)
             .padding(gap::S)
             .align_x(Alignment::Center)
@@ -2269,6 +2273,7 @@ fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Elemen
                         Message::Sign(crate::signing::SignMsg::PassphraseChanged(typed))
                     })
                     .on_submit(Message::Sign(crate::signing::SignMsg::PassphraseSubmit))
+                    .style(theme::ambient::text_field)
                     .padding(gap::S),
             ]
             .spacing(gap::M);
@@ -2378,18 +2383,21 @@ fn sign_dialog(flow: &crate::signing::SigningFlow, on_page_zero: bool) -> Elemen
                     "Reason (optional)",
                     text_input("Reason", &options.reason)
                         .on_input(|v| Message::Sign(SignMsg::ReasonChanged(v)))
+                        .style(theme::ambient::text_field)
                         .padding(gap::S),
                 ),
                 dialog_section(
                     "Location (optional)",
                     text_input("Location", &options.location)
                         .on_input(|v| Message::Sign(SignMsg::LocationChanged(v)))
+                        .style(theme::ambient::text_field)
                         .padding(gap::S),
                 ),
                 dialog_section(
                     "Contact (optional)",
                     text_input("Contact", &options.contact)
                         .on_input(|v| Message::Sign(SignMsg::ContactChanged(v)))
+                        .style(theme::ambient::text_field)
                         .padding(gap::S),
                 ),
             ]
@@ -2718,20 +2726,22 @@ fn mappings(app: &App) -> Element<'_, Message> {
             NotesMapping::PairedPages(PairedRule::TwoRanges { notes_first: false }),
         ),
     ];
-    let mut buttons = row![text("Notes mapping:").size(12)].spacing(6);
+    let mut buttons = row![text("Notes mapping:").size(type_scale::LABEL)].spacing(gap::XS);
     for (label, mapping) in options {
         let selected = app.state.mapping() == &mapping;
         buttons = buttons.push(
-            selectable(button(text(label).size(11)), selected)
+            selectable(button(text(label).size(type_scale::CAPTION)), selected)
                 .on_press(Message::SetMapping(mapping)),
         );
     }
     let current = app.state.mapping();
     if let NotesMapping::SplitPage { slide, .. } = current {
         let notes_side = if slide.x > 0.0 { "left" } else { "right" };
-        buttons = buttons.push(text(format!("split page, notes {notes_side}")).size(11));
+        buttons =
+            buttons.push(text(format!("split page, notes {notes_side}")).size(type_scale::CAPTION));
         buttons = buttons.push(
-            button(text("Swap halves").size(11)).on_press(Message::SetMapping(current.swapped())),
+            button(text("Swap halves").size(type_scale::CAPTION))
+                .on_press(Message::SetMapping(current.swapped())),
         );
     }
     buttons.wrap().into()
@@ -2800,23 +2810,23 @@ fn library_page(app: &App) -> Element<'_, Message> {
 fn layout_dialog(dialog: &LayoutDialog) -> Element<'_, Message> {
     let body: Element<'_, Message> = match dialog {
         LayoutDialog::ConfirmDelete { name, .. } => column![
-            text(format!("Delete “{name}”?")).size(16),
+            text(format!("Delete “{name}”?")).size(type_scale::HEADING),
             text("This cannot be undone.")
-                .size(12)
+                .size(type_scale::LABEL)
                 .color(theme::ambient::muted()),
             row![
-                button(text("Delete").size(13))
-                    .padding(9)
+                button(text("Delete").size(type_scale::BODY))
+                    .padding(gap::S)
                     .style(theme::ambient::alert_button)
                     .on_press(Message::ConfirmLayoutDialog),
-                button(text("Cancel").size(13))
-                    .padding(9)
+                button(text("Cancel").size(type_scale::BODY))
+                    .padding(gap::S)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::CancelLayoutDialog),
             ]
-            .spacing(8),
+            .spacing(gap::S),
         ]
-        .spacing(12)
+        .spacing(gap::M)
         .into(),
     };
 

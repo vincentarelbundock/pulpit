@@ -44,7 +44,7 @@ fn strip<Message: Clone + 'static>(
             .width(Length::FillPortion(46)),
         container(panel(widget, slides, mode, Relative::Next, on)).width(Length::FillPortion(27)),
     ]
-    .spacing(8)
+    .spacing(theme::space::S)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -88,7 +88,7 @@ fn panel<Message: Clone + 'static>(
                     } else {
                         "—".to_string()
                     })
-                    .size(20)
+                    .size(theme::type_scale::HEADING)
                     .color(theme::ambient::muted()),
                 )
                 .center_x(Length::Fill)
@@ -211,11 +211,11 @@ fn panel<Message: Clone + 'static>(
     }
 
     let caption = text(format!("{} · {}", which.caption(), slides.label(slide)))
-        .size(12)
+        .size(theme::type_scale::LABEL)
         .color(theme::ambient::muted());
 
     column![caption, framed]
-        .spacing(4)
+        .spacing(theme::space::XS)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

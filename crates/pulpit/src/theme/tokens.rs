@@ -340,6 +340,14 @@ pub mod type_scale {
     pub const TITLE: f32 = 22.0;
 }
 
+/// Font roles. Application prose and controls deliberately inherit Iced's
+/// platform UI font; compact numeric readouts use the bundled DejaVu Sans
+/// Mono so columns and changing digits do not jump or vary between machines,
+/// without imposing a branded face on the rest of the interface.
+pub mod font {
+    pub const READOUT: iced::Font = iced::Font::with_name("DejaVu Sans Mono");
+}
+
 /// Hit-target sizes, in logical pixels.
 pub mod target {
     /// Every pointer target must be at least this in each dimension.

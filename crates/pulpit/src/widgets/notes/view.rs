@@ -16,7 +16,6 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     let slides = &ctx.context.slides;
     let document = &ctx.context.document;
     let mode = ctx.context.mode;
-    let accent = ctx.accent;
     let options = widget.notes();
     // Notes follow the *preview* slide, not the committed one: reading ahead
     // is the whole point of the pane.
@@ -39,6 +38,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
         )
         .width(Length::Fill)
         .height(Length::Fill)
+        .style(theme::ambient::scrollbar)
         .into(),
         None => match slides
             .frames
@@ -66,14 +66,12 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     };
 
     column![
-        text("Speaker Notes").size(13).color(accent),
-        container(body)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(14)
-            .style(theme::ambient::surface),
+        text("Speaker Notes")
+            .size(theme::type_scale::LABEL)
+            .color(theme::ambient::muted()),
+        container(body).width(Length::Fill).height(Length::Fill),
     ]
-    .spacing(8)
+    .spacing(theme::space::XS)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()

@@ -260,6 +260,20 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   centrally from those roles. Components MUST NOT invent aliases such as
   `primary`, `danger` or named hues. Spacing (4/8/12/16/24/32), radii and
   typography scales likewise live in the theme layer, not in views.
++ *Platform typography, deliberate readouts.* Interface prose and controls use
+  the platform UI sans so Pulpit belongs on the host desktop and inherits its
+  language coverage. Clocks, timers, page positions and other compact numeric
+  readouts use the bundled DejaVu Sans Mono role so changing digits do not
+  shift or vary between machines. A display face is not part of the interface
+  vocabulary.
++ *Geometry follows function.* Controls and fields use a 4-pixel radius,
+  panels 8, and dialogs 12. Pills are reserved for genuine segmented choices;
+  passive surfaces do not accumulate nested cards. Shadows are reserved for
+  transient overlays that must separate from content beneath them.
++ *Accent is a budget.* It marks focus, selection, current/live state, and the
+  primary forward action. Passive headings and ordinary readouts use text or
+  muted roles. Alert is reserved for warnings, errors, overtime, and
+  destructive actions.
 + *Status is never conveyed by colour alone*, and contrast is at least 4.5:1
   for normal text, 3:1 for large text, control borders, focus rings and
   meaningful graphics. High-contrast system modes take precedence over the
@@ -882,6 +896,12 @@ pass. The explicit, palette-taking style builders underneath are what the
 tests exercise; the ambient layer only spares every widget from threading the
 palette by hand.
 
+Editable fields share one recipe: surface fill, a quiet one-pixel edge,
+4-pixel corners, and a two-pixel accent focus edge. Scrollbars keep a
+14-pixel pointer lane and a 48-pixel minimum thumb while drawing only a
+5-pixel thumb; the thumb strengthens on hover and uses accent only while
+dragged.
+
 == Status: toasts, and why they are never the whole story
 
 Notices appear in the corner of the *presenter* window and never on the
@@ -1188,13 +1208,12 @@ and a mute button; an animation has no playhead and no audio, so it gets the
 button alone. Media whose runtime never started still gets a transport, drawn
 inert and reading *Not playing*.
 
-=== Accent colours
+=== Accent and alert
 
-Cyan (default), amber, white or slate — the sanctioned palette, no arbitrary
-colours. *Amber is reserved for timing displays.* The Timer takes it by
-default and other widgets are not offered it; choosing it elsewhere is refused
-with an explanation rather than silently accepted, so the timer stays the one
-thing on the screen that reads as urgent.
+Accent is the interface's interaction signal, not a decoration: focus,
+selection, current/live state, and the Forward action. Timer and clock digits
+are ordinary text until a warning or alarm makes them alert-coloured. That
+change is intentionally rare, so it remains visible at a glance.
 
 == Editing
 

@@ -12,6 +12,7 @@ use iced::{Element, Length, Padding, Size};
 
 use crate::theme;
 use crate::theme::target;
+use crate::theme::Icon;
 use crate::widgets::common::view::fitted_size;
 use crate::widgets::context::{Mode, SlideData};
 use crate::widgets::event::WidgetEvent;
@@ -26,7 +27,6 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     let mode = ctx.context.mode;
     let on = ctx.on_event;
     let scale = ctx.scale;
-    let accent = ctx.accent;
     match widget.kind() {
         WidgetKind::SlideButtons => {
             let options = widget.buttons();
@@ -40,7 +40,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             .into()
         }
         WidgetKind::SlideSlider => scrubber(slides, mode, on),
-        WidgetKind::SlideCounter => counter(slides, scale, accent, mode, on),
+        WidgetKind::SlideCounter => counter(slides, scale, mode, on),
         WidgetKind::PauseResume => {
             action("Pause / Resume", WidgetEvent::ToggleTimer, mode, on, false)
         }
@@ -68,11 +68,7 @@ fn buttons<Message: Clone + 'static>(
 ) -> Element<'static, Message> {
     let halves = f32::from(u8::from(options.back) + u8::from(options.forward)).max(1.0);
     let button_width = ((width - SPACING) / halves - 20.0).max(1.0);
-    let longest = if options.labels {
-        "Forward  ▶"
-    } else {
-        "▶"
-    };
+    let longest = if options.labels { "Forward" } else { "" };
     let label_size = fitted_size(
         Size::new(button_width, height),
         longest.chars().count(),
@@ -86,34 +82,38 @@ fn buttons<Message: Clone + 'static>(
 
     let mut row = Row::new().spacing(SPACING).width(Length::Fill);
     if options.back {
-        let mut back = button(
-            text(if show_words { "◀  Back" } else { "◀" })
-                .size(label_size)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .center()
-                .width(Length::Fill),
-        )
-        .height(Length::Fixed(height))
-        .padding(Padding::from([0.0, 8.0]))
-        .width(Length::FillPortion(1))
-        .style(theme::ambient::back_button);
+        let label = text("Back")
+            .size(label_size)
+            .wrapping(iced::widget::text::Wrapping::None);
+        let content = if show_words {
+            row![theme::icon::icon(Icon::ChevronLeft, label_size), label].spacing(theme::space::XS)
+        } else {
+            row![theme::icon::icon(Icon::ChevronLeft, label_size)]
+        };
+        let mut back = button(content.align_y(iced::Alignment::Center))
+            .height(Length::Fixed(height))
+            .padding(Padding::from([0.0, 8.0]))
+            .width(Length::FillPortion(1))
+            .style(theme::ambient::back_button);
         if mode.interactive() {
             back = back.on_press(on(WidgetEvent::Previous));
         }
         row = row.push(back);
     }
     if options.forward {
-        let mut forward = button(
-            text(if show_words { "Forward  ▶" } else { "▶" })
-                .size(label_size)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .center()
-                .width(Length::Fill),
-        )
-        .height(Length::Fixed(height))
-        .padding(Padding::from([0.0, 8.0]))
-        .width(Length::FillPortion(1))
-        .style(theme::ambient::forward_button);
+        let label = text("Forward")
+            .size(label_size)
+            .wrapping(iced::widget::text::Wrapping::None);
+        let content = if show_words {
+            row![label, theme::icon::icon(Icon::ChevronRight, label_size)].spacing(theme::space::XS)
+        } else {
+            row![theme::icon::icon(Icon::ChevronRight, label_size)]
+        };
+        let mut forward = button(content.align_y(iced::Alignment::Center))
+            .height(Length::Fixed(height))
+            .padding(Padding::from([0.0, 8.0]))
+            .width(Length::FillPortion(1))
+            .style(theme::ambient::forward_button);
         if mode.interactive() {
             forward = forward.on_press(on(WidgetEvent::Next));
         }
@@ -227,7 +227,6 @@ fn scrub_event(mode: Mode, slide: usize) -> WidgetEvent {
 fn counter<Message: Clone + 'static>(
     slides: &SlideData<'_>,
     scale: f32,
-    accent: iced::Color,
     mode: Mode,
     on: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
@@ -240,7 +239,10 @@ fn counter<Message: Clone + 'static>(
                 text("SLIDE")
                     .size((size * 0.34).clamp(9.0, 14.0))
                     .color(theme::ambient::muted()),
-                text(label.clone()).size(size).color(accent),
+                text(label.clone())
+                    .font(theme::font::READOUT)
+                    .size(size)
+                    .color(theme::ambient::text()),
             ]
             .spacing(2)
             .align_x(iced::Alignment::Center),
@@ -262,14 +264,19 @@ fn action<Message: Clone + 'static>(
     on: fn(WidgetEvent) -> Message,
     alert: bool,
 ) -> Element<'static, Message> {
-    let mut control = button(text(label).size(16).center().width(Length::Fill))
-        .width(Length::Fill)
-        .padding(12)
-        .style(if alert {
-            theme::ambient::alert_button
-        } else {
-            theme::ambient::tool_button
-        });
+    let mut control = button(
+        text(label)
+            .size(theme::type_scale::BODY)
+            .center()
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::M)
+    .style(if alert {
+        theme::ambient::alert_button
+    } else {
+        theme::ambient::tool_button
+    });
     if mode.interactive() {
         control = control.on_press(on(event));
     }

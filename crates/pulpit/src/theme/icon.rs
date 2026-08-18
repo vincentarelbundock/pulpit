@@ -57,6 +57,8 @@ pub enum Icon {
     EyeOff,
     /// Opens a panel below its trigger: `chevron-down`.
     ChevronDown,
+    /// Increase a stepped value: `chevron-up`.
+    ChevronUp,
     /// Dismiss: `x`.
     Close,
     /// Edit in place: `pencil`.
@@ -130,6 +132,7 @@ impl Icon {
             Icon::Eye => include_bytes!("../../assets/icons/eye.svg"),
             Icon::EyeOff => include_bytes!("../../assets/icons/eye-off.svg"),
             Icon::ChevronDown => include_bytes!("../../assets/icons/chevron-down.svg"),
+            Icon::ChevronUp => include_bytes!("../../assets/icons/chevron-up.svg"),
             Icon::Close => include_bytes!("../../assets/icons/x.svg"),
             Icon::Pencil => include_bytes!("../../assets/icons/pencil.svg"),
             Icon::Type => include_bytes!("../../assets/icons/type.svg"),
@@ -167,7 +170,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 37] = [
+    const ALL: [Icon; 38] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -180,6 +183,7 @@ impl Icon {
         Icon::Eye,
         Icon::EyeOff,
         Icon::ChevronDown,
+        Icon::ChevronUp,
         Icon::Close,
         Icon::Pencil,
         Icon::Type,

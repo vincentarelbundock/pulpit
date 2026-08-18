@@ -79,7 +79,7 @@ pub fn reveal_offset(
 /// The shared track and thumb geometry.
 pub fn bar() -> scrollable::Scrollbar {
     scrollable::Scrollbar::new()
-        .width(super::tokens::SCROLL_HANDLE_WIDTH)
+        .width(super::tokens::SCROLL_LANE_WIDTH)
         .scroller_width(super::tokens::SCROLL_HANDLE_WIDTH)
         .min_scroller_length(super::tokens::SCROLL_HANDLE_MIN_LENGTH)
 }
@@ -88,7 +88,9 @@ pub fn bar() -> scrollable::Scrollbar {
 pub fn vertical<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
 ) -> Scrollable<'a, Message> {
-    scrollable(content).direction(scrollable::Direction::Vertical(bar()))
+    scrollable(content)
+        .direction(scrollable::Direction::Vertical(bar()))
+        .style(crate::theme::ambient::scrollbar)
 }
 
 #[cfg(test)]

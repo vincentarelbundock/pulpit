@@ -261,10 +261,11 @@ pub const CATALOG: [WidgetDefinition; 26] = [
         // one of them could be telling the truth.
         placement: PlacementPolicy::single(),
         capabilities: NO_CAPS,
-        // Eight controls in one row; they grow into whatever height the cell
-        // has, so the minimum is the smallest button still worth pressing.
-        // Option panels are overlays and cost the cell nothing.
-        minimum_size: (300.0, 26.0),
+        // The responsive row keeps the primary tools and moves every control
+        // that does not fit into a labelled overflow menu. At 160pt it keeps
+        // several direct tools plus that menu; requiring the full expanded
+        // row would make the contract describe a preferred width as a minimum.
+        minimum_size: (160.0, 32.0),
         thumbnail: ThumbnailContent::Marks,
     },
     WidgetDefinition {
@@ -562,8 +563,8 @@ mod tests {
         );
         let (width, height) = definition.minimum_size;
         assert!(
-            width >= 260.0 && (24.0..=32.0).contains(&height),
-            "the palette is one row of controls that grows into its cell"
+            width >= 160.0 && height >= crate::theme::target::MINIMUM,
+            "the palette keeps usable targets and moves the rest into overflow"
         );
     }
 

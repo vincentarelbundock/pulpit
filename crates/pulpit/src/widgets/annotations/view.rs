@@ -445,7 +445,7 @@ fn overflow_menu<Message: Clone + 'static>(
                 // popover over it: a panel hanging off a panel is hard to
                 // dismiss, and this one is already a list with room in it.
                 let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, glyph))
-                    .padding(4)
+                    .padding(theme::space::XS)
                     .style(theme::ambient::tool_button);
                 if mode.interactive() {
                     arm = arm.on_press(on(WidgetEvent::Annotate(command)));
@@ -1413,26 +1413,30 @@ pub fn marks<'a, Message: 'a>(
                     .size(font_size)
                     .color(iced::Color::from_rgb(red, green, blue));
                     let palette = theme::ambient::palette();
-                    let editor =
-                        container(scrollable(source).width(Length::Fill).height(Length::Fill))
-                            .padding(padding)
-                            .width(Length::Fixed(width))
-                            .height(Length::Fixed(height))
-                            .style(move |_| container::Style {
-                                background: Some(iced::Background::Color(iced::Color {
-                                    a: 0.58,
-                                    ..palette.surface
-                                })),
-                                border: iced::Border {
-                                    color: iced::Color {
-                                        a: 0.9,
-                                        ..palette.accent
-                                    },
-                                    width: 2.0,
-                                    radius: theme::radius::SMALL.into(),
-                                },
-                                ..container::Style::default()
-                            });
+                    let editor = container(
+                        scrollable(source)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(theme::ambient::scrollbar),
+                    )
+                    .padding(padding)
+                    .width(Length::Fixed(width))
+                    .height(Length::Fixed(height))
+                    .style(move |_| container::Style {
+                        background: Some(iced::Background::Color(iced::Color {
+                            a: 0.58,
+                            ..palette.surface
+                        })),
+                        border: iced::Border {
+                            color: iced::Color {
+                                a: 0.9,
+                                ..palette.accent
+                            },
+                            width: 2.0,
+                            radius: theme::radius::SMALL.into(),
+                        },
+                        ..container::Style::default()
+                    });
                     layers = layers.push(
                         container(editor)
                             .padding(Padding {

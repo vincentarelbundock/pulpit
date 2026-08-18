@@ -18,14 +18,12 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     let slides = &ctx.context.slides;
     let audience = &ctx.context.audience;
     let scale = ctx.scale;
-    let accent = ctx.accent;
     match widget.kind() {
         WidgetKind::PresentationTitle => title(document, slides, scale),
         WidgetKind::CurrentSection => labelled(
             "Section",
             document.section.clone().unwrap_or_else(|| "—".to_string()),
             scale,
-            accent,
             widget.style.alignment,
         ),
         WidgetKind::AudienceScreenStatus => {
@@ -87,7 +85,7 @@ fn title<Message: 'static>(
             ]
             .spacing(2),
         ]
-        .spacing(10)
+        .spacing(theme::space::M)
         .align_y(Alignment::Center)
         .height(Length::Fill)
         .into()

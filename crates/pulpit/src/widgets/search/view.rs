@@ -12,6 +12,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
+use crate::theme::Icon;
 use crate::widgets::context::SearchData;
 use crate::widgets::event::FindCommand;
 use crate::widgets::view_context::WidgetViewContext;
@@ -48,6 +49,8 @@ pub fn pane<Message: Clone + 'static>(
     let mut field = iced::widget::TextInput::new("Find in document", state.query().text())
         .id(input_id())
         .size(theme::type_scale::BODY)
+        .padding(theme::space::S)
+        .style(theme::ambient::text_field)
         .width(Length::Fill);
     if live {
         field = field
@@ -57,8 +60,8 @@ pub fn pane<Message: Clone + 'static>(
             .on_submit(on_event(WidgetEvent::Find(FindCommand::Next)));
     }
 
-    let step = |label: &'static str, command: FindCommand| {
-        let mut control = button(text(label).size(theme::type_scale::LABEL))
+    let step = |glyph: Icon, command: FindCommand| {
+        let mut control = button(theme::icon::icon(glyph, theme::type_scale::BODY))
             .padding(theme::space::XS)
             .style(theme::ambient::tool_button);
         // Nothing found is nothing to step through, and a dead button says
@@ -83,7 +86,7 @@ pub fn pane<Message: Clone + 'static>(
         control
     };
 
-    let mut clear = button(text("✕").size(theme::type_scale::LABEL))
+    let mut clear = button(theme::icon::icon(Icon::Close, theme::type_scale::BODY))
         .padding(theme::space::XS)
         .style(theme::ambient::tool_button);
     // Nothing typed is nothing to clear, and the overlays on the page go with
@@ -95,8 +98,8 @@ pub fn pane<Message: Clone + 'static>(
     // The query gets the whole rail width. The compact tool row below it is
     // easier to scan and does not squeeze the input as options are added.
     let controls = row![
-        step("‹", FindCommand::Previous),
-        step("›", FindCommand::Next),
+        step(Icon::ChevronLeft, FindCommand::Previous),
+        step(Icon::ChevronRight, FindCommand::Next),
         toggle(
             "Aa",
             state.query().case_sensitive,

@@ -1,5 +1,4 @@
-//! The controls whose look is borrowed from Material 3: tonal and split
-//! buttons, segments, menu and panel surfaces.
+//! Shared tonal, split, segmented, menu, and panel controls.
 //!
 //! These were once adapters over `material-ui-rs`. The library gave three
 //! style functions and a handful of numbers, and asked in exchange that every
@@ -40,7 +39,7 @@ const PRESSED_LAYER: f32 = 0.10;
 const DISABLED_CONTAINER: f32 = 0.12;
 const DISABLED_TEXT: f32 = 0.38;
 
-/// Material's filled-tonal button: the quiet-but-present emphasis, used for
+/// A quiet tonal button, used for
 /// the controls that are pressed often and are not the one dangerous action.
 pub fn filled_tonal(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
     move |_, status| filled_tonal_style(palette, status)
@@ -156,7 +155,7 @@ fn filled_tonal_style(palette: Palette, status: button::Status) -> button::Style
         background: Some(Background::Color(background)),
         text_color: foreground,
         border: Border {
-            radius: CORNER_FULL.into(),
+            radius: super::radius::SMALL.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -186,7 +185,7 @@ fn text_style(palette: Palette, status: button::Status) -> button::Style {
         background: None,
         text_color: foreground,
         border: Border {
-            radius: CORNER_FULL.into(),
+            radius: super::radius::SMALL.into(),
             ..Border::default()
         },
         ..button::Style::default()

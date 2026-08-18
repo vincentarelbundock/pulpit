@@ -167,7 +167,6 @@ pub fn presenter_default() -> Layout {
         stage_children,
     );
 
-    let third = 1.0 / 3.0;
     let control_children = vec![
         b.panel(WidgetKind::SlideSlider),
         b.panel(WidgetKind::SlideButtons),
@@ -176,7 +175,9 @@ pub fn presenter_default() -> Layout {
     let controls = b.split(
         "Navigation and tools",
         Direction::Horizontal,
-        &[third, third, third],
+        // The slider is the elastic control; navigation keeps a dependable
+        // centre target, and the tool cluster hugs the smaller trailing area.
+        &[0.52, 0.32, 0.16],
         control_children,
     );
 
@@ -438,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_built_from_clean_fractions() {
+    fn the_default_uses_deliberate_stage_rail_and_control_proportions() {
         let default = presenter_default();
         let root = default.root.as_split().unwrap();
         assert_eq!(root.sizes, vec![0.92, 0.08]);
@@ -450,9 +451,10 @@ mod tests {
         assert_eq!(rail.sizes, vec![0.15, 0.30, 0.55]);
         assert_eq!(rail.children[0].as_split().unwrap().sizes, vec![0.5, 0.5]);
 
-        for size in &root.children[1].as_split().unwrap().sizes {
-            assert!((size - 1.0 / 3.0).abs() < 1e-6);
-        }
+        assert_eq!(
+            root.children[1].as_split().unwrap().sizes,
+            vec![0.52, 0.32, 0.16]
+        );
 
         let kinds: Vec<WidgetKind> = default.widgets().iter().map(|w| w.kind()).collect();
         for required in [

@@ -39,8 +39,12 @@ pub const SPLIT_GAP: f32 = 8.0;
 /// widget, so it stays hairline-thin in both the live layout and the editor.
 pub const CELL_SEPARATOR_WIDTH: f32 = 1.0;
 
-/// The width of a vertical scroll handle and its lane.
-pub const SCROLL_HANDLE_WIDTH: f32 = 14.0;
+/// The forgiving pointer lane around the visually quiet thumb.
+pub const SCROLL_LANE_WIDTH: f32 = 14.0;
+
+/// The visible thumb. Keeping this narrower than its lane makes scrolling
+/// discoverable without drawing a heavy bar down every reading surface.
+pub const SCROLL_HANDLE_WIDTH: f32 = 5.0;
 
 /// The shortest scrollbar thumb: large enough to acquire on the first try.
 pub const SCROLL_HANDLE_MIN_LENGTH: f32 = 48.0;

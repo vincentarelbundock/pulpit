@@ -16,6 +16,7 @@ use pulpit_core::annotation::{AnnotationTool, InkColor};
 use pulpit_core::page::PageIndex;
 
 use crate::theme;
+use crate::theme::Icon;
 use crate::widgets::context::{Mode, ReaderData};
 use crate::widgets::event::ReadCommand;
 use crate::widgets::view_context::WidgetViewContext;
@@ -80,7 +81,7 @@ fn hint<'a, Message: 'a>(
     tooltip(
         control,
         container(text(label.to_string()).size(theme::type_scale::CAPTION))
-            .padding(6.0)
+            .padding(theme::space::S)
             .style(theme::ambient::dialog),
         tooltip::Position::Bottom,
     )
@@ -134,6 +135,7 @@ fn page_surface<'a, Message: Clone + 'static>(
             vertical: crate::widgets::scroll::bar(),
             horizontal: scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
         })
+        .style(theme::ambient::scrollbar)
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -943,7 +945,9 @@ fn choice_list_layer<Message: Clone + 'static>(
 
     let panel = container(
         column![
-            iced::widget::scrollable(rows).height(Length::Shrink),
+            iced::widget::scrollable(rows)
+                .height(Length::Shrink)
+                .style(theme::ambient::scrollbar),
             // "Done" rather than "Close" for a multi-select list: every tick
             // was already committed on its own, so there is nothing left to
             // confirm and nothing a "Cancel" could take back.
@@ -1021,14 +1025,14 @@ fn date_picker_layer<Message: Clone + 'static>(
         above.max(0.0)
     };
 
-    let step = |label: &str, forward: bool| {
-        button(text(label.to_string()).size(theme::type_scale::LABEL))
+    let step = |glyph: Icon, forward: bool| {
+        button(theme::icon::icon(glyph, theme::type_scale::BODY))
             .padding(theme::space::XS)
             .style(theme::ambient::tool_button)
             .on_press(send(ReadCommand::StepDatePicker(forward)))
     };
     let header = row![
-        step("‹", false),
+        step(Icon::ChevronLeft, false),
         container(
             text(picker.month.title(language))
                 .size(theme::type_scale::LABEL)
@@ -1036,7 +1040,7 @@ fn date_picker_layer<Message: Clone + 'static>(
         )
         .width(Length::Fill)
         .align_y(Alignment::Center),
-        step("›", true),
+        step(Icon::ChevronRight, true),
     ]
     .align_y(Alignment::Center);
 
@@ -1144,11 +1148,10 @@ fn time_picker_layer<Message: Clone + 'static>(
 
     let stepper = move |value: String, minutes: i32| {
         column![
-            button(
-                text("▲")
-                    .size(theme::type_scale::CAPTION)
-                    .align_x(Alignment::Center)
-            )
+            button(theme::icon::icon(
+                Icon::ChevronUp,
+                theme::type_scale::CAPTION
+            ))
             .width(Length::Fixed(COLUMN))
             .padding(2.0)
             .style(theme::ambient::tool_button)
@@ -1160,11 +1163,10 @@ fn time_picker_layer<Message: Clone + 'static>(
             )
             .width(Length::Fixed(COLUMN))
             .align_y(Alignment::Center),
-            button(
-                text("▼")
-                    .size(theme::type_scale::CAPTION)
-                    .align_x(Alignment::Center)
-            )
+            button(theme::icon::icon(
+                Icon::ChevronDown,
+                theme::type_scale::CAPTION
+            ))
             .width(Length::Fixed(COLUMN))
             .padding(2.0)
             .style(theme::ambient::tool_button)
@@ -1329,7 +1331,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
     // Placing the mark. The tick is the visible way to do it, because Return
     // now means what it means in prose.
     controls = controls.push(
-        button(text("✓").size(theme::type_scale::LABEL))
+        button(theme::icon::icon(Icon::Check, theme::type_scale::BODY))
             .padding(theme::space::XS)
             .style(theme::ambient::selected_button)
             .on_press(on_event(WidgetEvent::Read(ReadCommand::CommitMark))),
@@ -1341,7 +1343,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
     if composing.tool != AnnotationTool::Note {
         let typst = composing.typst;
         controls = controls.push(
-            button(text(if typst { "Typst ✓" } else { "Typst" }).size(theme::type_scale::LABEL))
+            button(text("Typst").size(theme::type_scale::LABEL))
                 .padding(theme::space::XS)
                 .style(if typst {
                     theme::ambient::selected_button
@@ -1354,7 +1356,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
         );
     }
     controls = controls.push(
-        button(text("✕").size(theme::type_scale::LABEL))
+        button(theme::icon::icon(Icon::Close, theme::type_scale::BODY))
             .padding(theme::space::XS)
             .style(theme::ambient::tool_button)
             .on_press(on_event(WidgetEvent::Read(ReadCommand::CancelMark))),
@@ -1472,6 +1474,7 @@ fn navigation<Message: Clone + 'static>(
             .unwrap_or_else(|| reader.page_label());
         let mut current = text_input("Page", &value)
             .size(theme::type_scale::LABEL)
+            .style(theme::ambient::text_field)
             .width(Length::Fixed(48.0))
             .padding(Padding::from([4.0, 6.0]));
         if live {

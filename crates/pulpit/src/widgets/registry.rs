@@ -335,7 +335,7 @@ mod tests {
         // proves the function actually returns rather than panicking.
         let context = super::super::sample::context(crate::widgets::context::Mode::Live);
         let ctx: WidgetViewContext<'_, '_, ()> =
-            WidgetViewContext::new(&context, None, |_| (), iced::Color::BLACK, 1.0);
+            WidgetViewContext::new(&context, None, |_| (), 1.0);
         for kind in WidgetKind::ALL {
             let widget = Widget::new(kind);
             let _: Element<'_, ()> = dispatch(&ctx, &widget);

@@ -4,7 +4,7 @@
 //! facet per concern, borrowed from the application. This wraps it with the
 //! few things the layout renderer used to compute once and thread through by
 //! hand — the message constructor, the composing editor's content, and the
-//! ambient accent and scale — so every family's entry point takes the same
+//! ambient scale — so every family's entry point takes the same
 //! four words rather than its own hand-picked slice of them.
 
 use crate::widgets::context::Context;
@@ -28,9 +28,6 @@ pub struct WidgetViewContext<'ctx, 'a, Message> {
     /// How a family turns a widget interaction into the application's
     /// message type.
     pub on_event: fn(WidgetEvent) -> Message,
-    /// The ambient accent colour, resolved once per draw rather than once
-    /// per widget.
-    pub accent: iced::Color,
     /// The widget's content scale, already clamped to
     /// [`crate::widgets::common::SCALE_RANGE`].
     pub scale: f32,
@@ -41,14 +38,12 @@ impl<'ctx, 'a, Message> WidgetViewContext<'ctx, 'a, Message> {
         context: &'ctx Context<'ctx>,
         compose: Option<&'a iced::widget::text_editor::Content>,
         on_event: fn(WidgetEvent) -> Message,
-        accent: iced::Color,
         scale: f32,
     ) -> Self {
         Self {
             context,
             compose,
             on_event,
-            accent,
             scale,
         }
     }

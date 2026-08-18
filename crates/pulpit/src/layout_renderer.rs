@@ -280,12 +280,11 @@ pub fn widget<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
-    let accent = theme::ambient::accent();
     let scale = widget.style.scale.clamp(
         crate::widgets::common::SCALE_RANGE.0,
         crate::widgets::common::SCALE_RANGE.1,
     );
-    let ctx = WidgetViewContext::new(context, compose, on_event, accent, scale);
+    let ctx = WidgetViewContext::new(context, compose, on_event, scale);
 
     registry::dispatch(&ctx, widget)
 }
@@ -297,12 +296,11 @@ fn widget_kind<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
-    let accent = theme::ambient::accent();
     let scale = host.style.scale.clamp(
         crate::widgets::common::SCALE_RANGE.0,
         crate::widgets::common::SCALE_RANGE.1,
     );
-    let ctx = WidgetViewContext::new(context, compose, on_event, accent, scale);
+    let ctx = WidgetViewContext::new(context, compose, on_event, scale);
     registry::dispatch_kind(kind, &ctx, host)
 }
 
