@@ -2345,9 +2345,7 @@ fn document_tools_band<Message: Clone + 'static>(
         if let Some(tool) = state.tool {
             bar = bar.push(document_tool_control(tool, state, on_event));
         }
-        bar = bar
-            .push(space::horizontal().width(Length::Fill))
-            .push(document_tools_overflow(state, on_event));
+        bar = bar.push(document_tools_overflow(state, on_event));
         return container(bar)
             .width(Length::Fill)
             .align_y(Alignment::Center)

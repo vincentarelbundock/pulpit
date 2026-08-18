@@ -298,10 +298,12 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
 + *Errors say what failed, what is currently safe, and what to do next.* A
   transient toast is never the sole record of a presentation-critical failure,
   and never appears on the audience window.
-+ *Layouts are device-independent.* Normalised split proportions, minimum
-  sizes in logical units, no monitor index, desktop coordinate, OS font name
-  or physical DPI. The designer canvas MUST use the same layout algorithm as
-  the live presenter view — a separate approximation is forbidden.
++ *Layouts are device-independent.* Flexible tracks use normalised split
+  proportions; a cell may instead hug its widget's declared minimum extent on
+  either axis, also in logical units. No monitor index, desktop coordinate, OS
+  font name or physical DPI. The designer canvas MUST use the same layout
+  algorithm as the live presenter view — a separate approximation is
+  forbidden.
 
 == Performance
 
@@ -1118,10 +1120,11 @@ Two node types only:
 
 - a *split* with two or more children in one direction, plus their relative
   sizes, a gap and a minimum child size;
-- a *leaf* cell holding at most one widget, plus padding, background and what
-  to do when it is empty. Neighbouring cells are separated by one muted
-  hairline in the split gutter; cells and widgets do not draw perimeter
-  borders.
+- a *leaf* cell holding at most one widget, plus padding, background, what to
+  do when it is empty, and whether either axis fills its authored proportion
+  or hugs the widget's functional minimum. Neighbouring cells are separated
+  by one muted hairline in the split gutter; cells and widgets do not draw
+  perimeter borders.
 
 The tree is kept *canonical*: a split never directly contains a child split of
 the same direction. That single rule is what makes divider behaviour
@@ -1136,11 +1139,14 @@ predictable:
   left with one child dissolves, and if the survivor now sits inside a split
   of its own direction it is flattened in.
 
-Layouts are stored proportionally, so they scale to any screen without
-letterboxing or reflow. The editor's aspect-ratio selector changes only what
-the canvas previews — never the saved layout. When the presenter screen's real
-ratio is far from the design ratio, the presenter window shows one dismissible
-notice suggesting a review at that ratio.
+Flexible layout space is stored proportionally, so it scales to any screen
+without letterboxing or reflow. A hug cell takes its widget's declared minimum
+plus its padding first, and the flexible siblings divide what remains. This is
+how a one-row toolbar stays one row in a tall window without baking that
+window's dimensions into the file. The editor's aspect-ratio selector changes
+only what the canvas previews — never the saved layout. When the presenter
+screen's real ratio is far from the design ratio, the presenter window shows
+one dismissible notice suggesting a review at that ratio.
 
 == Widgets
 

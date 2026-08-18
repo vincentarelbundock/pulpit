@@ -5,7 +5,7 @@
 //! glance, large controls, restrained colour.
 
 use crate::layout::model::{AspectRatio, Layout, LayoutId, Origin, PrimaryViewer};
-use crate::layout::tree::{Cell, CellBackground, Direction, Node, NodeId, Split};
+use crate::layout::tree::{Cell, CellBackground, CellExtent, Direction, Node, NodeId, Split};
 use crate::widgets::{Widget, WidgetKind};
 
 /// Builder state: hands out ids while a tree is assembled.
@@ -85,6 +85,19 @@ impl Builder {
         let mut cell = Cell::with_widget(self.id(), Widget::new(kind));
         cell.background = CellBackground::Panel;
         cell.padding = 4.0;
+        cell.sizing.vertical = CellExtent::Hug;
+        Node::Leaf(cell)
+    }
+
+    /// A toolbar cell which also keeps only its functional width. At least
+    /// one sibling in the row remains flexible and receives the space this
+    /// cell releases.
+    fn hug_button(&mut self, kind: WidgetKind) -> Node {
+        let mut cell = match self.button(kind) {
+            Node::Leaf(cell) => cell,
+            Node::Split(_) => unreachable!("button always creates a leaf"),
+        };
+        cell.sizing.horizontal = CellExtent::Hug;
         Node::Leaf(cell)
     }
 
@@ -214,12 +227,12 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     // one row of icons, and the way in to the application belongs on that row
     // instead of on a strip of its own that costs the page another line.
     let band_children = vec![
-        b.button(WidgetKind::MainMenu),
+        b.hug_button(WidgetKind::MainMenu),
         // These are icon runs just like the menu button. The ordinary panel
         // inset puts 24 points plus the split gutter between neighbouring
         // runs; the button inset packs the whole band around its icons.
         b.button(WidgetKind::DocumentNav),
-        b.button(WidgetKind::AnnotationTools),
+        b.hug_button(WidgetKind::AnnotationTools),
     ];
     let band = b.split(
         "Navigation and tools",
@@ -342,6 +355,11 @@ mod tests {
         assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.24, 0.76]);
         for cell in root.children[0].cells() {
             assert_eq!(cell.padding, 4.0, "Reader controls should hug their icons");
+            assert_eq!(
+                cell.sizing.vertical,
+                CellExtent::Hug,
+                "Reader controls should take one toolbar row vertically"
+            );
         }
         let heights: Vec<f32> = root.children[0]
             .cells()
@@ -352,6 +370,27 @@ mod tests {
         assert!(
             heights.windows(2).all(|pair| pair[0] == pair[1]),
             "Reader controls should have one height, got {heights:?}"
+        );
+
+        let (placements, _) =
+            reader.compute(crate::layout::Frame::new(0.0, 0.0, 887.0, 1066.0), false);
+        let frame = |id| {
+            placements
+                .iter()
+                .find(|placement| placement.id == id)
+                .expect("built-in node is placed")
+                .frame
+        };
+        let band = &root.children[0];
+        assert_eq!(frame(band.id()).height, 40.0);
+        let menu = &band.as_split().unwrap().children[0];
+        let navigation = &band.as_split().unwrap().children[1];
+        let annotations = &band.as_split().unwrap().children[2];
+        assert_eq!(frame(menu.id()).width, 40.0);
+        assert_eq!(frame(annotations.id()).width, 152.0);
+        assert!(
+            frame(navigation.id()).width > 560.0,
+            "navigation should receive the released toolbar space"
         );
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();

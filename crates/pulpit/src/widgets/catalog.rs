@@ -428,7 +428,10 @@ pub const CATALOG: [WidgetDefinition; 26] = [
         // show two armed tools and only one of them could be telling the truth.
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::ShowsDocument],
-        minimum_size: (300.0, 32.0),
+        // The compact row keeps the hand, the armed tool and labelled More
+        // access visible. The built-in Reader hugs this functional compact
+        // width; wider custom cells still reveal the full run responsively.
+        minimum_size: (144.0, 32.0),
         thumbnail: ThumbnailContent::Marks,
     },
     WidgetDefinition {

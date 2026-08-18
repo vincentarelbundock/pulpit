@@ -137,8 +137,10 @@ fn node<'a, Message: Clone + 'static>(
                 return space::horizontal().into();
             }
 
-            // Proportions become fill portions, so the layout scales to any
-            // window without letterboxing or reflow.
+            // Flexible cells become fill portions, so authored proportions
+            // still divide all remaining space. A hug cell takes only its
+            // widget's functional minimum plus padding; the pure geometry
+            // calculation uses the same `Node::hug_extent` rule.
             let portion = |index: usize| {
                 (split.sizes[index]
                     * pane_reveal(&split.children[index], context, inside_outline_rail)
@@ -153,6 +155,14 @@ fn node<'a, Message: Clone + 'static>(
                         if position > 0 {
                             content = content.push(split_separator(split.direction, split.gap));
                         }
+                        let reveal =
+                            pane_reveal(&split.children[index], context, inside_outline_rail);
+                        let width = split.children[index]
+                            .hug_extent(split.direction)
+                            .map_or_else(
+                                || Length::FillPortion(portion(index)),
+                                |extent| Length::Fixed(extent * reveal),
+                            );
                         content = content.push(
                             container(self::node(
                                 &split.children[index],
@@ -161,7 +171,7 @@ fn node<'a, Message: Clone + 'static>(
                                 on_event,
                                 inside_outline_rail || is_outline_rail(&split.children[index]),
                             ))
-                            .width(Length::FillPortion(portion(index)))
+                            .width(width)
                             .height(Length::Fill)
                             .clip(true),
                         );
@@ -174,6 +184,14 @@ fn node<'a, Message: Clone + 'static>(
                         if position > 0 {
                             content = content.push(split_separator(split.direction, split.gap));
                         }
+                        let reveal =
+                            pane_reveal(&split.children[index], context, inside_outline_rail);
+                        let height = split.children[index]
+                            .hug_extent(split.direction)
+                            .map_or_else(
+                                || Length::FillPortion(portion(index)),
+                                |extent| Length::Fixed(extent * reveal),
+                            );
                         content = content.push(
                             container(self::node(
                                 &split.children[index],
@@ -183,7 +201,7 @@ fn node<'a, Message: Clone + 'static>(
                                 inside_outline_rail || is_outline_rail(&split.children[index]),
                             ))
                             .width(Length::Fill)
-                            .height(Length::FillPortion(portion(index)))
+                            .height(height)
                             .clip(true),
                         );
                     }

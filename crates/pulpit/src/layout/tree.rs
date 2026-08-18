@@ -115,6 +115,35 @@ pub enum CellBorder {
     Accent,
 }
 
+/// How one axis of a cell participates in its parent's split.
+///
+/// `Fill` keeps the authored split proportion. `Hug` takes only the widget's
+/// declared minimum extent plus the cell padding, leaving the remaining space
+/// to the fill cells beside it. The setting lives on the cell so structural
+/// edits cannot separate it from the widget it describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CellExtent {
+    #[default]
+    Fill,
+    Hug,
+}
+
+/// Independent sizing for the two axes of a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CellSizing {
+    #[serde(default)]
+    pub horizontal: CellExtent,
+    #[serde(default)]
+    pub vertical: CellExtent,
+}
+
+impl CellSizing {
+    fn is_fill(&self) -> bool {
+        self.horizontal == CellExtent::Fill && self.vertical == CellExtent::Fill
+    }
+}
+
 impl CellBorder {
     pub const ALL: [CellBorder; 3] = [CellBorder::None, CellBorder::Subtle, CellBorder::Accent];
 
@@ -168,6 +197,10 @@ pub struct Cell {
     pub border: CellBorder,
     #[serde(default)]
     pub empty_behavior: EmptyBehavior,
+    /// Whether this cell fills its proportional track or hugs the widget on
+    /// either axis. Omitted from older and ordinary proportional layouts.
+    #[serde(default, skip_serializing_if = "CellSizing::is_fill")]
+    pub sizing: CellSizing,
 }
 
 impl Cell {
@@ -181,6 +214,7 @@ impl Cell {
             background: CellBackground::None,
             border: CellBorder::None,
             empty_behavior: EmptyBehavior::ShowBlankPanel,
+            sizing: CellSizing::default(),
         }
     }
 
@@ -294,6 +328,45 @@ impl Node {
         match self {
             Node::Split(split) => &mut split.name,
             Node::Leaf(cell) => &mut cell.name,
+        }
+    }
+
+    /// The fixed extent this subtree requests on `direction`, when every leaf
+    /// in that axis is content-sized. A perpendicular split hugs the largest
+    /// child; a parallel split hugs their sum and its gutters.
+    pub fn hug_extent(&self, direction: Direction) -> Option<f32> {
+        match self {
+            Node::Leaf(cell) => {
+                let extent = match direction {
+                    Direction::Horizontal => cell.sizing.horizontal,
+                    Direction::Vertical => cell.sizing.vertical,
+                };
+                if extent != CellExtent::Hug {
+                    return None;
+                }
+                let (width, height) = cell.widget.as_ref()?.minimum_size();
+                let content = match direction {
+                    Direction::Horizontal => width,
+                    Direction::Vertical => height,
+                };
+                Some(content + cell.padding * 2.0)
+            }
+            Node::Split(split) => {
+                let extents: Option<Vec<f32>> = split
+                    .children
+                    .iter()
+                    .map(|child| child.hug_extent(direction))
+                    .collect();
+                let extents = extents?;
+                if split.direction == direction {
+                    Some(
+                        extents.iter().sum::<f32>()
+                            + split.gap * extents.len().saturating_sub(1) as f32,
+                    )
+                } else {
+                    extents.into_iter().reduce(f32::max)
+                }
+            }
         }
     }
 
@@ -502,13 +575,23 @@ fn layout_node(
         return;
     }
 
-    let total_size: f32 = visible.iter().map(|index| split.sizes[*index]).sum();
     let gaps = split.gap * visible.len().saturating_sub(1) as f32;
     let span = match split.direction {
         Direction::Horizontal => area.width,
         Direction::Vertical => area.height,
     };
     let usable = (span - gaps).max(0.0);
+    let fixed: Vec<Option<f32>> = visible
+        .iter()
+        .map(|index| split.children[*index].hug_extent(split.direction))
+        .collect();
+    let fixed_total: f32 = fixed.iter().flatten().sum();
+    let flexible_total: f32 = visible
+        .iter()
+        .zip(fixed.iter())
+        .filter_map(|(index, extent)| extent.is_none().then_some(split.sizes[*index]))
+        .sum();
+    let flexible_span = (usable - fixed_total).max(0.0);
 
     let mut offset = match split.direction {
         Direction::Horizontal => area.x,
@@ -516,12 +599,13 @@ fn layout_node(
     };
 
     for (position, index) in visible.iter().enumerate() {
-        let fraction = if total_size > 0.0 {
-            split.sizes[*index] / total_size
-        } else {
-            1.0 / visible.len() as f32
-        };
-        let length = usable * fraction;
+        let length = fixed[position].unwrap_or_else(|| {
+            if flexible_total > 0.0 {
+                flexible_span * split.sizes[*index] / flexible_total
+            } else {
+                0.0
+            }
+        });
         let child_area = match split.direction {
             Direction::Horizontal => Frame::new(offset, area.y, length, area.height),
             Direction::Vertical => Frame::new(area.x, offset, area.width, length),
