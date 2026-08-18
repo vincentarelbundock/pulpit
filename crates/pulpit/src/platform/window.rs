@@ -66,9 +66,10 @@ impl WindowPolicy for DesktopWindowPolicy {
     }
 
     fn minimum_size(&self) -> (f32, f32) {
-        // Below this the presenter view cannot keep the current slide, the
-        // next slide, audience status and navigation all visible.
-        (720.0, 480.0)
+        // The compact bands and drawers keep every action reachable at this
+        // width. Height still reserves enough room for a full control target
+        // above or below the working surface.
+        (480.0, 600.0)
     }
 
     fn quit_on_last_window_closed(&self) -> bool {
@@ -116,6 +117,11 @@ mod tests {
         let policy = DesktopWindowPolicy;
         let bounds = Bounds::new(100.0, 80.0, 1280.0, 800.0);
         assert_eq!(policy.clamp_to_work_area(bounds, &[laptop()]), bounds);
+    }
+
+    #[test]
+    fn the_desktop_policy_allows_a_narrow_working_window() {
+        assert_eq!(DesktopWindowPolicy.minimum_size(), (480.0, 600.0));
     }
 
     #[test]

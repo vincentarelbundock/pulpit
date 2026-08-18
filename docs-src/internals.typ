@@ -902,6 +902,28 @@ Editable fields share one recipe: surface fill, a quiet one-pixel edge,
 5-pixel thumb; the thumb strengthens on hover and uses accent only while
 dragged.
 
+== Narrow windows
+
+The presenter window supports a 480-by-600 logical-point minimum. Responsive
+behaviour belongs to the contents of a cell, not to a second saved layout:
+Iced's `responsive` widget measures the space a control run actually receives,
+and actions that do not fit move behind one labelled *More* popover. No action
+is discarded. The current page controls and the armed crop or annotation tool
+remain on the band, while the popover uses text labels so an action displaced
+from its familiar icon can still be found.
+
+Below 760 logical points, a document's outline/search rail becomes a
+300-point drawer over the page. It remains below the application toolbar and
+keeps the same disclosure animation, but it no longer turns the document into
+a narrow strip. Dialogs fill up to their maximum width and scroll vertically;
+shortcut help steps from three columns to two and then one. The layout editor
+likewise moves its widget library above the canvas below 700 points.
+
+The saved proportional tree is unchanged by all of this. Custom presenter
+layouts keep their authored structure; individual widgets may compact their
+own controls, and the document sidebar may float, but Pulpit does not invent
+or persist alternate trees at breakpoints.
+
 == Status: toasts, and why they are never the whole story
 
 Notices appear in the corner of the *presenter* window and never on the
@@ -1286,7 +1308,7 @@ what the checks say.
   inset: 0.55em,
   [*Layout*], [*For*],
   [*Presenter Default*], [What a presentation opens with: current slide at 72% width, with the clock and timer, the next slide and the notes in a rail, and navigation and annotation tools in a band below.],
-  [*Reader*], [What a document opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail.],
+  [*Reader*], [What a document opens with: the page under a control band carrying the menu, document navigation and the annotation tools, with the outline in a narrow rail that becomes an overlay drawer in a narrow window.],
 )
 
 There are two and no more, one per mode, and neither is a variant of the

@@ -168,9 +168,9 @@ pub fn presenter_default() -> Layout {
     );
 
     let control_children = vec![
-        b.panel(WidgetKind::SlideSlider),
-        b.panel(WidgetKind::SlideButtons),
-        b.panel(WidgetKind::Annotations),
+        b.button(WidgetKind::SlideSlider),
+        b.button(WidgetKind::SlideButtons),
+        b.button(WidgetKind::Annotations),
     ];
     let controls = b.split(
         "Navigation and tools",
@@ -186,7 +186,7 @@ pub fn presenter_default() -> Layout {
     let root = b.split(
         "Presenter screen",
         Direction::Vertical,
-        &[0.92, 0.08],
+        &[0.915, 0.085],
         vec![stage, controls],
     );
     finish(
@@ -239,7 +239,7 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     let root = b.split(
         "Reader",
         Direction::Vertical,
-        &[0.07, 0.93],
+        &[0.085, 0.915],
         vec![band, body],
     );
     finish("Reader", "reader-default", root, ratio)
@@ -331,7 +331,7 @@ mod tests {
         let reader = reader_default(AspectRatio::SixteenNine);
         let root = reader.root.as_split().unwrap();
         assert_eq!(root.name.as_deref(), Some("Reader"));
-        assert_eq!(root.sizes, vec![0.07, 0.93]);
+        assert_eq!(root.sizes, vec![0.085, 0.915]);
         assert_eq!(
             root.children[0].as_split().unwrap().sizes,
             vec![0.05, 0.475, 0.475]
@@ -448,7 +448,7 @@ mod tests {
     fn the_default_uses_deliberate_stage_rail_and_control_proportions() {
         let default = presenter_default();
         let root = default.root.as_split().unwrap();
-        assert_eq!(root.sizes, vec![0.92, 0.08]);
+        assert_eq!(root.sizes, vec![0.915, 0.085]);
 
         let stage = root.children[0].as_split().unwrap();
         assert_eq!(stage.sizes, vec![0.72, 0.28]);

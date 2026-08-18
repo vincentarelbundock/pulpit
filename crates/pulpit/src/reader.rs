@@ -3085,6 +3085,12 @@ impl ReaderSession {
     /// scroll — so the caller knows to ask the worker for frames. A tool
     /// change and an outline toggle do not.
     pub fn apply(&mut self, command: &ReadCommand) -> bool {
+        // Overflow menus are transient answers to a narrow band. Any action
+        // reached through one dismisses it; the two overflow commands below
+        // can immediately open the requested menu again.
+        self.controls.navigation_overflow = false;
+        let tool_overflow = self.controls.tool_overflow;
+        self.controls.tool_overflow = false;
         match command {
             ReadCommand::ScrollTo {
                 offset,
@@ -3272,9 +3278,22 @@ impl ReaderSession {
             }
             ReadCommand::ToolOptions(tool) => {
                 self.controls.tool_options = *tool;
+                // Options opened from the compact menu expand inside that
+                // menu, so the menu remains mounted while the question is
+                // being answered.
+                self.controls.tool_overflow = tool_overflow;
+                false
+            }
+            ReadCommand::NavigationOverflow(open) => {
+                self.controls.navigation_overflow = *open;
+                false
+            }
+            ReadCommand::ToolOverflow(open) => {
+                self.controls.tool_overflow = *open;
                 false
             }
             ReadCommand::SetToolColor(tool, color) => {
+                self.controls.tool_overflow = tool_overflow;
                 match tool {
                     AnnotationTool::Ink => {
                         self.controls.ink_color = *color;
@@ -3305,6 +3324,7 @@ impl ReaderSession {
                 false
             }
             ReadCommand::SetInkWidth(width) => {
+                self.controls.tool_overflow = tool_overflow;
                 self.interaction.set_ink_style(pulpit_core::annotate::MarkStyle {
                     width: *width,
                     ..self.interaction.ink_style()
@@ -3315,6 +3335,7 @@ impl ReaderSession {
                 false
             }
             ReadCommand::SetTextSize(size) => {
+                self.controls.tool_overflow = tool_overflow;
                 self.interaction.set_text_style(pulpit_core::annotate::MarkStyle {
                     font_size: *size,
                     ..self.interaction.text_style()
@@ -6662,6 +6683,22 @@ mod tests {
         assert_eq!(session.controls().tool_options, Some(AnnotationTool::Ink));
         session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
         assert_eq!(session.controls().tool_options, None);
+    }
+
+    #[test]
+    fn compact_overflow_dismisses_after_actions_but_keeps_inline_options() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::NavigationOverflow(true));
+        session.apply(&ReadCommand::ZoomIn);
+        assert!(!session.controls().navigation_overflow);
+
+        session.apply(&ReadCommand::ToolOverflow(true));
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Ink)));
+        assert!(session.controls().tool_overflow);
+        session.apply(&ReadCommand::SetInkWidth(4.0));
+        assert!(session.controls().tool_overflow);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(!session.controls().tool_overflow);
     }
 
     #[test]

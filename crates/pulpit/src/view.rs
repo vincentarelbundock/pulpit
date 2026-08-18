@@ -252,7 +252,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
         app.frame_for_width(slide, kind, max_width)
             .map(|picture| picture.handle)
     };
-    let context = app.render_context(
+    let mut context = app.render_context(
         crate::widgets::Mode::Live,
         &frame,
         crate::widgets::sample::NOTES,
@@ -280,6 +280,19 @@ fn presenter(app: &App) -> Element<'_, Message> {
             .into();
         }
     }
+    let has_outline_panel = app
+        .active_layout
+        .widgets()
+        .iter()
+        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+    let compact_sidebar = has_outline_panel && app.compact_document_sidebar();
+    let sidebar_reveal = context.reader.outline_reveal.max(context.search_reveal);
+    if compact_sidebar {
+        // Remove the layout-owned rail. Its contents are mounted again below
+        // as a drawer, so there remains exactly one outline/search surface.
+        context.reader.outline_reveal = 0.0;
+        context.search_reveal = 0.0;
+    }
     let body = crate::layout_renderer::layout(
         &app.active_layout,
         &context,
@@ -296,12 +309,20 @@ fn presenter(app: &App) -> Element<'_, Message> {
     // Side panels belong to the working surface. Keeping this boundary below
     // the toolbar means neither their opening nor their closing can move the
     // menu button or any of the controls in that band.
-    let has_outline_panel = app
-        .active_layout
-        .widgets()
-        .iter()
-        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
-    let body = if has_outline_panel {
+    let body = if compact_sidebar {
+        let sidebar = if app.search_workspace {
+            search_workspace(app)
+        } else {
+            let outline = app
+                .active_layout
+                .widgets()
+                .into_iter()
+                .find(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline)
+                .expect("a compact document sidebar has an outline widget");
+            crate::layout_renderer::widget(outline, &context, app.compose_buffer(), interaction)
+        };
+        crate::layout_renderer::overlay_side_panel(sidebar, framed, 300.0, sidebar_reveal)
+    } else if has_outline_panel {
         // The layout renderer substitutes Search into the outline's slot, so
         // both panels have exactly the same position and extent.
         framed.into()
@@ -1227,45 +1248,56 @@ fn shortcuts_overlay(app: &App, dismissable: bool) -> Element<'_, Message> {
         ),
     ];
 
-    let group = |name: &'static str, actions: &'static [Action]| {
-        let mut content = Column::new().spacing(gap::XS).push(
-            text(name)
-                .size(type_scale::LABEL)
-                .color(theme::ambient::text()),
-        );
-        for action in actions {
-            let keys = app.action_shortcuts(*action);
-            let keys = if keys.is_empty() {
-                "Unbound".to_string()
-            } else {
-                keys.join("  ·  ")
-            };
-            content = content.push(
-                row![
-                    text(action.label()).size(type_scale::CAPTION),
-                    space::horizontal(),
-                    text(keys)
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                ]
-                .spacing(gap::M),
+    let groups = responsive(move |size| {
+        let group = |name: &'static str, actions: &'static [Action]| {
+            let mut content = Column::new().spacing(gap::XS).push(
+                text(name)
+                    .size(type_scale::LABEL)
+                    .color(theme::ambient::text()),
             );
+            for action in actions {
+                let keys = app.action_shortcuts(*action);
+                let keys = if keys.is_empty() {
+                    "Unbound".to_string()
+                } else {
+                    keys.join("  ·  ")
+                };
+                content = content.push(
+                    row![
+                        text(action.label()).size(type_scale::CAPTION),
+                        space::horizontal(),
+                        text(keys)
+                            .size(type_scale::CAPTION)
+                            .color(theme::ambient::muted()),
+                    ]
+                    .spacing(gap::M),
+                );
+            }
+            container(content).width(Length::Fill).padding(gap::S)
+        };
+        let column_for = |indices: &[usize]| {
+            let mut column = Column::new().spacing(gap::M);
+            for index in indices {
+                column = column.push(group(GROUPS[*index].0, GROUPS[*index].1));
+            }
+            column.width(Length::Fill)
+        };
+        if size.width < 620.0 {
+            column_for(&[0, 1, 2, 3, 4, 5]).into()
+        } else if size.width < 900.0 {
+            row![column_for(&[0, 2, 4]), column_for(&[1, 3, 5])]
+                .spacing(gap::L)
+                .into()
+        } else {
+            row![
+                column_for(&[0, 3]),
+                column_for(&[1, 4]),
+                column_for(&[2, 5]),
+            ]
+            .spacing(gap::L)
+            .into()
         }
-        container(content).width(Length::Fill).padding(gap::S)
-    };
-
-    let first = Column::new()
-        .spacing(gap::M)
-        .push(group(GROUPS[0].0, GROUPS[0].1))
-        .push(group(GROUPS[3].0, GROUPS[3].1));
-    let second = Column::new()
-        .spacing(gap::M)
-        .push(group(GROUPS[1].0, GROUPS[1].1))
-        .push(group(GROUPS[4].0, GROUPS[4].1));
-    let third = Column::new()
-        .spacing(gap::M)
-        .push(group(GROUPS[2].0, GROUPS[2].1))
-        .push(group(GROUPS[5].0, GROUPS[5].1));
+    });
     let title = if dismissable {
         "Keyboard shortcuts"
     } else {
@@ -1287,14 +1319,7 @@ fn shortcuts_overlay(app: &App, dismissable: bool) -> Element<'_, Message> {
                 .on_press(Message::OpenDialog),
         );
     }
-    let mut content = Column::new().spacing(gap::M).push(header).push(
-        row![
-            first.width(Length::Fill),
-            second.width(Length::Fill),
-            third.width(Length::Fill),
-        ]
-        .spacing(gap::L),
-    );
+    let mut content = Column::new().spacing(gap::M).push(header).push(groups);
     if dismissable {
         content = content.push(
             container(
@@ -1716,7 +1741,7 @@ fn color_editor(app: &App) -> Element<'_, Message> {
             .on_input(move |value| Message::SetColor(role, value))
             .style(theme::ambient::text_field)
             .width(Length::Fixed(124.0));
-        let mut role_row = column![row![
+        let mut role_row = column![
             column![
                 text(role.label()).size(type_scale::BODY),
                 text(role.description())
@@ -1724,18 +1749,16 @@ fn color_editor(app: &App) -> Element<'_, Message> {
                     .color(theme::ambient::muted()),
             ]
             .spacing(gap::XS)
-            // Wide enough for the longest description, no wider: the swatch
-            // and field read as part of the row, not pinned to the far edge.
-            .width(Length::Fixed(360.0)),
-            // The swatch is the wheel's handle. Typing `#RRGGBB` stays the
-            // way to reproduce a colour exactly — a brand hex out of a style
-            // guide is *given*, not chosen — and the wheel is the way to
-            // choose one, which a hex field is a poor instrument for.
-            role_swatch(app, role, swatch),
-            field,
+            .width(Length::Fill),
+            row![
+                // The swatch is the wheel's handle. Typing `#RRGGBB` stays
+                // the reproducible path; the wheel is the choosing path.
+                role_swatch(app, role, swatch),
+                field,
+            ]
+            .spacing(gap::M)
+            .align_y(Alignment::Center),
         ]
-        .spacing(gap::M)
-        .align_y(Alignment::Center)]
         .spacing(gap::XS);
         if parsed.is_none() {
             role_row = role_row.push(
@@ -1754,24 +1777,23 @@ fn color_editor(app: &App) -> Element<'_, Message> {
     }
 
     column![
-        row![
+        column![
             text("Edit palette").size(type_scale::LABEL),
-            pick_list(
-                crate::settings::ColorScheme::ALL,
-                Some(scheme),
-                Message::EditColorScheme,
-            )
-            .width(Length::Fixed(140.0))
-            .style(theme::ambient::drop_down)
-            .menu_style(theme::ambient::drop_down_menu),
-            // Beside the palette it resets, not pushed to the far edge: the
-            // two controls are about the same set of colours, and a button
-            // alone across the page reads as belonging to the page.
-            reset,
-            space::horizontal().width(Length::Fill),
+            row![
+                pick_list(
+                    crate::settings::ColorScheme::ALL,
+                    Some(scheme),
+                    Message::EditColorScheme,
+                )
+                .width(Length::Fixed(140.0))
+                .style(theme::ambient::drop_down)
+                .menu_style(theme::ambient::drop_down_menu),
+                reset,
+            ]
+            .spacing(gap::M)
+            .align_y(Alignment::Center),
         ]
-        .spacing(gap::M)
-        .align_y(Alignment::Center),
+        .spacing(gap::S),
         text("Every view and widget inherits these roles. High contrast remains controlled by the system.")
             .size(type_scale::CAPTION)
             .color(theme::ambient::muted()),
@@ -3066,7 +3088,7 @@ fn editor_page(app: &App) -> Element<'_, Message> {
         &frame,
         crate::widgets::sample::NOTES,
     );
-    designer_view::editor(designer, &context)
+    designer_view::editor(designer, &context, app.compact_editor())
 }
 
 /// Seconds since local midnight, for the clock widget.

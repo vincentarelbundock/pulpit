@@ -22,7 +22,7 @@ use crate::widgets::event::ReadCommand;
 use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
-use super::model::{OutlineView, PageSpread, Zoom};
+use super::model::{CropState, OutlineView, PageSpread, Zoom};
 
 /// One outline row plus the two-point gap below it.
 pub const OUTLINE_ROW_HEIGHT: f32 = 28.0;
@@ -322,7 +322,10 @@ fn page_surface_width(column_width: f32, viewport_width: f32) -> f32 {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{bookmark_row_geometry, page_surface_width, OUTLINE_COMPACT_ROW_HEIGHT};
+    use super::{
+        bookmark_row_geometry, navigation_is_compact, page_surface_width, tools_are_compact,
+        OUTLINE_COMPACT_ROW_HEIGHT,
+    };
 
     #[test]
     fn a_fitted_document_tracks_the_live_viewport_width() {
@@ -352,6 +355,21 @@ mod layout_tests {
         let (wide_indent, _) = bookmark_row_geometry("Methods", 6, 420.0);
         assert!(narrow_indent < wide_indent);
         assert!(narrow_indent <= 170.0 * 0.32);
+    }
+
+    #[test]
+    fn reader_bands_use_overflow_at_narrow_window_widths() {
+        // The built-in Reader gives each run 47.5% of the band, less the
+        // menu cell and gutters. These representative logical viewport
+        // widths cover the supported minimum through an ordinary desktop.
+        for viewport in [480.0_f32, 640.0, 720.0, 1008.0] {
+            let cell = viewport * 0.475;
+            assert!(navigation_is_compact(cell), "navigation at {viewport}");
+            assert!(tools_are_compact(cell), "tools at {viewport}");
+        }
+        let desktop_cell = 1280.0 * 0.475;
+        assert!(!navigation_is_compact(desktop_cell));
+        assert!(!tools_are_compact(desktop_cell));
     }
 }
 
@@ -1406,14 +1424,13 @@ pub fn compose_input_id() -> iced::advanced::widget::Id {
 /// reaching the page, and after a crop is taken it is what puts the margins
 /// back. One press on, one press off.
 fn crop_control<Message: Clone + 'static>(
-    reader: &ReaderData<'_>,
+    crop: CropState,
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     use super::model::{CropChoice, CropState};
 
     let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
-    let crop = reader.controls.crop;
     let control = button(theme::icon::icon(
         theme::Icon::Crop,
         theme::type_scale::HEADING,
@@ -1467,156 +1484,291 @@ fn navigation<Message: Clone + 'static>(
     mode: Mode,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let live = mode.interactive() && reader.open;
-    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
-
-    let step = |icon: theme::Icon, label: &str, command: ReadCommand, enabled: bool| {
-        let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
-            .padding(Padding::from([4.0, 8.0]))
-            .style(theme::ambient::tool_button);
-        let control = if live && enabled {
-            control.on_press(send(command))
-        } else {
-            control
-        };
-        hint(control, label)
-    };
-
-    // Only the current page is editable. The slash and total remain a fact
-    // beside it, so selecting or replacing the input cannot overwrite them.
-    let entry = {
-        let value = reader
+    let state = NavigationState {
+        live: mode.interactive() && reader.open,
+        page_value: reader
             .page_entry
             .clone()
-            .unwrap_or_else(|| reader.page_label());
-        let mut current = text_input("Page", &value)
-            .size(theme::type_scale::LABEL)
-            .style(theme::ambient::text_field)
-            .width(Length::Fixed(48.0))
-            .padding(Padding::from([4.0, 6.0]));
-        if live {
-            current = current
-                .on_input(move |typed| send(ReadCommand::TypePage(typed)))
-                .on_submit(send(ReadCommand::CommitPage));
-        }
-        row![
-            current,
-            text(reader.page_total())
+            .unwrap_or_else(|| reader.page_label()),
+        page_total: reader.page_total(),
+        can_go_back: reader.controls.page.get() > 0 || reader.can_go_back,
+        can_go_forward: reader.controls.page.get() + 1 < reader.page_count || reader.can_go_forward,
+        zoom_label: format!("{}%", (reader.scale * 100.0).round() as i32),
+        spread: reader.controls.spread,
+        crop: reader.controls.crop,
+        overflow_open: reader.controls.navigation_overflow,
+    };
+    responsive(move |size| navigation_band(state.clone(), size.width, on_event)).into()
+}
+
+#[derive(Clone)]
+struct NavigationState {
+    live: bool,
+    page_value: String,
+    page_total: String,
+    can_go_back: bool,
+    can_go_forward: bool,
+    zoom_label: String,
+    spread: PageSpread,
+    crop: CropState,
+    overflow_open: bool,
+}
+
+fn navigation_band<Message: Clone + 'static>(
+    state: NavigationState,
+    width: f32,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let send = move |command: ReadCommand| on_event(WidgetEvent::Read(command));
+    let step = |icon, label, command, enabled| {
+        navigation_button(icon, label, command, state.live && enabled, on_event)
+    };
+
+    let mut current = text_input("Page", &state.page_value)
+        .size(theme::type_scale::LABEL)
+        .style(theme::ambient::text_field)
+        .width(Length::Fixed(48.0))
+        .padding(Padding::from([4.0, 6.0]));
+    if state.live {
+        current = current
+            .on_input(move |typed| send(ReadCommand::TypePage(typed)))
+            .on_submit(send(ReadCommand::CommitPage));
+    }
+    let mut entry = Row::new().push(current);
+    if width >= 230.0 {
+        entry = entry.push(
+            text(state.page_total.clone())
                 .size(theme::type_scale::LABEL)
                 .color(theme::ambient::muted()),
-        ]
-        .spacing(theme::space::XS)
-        .align_y(Alignment::Center)
-    };
-
-    let previous = reader.controls.page.get() > 0;
-    let next = reader.controls.page.get() + 1 < reader.page_count;
-
-    // The scale, never the fit's name: the fit is what the icon beside it
-    // says, and repeating it in words costs the band the one thing the icons
-    // cannot show — how big the page actually is right now.
-    let zoom_label = text(format!("{}%", (reader.scale * 100.0).round() as i32))
-        .size(theme::type_scale::LABEL)
-        .color(theme::ambient::muted());
-
-    // Where you are and how big the page is are two different questions, so
-    // the band answers them in two groups with a rule between them rather
-    // than as one undifferentiated run of controls.
-    let group = |controls: Row<'static, Message>| {
-        container(
-            controls
-                .spacing(theme::space::XS)
-                .align_y(Alignment::Center),
-        )
-    };
-    let rule = || {
-        container(space::horizontal())
-            .width(Length::Fixed(1.0))
-            .height(Length::Fixed(theme::space::M))
-            .style(theme::ambient::separator)
-    };
-
-    let pages = group(row![
-        // Back and forward, not strictly previous and next: these follow the
-        // history when a jump has been made and step a page when it has not,
-        // so returning from an overview jump is one press rather than a hunt
-        // for the page you were on.
+        );
+    }
+    let pages = row![
         step(
             theme::Icon::ChevronLeft,
             "Back",
             ReadCommand::HistoryBack,
-            previous || reader.can_go_back
+            state.can_go_back,
         ),
-        entry,
+        entry.spacing(theme::space::XS).align_y(Alignment::Center),
         step(
             theme::Icon::ChevronRight,
             "Forward",
             ReadCommand::HistoryForward,
-            next || reader.can_go_forward
+            state.can_go_forward,
         ),
-    ]);
+    ]
+    .spacing(theme::space::XS)
+    .align_y(Alignment::Center);
 
-    let sizing = group(row![
+    if navigation_is_compact(width) {
+        let mut band = Row::new()
+            .push(pages)
+            .push(space::horizontal().width(Length::Fill))
+            .spacing(theme::space::XS)
+            .align_y(Alignment::Center);
+        // Once armed, Crop stays visible: the choice for a drawn rectangle
+        // hangs from this button and must not disappear into a closed menu.
+        if state.crop.is_on() {
+            band = band.push(crop_control(state.crop, state.live, on_event));
+        }
+        band = band.push(navigation_overflow(&state, on_event));
+        return container(band)
+            .width(Length::Fill)
+            .align_y(Alignment::Center)
+            .into();
+    }
+
+    let sizing = row![
         step(theme::Icon::ZoomOut, "Zoom out", ReadCommand::ZoomOut, true),
-        zoom_label,
+        text(state.zoom_label.clone())
+            .size(theme::type_scale::LABEL)
+            .color(theme::ambient::muted()),
         step(theme::Icon::ZoomIn, "Zoom in", ReadCommand::ZoomIn, true),
         step(
             theme::Icon::FitWidth,
             "Fit width",
             ReadCommand::SetZoom(Zoom::FitWidth),
-            true
+            true,
         ),
         step(
             theme::Icon::FitHeight,
             "Fit height",
             ReadCommand::SetZoom(Zoom::FitHeight),
-            true
+            true,
         ),
         step(
             theme::Icon::FitPage,
             "Fit page",
             ReadCommand::SetZoom(Zoom::FitPage),
-            true
+            true,
         ),
-        crop_control(reader, live, on_event),
-        // The spread belongs with the zoom rather than in a group of its own:
-        // how many pages stand across the window is the same question as how
-        // big they are, and the reader who wants two of them is answering it.
-        // One control, not two — the spread has exactly two states, and a
-        // button that shows the one you are not in is a press rather than a
-        // choice between a pressed and an unpressed twin.
+        crop_control(state.crop, state.live, on_event),
         step(
-            match reader.controls.spread.other() {
+            match state.spread.other() {
                 PageSpread::Single => theme::Icon::SinglePage,
                 PageSpread::Double => theme::Icon::TwoPages,
             },
-            reader.controls.spread.other().label(),
-            ReadCommand::SetSpread(reader.controls.spread.other()),
-            true
+            state.spread.other().label(),
+            ReadCommand::SetSpread(state.spread.other()),
+            true,
         ),
-        // A view transform like the crop and the spread: the page is turned
-        // for this reader's eyes, never edited, and the audience never sees
-        // it. One button that keeps turning, because "rotate" is a verb and
-        // four radio states would cost the band three presses' width.
         step(
             theme::Icon::RotatePage,
             "Rotate 90° clockwise",
             ReadCommand::RotateView,
-            true
+            true,
         ),
-    ]);
+    ]
+    .spacing(theme::space::XS)
+    .align_y(Alignment::Center);
+    let rule = container(space::horizontal())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(theme::space::M))
+        .style(theme::ambient::separator);
+    container(
+        row![pages, rule, sizing]
+            .spacing(theme::space::M)
+            .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .align_y(Alignment::Center)
+    .into()
+}
 
-    let band = row![pages, rule(), sizing]
-        .spacing(theme::space::M)
-        .align_y(Alignment::Center);
+fn navigation_button<Message: Clone + 'static>(
+    icon: theme::Icon,
+    label: &'static str,
+    command: ReadCommand,
+    enabled: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
+        .padding(Padding::from([4.0, 8.0]))
+        .style(theme::ambient::tool_button);
+    let control = if enabled {
+        control.on_press(on_event(WidgetEvent::Read(command)))
+    } else {
+        control
+    };
+    hint(control, label)
+}
 
-    // The band and nothing beside it. The compatibility level and the unsaved
-    // mark used to sit at the far end of this row; they are said elsewhere,
-    // and a line of standing text in the reader's own chrome is a thing the
-    // eye stops seeing long before it stops costing the row.
-    container(band.width(Length::Fill))
+fn navigation_is_compact(width: f32) -> bool {
+    width < 560.0
+}
+
+fn navigation_overflow<Message: Clone + 'static>(
+    state: &NavigationState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let mut trigger = button(theme::icon::icon(
+        theme::Icon::Ellipsis,
+        theme::type_scale::HEADING,
+    ))
+    .padding(Padding::from([4.0, 8.0]))
+    .style(if state.overflow_open {
+        theme::ambient::selected_button
+    } else {
+        theme::ambient::tool_button
+    });
+    if state.live {
+        trigger = trigger.on_press(on_event(WidgetEvent::Read(
+            ReadCommand::NavigationOverflow(!state.overflow_open),
+        )));
+    }
+    let panel = state
+        .overflow_open
+        .then(|| navigation_overflow_menu(state, on_event));
+    crate::widgets::annotations::popover::Popover::new(
+        hint(trigger, "More navigation controls"),
+        panel,
+    )
+    .into()
+}
+
+fn navigation_overflow_menu<Message: Clone + 'static>(
+    state: &NavigationState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let item = |icon, label: &'static str, command| {
+        let control = button(
+            row![
+                theme::icon::icon(icon, theme::type_scale::BODY),
+                text(label).size(theme::type_scale::CAPTION),
+            ]
+            .spacing(theme::space::S)
+            .align_y(Alignment::Center),
+        )
         .width(Length::Fill)
-        .align_y(Alignment::Center)
+        .padding(Padding::from([4.0, theme::space::S]))
+        .style(theme::ambient::tool_button);
+        if state.live {
+            control.on_press(on_event(WidgetEvent::Read(command)))
+        } else {
+            control
+        }
+    };
+    let spread = state.spread.other();
+    let mut menu = column![row![
+        text(format!("Zoom — {}", state.zoom_label)).size(theme::type_scale::LABEL),
+        space::horizontal().width(Length::Fill),
+        button(theme::icon::icon(
+            theme::Icon::Close,
+            theme::type_scale::BODY
+        ))
+        .padding(2)
+        .style(theme::ambient::tool_button)
+        .on_press_maybe(
+            state
+                .live
+                .then(|| on_event(WidgetEvent::Read(ReadCommand::NavigationOverflow(false),)))
+        ),
+    ]
+    .align_y(Alignment::Center)]
+    .spacing(theme::space::XS);
+    for control in [
+        item(theme::Icon::ZoomOut, "Zoom out", ReadCommand::ZoomOut),
+        item(theme::Icon::ZoomIn, "Zoom in", ReadCommand::ZoomIn),
+        item(
+            theme::Icon::FitWidth,
+            "Fit width",
+            ReadCommand::SetZoom(Zoom::FitWidth),
+        ),
+        item(
+            theme::Icon::FitHeight,
+            "Fit height",
+            ReadCommand::SetZoom(Zoom::FitHeight),
+        ),
+        item(
+            theme::Icon::FitPage,
+            "Fit page",
+            ReadCommand::SetZoom(Zoom::FitPage),
+        ),
+        item(
+            theme::Icon::Crop,
+            state.crop.label(),
+            ReadCommand::ArmCrop(!state.crop.is_on()),
+        ),
+        item(
+            match spread {
+                PageSpread::Single => theme::Icon::SinglePage,
+                PageSpread::Double => theme::Icon::TwoPages,
+            },
+            spread.label(),
+            ReadCommand::SetSpread(spread),
+        ),
+        item(
+            theme::Icon::RotatePage,
+            "Rotate 90° clockwise",
+            ReadCommand::RotateView,
+        ),
+    ] {
+        menu = menu.push(control);
+    }
+    container(menu)
+        .width(Length::Fixed(220.0))
+        .padding(theme::space::S)
+        .style(theme::ambient::surface)
         .into()
 }
 
@@ -1915,7 +2067,7 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
         hint(control, label)
     };
 
-    row![
+    let tabs = row![
         tab(
             theme::Icon::Outline,
             "Outline",
@@ -1929,8 +2081,22 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
             PanelCommand::ShowSearch
         ),
     ]
-    .spacing(theme::space::XS)
-    .into()
+    .spacing(theme::space::XS);
+
+    let mut close = button(theme::icon::icon(
+        theme::Icon::Close,
+        theme::type_scale::TITLE,
+    ))
+    .padding(theme::space::XS)
+    .style(theme::ambient::tool_button);
+    if live {
+        close = close.on_press(on_event(WidgetEvent::Panel(PanelCommand::CloseSidebar)));
+    }
+
+    row![tabs, space::horizontal(), hint(close, "Close sidebar")]
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
 }
 
 const OUTLINE_LINE_HEIGHT: f32 = 15.0;
@@ -2120,244 +2286,426 @@ fn tools<Message: Clone + 'static>(
     mode: Mode,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let live = mode.interactive() && reader.annotatable();
-    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
-
-    let mut bar = row![].spacing(theme::space::XS).align_y(Alignment::Center);
-
-    // Nothing armed: the pointer belongs to the document's own links and form
-    // fields, which is what a reader wants most of the time.
-    let hand = {
-        let selected = reader.controls.tool.is_none();
-        let control = button(theme::icon::icon(
-            theme::Icon::Hand,
-            theme::type_scale::HEADING,
-        ))
-        .padding(Padding::from([4.0, 8.0]))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
-        let control = if live {
-            control.on_press(send(ReadCommand::Arm(None)))
-        } else {
-            control
-        };
-        hint(
-            control,
-            "Hand — drag the page about, and the document's own links and fields",
-        )
+    let state = DocumentToolsState {
+        live: mode.interactive() && reader.annotatable(),
+        open: reader.open,
+        tool: reader.controls.tool,
+        tool_options: reader.controls.tool_options,
+        overflow_open: reader.controls.tool_overflow,
+        ink_color: reader.controls.ink_color,
+        ink_width: reader.controls.ink_width,
+        highlight_color: reader.controls.highlight_color,
+        text_color: reader.controls.text_color,
+        text_size: reader.controls.text_size,
+        selected: reader.selected,
+        can_undo: reader.can_undo,
+        can_redo: reader.can_redo,
     };
-    bar = bar.push(hand);
+    responsive(move |size| document_tools_band(state, size.width, on_event)).into()
+}
 
-    for tool in AnnotationTool::DOCUMENT {
-        let selected = reader.controls.tool == Some(tool);
-        let icon = match tool {
-            AnnotationTool::Select => theme::Icon::Select,
-            AnnotationTool::Ink => theme::Icon::Pen,
-            AnnotationTool::Highlighter => theme::Icon::Highlighter,
-            AnnotationTool::Text => theme::Icon::Type,
-            AnnotationTool::Note => theme::Icon::StickyNote,
-            AnnotationTool::Stamp => theme::Icon::Stamp,
-            AnnotationTool::Eraser => theme::Icon::Eraser,
-            // Not in `DOCUMENT`; a presenter effect has nothing to act on in
-            // a document, and the toolbar does not offer it.
-            AnnotationTool::Pointer | AnnotationTool::Spotlight => theme::Icon::Pointer,
-        };
-        // A tool drawn in the colour it is about to lay down, like the
-        // presenter palette: the tint is what says which colour is armed
-        // without opening the options.
-        let colour = tool_colour(tool, reader);
-        let glyph: Element<'static, Message> = match colour {
-            Some(colour) => {
-                let (r, g, b) = colour.rgb();
-                theme::icon::tinted(
-                    icon,
-                    theme::type_scale::HEADING,
-                    iced::Color::from_rgb(r, g, b),
-                )
-            }
-            None => theme::icon::icon(icon, theme::type_scale::HEADING),
-        };
-        let control = button(glyph)
-            .padding(Padding::from([4.0, 8.0]))
-            .style(if selected {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
-        let control = if live {
-            control.on_press(send(ReadCommand::Arm(Some(tool))))
-        } else {
-            control
-        };
-        let control = hint(control, tool.label());
+#[derive(Debug, Clone, Copy)]
+struct DocumentToolsState {
+    live: bool,
+    open: bool,
+    tool: Option<AnnotationTool>,
+    tool_options: Option<AnnotationTool>,
+    overflow_open: bool,
+    ink_color: InkColor,
+    ink_width: f32,
+    highlight_color: InkColor,
+    text_color: InkColor,
+    text_size: f32,
+    selected: bool,
+    can_undo: bool,
+    can_redo: bool,
+}
 
-        // A colour-bearing tool carries a narrow arrow in its corner, which
-        // opens the swatches — and, for the pen, its width — in a popover
-        // over the button itself.
-        if colour.is_some() {
-            let open = reader.controls.tool_options == Some(tool);
-            let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, 9.0))
-                .padding(0)
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0))
-                .style(theme::ambient::tool_button);
-            if live {
-                arrow = arrow.on_press(send(ReadCommand::ToolOptions(if open {
-                    None
-                } else {
-                    Some(tool)
-                })));
-            }
-            let corner = container(arrow)
-                .height(Length::Fixed(theme::type_scale::HEADING + 8.0))
-                .align_y(Alignment::End);
-            let trigger = row![control, corner].spacing(0).align_y(Alignment::Center);
-            let panel = (live && open).then(|| tool_options_panel(tool, reader, on_event));
-            bar = bar.push(Element::from(
-                crate::widgets::annotations::popover::Popover::new(trigger, panel),
-            ));
-        } else {
-            bar = bar.push(control);
+fn document_tools_band<Message: Clone + 'static>(
+    state: DocumentToolsState,
+    width: f32,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let hand = document_command_button(
+        theme::Icon::Hand,
+        "Hand — use links and fields",
+        ReadCommand::Arm(None),
+        state.tool.is_none(),
+        state.live,
+        on_event,
+    );
+
+    if tools_are_compact(width) {
+        let mut bar = Row::new()
+            .push(hand)
+            .spacing(theme::space::XS)
+            .align_y(Alignment::Center);
+        // Keep the armed tool (and therefore its options arrow) on the row.
+        // Everything else is still reachable by name through More.
+        if let Some(tool) = state.tool {
+            bar = bar.push(document_tool_control(tool, state, on_event));
         }
+        bar = bar
+            .push(space::horizontal().width(Length::Fill))
+            .push(document_tools_overflow(state, on_event));
+        return container(bar)
+            .width(Length::Fill)
+            .align_y(Alignment::Center)
+            .into();
     }
 
-    bar = bar.push(space::horizontal().width(Length::Fixed(theme::space::M)));
-
-    let history = |icon: theme::Icon, label: &str, command: ReadCommand, enabled: bool| {
-        let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
-            .padding(Padding::from([4.0, 8.0]))
-            .style(theme::ambient::tool_button);
-        let control = if live && enabled {
-            control.on_press(send(command))
-        } else {
-            control
-        };
-        hint(control, label)
-    };
-    // What to do with the mark that is held. Dim until something is, which is
-    // also how the toolbar says that nothing has been picked up — the outline
-    // on the page says the same thing from the other side (§8.4). There is no
-    // button for editing what a mark says: that is what double-clicking it
-    // does, the same as double-clicking text anywhere else.
-    bar = bar.push(history(
-        theme::Icon::Trash,
-        "Delete the selected mark",
-        ReadCommand::DeleteSelected,
-        reader.selected,
-    ));
-    bar = bar.push(space::horizontal().width(Length::Fixed(theme::space::M)));
-    bar = bar.push(history(
-        theme::Icon::Undo,
-        "Undo",
-        ReadCommand::Undo,
-        reader.can_undo,
-    ));
-    bar = bar.push(history(
-        theme::Icon::Redo,
-        "Redo",
-        ReadCommand::Redo,
-        reader.can_redo,
-    ));
-    // Save As rather than Save: the source is never overwritten (A6), and a
-    // control labelled "Save" would be promising otherwise.
-    bar = bar.push(history(
-        theme::Icon::Save,
-        "Save as…",
-        ReadCommand::SaveAs,
-        reader.open,
-    ));
-    // Sign (SPEC-signing.md §31.1): cryptographic, and always offered
-    // alongside Save As rather than folded into it, because a signature is
-    // never implied by any other control (§20.2).
-    bar = bar.push(history(
-        theme::Icon::Stamp,
-        "Sign…",
-        ReadCommand::Sign,
-        reader.open,
-    ));
-    // The signature panel itself (§31.4) is drawn as an app-level overlay
-    // (see `view::sign_dialog`'s neighbour, `signature_panel`) rather than
-    // from here: it is `App` state that outlives whichever tool is armed,
-    // the same reason the Sign dialog above is not built in this module.
-
+    let mut bar = Row::new()
+        .push(hand)
+        .spacing(theme::space::XS)
+        .align_y(Alignment::Center);
+    for tool in AnnotationTool::DOCUMENT {
+        bar = bar.push(document_tool_control(tool, state, on_event));
+    }
+    bar = bar
+        .push(space::horizontal().width(Length::Fixed(theme::space::M)))
+        .push(document_command_button(
+            theme::Icon::Trash,
+            "Delete the selected mark",
+            ReadCommand::DeleteSelected,
+            false,
+            state.live && state.selected,
+            on_event,
+        ))
+        .push(space::horizontal().width(Length::Fixed(theme::space::M)))
+        .push(document_command_button(
+            theme::Icon::Undo,
+            "Undo",
+            ReadCommand::Undo,
+            false,
+            state.live && state.can_undo,
+            on_event,
+        ))
+        .push(document_command_button(
+            theme::Icon::Redo,
+            "Redo",
+            ReadCommand::Redo,
+            false,
+            state.live && state.can_redo,
+            on_event,
+        ))
+        .push(document_command_button(
+            theme::Icon::Save,
+            "Save as…",
+            ReadCommand::SaveAs,
+            false,
+            state.live && state.open,
+            on_event,
+        ))
+        .push(document_command_button(
+            theme::Icon::Stamp,
+            "Sign…",
+            ReadCommand::Sign,
+            false,
+            state.live && state.open,
+            on_event,
+        ));
     container(bar)
         .width(Length::Fill)
         .align_y(Alignment::Center)
         .into()
 }
 
-/// The colour a document tool lays down, or `None` for the tools that lay
-/// none — which are also the ones with no options to open.
-fn tool_colour(tool: AnnotationTool, reader: &ReaderData<'_>) -> Option<InkColor> {
-    match tool {
-        AnnotationTool::Ink => Some(reader.controls.ink_color),
-        AnnotationTool::Highlighter => Some(reader.controls.highlight_color),
-        AnnotationTool::Text | AnnotationTool::Note => Some(reader.controls.text_color),
-        _ => None,
+fn tools_are_compact(width: f32) -> bool {
+    width < 590.0
+}
+
+fn document_command_button<Message: Clone + 'static>(
+    icon: theme::Icon,
+    label: &'static str,
+    command: ReadCommand,
+    selected: bool,
+    enabled: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
+        .padding(Padding::from([4.0, 8.0]))
+        .style(if selected {
+            theme::ambient::selected_button
+        } else {
+            theme::ambient::tool_button
+        });
+    let control = if enabled {
+        control.on_press(on_event(WidgetEvent::Read(command)))
+    } else {
+        control
+    };
+    hint(control, label)
+}
+
+fn document_tool_control<Message: Clone + 'static>(
+    tool: AnnotationTool,
+    state: DocumentToolsState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let selected = state.tool == Some(tool);
+    let mut control = button(document_tool_glyph(tool, state, theme::type_scale::HEADING))
+        .padding(Padding::from([4.0, 8.0]))
+        .style(if selected {
+            theme::ambient::selected_button
+        } else {
+            theme::ambient::tool_button
+        });
+    if state.live {
+        control = control.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
+    }
+    let control = hint(control, tool.label());
+    if state.color(tool).is_none() {
+        return control;
+    }
+
+    let options_open = state.tool_options == Some(tool);
+    let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, 9.0))
+        .padding(0)
+        .width(Length::Fixed(12.0))
+        .height(Length::Fixed(12.0))
+        .style(theme::ambient::tool_button);
+    if state.live {
+        arrow = arrow.on_press(on_event(WidgetEvent::Read(ReadCommand::ToolOptions(
+            (!options_open).then_some(tool),
+        ))));
+    }
+    let trigger = row![
+        control,
+        container(arrow)
+            .height(Length::Fixed(theme::type_scale::HEADING + 8.0))
+            .align_y(Alignment::End),
+    ]
+    .spacing(0)
+    .align_y(Alignment::Center);
+    let panel = options_open.then(|| document_tool_options_panel(tool, state, on_event));
+    crate::widgets::annotations::popover::Popover::new(trigger, panel).into()
+}
+
+impl DocumentToolsState {
+    fn color(self, tool: AnnotationTool) -> Option<InkColor> {
+        match tool {
+            AnnotationTool::Ink => Some(self.ink_color),
+            AnnotationTool::Highlighter => Some(self.highlight_color),
+            AnnotationTool::Text | AnnotationTool::Note => Some(self.text_color),
+            _ => None,
+        }
     }
 }
 
-/// A tool's options: its swatches, and for the pen its width.
-fn tool_options_panel<Message: Clone + 'static>(
+fn document_tool_glyph<Message: 'static>(
     tool: AnnotationTool,
-    reader: &ReaderData<'_>,
+    state: DocumentToolsState,
+    size: f32,
+) -> Element<'static, Message> {
+    let icon = match tool {
+        AnnotationTool::Select => theme::Icon::Select,
+        AnnotationTool::Ink => theme::Icon::Pen,
+        AnnotationTool::Highlighter => theme::Icon::Highlighter,
+        AnnotationTool::Text => theme::Icon::Type,
+        AnnotationTool::Note => theme::Icon::StickyNote,
+        AnnotationTool::Stamp => theme::Icon::Stamp,
+        AnnotationTool::Eraser => theme::Icon::Eraser,
+        AnnotationTool::Pointer | AnnotationTool::Spotlight => theme::Icon::Pointer,
+    };
+    match state.color(tool) {
+        Some(colour) => {
+            let (red, green, blue) = colour.rgb();
+            theme::icon::tinted(icon, size, iced::Color::from_rgb(red, green, blue))
+        }
+        None => theme::icon::icon(icon, size),
+    }
+}
+
+fn document_tools_overflow<Message: Clone + 'static>(
+    state: DocumentToolsState,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
-    let selected = tool_colour(tool, reader).unwrap_or_default();
+    let mut trigger = button(theme::icon::icon(
+        theme::Icon::Ellipsis,
+        theme::type_scale::HEADING,
+    ))
+    .padding(Padding::from([4.0, 8.0]))
+    .style(if state.overflow_open {
+        theme::ambient::selected_button
+    } else {
+        theme::ambient::tool_button
+    });
+    if state.live {
+        trigger = trigger.on_press(on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(
+            !state.overflow_open,
+        ))));
+    }
+    let panel = state
+        .overflow_open
+        .then(|| document_tools_overflow_menu(state, on_event));
+    crate::widgets::annotations::popover::Popover::new(
+        hint(trigger, "More annotation controls"),
+        panel,
+    )
+    .into()
+}
 
-    let mut swatches = Row::new().spacing(theme::space::XS);
-    for colour in InkColor::ALL {
-        let (r, g, b) = colour.rgb();
-        swatches = swatches.push(
-            button(space::horizontal())
-                .width(Length::Fixed(24.0))
-                .height(Length::Fixed(24.0))
-                .padding(0)
-                .style(theme::color_swatch_button(
-                    iced::Color::from_rgb(r, g, b),
-                    selected == colour,
-                ))
-                .on_press(send(ReadCommand::SetToolColor(tool, colour))),
-        );
+fn document_tools_overflow_menu<Message: Clone + 'static>(
+    state: DocumentToolsState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let mut menu = column![row![
+        text("More annotation controls").size(theme::type_scale::LABEL),
+        space::horizontal().width(Length::Fill),
+        button(theme::icon::icon(
+            theme::Icon::Close,
+            theme::type_scale::BODY
+        ))
+        .padding(2)
+        .style(theme::ambient::tool_button)
+        .on_press_maybe(
+            state
+                .live
+                .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(false),)))
+        ),
+    ]
+    .align_y(Alignment::Center)]
+    .spacing(theme::space::XS);
+
+    for tool in AnnotationTool::DOCUMENT {
+        let selected = state.tool == Some(tool);
+        let mut arm = button(
+            row![
+                document_tool_glyph(tool, state, theme::type_scale::BODY),
+                text(tool.label()).size(theme::type_scale::CAPTION),
+            ]
+            .spacing(theme::space::S)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([4.0, theme::space::S]))
+        .style(if selected {
+            theme::ambient::selected_button
+        } else {
+            theme::ambient::tool_button
+        });
+        if state.live {
+            arm = arm.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
+        }
+        if state.color(tool).is_some() {
+            let open = state.tool_options == Some(tool);
+            let mut arrow = button(theme::icon::icon(
+                if open {
+                    theme::Icon::ChevronUp
+                } else {
+                    theme::Icon::ChevronDown
+                },
+                theme::type_scale::BODY,
+            ))
+            .padding(theme::space::XS)
+            .style(theme::ambient::tool_button);
+            if state.live {
+                arrow = arrow.on_press(on_event(WidgetEvent::Read(ReadCommand::ToolOptions(
+                    (!open).then_some(tool),
+                ))));
+            }
+            menu = menu.push(row![arm, arrow].spacing(theme::space::XS));
+            if open {
+                menu = menu.push(document_tool_options_panel(tool, state, on_event));
+            }
+        } else {
+            menu = menu.push(arm);
+        }
     }
 
+    for (icon, label, command, enabled) in [
+        (
+            theme::Icon::Trash,
+            "Delete selected mark",
+            ReadCommand::DeleteSelected,
+            state.selected,
+        ),
+        (theme::Icon::Undo, "Undo", ReadCommand::Undo, state.can_undo),
+        (theme::Icon::Redo, "Redo", ReadCommand::Redo, state.can_redo),
+        (
+            theme::Icon::Save,
+            "Save as…",
+            ReadCommand::SaveAs,
+            state.open,
+        ),
+        (theme::Icon::Stamp, "Sign…", ReadCommand::Sign, state.open),
+    ] {
+        let mut control = button(
+            row![
+                theme::icon::icon(icon, theme::type_scale::BODY),
+                text(label).size(theme::type_scale::CAPTION),
+            ]
+            .spacing(theme::space::S),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([4.0, theme::space::S]))
+        .style(theme::ambient::tool_button);
+        if state.live && enabled {
+            control = control.on_press(on_event(WidgetEvent::Read(command)));
+        }
+        menu = menu.push(control);
+    }
+
+    container(scrollable(menu).style(theme::ambient::scrollbar))
+        .width(Length::Fixed(250.0))
+        .max_height(400.0)
+        .padding(theme::space::S)
+        .style(theme::ambient::surface)
+        .into()
+}
+
+fn document_tool_options_panel<Message: Clone + 'static>(
+    tool: AnnotationTool,
+    state: DocumentToolsState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let selected = state.color(tool).unwrap_or_default();
+    let mut swatches = Row::new().spacing(theme::space::XS);
+    for colour in InkColor::ALL {
+        let (red, green, blue) = colour.rgb();
+        swatches =
+            swatches.push(
+                button(space::horizontal())
+                    .width(Length::Fixed(24.0))
+                    .height(Length::Fixed(24.0))
+                    .padding(0)
+                    .style(theme::color_swatch_button(
+                        iced::Color::from_rgb(red, green, blue),
+                        selected == colour,
+                    ))
+                    .on_press_maybe(state.live.then(|| {
+                        on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour)))
+                    })),
+            );
+    }
     let mut panel =
         column![text("Color").size(theme::type_scale::CAPTION), swatches].spacing(theme::space::XS);
-
     if tool == AnnotationTool::Ink {
-        let width = reader.controls.ink_width;
         panel = panel
-            .push(text(format!("Width — {width:.1} pt")).size(theme::type_scale::CAPTION))
             .push(
-                slider(0.5..=12.0, width, move |value| {
-                    send(ReadCommand::SetInkWidth(value))
+                text(format!("Width — {:.1} pt", state.ink_width)).size(theme::type_scale::CAPTION),
+            )
+            .push(
+                slider(0.5..=12.0, state.ink_width, move |value| {
+                    on_event(WidgetEvent::Read(ReadCommand::SetInkWidth(value)))
                 })
                 .step(0.5_f32),
             );
     }
-
-    // Type has a size for the same reason the pen has a width: it is the one
-    // measure a reader changes often, and until now the only way to change it
-    // was not to.
     if matches!(tool, AnnotationTool::Text | AnnotationTool::Note) {
-        let size = reader.controls.text_size;
         panel = panel
-            .push(text(format!("Size — {size:.0} pt")).size(theme::type_scale::CAPTION))
             .push(
-                slider(6.0..=48.0, size, move |value| {
-                    send(ReadCommand::SetTextSize(value))
+                text(format!("Size — {:.0} pt", state.text_size)).size(theme::type_scale::CAPTION),
+            )
+            .push(
+                slider(6.0..=48.0, state.text_size, move |value| {
+                    on_event(WidgetEvent::Read(ReadCommand::SetTextSize(value)))
                 })
                 .step(1.0_f32),
             );
     }
-
     container(panel)
-        .width(Length::Fixed(232.0))
-        .padding(theme::space::M)
-        .style(theme::ambient::surface)
+        .padding(theme::space::S)
+        .style(theme::ambient::dialog)
         .into()
 }
