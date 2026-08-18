@@ -8,7 +8,7 @@
 //! preview with sample content, and the editor canvas. Having one is what
 //! makes "what you designed is what you present" true rather than aspirational.
 
-use iced::widget::{container, row, space, Column, Row};
+use iced::widget::{container, opaque, row, space, stack, Column, Row};
 use iced::{Element, Length, Padding};
 
 use crate::layout::{Direction, Layout, Node};
@@ -51,6 +51,36 @@ pub fn side_panel<'a, Message: 'a>(
             .height(Length::Fill)
             .clip(true),
         surface.into(),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Float a transient side panel over a working surface.
+///
+/// A narrow document window cannot spare a permanent rail without turning
+/// the page into a sliver. The panel still owns a dependable width, while the
+/// page keeps the whole viewport underneath it. `opaque` prevents presses in
+/// the drawer from leaking through to links and form fields on the page.
+pub fn overlay_side_panel<'a, Message: 'a>(
+    panel: impl Into<Element<'a, Message>>,
+    surface: impl Into<Element<'a, Message>>,
+    width: f32,
+    reveal: f32,
+) -> Element<'a, Message> {
+    let reveal = reveal.clamp(0.0, 1.0);
+    if reveal <= f32::EPSILON {
+        return surface.into();
+    }
+    stack![
+        surface.into(),
+        opaque(
+            container(panel)
+                .width(Length::Fixed(revealed(width, reveal)))
+                .height(Length::Fill)
+                .clip(true),
+        ),
     ]
     .width(Length::Fill)
     .height(Length::Fill)

@@ -9,7 +9,7 @@
 //! Generic over the message type because the presenter window and the layout
 //! editor speak different vocabularies and are entitled to the same dialog.
 
-use iced::widget::{button, container, mouse_area, opaque, stack};
+use iced::widget::{button, container, mouse_area, opaque, scrollable, stack};
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
@@ -51,9 +51,10 @@ pub fn panel<'a, Message: Clone + 'a>(
     // it. Without it, using a control would also close the panel it is in —
     // and doing it this way needs no no-op message from the caller.
     let sheet = opaque(
-        container(stack(layers))
+        container(scrollable(stack(layers)).style(theme::ambient::scrollbar))
             .padding(PADDING)
-            .width(Length::Fixed(WIDTH))
+            .width(Length::Fill)
+            .max_width(WIDTH)
             .style(theme::ambient::dialog),
     );
 
@@ -62,6 +63,7 @@ pub fn panel<'a, Message: Clone + 'a>(
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
+        .padding(theme::space::M)
         .style(theme::ambient::scrim);
 
     match dismiss {

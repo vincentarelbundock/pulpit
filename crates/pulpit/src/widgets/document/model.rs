@@ -554,6 +554,10 @@ pub struct ReaderControls {
     pub tool: Option<pulpit_core::annotation::AnnotationTool>,
     /// Which tool's options popover is open in the toolbar, if any.
     pub tool_options: Option<pulpit_core::annotation::AnnotationTool>,
+    /// Whether the compact navigation overflow menu is open.
+    pub navigation_overflow: bool,
+    /// Whether the compact annotation overflow menu is open.
+    pub tool_overflow: bool,
     /// The colour each colour-bearing tool lays down, and the pen's width.
     /// Mirrors of the interaction's styles, held here so the toolbar can be
     /// drawn from the controls alone.
@@ -596,6 +600,8 @@ impl Default for ReaderControls {
             page: PageIndex(0),
             tool: None,
             tool_options: None,
+            navigation_overflow: false,
+            tool_overflow: false,
             ink_color: pulpit_core::annotate::MarkStyle::default().color,
             ink_width: pulpit_core::annotate::MarkStyle::default().width,
             highlight_color: pulpit_core::annotate::MarkStyle::highlighter().color,
@@ -922,6 +928,8 @@ mod tests {
         assert_eq!(OutlineView::Thumbnails.label(), "Pages");
         // Each tab names itself, so a view that is in front is still labelled.
         assert!(!ReaderControls::default().outline_collapsed);
+        assert!(!ReaderControls::default().navigation_overflow);
+        assert!(!ReaderControls::default().tool_overflow);
     }
 
     #[test]

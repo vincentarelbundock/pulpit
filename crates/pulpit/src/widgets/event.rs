@@ -62,6 +62,8 @@ pub enum WidgetEvent {
 pub enum PanelCommand {
     FocusDocument,
     FocusSidebar,
+    /// Close the shared document sidebar.
+    CloseSidebar,
     /// Show search in the shared document sidebar.
     ShowSearch,
     /// Show the outline in the shared document sidebar.
@@ -217,6 +219,10 @@ pub enum ReadCommand {
     /// Open one tool's options popover in the toolbar, or close whichever is
     /// open.
     ToolOptions(Option<pulpit_core::annotation::AnnotationTool>),
+    /// Open or close the navigation band's compact overflow menu.
+    NavigationOverflow(bool),
+    /// Open or close the annotation band's compact overflow menu.
+    ToolOverflow(bool),
     /// Set the colour a tool lays down.
     SetToolColor(
         pulpit_core::annotation::AnnotationTool,

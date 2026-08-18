@@ -8598,6 +8598,13 @@ impl App {
         match command {
             PanelCommand::ShowSearch => self.open_search(),
             PanelCommand::ShowOutline => self.close_search(false),
+            PanelCommand::CloseSidebar => {
+                let close_search = self.close_search(false);
+                let collapse_outline = self.on_read_command(
+                    crate::widgets::event::ReadCommand::SetOutlineCollapsed(true),
+                );
+                Task::batch([close_search, collapse_outline])
+            }
             PanelCommand::FocusDocument => {
                 self.keyboard_region = KeyboardRegion::Document;
                 iced::advanced::widget::operate(
@@ -8683,6 +8690,16 @@ impl App {
     pub fn search_reveal(&self) -> f32 {
         self.search_animation
             .interpolate(0.0_f32, 1.0_f32, self.now)
+    }
+
+    /// Whether a document sidebar should float over the page instead of
+    /// permanently narrowing it.
+    pub fn compact_document_sidebar(&self) -> bool {
+        self.uses_document_viewer() && self.presenter_size.width < 760.0
+    }
+
+    pub fn compact_editor(&self) -> bool {
+        self.presenter_size.width < 700.0
     }
 
     pub fn search_input_focused(&self) -> bool {

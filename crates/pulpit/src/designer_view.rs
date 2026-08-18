@@ -178,7 +178,8 @@ fn layout_card<'a>(
         .spacing(gap::S),
     )
     .padding(gap::M)
-    .width(Length::Fixed(310.0))
+    .width(Length::Fill)
+    .max_width(310.0)
     // Every card the same size, so a shelf of them reads as a shelf.
     .height(Length::Fixed(260.0))
     .style(move |theme: &iced::Theme| {
@@ -488,16 +489,30 @@ impl<Message> canvas::Program<Message> for SlideBounds {
 pub fn editor<'a>(
     designer: &'a Designer,
     context: &crate::widgets::Context<'_>,
+    compact: bool,
 ) -> Element<'a, Message> {
-    let body = row![
-        container(widget_library(designer))
-            .width(Length::Fixed(230.0))
-            .height(Length::Fill),
-        container(canvas_region(designer, context))
-            .width(Length::Fill)
-            .height(Length::Fill),
-    ]
-    .spacing(gap::M);
+    // The library is a rail while there is room for one, and a shallow shelf
+    // above the canvas when there is not. The canvas therefore never becomes
+    // an unusably narrow strip merely to preserve a desktop arrangement.
+    let library = container(widget_library(designer));
+    let canvas = container(canvas_region(designer, context))
+        .width(Length::Fill)
+        .height(Length::Fill);
+    let body: Element<'a, Message> = if compact {
+        column![
+            library.width(Length::Fill).height(Length::Fixed(180.0)),
+            canvas,
+        ]
+        .spacing(gap::M)
+        .into()
+    } else {
+        row![
+            library.width(Length::Fixed(230.0)).height(Length::Fill),
+            canvas,
+        ]
+        .spacing(gap::M)
+        .into()
+    };
 
     let mut page = column![header(designer)].spacing(gap::M).padding(gap::M);
     if designer.is_editable() {
