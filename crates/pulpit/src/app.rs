@@ -6913,9 +6913,62 @@ impl App {
             .find(|placement| placement.id == cell.id)?
             .frame;
         Some((
-            (placed.width - cell.padding * 2.0).max(0.0),
+            (placed.width + self.released_rail_width(&placements, placed) - cell.padding * 2.0)
+                .max(0.0),
             (placed.height - cell.padding * 2.0).max(0.0),
         ))
+    }
+
+    /// How much width the outline rail has given back to the page.
+    ///
+    /// The rail is a layout pane, not content folded inside one, so
+    /// collapsing it hands its track to its siblings — see
+    /// `layout_renderer::pane_reveal`, which is what actually draws it. The
+    /// layout computed above knows nothing about that, so a fit taken
+    /// straight from it is sized for a rail that is not on screen: with the
+    /// built-in Reader's 0.24/0.76 body split the pages come out about a
+    /// quarter smaller than they should be, and in a two-page spread the top
+    /// of the next row shows below them.
+    ///
+    /// Interpolated rather than switched on the collapsed flag, so the fit
+    /// tracks the disclosure animation instead of jumping at the end of it.
+    /// Claimed only when the rail sits in the same horizontal band as the
+    /// page — in the built-in Reader they are siblings, and a custom layout
+    /// that puts the rail somewhere else releases its space to whatever is
+    /// actually beside it, not to the page.
+    fn released_rail_width(
+        &self,
+        placements: &[crate::layout::tree::Placement],
+        page: crate::layout::Frame,
+    ) -> f32 {
+        let revealed = self
+            .outline_animation
+            .interpolate(1.0_f32, 0.0_f32, self.now)
+            .max(self.search_reveal())
+            .clamp(0.0, 1.0);
+        // A narrow window mounts the rail as a drawer over the page instead,
+        // so the layout-owned pane is gone entirely whatever the animation.
+        let revealed = if self.compact_document_sidebar() {
+            0.0
+        } else {
+            revealed
+        };
+        if revealed >= 1.0 {
+            return 0.0;
+        }
+        self.active_layout
+            .cells()
+            .into_iter()
+            .find(|cell| {
+                cell.widget.as_ref().map(|widget| widget.kind())
+                    == Some(crate::widgets::WidgetKind::DocumentOutline)
+            })
+            .and_then(|rail| placements.iter().find(|placement| placement.id == rail.id))
+            .filter(|rail| {
+                (rail.frame.y - page.y).abs() < 0.5 && (rail.frame.height - page.height).abs() < 0.5
+            })
+            .map(|rail| rail.frame.width * (1.0 - revealed))
+            .unwrap_or(0.0)
     }
 
     /// Put the time the helper is showing into the field it is open over.
