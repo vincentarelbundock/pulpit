@@ -167,6 +167,10 @@ impl DisplayBackend for WaylandBackend {
         "wayland-output"
     }
 
+    fn wait_for_topology_change(&self) -> Result<bool, BackendError> {
+        WaylandBackend::wait_for_change(self).map(|()| true)
+    }
+
     fn snapshot(&self) -> Result<DisplaySnapshot, BackendError> {
         self.pump()?;
         let state = self.state.lock().unwrap();

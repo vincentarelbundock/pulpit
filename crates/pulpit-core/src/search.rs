@@ -511,7 +511,7 @@ impl std::fmt::Display for SearchProblem {
 pub struct SearchState {
     query: Query,
     generation: SearchGeneration,
-    hits: Vec<Hit>,
+    hits: std::sync::Arc<Vec<Hit>>,
     cursor: Option<usize>,
     /// The next page to ask the worker about; `page_count` when the scan of
     /// the page text is done.
@@ -537,6 +537,11 @@ impl SearchState {
 
     pub fn hits(&self) -> &[Hit] {
         &self.hits
+    }
+
+    /// Immutable, cheap-to-clone view data for responsive UI closures.
+    pub fn hits_snapshot(&self) -> std::sync::Arc<Vec<Hit>> {
+        self.hits.clone()
     }
 
     pub fn problem(&self) -> Option<&SearchProblem> {
@@ -594,7 +599,7 @@ impl SearchState {
     }
 
     fn restart(&mut self) -> SearchGeneration {
-        self.hits.clear();
+        self.hits = std::sync::Arc::new(Vec::new());
         self.cursor = None;
         self.problem = None;
         self.in_flight = None;
@@ -688,6 +693,7 @@ impl SearchState {
         }
 
         let held = std::mem::take(&mut self.hits);
+        let held = std::sync::Arc::try_unwrap(held).unwrap_or_else(|shared| (*shared).clone());
         let mut held = held.into_iter().peekable();
         let mut incoming = incoming.into_iter().peekable();
         let mut merged = Vec::with_capacity((held.len() + incoming.len()).min(MAX_HITS));
@@ -714,7 +720,7 @@ impl SearchState {
                 (None, None) => break,
             }
         }
-        self.hits = merged;
+        self.hits = std::sync::Arc::new(merged);
         self.cursor =
             current.and_then(|key| self.hits.binary_search_by(|hit| hit.key().cmp(&key)).ok());
     }

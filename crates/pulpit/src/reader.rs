@@ -301,7 +301,7 @@ pub struct ReaderSession {
     /// the moment the real cell arrives.
     cell_known: bool,
     scale: f32,
-    outline: Vec<OutlineRow>,
+    outline: std::sync::Arc<Vec<OutlineRow>>,
     outline_focus: Option<OutlineItemId>,
     outline_scroll: [f32; 3],
     outline_viewport: [std::rc::Rc<std::cell::Cell<f32>>; 3],
@@ -322,7 +322,7 @@ pub struct ReaderSession {
     /// badges read it, and neither writes to it. It changes only when a fresh
     /// list arrives, so nothing here can disagree with PDFium for longer than
     /// the round trip after a commit.
-    fields: Vec<pulpit_render::document::FormField>,
+    fields: std::sync::Arc<Vec<pulpit_render::document::FormField>>,
     /// Whether a field currently holds the caret, as the *worker* last said.
     ///
     /// Never guessed here. PDFium owns the caret — it decides whether a click
@@ -565,7 +565,7 @@ impl ReaderSession {
 
     /// Take the engine's field list as it stands.
     pub fn set_fields(&mut self, fields: Vec<pulpit_render::document::FormField>) {
-        self.fields = fields;
+        self.fields = std::sync::Arc::new(fields);
         self.repair_outline_focus();
     }
 
@@ -1257,7 +1257,7 @@ impl ReaderSession {
     }
 
     pub fn set_outline(&mut self, outline: Vec<OutlineRow>) {
-        self.outline = outline;
+        self.outline = std::sync::Arc::new(outline);
         self.repair_outline_focus();
     }
 
@@ -3699,14 +3699,14 @@ impl ReaderSession {
                 1.0
             },
             scale: self.scale,
-            outline: &self.outline,
+            outline: self.outline.clone(),
             outline_focus: self.outline_focus.as_ref(),
             outline_scroll: self.outline_scroll_position().0,
             outline_viewport: self.outline_viewport[self.outline_slot()].clone(),
             outline_width: self.outline_width[self.outline_slot()].clone(),
             document_keyboard_focus: false,
             has_form: self.has_form,
-            fields: &self.fields,
+            fields: self.fields.clone(),
             date_picker: self.date_picker.as_ref(),
             time_picker: self.time_picker.as_ref(),
             focused_widget: self.form_widget.as_ref(),

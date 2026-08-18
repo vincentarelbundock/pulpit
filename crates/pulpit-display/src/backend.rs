@@ -22,6 +22,9 @@ pub enum BackendError {
 pub enum PlacementOutcome {
     /// The request was applied.
     Applied,
+    /// The native request was sent; verification must happen on a later
+    /// event-loop turn after the window manager has had a chance to act.
+    Pending,
     /// The compositor refused it (policy, tiling WM, ...).
     Refused,
     /// The target monitor disappeared between snapshot and request. This is a
@@ -42,6 +45,13 @@ pub trait DisplayBackend: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// Block a caller-owned helper thread until the platform hints that the
+    /// topology changed. `Ok(false)` means no native listener is available
+    /// and the caller should use its slow fallback poll.
+    fn wait_for_topology_change(&self) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Give a window the keyboard focus.
     ///
     /// The toolkit's own focus request is advisory and, on Wayland, usually
@@ -61,6 +71,18 @@ pub trait DisplayBackend: Send + Sync {
         identity: &MonitorIdentity,
         mode: WindowMode,
     ) -> PlacementOutcome;
+
+    /// Verify a previously issued placement without retaining `window`
+    /// across turns. Backends whose placement result is immediate never need
+    /// this hook.
+    fn verify_placement(
+        &self,
+        _window: NativeWindow,
+        _identity: &MonitorIdentity,
+        _final_attempt: bool,
+    ) -> PlacementOutcome {
+        PlacementOutcome::Unsupported
+    }
 }
 
 /// An opaque backend-specific window reference, valid only for the duration

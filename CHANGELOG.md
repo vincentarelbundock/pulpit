@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Worker, file-watch, and display-topology results now wake the interface as
+  they arrive instead of waiting for a periodic UI-thread poll. Delivery work
+  is bounded per event-loop turn, document opening and placement verification
+  no longer block the interface, and large search/outline snapshots are
+  shared across view rebuilds.
+
 - **Keyboard shortcuts are vim-first, and modifiers are now real.** Navigation
   answers to `j`/`l` and `k`/`h` as well as the arrows, space and the paging
   keys — nothing conventional was taken away, because no presenter remote

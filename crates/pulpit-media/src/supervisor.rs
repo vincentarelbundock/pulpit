@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError,
+};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pulpit_core::overlay::ContentKind;
@@ -30,6 +33,41 @@ use crate::surface::{RingNamer, SurfaceRing, DEFAULT_SLOTS};
 /// killed. Comfortably more than the three seconds each browser is given, and
 /// still short enough not to read as a hung quit.
 const WORKER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// A media worker queued an event. The payload remains on the supervisor's
+/// ordered channel; this one-slot signal only wakes the application.
+pub struct MediaWakeup {
+    inbox: Mutex<Receiver<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wakeup {
+    Ring,
+    Idle,
+    Closed,
+}
+
+impl MediaWakeup {
+    pub fn wait(&self, timeout: Duration) -> Wakeup {
+        let Ok(inbox) = self.inbox.try_lock() else {
+            return Wakeup::Closed;
+        };
+        match inbox.recv_timeout(timeout) {
+            Ok(()) => Wakeup::Ring,
+            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
+            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WakeupSink(SyncSender<()>);
+
+impl WakeupSink {
+    fn ring(&self) {
+        let _ = self.0.try_send(());
+    }
+}
 
 /// How a worker process is launched.
 #[derive(Debug, Clone)]
@@ -175,6 +213,12 @@ pub enum SessionEvent {
     },
 }
 
+/// One bounded supervisor drain.
+pub struct PollBatch {
+    pub events: Vec<SessionEvent>,
+    pub more: bool,
+}
+
 /// One live session: its ring, the runtime hosting it and its place in the
 /// fallback chain.
 ///
@@ -207,7 +251,11 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(runtime: RuntimeId, command: &WorkerCommand) -> Result<Worker, MediaError> {
+    fn spawn(
+        runtime: RuntimeId,
+        command: &WorkerCommand,
+        wakeup: WakeupSink,
+    ) -> Result<Worker, MediaError> {
         let mut child = command
             .build()
             .and_then(|mut command| command.spawn())
@@ -238,10 +286,12 @@ impl Worker {
                             if sender.send(Ok(event)).is_err() {
                                 break;
                             }
+                            wakeup.ring();
                         }
                         Err(crate::protocol::ProtocolError::Closed) => break,
                         Err(e) => {
                             let _ = sender.send(Err(e.to_string()));
+                            wakeup.ring();
                             break;
                         }
                     }
@@ -279,10 +329,10 @@ impl Worker {
         })
     }
 
-    fn drain(&mut self) -> (Vec<MediaEvent>, Option<String>) {
+    fn drain(&mut self, limit: usize) -> (Vec<MediaEvent>, Option<String>, bool) {
         let mut events = Vec::new();
         let mut fault = None;
-        loop {
+        while events.len() < limit {
             match self.events.try_recv() {
                 Ok(Ok(event)) => events.push(event),
                 Ok(Err(problem)) => {
@@ -297,7 +347,8 @@ impl Worker {
                 }
             }
         }
-        (events, fault)
+        let more = events.len() == limit;
+        (events, fault, more)
     }
 
     /// Ask the worker to stop, and give it time to actually do it.
@@ -357,6 +408,8 @@ pub struct MediaSupervisor {
     /// The last selection made for each overlay, for preflight reporting.
     selections: HashMap<OverlayId, Selection>,
     pending: Vec<SessionEvent>,
+    wakeup: WakeupSink,
+    wakeup_inbox: Option<Arc<MediaWakeup>>,
     /// The latest pipeline totals each worker reported about itself.
     worker_counters: HashMap<RuntimeId, WorkerCounters>,
     /// Frames copied out of shared memory and handed to the application.
@@ -391,6 +444,7 @@ impl MediaSupervisor {
 
     /// A supervisor that knows nothing until it is told. Tests only.
     pub fn unprobed(config: MediaConfig) -> Self {
+        let (signal, inbox) = sync_channel(1);
         Self {
             config,
             namer: RingNamer::new(),
@@ -401,6 +455,10 @@ impl MediaSupervisor {
             probes: HashMap::new(),
             selections: HashMap::new(),
             pending: Vec::new(),
+            wakeup: WakeupSink(signal),
+            wakeup_inbox: Some(Arc::new(MediaWakeup {
+                inbox: Mutex::new(inbox),
+            })),
             worker_counters: HashMap::new(),
             frames_forwarded: 0,
             frames_coalesced: 0,
@@ -409,6 +467,16 @@ impl MediaSupervisor {
 
     pub fn config(&self) -> &MediaConfig {
         &self.config
+    }
+
+    /// Take the application event loop's sole doorbell listener.
+    pub fn take_wakeup(&mut self) -> Option<Arc<MediaWakeup>> {
+        self.wakeup_inbox.take()
+    }
+
+    fn push_pending(&mut self, event: SessionEvent) {
+        self.pending.push(event);
+        self.wakeup.ring();
     }
 
     /// Record a probe result. Probing itself is the registry's job; the
@@ -480,7 +548,7 @@ impl MediaSupervisor {
 
         let selection = self.plan(overlay, kind, request);
         let Some(runtime) = selection.selected else {
-            self.pending.push(SessionEvent::Failed {
+            self.push_pending(SessionEvent::Failed {
                 session: session_id,
                 overlay,
                 error: MediaError::new(
@@ -570,7 +638,11 @@ impl MediaSupervisor {
                 .with_runtime(runtime)
             })?;
         if let std::collections::hash_map::Entry::Vacant(slot) = self.workers.entry(runtime) {
-            slot.insert(Worker::spawn(runtime, &command_for(runtime))?);
+            slot.insert(Worker::spawn(
+                runtime,
+                &command_for(runtime),
+                self.wakeup.clone(),
+            )?);
         }
         let worker = self.workers.get_mut(&runtime).expect("just inserted");
         if let Err(error) = worker.send(&MediaRequest::Open(Box::new(spec.clone()))) {
@@ -617,7 +689,7 @@ impl MediaSupervisor {
                     attempts,
                 },
             );
-            self.pending.push(SessionEvent::Failed {
+            self.push_pending(SessionEvent::Failed {
                 session: session_id,
                 overlay,
                 error,
@@ -629,7 +701,7 @@ impl MediaSupervisor {
         let next = fallbacks.remove(0);
         // Warn about the failed candidate, then try the next one. The last
         // good frame, if any, is still on screen throughout.
-        self.pending.push(SessionEvent::Failed {
+        self.push_pending(SessionEvent::Failed {
             session: session_id,
             overlay,
             error: error.clone(),
@@ -696,7 +768,7 @@ impl MediaSupervisor {
                     session: session.id,
                 });
             }
-            self.pending.push(SessionEvent::Closed {
+            self.push_pending(SessionEvent::Closed {
                 session: session.id,
             });
         }
@@ -788,7 +860,7 @@ impl MediaSupervisor {
             return;
         };
         if let Err(error) = worker.send(&request) {
-            self.pending.push(SessionEvent::Failed {
+            self.push_pending(SessionEvent::Failed {
                 session,
                 overlay,
                 error,
@@ -802,15 +874,35 @@ impl MediaSupervisor {
     /// Each worker is drained once and its events routed to the sessions they
     /// name, because one worker now speaks for several of them.
     pub fn poll(&mut self, command_for: impl Fn(RuntimeId) -> WorkerCommand) -> Vec<SessionEvent> {
+        self.poll_limit(command_for, usize::MAX).events
+    }
+
+    /// Poll with a per-worker message budget, yielding before a burst can
+    /// monopolise the application event loop.
+    pub fn poll_bounded(
+        &mut self,
+        command_for: impl Fn(RuntimeId) -> WorkerCommand,
+        limit: usize,
+    ) -> PollBatch {
+        self.poll_limit(command_for, limit)
+    }
+
+    fn poll_limit(
+        &mut self,
+        command_for: impl Fn(RuntimeId) -> WorkerCommand,
+        limit: usize,
+    ) -> PollBatch {
         let mut out = std::mem::take(&mut self.pending);
         let mut casualties: Vec<(SessionId, MediaError)> = Vec::new();
+        let mut more = false;
 
         let runtimes: Vec<RuntimeId> = self.workers.keys().copied().collect();
         for runtime in runtimes {
             let Some(worker) = self.workers.get_mut(&runtime) else {
                 continue;
             };
-            let (events, fault) = worker.drain();
+            let (events, fault, worker_more) = worker.drain(limit);
+            more |= worker_more;
 
             // Within one drain, only a session's newest complete frame is
             // worth copying: every frame is a full replacement, so an older
@@ -903,7 +995,7 @@ impl MediaSupervisor {
         for (id, error) in casualties {
             self.recover(id, error, &command_for, &mut out);
         }
-        out
+        PollBatch { events: out, more }
     }
 
     /// Apply one worker event to the session it names, returning a request the
@@ -1202,6 +1294,21 @@ mod tests {
             },
             ..RuntimeProbe::unavailable(id, Availability::Available)
         }
+    }
+
+    #[test]
+    fn pending_events_ring_the_one_slot_doorbell() {
+        let mut supervisor = MediaSupervisor::unprobed(MediaConfig::default());
+        let wakeup = supervisor.take_wakeup().unwrap();
+        supervisor.push_pending(SessionEvent::Closed {
+            session: SessionId(7),
+        });
+        supervisor.push_pending(SessionEvent::Closed {
+            session: SessionId(8),
+        });
+
+        assert_eq!(wakeup.wait(Duration::ZERO), Wakeup::Ring);
+        assert_eq!(wakeup.wait(Duration::ZERO), Wakeup::Idle);
     }
 
     #[test]

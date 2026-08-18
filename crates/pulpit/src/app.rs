@@ -28,12 +28,21 @@ use crate::display::{self, DisplayCoordinator};
 use crate::theme::ThemeState;
 use crate::toast::{Intent, Toasts};
 
-/// How often the update loop wakes up: fast enough for a smooth clock and
-/// prompt renderer events, cheap enough to leave the GPU alone.
+/// Cadence for animations and short UI deadlines. Worker delivery is
+/// event-driven and does not wait for this clock.
 const TICK: Duration = Duration::from_millis(50);
-/// The tick while nothing is live: fast enough for the clock, file watching
-/// and resume detection, slow enough that an idle talk barely wakes the CPU.
+/// The watchdog tick while nothing is live: fast enough for the clock,
+/// deadlines and resume detection, slow enough that an idle talk barely
+/// wakes the CPU.
 const SETTLED_TICK: Duration = Duration::from_millis(250);
+/// Per-message answer budget. A form can cause follow-up asks while answers
+/// are handled, so bounding the drain prevents a busy document from owning an
+/// event-loop turn indefinitely.
+const READER_DRAIN_BUDGET: usize = 32;
+/// Renderer messages may each copy a full frame, so a single wakeup gets a
+/// strict amount of event-loop work before yielding to drawing.
+const RENDER_DRAIN_BUDGET: usize = 16;
+const MEDIA_DRAIN_BUDGET: usize = 32;
 
 /// How long a newly cached frame keeps the fast tick, so the windows can get
 /// it onto the GPU before the next page turn asks them to draw it.
@@ -70,8 +79,8 @@ const OVERVIEW_SCROLL_CLAIM: Duration = Duration::from_millis(400);
 /// Toolkits report a notched wheel in lines and browsers in pixels; sixteen
 /// is the conventional line height that conversion assumes.
 const LINE_SCROLL_PIXELS: f32 = 16.0;
-/// Topology is polled at this interval as the baseline; native listeners
-/// shorten the latency where they exist.
+/// Fallback enumeration interval for sessions with no native topology
+/// listener. Both the fallback and native wait run off the event-loop thread.
 const POLL_TOPOLOGY: Duration = Duration::from_millis(1000);
 /// Window mapping, fullscreen, and compositor placement are asynchronous.
 /// Refocusing after both the first map and its placement retry keeps the
@@ -93,6 +102,16 @@ pub enum Message {
     /// only when the next tick got round to looking, so every page turn paid
     /// up to a tick per rendering step for nothing but the poll.
     RenderReady,
+    /// The document worker has queued at least one ordered answer.
+    ReaderReady,
+    /// A media worker has queued state or a complete replacement frame.
+    MediaReady,
+    /// The watched document was touched; debounce and stability checks still
+    /// belong to `DocumentManager`.
+    FileChanged,
+    /// An authoritative topology snapshot gathered off the event-loop thread
+    /// after a native change hint (or the slow fallback poll).
+    TopologySnapshot(pulpit_display::DisplaySnapshot),
     Key {
         key: Option<String>,
         text: Option<String>,
@@ -127,16 +146,16 @@ pub enum Message {
     NavForward,
     OpenDialog,
     Opened(Option<PathBuf>),
+    /// Filesystem preparation for the most recently opened document finished
+    /// on its helper thread. The result itself stays on App's private channel
+    /// because it owns non-clone worker and watcher handles.
+    DocumentPrepared,
     /// Where the reader's annotated document should be written. `None` when
     /// the chooser was dismissed, which is not a failure.
     SaveDocumentTo(Option<PathBuf>),
     /// The Sign dialog (SPEC-signing.md §31.1); grouped the way `Timer` and
     /// `Read` already group their own popups' messages.
     Sign(crate::signing::SignMsg),
-    /// Structural signature discovery on a document that just opened
-    /// (§31.3): does it already carry a signature, and if so, which fields
-    /// exist. Cheap and supervisor-side; run once per open.
-    DocumentSignaturesDiscovered(Vec<pulpit_render::verify::SignatureVerification>),
     /// The reader accepted or declined the append-only offer (§31.3, A9).
     AcceptAppendOnly,
     EditAnyway,
@@ -288,6 +307,16 @@ pub enum Message {
     DiscardReaderEdits,
     /// A widget that produces nothing (preview mode).
     Ignore,
+}
+
+struct PreparedDocument {
+    serial: u64,
+    watcher: Result<DocumentWatcher, String>,
+    content_hash: Option<String>,
+    fingerprint: Option<crate::session::DocumentFingerprint>,
+    recovery: Option<crate::reader_journal::RecoveredJournal>,
+    reader: Option<Result<crate::reader_link::ReaderLink, String>>,
+    signatures: Vec<pulpit_render::verify::SignatureVerification>,
 }
 
 /// A question the library page is waiting on.
@@ -764,6 +793,8 @@ pub struct App {
     pub supervisor: Option<RendererSupervisor>,
     /// The renderer's doorbell, listened to by [`App::subscription`].
     render_wakeup: Option<std::sync::Arc<pulpit_render::supervisor::RenderWakeup>>,
+    /// The current document session's one-slot answer doorbell.
+    reader_wakeup: Option<std::sync::Arc<crate::reader_link::ReaderWakeup>>,
     /// When the windows have had long enough to upload the frames that have
     /// arrived. Keeps the fast tick until then; see [`UPLOAD_SETTLE`].
     uploads_settle_by: Option<Instant>,
@@ -774,6 +805,9 @@ pub struct App {
     /// Where the windows report the uploads they blocked on. Shared with the
     /// `residency` widget in each window's view.
     upload_meter: crate::latency::UploadMeter,
+    /// Time spent rebuilding the top-level element trees, recorded through
+    /// `&App` at the view boundary just like upload latency.
+    pub view_meter: crate::latency::UploadMeter,
     /// When each outstanding render was submitted, so a frame can report how
     /// long it took. Separate from `pending` because it is diagnostic only.
     submitted_at: std::collections::HashMap<RequestId, Instant>,
@@ -913,9 +947,11 @@ pub struct App {
     /// for, never assumed: it decides how wide a panel's frame has to be to
     /// look sharp, and guessing high is four times the pixels for nothing.
     presenter_scale: f32,
-    pub last_poll: Instant,
     pub now: Instant,
     watcher: Option<DocumentWatcher>,
+    file_wakeup: Option<std::sync::Arc<crate::doc::watcher::FileWakeup>>,
+    prepared_documents: std::sync::mpsc::Receiver<PreparedDocument>,
+    prepare_document: std::sync::mpsc::Sender<PreparedDocument>,
     needs_reconcile: bool,
     pending: Vec<(RequestId, FrameKey)>,
     /// Link annotations by (document, pdf page), as reported by the renderer.
@@ -936,6 +972,8 @@ pub struct App {
     /// Media worker supervision. Absent when no runtime is usable at all,
     /// which is not a failure: every overlay then shows its static fallback.
     pub media_supervisor: Option<pulpit_media::MediaSupervisor>,
+    /// The media supervisor's one-slot event doorbell.
+    media_wakeup: Option<std::sync::Arc<pulpit_media::supervisor::MediaWakeup>>,
     /// Attachments already asked of the renderer, so a re-render does not
     /// fetch the same embedded file twice.
     attachments_requested: std::collections::HashSet<String>,
@@ -1255,11 +1293,19 @@ struct PlacementRetry {
     mode: WindowMode,
     attempt: u32,
     due: Instant,
+    /// This pass observes a request already sent; it does not issue another
+    /// native move.
+    verifying: bool,
 }
 
 /// How many times a refused placement is retried after the window is mapped.
 const MAX_PLACEMENT_RETRIES: u32 = 4;
 const PLACEMENT_RETRY_DELAY: Duration = Duration::from_millis(250);
+const PLACEMENT_VERIFY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(20),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+];
 /// A monotonic gap larger than this means the machine was asleep.
 const RESUME_GAP: Duration = Duration::from_secs(5);
 
@@ -1379,6 +1425,14 @@ impl App {
             crate::widgets::TimerControls::new(settings.timer.target(), settings.timer.count_down);
         timer_controls.snooze_minutes = alarm_controls.snooze_minutes;
 
+        let mut media_supervisor = Some(pulpit_media::MediaSupervisor::unprobed(
+            crate::media::config_from_settings(None, None, None, None),
+        ));
+        let media_wakeup = media_supervisor
+            .as_mut()
+            .and_then(pulpit_media::MediaSupervisor::take_wakeup);
+
+        let (prepare_document, prepared_documents) = std::sync::mpsc::channel();
         let mut app = Self {
             state: PresentationState::default(),
             nav_history: pulpit_core::NavHistory::new(),
@@ -1407,9 +1461,11 @@ impl App {
             store,
             supervisor,
             render_wakeup,
+            reader_wakeup: None,
             uploads_settle_by: None,
             latency: crate::latency::Latency::default(),
             upload_meter: crate::latency::UploadMeter::default(),
+            view_meter: crate::latency::UploadMeter::default(),
             submitted_at: std::collections::HashMap::new(),
             coordinator,
             diagnostics,
@@ -1463,9 +1519,11 @@ impl App {
             // render is asked for.
             presenter_size: Size::new(1422.0, 800.0),
             presenter_scale: 1.0,
-            last_poll: now,
             now,
             watcher: None,
+            file_wakeup: None,
+            prepared_documents,
+            prepare_document,
             needs_reconcile: true,
             links: std::collections::HashMap::new(),
             links_requested: std::collections::HashSet::new(),
@@ -1478,9 +1536,8 @@ impl App {
             // synchronously here, before the first window could appear. The
             // probes arrive via `Message::MediaProbed` from a helper thread,
             // and no session opens until they do.
-            media_supervisor: Some(pulpit_media::MediaSupervisor::unprobed(
-                crate::media::config_from_settings(None, None, None, None),
-            )),
+            media_supervisor,
+            media_wakeup,
             attachments_requested: std::collections::HashSet::new(),
             media_runtime_warned: false,
             input_router: crate::media::InputRouter::new(),
@@ -1661,19 +1718,19 @@ impl App {
         crate::theme::iced_theme(self.theme.palette)
     }
 
-    /// Is anything happening that deserves the fast tick? When nothing is —
-    /// no renders in flight, no media playing, no thumbnails warming, no
-    /// toast counting down — the application settles to a slow tick, and an
-    /// idle presentation costs wakeups a hand can count instead of twenty a
-    /// second. Everything the slow tick still drives (resume detection, the
-    /// clock, file watching, the throttled saves) tolerates its cadence.
+    /// Is anything timed locally that deserves the fast tick? Worker and file
+    /// results have doorbells, so in-flight work is deliberately absent. When
+    /// no animation or short deadline is live the application settles to the
+    /// watchdog cadence, and an idle presentation costs wakeups a hand can
+    /// count instead of twenty a second.
     fn is_live(&self) -> bool {
-        !self.pending.is_empty()
+        // Worker completions use doorbells, so work merely being in flight is
+        // not a reason to rebuild every window twenty times a second.
+        // Frames that have arrived but may not be on the GPU yet are.
+        self.uploads_settle_by.is_some_and(|at| self.now < at)
             // Frames that have arrived but may not be on the GPU yet. The
             // renders being finished is precisely when this matters: the
             // uploads that make the next turn instant happen after it.
-            || self.uploads_settle_by.is_some_and(|at| self.now < at)
-            || !self.thumbnail_queue.is_empty()
             || self.scrubbing
             || !self.placement_retries.is_empty()
             // A pending focus repair is timed in tens of milliseconds; the
@@ -1688,27 +1745,8 @@ impl App {
             || self.search_animation.is_animating(self.now)
             || self.search_focus_pending
             || self.needs_reconcile
-            // An edit on its way to the page: the worker has been asked and
-            // has not answered, or it has and the snapshot the render pool
-            // draws from is still owed. Every step of that is a round trip
-            // polled from the tick, so at the settled tick a placed mark waits
-            // a quarter of a second per step for no reason other than the
-            // clock — which is what "it takes a long time to appear" is.
-            //
-            // Asked of the link rather than enumerated here: every kind of
-            // request — a mutation, a selection query, a keystroke, a partial
-            // repaint, a pointer move over a form — is answered on the same
-            // link, and the link counts what it is owed. A list of conditions
-            // is a list a new kind of request gets left out of, and the
-            // symptom of being left out is a keystroke answered a quarter of
-            // a second late: "the form is slow to type in".
-            || self
-                .reader_link
-                .as_ref()
-                .is_some_and(crate::reader_link::ReaderLink::is_busy)
-            // …and what is held back rather than sent. Nothing is owed for
-            // these yet, so the link does not know about them; the tick that
-            // sends them has to keep running.
+            // Work held back rather than sent has no worker answer to ring a
+            // doorbell. The tick that releases it must keep running.
             || self.selection_query.is_waiting()
             || self.form_move.is_waiting()
             || self.form_flow.is_waiting()
@@ -1727,10 +1765,6 @@ impl App {
             // settled tick is far too slow for that: it would open at the
             // top and hop, in full view of the presenter.
             || self.overview_reveal.is_some()
-            || self
-                .media_supervisor
-                .as_ref()
-                .is_some_and(|media| media.session_count() > 0)
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1802,17 +1836,33 @@ impl App {
         let closes = window::close_events().map(Message::WindowClosed);
         let resizes = window::resize_events().map(|(id, size)| Message::Resized { id, size });
         let mut subscriptions = vec![ticks, keys, closes, resizes];
+        subscriptions.push(topology_snapshots(
+            self.coordinator.backend.clone(),
+            POLL_TOPOLOGY,
+        ));
         if let Some(wakeup) = self.render_wakeup.clone() {
             subscriptions.push(render_wakeups(wakeup));
+        }
+        if let Some(wakeup) = self.reader_wakeup.clone() {
+            subscriptions.push(reader_wakeups(wakeup));
+        }
+        if let Some(wakeup) = self.media_wakeup.clone() {
+            subscriptions.push(media_wakeups(wakeup));
+        }
+        if let Some(wakeup) = self.file_wakeup.clone() {
+            subscriptions.push(file_wakeups(wakeup));
         }
         Subscription::batch(subscriptions)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let started = Instant::now();
         let task = self.dispatch(message);
         // After every message, not per handler: annotations mutate from a
         // dozen places, and the view must never draw a stale snapshot.
         self.sync_annotation_layers();
+        self.latency
+            .record_stage(|stages| &mut stages.update, started.elapsed());
         task
     }
 
@@ -2002,9 +2052,12 @@ impl App {
         // a render, which happens in another process entirely.
         let stages = self.latency.stages();
         for (name, stage) in [
+            ("handling messages", stages.update),
             ("planning renders", stages.plan_renders),
             ("following media", stages.service_media),
             ("taking delivery of frames", stages.drain_renderer),
+            ("taking document answers", stages.drain_reader),
+            ("taking media frames", stages.drain_media),
         ] {
             if stage.calls == 0 {
                 continue;
@@ -2038,6 +2091,15 @@ impl App {
                 upload.calls,
                 millis(upload.mean()),
                 millis(upload.worst),
+            ));
+        }
+        let views = self.view_meter.get();
+        if views.calls > 0 {
+            report.push_str(&format!(
+                "- on the event loop, rebuilding views: {} passes, {} typical, {} worst\n",
+                views.calls,
+                millis(views.mean()),
+                millis(views.worst),
             ));
         }
         let copies = self.latency.copies();
@@ -2133,8 +2195,46 @@ impl App {
         match message {
             Message::Tick(now) => self.on_tick(now),
             Message::RenderReady => {
-                self.pump_renderer();
-                Task::none()
+                if self.pump_renderer() {
+                    Task::done(Message::RenderReady)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ReaderReady => {
+                if self.pump_reader() {
+                    Task::done(Message::ReaderReady)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DocumentPrepared => self.finish_document_prepare(),
+            Message::MediaReady => {
+                if self.poll_media() {
+                    Task::done(Message::MediaReady)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::FileChanged => {
+                if self.settings.rendering.watch_document
+                    && self.watcher.as_ref().is_some_and(DocumentWatcher::drain)
+                {
+                    let actions = self.documents.on_file_event(self.now);
+                    self.run_document_actions(actions)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::TopologySnapshot(snapshot) => {
+                if snapshot.same_topology(&self.coordinator.snapshot) {
+                    Task::none()
+                } else {
+                    self.coordinator.snapshot = snapshot;
+                    self.diagnostics
+                        .record_snapshot(self.coordinator.snapshot.clone());
+                    self.reconcile()
+                }
             }
             Message::Key {
                 key,
@@ -2656,9 +2756,6 @@ impl App {
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
             Message::SaveDocumentTo(None) => Task::none(),
             Message::Sign(msg) => self.handle_sign(msg),
-            Message::DocumentSignaturesDiscovered(found) => {
-                self.handle_signatures_discovered(found)
-            }
             Message::AcceptAppendOnly => {
                 self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
                 self.pending_append_only_offer = false;
@@ -4195,19 +4292,20 @@ impl App {
     ///
     /// Shared by the tick and by the doorbell so a frame reaches the windows
     /// by whichever arrives first, with identical effects either way.
-    fn pump_renderer(&mut self) {
+    fn pump_renderer(&mut self) -> bool {
         // Timed around the drain rather than around `pump` alone: copying a
         // large frame out of the shared region happens inside `pump`, and
         // turning it into a texture handle happens in the loop below. Both
         // are on the event loop, and a turn pays for both.
         let start = Instant::now();
-        let events = self
+        let batch = self
             .supervisor
             .as_mut()
-            .map(|s| s.pump())
+            .map(|s| s.pump_bounded(RENDER_DRAIN_BUDGET))
             .unwrap_or_default();
+        let events = batch.events;
         if events.is_empty() {
-            return;
+            return batch.more;
         }
         for event in events {
             self.on_render_event(event);
@@ -4217,6 +4315,7 @@ impl App {
         // One overlay-index rebuild for the whole batch of Overlays events
         // drained above, however many pages announced themselves.
         self.flush_overlay_rebuild();
+        batch.more
     }
 
     fn on_tick(&mut self, now: Instant) -> Task<Message> {
@@ -4245,7 +4344,9 @@ impl App {
         // 1b. Collect what the document worker has said and ask for whatever
         //     the reader now needs drawn. On the tick rather than in a view
         //     pass: a page render must not happen inside a draw.
-        self.pump_reader();
+        if self.pump_reader() {
+            tasks.push(Task::done(Message::ReaderReady));
+        }
         self.pump_search();
 
         // Search replaces the outline in the view pass after Ctrl-F. By this
@@ -4351,14 +4452,18 @@ impl App {
         //    deadline and restart checks inside `pump` are the supervisor's
         //    clock, and a silent worker is exactly the case no doorbell
         //    reports.
-        self.pump_renderer();
+        if self.pump_renderer() {
+            tasks.push(Task::done(Message::RenderReady));
+        }
 
         // 2b. Media events. Frames arrive already validated and copied, so
         //     the only thing that reaches presentation state is a complete
         //     replacement for a frame already on screen. The newest pointer
         //     position goes out first: one coalesced move per tick.
         self.flush_pointer_move();
-        self.poll_media();
+        if self.poll_media() {
+            tasks.push(Task::done(Message::MediaReady));
+        }
 
         // The audience window's current frame, so a page change has something
         // to hold while the next one renders.
@@ -4394,17 +4499,6 @@ impl App {
         self.save_session(now);
         if self.settings_dirty && self.settings_throttle.due(now) {
             self.flush_settings();
-        }
-
-        // 5. Topology. Polling is the baseline; a native listener only makes
-        //    it prompter, never authoritative.
-        if now.duration_since(self.last_poll) >= POLL_TOPOLOGY {
-            self.last_poll = now;
-            if self.coordinator.refresh() {
-                self.diagnostics
-                    .record_snapshot(self.coordinator.snapshot.clone());
-                tasks.push(self.reconcile());
-            }
         }
 
         Task::batch(tasks)
@@ -4463,10 +4557,17 @@ impl App {
             let Some(native) = self.coordinator.native(retry.role) else {
                 continue;
             };
-            let outcome = self
-                .coordinator
-                .backend
-                .place(native, &retry.identity, retry.mode);
+            let outcome = if retry.verifying {
+                self.coordinator.backend.verify_placement(
+                    native,
+                    &retry.identity,
+                    retry.attempt as usize >= PLACEMENT_VERIFY_DELAYS.len(),
+                )
+            } else {
+                self.coordinator
+                    .backend
+                    .place(native, &retry.identity, retry.mode)
+            };
             self.diagnostics.note(format!(
                 "placement retry {} for the {} window: {outcome:?}",
                 retry.attempt,
@@ -4488,7 +4589,17 @@ impl App {
                     // Normal topology race: converge through reconciliation.
                     self.needs_reconcile = true;
                 }
-                _ if retry.attempt < MAX_PLACEMENT_RETRIES => {
+                pulpit_display::PlacementOutcome::Pending
+                    if (retry.attempt as usize) < PLACEMENT_VERIFY_DELAYS.len() =>
+                {
+                    self.placement_retries.push(PlacementRetry {
+                        attempt: retry.attempt + 1,
+                        due: now + PLACEMENT_VERIFY_DELAYS[retry.attempt as usize],
+                        verifying: true,
+                        ..retry
+                    });
+                }
+                _ if !retry.verifying && retry.attempt < MAX_PLACEMENT_RETRIES => {
                     self.placement_retries.push(PlacementRetry {
                         attempt: retry.attempt + 1,
                         due: now + PLACEMENT_RETRY_DELAY * retry.attempt,
@@ -4968,19 +5079,10 @@ impl App {
         documents.continue_ids_after(&self.documents);
         self.retired_document = self.documents.active().map(|info| info.id);
         self.documents = documents;
-        self.watcher = match DocumentWatcher::new(&path) {
-            Ok(watcher) => Some(watcher),
-            Err(e) => {
-                self.notify(format!("automatic reload is off: {e}"));
-                None
-            }
-        };
+        self.watcher = None;
+        self.file_wakeup = None;
         self.document_serial += 1;
-        // Who this document is, for the purpose of remembered preferences.
-        // Taken from the bytes on disk before anything has had a chance to
-        // touch them, and taken here rather than in `open_for_reading` so it
-        // exists even when document mode is switched off or fails to start.
-        self.document_hash = crate::session::content_hash(&path);
+        self.document_hash = None;
         // A fresh document starts with no signing question answered yet;
         // discovery below decides whether one needs asking (§31.3, A9).
         self.append_only = None;
@@ -4994,118 +5096,113 @@ impl App {
         // marks arrive from its engine once it has described itself.
         self.annotations.clear();
         self.warned_marks_are_not_kept = false;
-        // Diagnostic kill switch while chasing a page-turn regression: skip
-        // the document session entirely to measure its cost.
-        if std::env::var_os("PULPIT_NO_READER").is_none() {
-            self.open_for_reading(&path);
-        }
-        let actions = self.documents.open_initial(self.now);
-        let mut task = self.run_document_actions(actions);
-        task = Task::batch([task, self.discover_signatures_task(&path)]);
-        task
-    }
-
-    /// §31.3: a cheap structural pass over the just-opened bytes, so the
-    /// append-only offer can be made before anything mutates the document.
-    /// Not the same check as §28 verification — it only asks "does at least
-    /// one `/Sig` field exist with a non-null `/V`", which is exactly what
-    /// deciding append-only-or-not needs.
-    fn discover_signatures_task(&self, path: &std::path::Path) -> Task<Message> {
-        let path = path.to_path_buf();
-        Task::perform(
-            async move {
-                // Synchronous: this reads the document that was just opened,
-                // so its bytes are already resident in the page cache, and
-                // the alternative (a `tokio::fs` dependency for one read) is
-                // not worth the extra dependency for v1.
-                let bytes = match std::fs::read(&path) {
-                    Ok(bytes) => bytes,
-                    Err(_) => return Vec::new(),
-                };
-                pulpit_render::verify::verify_signatures(&bytes).unwrap_or_default()
-            },
-            Message::DocumentSignaturesDiscovered,
-        )
-    }
-
-    /// What discovery found: offer append-only mode when a signature exists,
-    /// and leave the question unset — not "no" — for a document with none,
-    /// so nothing here ever implies a signed document is unsigned.
-    fn handle_signatures_discovered(
-        &mut self,
-        found: Vec<pulpit_render::verify::SignatureVerification>,
-    ) -> Task<Message> {
-        if !found.is_empty() {
-            self.pending_append_only_offer = true;
-        }
-        self.document_signatures = found;
-        Task::none()
-    }
-
-    /// Open the same file for the reader: a document worker of its own,
-    /// holding one open PDF it can annotate (§5.1, §6).
-    ///
-    /// Separate from the render workers on purpose. Those hold the document
-    /// read-only for the projector and are interchangeable; this one is the
-    /// single execution context that owns the mutations, and a frame it draws
-    /// contains the commit that was just made (A7).
-    ///
-    /// A failure here is not a failure to open the deck: presentation mode
-    /// works whether or not document mode does, so the reader stays closed and
-    /// says why rather than taking the presentation down with it.
-    fn open_for_reading(&mut self, path: &std::path::Path) {
         self.reader.closed();
         self.reset_reader_rendering();
         self.reader_link = None;
+        self.reader_wakeup = None;
         self.reader_journal = None;
-        // Everything the last document left half-done. A reload used to leave
-        // the pointer-move guard latched — the form then stopped following the
-        // pointer for the rest of the session — and a mutation record standing,
-        // which the *new* document's first answer popped and was read as.
         self.forget_per_document_edit_state();
 
-        // Anything the last run left unsaved for *this* file, before a new
-        // journal replaces it. The offer is inert: nothing is applied without
-        // an explicit answer (§11.4).
-        let journal_path = Self::journal_path();
-        let fingerprint = crate::session::fingerprint(path);
-        self.pending_reader_recovery = crate::reader_journal::Journal::recover(&journal_path)
-            .filter(|recovered| {
-                fingerprint
-                    .as_ref()
-                    .is_some_and(|current| recovered.applies_to(path, current))
-            });
+        let preparation = self.prepare_document_task(path.clone(), self.document_serial);
+        let actions = self.documents.open_initial(self.now);
+        Task::batch([self.run_document_actions(actions), preparation])
+    }
 
-        match crate::reader_link::ReaderLink::open(path) {
-            Ok(mut link) => {
-                // Ask for the shape of it straight away: the reader can lay
-                // out nothing until it knows how many pages there are and how
-                // big they are.
-                link.ask(crate::reader_link::Ask::Describe { pages: 0 });
-                self.reader_link = Some(link);
+    fn prepare_document_task(&mut self, path: PathBuf, serial: u64) -> Task<Message> {
+        let results = self.prepare_document.clone();
+        let journal_path = Self::journal_path();
+        let reader_enabled = std::env::var_os("PULPIT_NO_READER").is_none();
+        let (done, finished) = iced::futures::channel::oneshot::channel();
+        let spawn = std::thread::Builder::new()
+            .name("document-open".into())
+            .spawn(move || {
+                let fingerprint = crate::session::fingerprint(&path);
+                let recovery =
+                    crate::reader_journal::Journal::recover(&journal_path).filter(|recovered| {
+                        fingerprint
+                            .as_ref()
+                            .is_some_and(|current| recovered.applies_to(&path, current))
+                    });
+                let signatures = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| pulpit_render::verify::verify_signatures(&bytes).ok())
+                    .unwrap_or_default();
+                let reader = reader_enabled.then(|| {
+                    crate::reader_link::ReaderLink::open(&path).map_err(|e| e.to_string())
+                });
+                let prepared = PreparedDocument {
+                    serial,
+                    content_hash: crate::session::content_hash(&path),
+                    watcher: DocumentWatcher::new(&path).map_err(|error| error.to_string()),
+                    reader,
+                    fingerprint,
+                    recovery,
+                    signatures,
+                };
+                let _ = results.send(prepared);
+                let _ = done.send(());
+            });
+        if let Err(error) = spawn {
+            self.notify(format!("document preparation could not start: {error}"));
+            return Task::none();
+        }
+        Task::perform(
+            async move {
+                let _ = finished.await;
+            },
+            |_| Message::DocumentPrepared,
+        )
+    }
+
+    fn finish_document_prepare(&mut self) -> Task<Message> {
+        let Some(mut prepared) = self
+            .prepared_documents
+            .try_iter()
+            .find(|prepared| prepared.serial == self.document_serial)
+        else {
+            return Task::none();
+        };
+        self.document_hash = prepared.content_hash.take();
+        self.pending_reader_recovery = prepared.recovery.take();
+        self.document_signatures = prepared.signatures;
+        self.pending_append_only_offer = !self.document_signatures.is_empty();
+        match prepared.watcher {
+            Ok(mut watcher) => {
+                self.file_wakeup = watcher.take_wakeup();
+                self.watcher = Some(watcher);
             }
+            Err(error) => self.notify(format!("automatic reload is off: {error}")),
+        }
+
+        let Some(reader) = prepared.reader else {
+            return Task::none();
+        };
+        let mut link = match reader {
+            Ok(link) => link,
             Err(error) => {
                 tracing::warn!(%error, "document mode is unavailable for this file");
-                return;
+                return Task::none();
             }
-        }
+        };
+        link.ask(crate::reader_link::Ask::Describe { pages: 0 });
+        self.reader_wakeup = link.take_wakeup();
+        self.reader_link = Some(link);
 
-        // A journal for this run. Started only once the document opened: a
-        // file that cannot be read has nothing to journal about.
-        match fingerprint {
-            Some(fingerprint) => {
-                match crate::reader_journal::Journal::start(&journal_path, path, fingerprint) {
-                    Ok(journal) => self.reader_journal = Some(journal),
-                    Err(error) => {
-                        // Editing still works; what is lost is the promise
-                        // that an edit survives a crash, and saying so is
-                        // better than discovering it after one.
-                        self.notify(format!("Unsaved edits will not survive a crash: {error}"));
-                    }
+        let journal_path = Self::journal_path();
+        match prepared.fingerprint {
+            Some(fingerprint) => match crate::reader_journal::Journal::start(
+                &journal_path,
+                self.documents.path(),
+                fingerprint,
+            ) {
+                Ok(journal) => self.reader_journal = Some(journal),
+                Err(error) => {
+                    self.notify(format!("Unsaved edits will not survive a crash: {error}"))
                 }
-            }
+            },
             None => tracing::warn!("no fingerprint for the document; edits are not journalled"),
         }
+        Task::none()
     }
 
     /// Where the document journal lives: beside the session snapshot, because
@@ -5151,6 +5248,7 @@ impl App {
         self.reader.closed();
         self.reset_reader_rendering();
         self.reader_link = None;
+        self.reader_wakeup = None;
         self.forget_per_document_edit_state();
     }
 
@@ -5180,17 +5278,19 @@ impl App {
     ///
     /// Called from the tick rather than from a view pass: a render and, later,
     /// a keystroke round trip must not happen inside a draw.
-    fn pump_reader(&mut self) {
+    fn pump_reader(&mut self) -> bool {
+        let started = Instant::now();
         // Collected first, then handled: the answers are drained from the link
         // and the link is put down, so handling one can notify, close the
         // reader, or ask for the next thing without the borrow in the way.
-        let Some(told) = self
+        let Some((told, more)) = self
             .reader_link
             .as_mut()
-            .map(crate::reader_link::ReaderLink::collect)
+            .map(|link| link.collect_bounded(READER_DRAIN_BUDGET))
         else {
-            return;
+            return false;
         };
+        let answer_count = told.len();
         for told in told {
             match told {
                 crate::reader_link::Told::Described {
@@ -5492,7 +5592,7 @@ impl App {
                     self.reader.commit_refused();
                     if fatal {
                         self.reader_link_died();
-                        return;
+                        return false;
                     }
                 }
                 crate::reader_link::Told::Failed { message, fatal } => {
@@ -5531,7 +5631,7 @@ impl App {
                     self.reader_render.snapshot_in_flight = None;
                     if fatal {
                         self.reader_link_died();
-                        return;
+                        return false;
                     }
                 }
             }
@@ -5572,6 +5672,11 @@ impl App {
 
         // …and ask the pool for whatever the window now needs drawn.
         self.request_reader_renders();
+        if answer_count > 0 {
+            self.latency
+                .record_stage(|stages| &mut stages.drain_reader, started.elapsed());
+        }
+        more
     }
 
     /// Ask the document worker for a snapshot when one is due.
@@ -9456,7 +9561,13 @@ impl App {
                             identity: identity.clone(),
                             mode: *mode,
                             attempt: 1,
-                            due: self.now + PLACEMENT_RETRY_DELAY,
+                            due: self.now
+                                + if matches!(outcome, pulpit_display::PlacementOutcome::Pending) {
+                                    PLACEMENT_VERIFY_DELAYS[0]
+                                } else {
+                                    PLACEMENT_RETRY_DELAY
+                                },
+                            verifying: matches!(outcome, pulpit_display::PlacementOutcome::Pending),
                         });
                     } else if !placed {
                         // Backends that cannot place (Wayland, tiling) still
@@ -9526,6 +9637,7 @@ impl App {
                                 mode,
                                 attempt: 1,
                                 due: self.now + PLACEMENT_RETRY_DELAY,
+                                verifying: false,
                             });
                         }
                     }
@@ -11709,11 +11821,14 @@ impl App {
     }
 
     /// Drain the media supervisor, holding every complete frame.
-    fn poll_media(&mut self) {
+    fn poll_media(&mut self) -> bool {
+        let started = Instant::now();
         let Some(media) = self.media_supervisor.as_mut() else {
-            return;
+            return false;
         };
-        let events = media.poll(crate::media::worker_command);
+        let batch = media.poll_bounded(crate::media::worker_command, MEDIA_DRAIN_BUDGET);
+        let events = batch.events;
+        let event_count = events.len();
         for event in events {
             match event {
                 pulpit_media::SessionEvent::Ready {
@@ -11782,6 +11897,11 @@ impl App {
                 pulpit_media::SessionEvent::Closed { .. } => {}
             }
         }
+        if event_count > 0 {
+            self.latency
+                .record_stage(|stages| &mut stages.drain_media, started.elapsed());
+        }
+        batch.more
     }
 }
 
@@ -12470,6 +12590,184 @@ fn render_wakeups(
             // The tick still drains the supervisor, so this costs latency
             // rather than frames.
             tracing::warn!(%error, "no renderer wakeup listener; falling back to the tick");
+        }
+        receiver
+    })
+}
+
+/// Stable subscription identity for the current document session.
+///
+/// Every newly opened document replaces this handle, so the source path is
+/// part of the identity indirectly through the `Arc` address. The old
+/// listener observes a closed doorbell and exits.
+#[derive(Clone)]
+struct ReaderListener(std::sync::Arc<crate::reader_link::ReaderWakeup>);
+
+impl std::hash::Hash for ReaderListener {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::sync::Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+fn reader_wakeups(
+    wakeup: std::sync::Arc<crate::reader_link::ReaderWakeup>,
+) -> Subscription<Message> {
+    use crate::reader_link::Wakeup;
+
+    Subscription::run_with(ReaderListener(wakeup), |listener| {
+        let wakeup = listener.0.clone();
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("reader-wakeup".into())
+            .spawn(move || loop {
+                match wakeup.wait(WAKEUP_POLL) {
+                    Wakeup::Ring => {
+                        if sender
+                            .try_send(Message::ReaderReady)
+                            .is_err_and(|error| error.is_disconnected())
+                        {
+                            return;
+                        }
+                    }
+                    Wakeup::Idle => {}
+                    Wakeup::Closed => return,
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no document wakeup listener; falling back to the tick");
+        }
+        receiver
+    })
+}
+
+#[derive(Clone)]
+struct MediaListener(std::sync::Arc<pulpit_media::supervisor::MediaWakeup>);
+
+impl std::hash::Hash for MediaListener {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "pulpit::media-wakeup".hash(state);
+    }
+}
+
+fn media_wakeups(
+    wakeup: std::sync::Arc<pulpit_media::supervisor::MediaWakeup>,
+) -> Subscription<Message> {
+    use pulpit_media::supervisor::Wakeup;
+
+    Subscription::run_with(MediaListener(wakeup), |listener| {
+        let wakeup = listener.0.clone();
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("media-wakeup".into())
+            .spawn(move || loop {
+                match wakeup.wait(WAKEUP_POLL) {
+                    Wakeup::Ring => {
+                        if sender
+                            .try_send(Message::MediaReady)
+                            .is_err_and(|error| error.is_disconnected())
+                        {
+                            return;
+                        }
+                    }
+                    Wakeup::Idle => {}
+                    Wakeup::Closed => return,
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no media wakeup listener; falling back to the tick");
+        }
+        receiver
+    })
+}
+
+#[derive(Clone)]
+struct FileListener(std::sync::Arc<crate::doc::watcher::FileWakeup>);
+
+impl std::hash::Hash for FileListener {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::sync::Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+fn file_wakeups(wakeup: std::sync::Arc<crate::doc::watcher::FileWakeup>) -> Subscription<Message> {
+    use crate::doc::watcher::Wakeup;
+
+    Subscription::run_with(FileListener(wakeup), |listener| {
+        let wakeup = listener.0.clone();
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("file-wakeup".into())
+            .spawn(move || loop {
+                match wakeup.wait(WAKEUP_POLL) {
+                    Wakeup::Ring => {
+                        if sender
+                            .try_send(Message::FileChanged)
+                            .is_err_and(|error| error.is_disconnected())
+                        {
+                            return;
+                        }
+                    }
+                    Wakeup::Idle => {}
+                    Wakeup::Closed => return,
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no file wakeup listener; falling back to the tick");
+        }
+        receiver
+    })
+}
+
+#[derive(Clone)]
+struct TopologyListener {
+    backend: std::sync::Arc<dyn pulpit_display::DisplayBackend>,
+    fallback: Duration,
+}
+
+impl std::hash::Hash for TopologyListener {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "pulpit::topology-listener".hash(state);
+        self.fallback.hash(state);
+    }
+}
+
+fn topology_snapshots(
+    backend: std::sync::Arc<dyn pulpit_display::DisplayBackend>,
+    fallback: Duration,
+) -> Subscription<Message> {
+    Subscription::run_with(TopologyListener { backend, fallback }, |listener| {
+        let backend = listener.backend.clone();
+        let fallback = listener.fallback;
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("topology-listener".into())
+            .spawn(move || {
+                let mut initial = true;
+                loop {
+                    if !initial {
+                        match backend.wait_for_topology_change() {
+                            Ok(true) => {
+                                // RANDR and compositor events are hints,
+                                // and a burst can precede final geometry.
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                            Ok(false) | Err(_) => std::thread::sleep(fallback),
+                        }
+                    }
+                    initial = false;
+                    let Ok(snapshot) = backend.snapshot() else {
+                        continue;
+                    };
+                    if sender
+                        .try_send(Message::TopologySnapshot(snapshot))
+                        .is_err_and(|error| error.is_disconnected())
+                    {
+                        return;
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no topology listener; using resume-time refresh only");
         }
         receiver
     })

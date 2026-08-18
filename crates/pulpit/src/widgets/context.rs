@@ -415,7 +415,7 @@ pub struct ReaderData<'a> {
     pub outline_reveal: f32,
     /// The resolved scale, so the zoom control can say "83%" for a fit.
     pub scale: f32,
-    pub outline: &'a [OutlineRow],
+    pub outline: std::sync::Arc<Vec<OutlineRow>>,
     /// The outline row owned by the keyboard, when the sidebar rather than
     /// the document owns navigation.
     pub outline_focus: Option<&'a crate::widgets::document::model::OutlineItemId>,
@@ -428,7 +428,7 @@ pub struct ReaderData<'a> {
     pub has_form: bool,
     /// The document's fields, in the order the file lists them, as the engine
     /// last reported them. Empty for everything that is not a form.
-    pub fields: &'a [pulpit_render::document::FormField],
+    pub fields: std::sync::Arc<Vec<pulpit_render::document::FormField>>,
     /// The calendar open over a date field, if one is (§8.6).
     pub date_picker: Option<&'a crate::reader::DatePicker>,
     /// The hour and minute steppers open over a time field, if any are (§8.6).

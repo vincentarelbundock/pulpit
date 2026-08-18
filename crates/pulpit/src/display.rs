@@ -226,6 +226,7 @@ pub fn iced_mode(mode: WindowMode) -> window::Mode {
 pub fn describe_placement(outcome: &PlacementOutcome) -> Option<String> {
     match outcome {
         PlacementOutcome::Applied => None,
+        PlacementOutcome::Pending => None,
         PlacementOutcome::Refused => {
             Some("the compositor refused to place that window; move it yourself".into())
         }

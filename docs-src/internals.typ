@@ -100,22 +100,23 @@ an error path.
 
 == Message flow
 
-Everything — key presses, timer ticks, file-watch hints, topology hints,
-renderer replies — becomes an application message handled by one `update`
+Everything — key presses, deadline ticks, file-watch hints, topology hints,
+renderer, document and media replies — becomes an application message handled by one `update`
 function. Subscriptions are stable across view rebuilds, so no watcher or
 timer is ever duplicated.
 
-The renderer is pumped from the tick handler and from a doorbell, both of
-which run the same drain, so IPC results stay inside the same
+Each worker-facing supervisor is pumped from a one-slot doorbell and from the
+slow watchdog tick, both of which run the same bounded drain, so IPC results stay inside the same
 single-threaded state transition as user input. The doorbell is a one-deep
 channel a worker's reader thread rings after its message is on the queue: it
 carries no payload, a burst of finished frames collapses into one pass of the
 event loop, and a missed ring costs nothing because the next drain takes
 everything waiting. It exists because a finished frame used to become visible
-only when the tick next got round to looking, so every rendering step of a
-page turn paid up to a tick for the poll alone. The tick is unchanged and
-still drains on its own schedule: a silent worker — the deadline and restart
-cases — is exactly what no doorbell reports.
+only when the tick next got round to looking, so every rendering, document or
+media step paid up to a tick for the poll alone. Reaching a drain budget posts
+a continuation message, yielding to drawing without leaving queued work for
+the watchdog. The tick remains for deadlines, restart checks, clocks, and
+resume detection: a silent worker is exactly what no doorbell reports.
 
 == Cache accounting
 
@@ -319,6 +320,15 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   (`Bytes::from_owner`) instead of deep-copying it; the annotation model is
   snapshotted behind an `Arc` with a revision counter and drawn through
   `canvas::Cache`, so unchanged strokes are neither cloned nor re-tessellated.
+  Search hits, bookmarks and form-field lists use immutable `Arc` snapshots
+  for the same reason: responsive view closures clone a pointer, not every
+  row in a large document.
++ *Polling is a watchdog, not a delivery path.* Renderer, document, media and
+  file-watch queues ring one-slot doorbells after enqueueing. X11 and Wayland
+  topology listeners block on native change notifications and re-enumerate on
+  a helper thread; backends without a listener use a one-second helper-thread
+  fallback. Work merely being in flight does not keep the 50 ms animation
+  tick alive or rebuild both window trees.
 + *A picture is compared by identity, never by its pixels.* Iced's image
   handle derives equality, and its pixel buffer compares by content, so a
   single `==` between two audience frames memcmps thirty megabytes. Anything
@@ -340,13 +350,13 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
 + *Measure before restructuring.* Three recorded negative results: replacing the
   CDP pipe's 1 ms retry sleep with `poll(2)` cost 2-3x the worker CPU for one
   to two milliseconds of latency (the sleep stays, with a comment saying why);
-  and the 50 ms application tick MUST NOT be replaced until a wrapped GUI
-  build has actually been profiled. Static-analysis findings are hypotheses
-  until measurement attaches numbers to them, and debug builds never set
-  targets. The renderer doorbell is not that replacement and MUST NOT be read
-  as licence for it: the tick still runs, still drains, and still owns the
-  deadline and restart checks — the doorbell only removes the poll's latency
-  from the path a page turn takes. The third: a form commit was going to keep
+  and the 50 ms animation tick MUST NOT be removed until a wrapped GUI build
+  has actually been profiled. Static-analysis findings are hypotheses until
+  measurement attaches numbers to them, and debug builds never set targets.
+  Doorbells do not remove that tick: it still owns animations and timed UI
+  transitions, while the 250 ms watchdog owns deadline and restart checks.
+  They remove queued delivery and mere in-flight work from the reasons to run
+  it. The third: a form commit was going to keep
   its render generation and invalidate only the committed page, so that the
   snapshot's reopen stopped cooling every visible page at once. Measured
   first (`cargo test --release -p pulpit-render --test document_budgets`, and
@@ -844,11 +854,12 @@ down is not waiting for any of the pages in between.
 
 A *stage* is a named piece of synchronous work, reported with its worst case
 as well as its mean. Stages count only what happens on the event loop, where
-a millisecond is a millisecond the interface is not drawing — planning
-renders, following the committed page with media, and taking delivery of
-frames, which includes copying a large one out of shared memory on this
-thread. Work inside a worker process is not a stage; it is already visible as
-render latency.
+a millisecond is a millisecond the interface is not drawing — the whole
+`update`, rebuilding each top-level view, planning renders, following the
+committed page with media, and bounded delivery drains for renderer, document,
+and media messages. Frame drains include copying a large frame out of shared
+memory on this thread. Work inside a worker process is not a stage; it is
+already visible as render latency.
 
 Uploading a picture to the GPU is on the event loop too, but outside
 `update`: it happens while a window lays itself out. It is therefore reported
@@ -1002,17 +1013,22 @@ XRandR provides `RRScreenChangeNotify` / `RRCrtcChangeNotify` /
 `wait_for_change()`. They are treated strictly as *hints*: every
 reconciliation re-enumerates, and the snapshot carries a monotonic sequence
 number so a delayed notification from an older topology is dropped. The
-baseline remains a 1 Hz poll, which is what runs when no native listener
-exists.
+application blocks on that listener off the event-loop thread, then
+re-enumerates and sends the immutable snapshot as an application message. A
+1 Hz fallback runs on the same helper thread only when a backend has no native
+listener; enumeration never blocks `update`.
 
 == Targeted fullscreen
 
 On X11 with an EWMH window manager the sequence that works is: leave
 fullscreen, `ConfigureWindow` to the target monitor's origin, then
-`_NET_WM_STATE_FULLSCREEN`. Every placement request returns an explicit
-outcome — `Applied`, `Refused`, `Disappeared`, `Unsupported`, `Failed` — and
-the UI surfaces the ones the user must act on. *Refusal is detected by the
-absence of `Applied`, never assumed to be success.*
+`_NET_WM_STATE_FULLSCREEN`. The request returns `Pending`; three later
+event-loop turns re-resolve the native handle and observe where the window
+landed after 20, 50 and 100 ms. This replaces a synchronous 170 ms sleep and
+keeps the rule that no native handle survives a turn. Every placement returns
+an explicit outcome — `Applied`, `Pending`, `Refused`, `Disappeared`,
+`Unsupported`, `Failed` — and the UI surfaces the ones the user must act on.
+*Refusal is detected by observation, never assumed to be success.*
 
 On Wayland `xdg_toplevel.set_fullscreen(output)` is the only mechanism, and it
 must be issued on the toolkit's own toplevel object. winit can do it —

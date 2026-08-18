@@ -616,6 +616,9 @@ pub struct RendererSupervisor {
     workers: Vec<Worker>,
     queue: VecDeque<RenderJob>,
     events: Receiver<WorkerMessage>,
+    /// One message pulled only to determine whether a bounded drain has more
+    /// work. It remains ordered ahead of the channel on the next pass.
+    deferred: VecDeque<WorkerMessage>,
     sender: Sender<WorkerMessage>,
     /// Handed to every reader thread, including those of workers spawned or
     /// restarted later, so the doorbell survives a crash.
@@ -651,6 +654,7 @@ impl RendererSupervisor {
             workers: Vec::new(),
             queue: VecDeque::new(),
             events,
+            deferred: VecDeque::new(),
             sender,
             wakeup: WakeupSink(signal),
             wakeup_inbox: Some(Arc::new(RenderWakeup {
@@ -970,18 +974,46 @@ impl RendererSupervisor {
     /// Drain worker events, enforce deadlines and dispatch queued work.
     /// Called from the application's update loop.
     pub fn pump(&mut self) -> Vec<RenderEvent> {
-        let mut events = Vec::new();
+        let mut all = Vec::new();
         loop {
-            match self.events.try_recv() {
+            let batch = self.pump_bounded(usize::MAX);
+            all.extend(batch.events);
+            if !batch.more {
+                return all;
+            }
+        }
+    }
+
+    /// Drain at most `limit` worker messages, preserving FIFO order and
+    /// reporting whether the event loop should schedule a continuation.
+    pub fn pump_bounded(&mut self, limit: usize) -> PumpBatch {
+        let mut events = Vec::new();
+        let mut handled = 0;
+        while handled < limit {
+            let message = self
+                .deferred
+                .pop_front()
+                .map(Ok)
+                .unwrap_or_else(|| self.events.try_recv());
+            match message {
                 Ok(message) => self.handle(message, &mut events),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
+            }
+            handled += 1;
+        }
+        if handled == limit {
+            if let Ok(message) = self.events.try_recv() {
+                self.deferred.push_back(message);
             }
         }
         self.enforce_deadlines(&mut events);
         self.reap(&mut events);
         self.dispatch();
-        events
+        PumpBatch {
+            events,
+            more: !self.deferred.is_empty(),
+        }
     }
 
     /// Block for up to `timeout` waiting for at least one event. Convenient
@@ -1457,6 +1489,13 @@ impl RendererSupervisor {
             }
         }
     }
+}
+
+/// One bounded event-loop drain.
+#[derive(Default)]
+pub struct PumpBatch {
+    pub events: Vec<RenderEvent>,
+    pub more: bool,
 }
 
 impl Drop for RendererSupervisor {

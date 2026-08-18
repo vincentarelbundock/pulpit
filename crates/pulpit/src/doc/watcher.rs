@@ -5,7 +5,8 @@
 //! [`crate::doc::manager::DocumentManager`], which is pure and testable.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -23,6 +24,32 @@ pub struct DocumentWatcher {
     path: PathBuf,
     _watcher: notify::RecommendedWatcher,
     events: Receiver<()>,
+    wakeup: Option<Arc<FileWakeup>>,
+}
+
+/// One-slot event-loop doorbell for filesystem hints.
+pub struct FileWakeup {
+    inbox: Mutex<Receiver<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wakeup {
+    Ring,
+    Idle,
+    Closed,
+}
+
+impl FileWakeup {
+    pub fn wait(&self, timeout: Duration) -> Wakeup {
+        let Ok(inbox) = self.inbox.try_lock() else {
+            return Wakeup::Closed;
+        };
+        match inbox.recv_timeout(timeout) {
+            Ok(()) => Wakeup::Ring,
+            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
+            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
+        }
+    }
 }
 
 impl std::fmt::Debug for DocumentWatcher {
@@ -65,6 +92,7 @@ impl DocumentWatcher {
         let directory = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let watched = path.file_name().map(|name| name.to_os_string());
         let (sender, events) = channel();
+        let (signal, wakeup) = sync_channel(1);
 
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             let Ok(event) = event else { return };
@@ -80,6 +108,7 @@ impl DocumentWatcher {
                 .any(|changed| is_the_watched_file(changed, watched.as_deref()))
             {
                 let _ = sender.send(());
+                let _ = signal.try_send(());
             }
         })
         .map_err(|e| WatchError::Watch {
@@ -98,11 +127,18 @@ impl DocumentWatcher {
             path,
             _watcher: watcher,
             events,
+            wakeup: Some(Arc::new(FileWakeup {
+                inbox: Mutex::new(wakeup),
+            })),
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn take_wakeup(&mut self) -> Option<Arc<FileWakeup>> {
+        self.wakeup.take()
     }
 
     /// Block for up to `timeout` for a hint. Returns true if the file was

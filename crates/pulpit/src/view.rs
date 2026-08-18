@@ -30,12 +30,15 @@ use crate::theme::{space as gap, target, type_scale};
 use crate::toast::Intent;
 
 pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
+    let started = std::time::Instant::now();
     // One palette for the whole pass. The audience window is deliberately
     // exempt from theming: its colours are output, not chrome.
     theme::ambient::set(app.theme.palette);
 
     if Some(window) == app.audience_window {
-        return audience(app);
+        let view = audience(app);
+        app.view_meter.record(started.elapsed());
+        return view;
     }
 
     let mut page = match app.page {
@@ -136,7 +139,10 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     // projector has, and for the same reason. A slide panel's picture is well
     // over the two mebibytes at which Iced stops uploading inline, so without
     // this a panel draws nothing on the pass a new frame first reaches it.
-    crate::residency::resident(page, app.presenter_resident_handles(), app.upload_meter())
+    let view =
+        crate::residency::resident(page, app.presenter_resident_handles(), app.upload_meter());
+    app.view_meter.record(started.elapsed());
+    view
 }
 
 // --------------------------------------------------------------- audience

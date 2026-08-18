@@ -292,30 +292,6 @@ impl X11Backend {
         ))
     }
 
-    /// Wait for the window manager to have its say, then report where the
-    /// window ended up.
-    ///
-    /// A manager that honours the request usually settles on the first look,
-    /// so the common case pays the shortest delay. One that overrides it costs
-    /// the whole budget exactly once per session: the verdict is latched and
-    /// no later placement pays it again.
-    fn settle(&self, window: Window, target: &Rect) -> Option<bool> {
-        const STEPS_MS: [u64; 3] = [20, 50, 100];
-        let mut seen = None;
-        for step in STEPS_MS {
-            std::thread::sleep(std::time::Duration::from_millis(step));
-            let Some(observed) = self.observed_geometry(window) else {
-                continue;
-            };
-            if landed_on(&observed, target) {
-                return Some(true);
-            }
-            seen = Some(observed);
-        }
-        // Never viewable throughout: no evidence either way.
-        seen.map(|_| false)
-    }
-
     fn record_trust(&self, honoured: bool) {
         let mut trust = self.trust.lock().unwrap();
         let verdict = if honoured {
@@ -347,6 +323,10 @@ impl X11Backend {
 impl DisplayBackend for X11Backend {
     fn name(&self) -> &'static str {
         "x11-randr"
+    }
+
+    fn wait_for_topology_change(&self) -> Result<bool, BackendError> {
+        X11Backend::wait_for_change(self).map(|()| true)
     }
 
     fn snapshot(&self) -> Result<DisplaySnapshot, BackendError> {
@@ -454,21 +434,48 @@ impl DisplayBackend for X11Backend {
             return PlacementOutcome::Applied;
         }
 
-        // The request went out. Whether it *held* is a question only the
-        // window manager can answer, and it answers by what it does.
-        match self.settle(window, &geometry) {
-            Some(true) => {
-                self.record_trust(true);
-                PlacementOutcome::Applied
-            }
-            Some(false) => {
-                self.record_trust(false);
+        // Verification is deliberately deferred. Sleeping here held the UI
+        // thread for 20–170 ms and retained a native handle throughout; the
+        // caller re-resolves that handle on later event-loop turns instead.
+        PlacementOutcome::Pending
+    }
+
+    fn verify_placement(
+        &self,
+        window: NativeWindow,
+        identity: &MonitorIdentity,
+        final_attempt: bool,
+    ) -> PlacementOutcome {
+        let snapshot = match self.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => return PlacementOutcome::Failed(error.to_string()),
+        };
+        let Some(target) = snapshot
+            .monitors
+            .iter()
+            .find(|monitor| {
+                &monitor.identity == identity
+                    || monitor.fallback_identity.as_ref() == Some(identity)
+            })
+            .map(|monitor| monitor.geometry)
+        else {
+            return PlacementOutcome::Disappeared;
+        };
+        let Some(observed) = self.observed_geometry(window.0 as Window) else {
+            return if final_attempt {
                 PlacementOutcome::Refused
-            }
-            // The window never became viewable. That says nothing about the
-            // window manager, so no verdict is latched; the caller's bounded
-            // post-map retry asks again once the window is up.
-            None => PlacementOutcome::Refused,
+            } else {
+                PlacementOutcome::Pending
+            };
+        };
+        if landed_on(&observed, &target) {
+            self.record_trust(true);
+            PlacementOutcome::Applied
+        } else if final_attempt {
+            self.record_trust(false);
+            PlacementOutcome::Refused
+        } else {
+            PlacementOutcome::Pending
         }
     }
 }

@@ -211,7 +211,7 @@ fn results<Message: Clone + 'static>(
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let hits = search.state.hits().to_vec();
+    let hits = search.state.hits_snapshot();
     let current = search.state.current().map(pulpit_core::search::Hit::key);
     if hits.is_empty() {
         return space::vertical().height(Length::Fill).into();

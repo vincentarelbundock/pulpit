@@ -1838,7 +1838,7 @@ fn outline<Message: Clone + 'static>(
             nothing("This document has no bookmarks.")
         }
         OutlineView::Bookmarks => {
-            let entries = reader.outline.to_vec();
+            let entries = reader.outline.clone();
             let focus = reader.outline_focus.cloned();
             virtual_bookmark_outline(
                 entries,
@@ -1854,7 +1854,7 @@ fn outline<Message: Clone + 'static>(
             nothing("This document has no form fields.")
         }
         OutlineView::Fields => {
-            let fields = reader.fields.to_vec();
+            let fields = reader.fields.clone();
             let focus = reader.outline_focus.cloned();
             virtual_outline(
                 fields.len(),
@@ -2130,7 +2130,7 @@ pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32) -> (f32, f32
 }
 
 fn virtual_bookmark_outline<Message: Clone + 'static>(
-    entries: Vec<crate::widgets::context::OutlineRow>,
+    entries: std::sync::Arc<Vec<crate::widgets::context::OutlineRow>>,
     focus: Option<crate::widgets::document::model::OutlineItemId>,
     scroll: f32,
     measured_viewport: std::rc::Rc<std::cell::Cell<f32>>,

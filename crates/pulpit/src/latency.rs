@@ -123,6 +123,9 @@ impl Stage {
 /// hashing, no allocation and no chance of a typo inventing a stage.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Stages {
+    /// Complete application message handling, including the state-to-view
+    /// snapshot synchronisation that follows dispatch.
+    pub update: Stage,
     /// Planning renders: cache lookups, job submission, and the cancellation
     /// broadcast, which writes to every worker.
     pub plan_renders: Stage,
@@ -131,6 +134,10 @@ pub struct Stages {
     /// Draining the renderer, which includes copying large frames out of the
     /// shared region on this thread.
     pub drain_renderer: Stage,
+    /// Applying ordered answers from the document worker.
+    pub drain_reader: Stage,
+    /// Coalescing and copying complete frames from media workers.
+    pub drain_media: Stage,
 }
 
 /// Frames copied out of the shared memory region, which happens on the event

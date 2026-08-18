@@ -17,7 +17,9 @@
 //!   mutation's revision arrives and not before (A7).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use pulpit_core::page::{PageGeometry, PageIndex};
 use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse};
@@ -249,6 +251,45 @@ pub enum Told {
     },
 }
 
+/// A document answer is waiting on [`ReaderLink`].
+///
+/// This is deliberately a one-slot doorbell rather than another delivery
+/// channel. Answers remain ordered on `ReaderLink::told`; a burst merely asks
+/// the event loop to drain that channel once.
+pub struct ReaderWakeup {
+    inbox: Mutex<Receiver<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wakeup {
+    Ring,
+    Idle,
+    Closed,
+}
+
+impl ReaderWakeup {
+    /// Block on a helper thread until an answer arrives or `timeout` elapses.
+    pub fn wait(&self, timeout: Duration) -> Wakeup {
+        let Ok(inbox) = self.inbox.try_lock() else {
+            return Wakeup::Closed;
+        };
+        match inbox.recv_timeout(timeout) {
+            Ok(()) => Wakeup::Ring,
+            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
+            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WakeupSink(SyncSender<()>);
+
+impl WakeupSink {
+    fn ring(&self) {
+        let _ = self.0.try_send(());
+    }
+}
+
 /// The application's end of the conversation.
 pub struct ReaderLink {
     asks: Sender<Ask>,
@@ -271,6 +312,7 @@ pub struct ReaderLink {
     /// where a send succeeded and decremented only where an answer was taken,
     /// and when the worker is lost the count goes with the link.
     outstanding: usize,
+    wakeup_inbox: Option<Arc<ReaderWakeup>>,
 }
 
 impl std::fmt::Debug for ReaderLink {
@@ -292,12 +334,14 @@ impl ReaderLink {
         let session = DocumentSession::start(&DocumentWorkerCommand::default(), source)?;
         let (ask_sender, ask_receiver) = std::sync::mpsc::channel::<Ask>();
         let (told_sender, told_receiver) = std::sync::mpsc::channel::<Told>();
+        let (wakeup_sender, wakeup_receiver) = sync_channel(1);
+        let wakeup = WakeupSink(wakeup_sender);
 
         let source_for_thread = source.to_path_buf();
         std::thread::Builder::new()
             .name("document-session".into())
             .spawn(move || {
-                serve(session, ask_receiver, told_sender);
+                serve(session, ask_receiver, told_sender, wakeup);
                 tracing::debug!(source = %source_for_thread.display(), "document session ended");
             })
             .map_err(SessionError::Spawn)?;
@@ -308,7 +352,15 @@ impl ReaderLink {
             source: source.to_path_buf(),
             lost: false,
             outstanding: 0,
+            wakeup_inbox: Some(Arc::new(ReaderWakeup {
+                inbox: Mutex::new(wakeup_receiver),
+            })),
         })
+    }
+
+    /// Take the single event-loop listener for this document session.
+    pub fn take_wakeup(&mut self) -> Option<Arc<ReaderWakeup>> {
+        self.wakeup_inbox.take()
     }
 
     pub fn source(&self) -> &Path {
@@ -345,8 +397,14 @@ impl ReaderLink {
     /// Drains rather than taking one, because the application collects on a
     /// tick and a queue that grows by more than one per tick would never empty.
     pub fn collect(&mut self) -> Vec<Told> {
+        self.collect_bounded(usize::MAX).0
+    }
+
+    /// Collect at most `limit` answers, returning whether another event-loop
+    /// turn should continue the drain.
+    pub fn collect_bounded(&mut self, limit: usize) -> (Vec<Told>, bool) {
         let mut answers = Vec::new();
-        loop {
+        while answers.len() < limit {
             match self.told.try_recv() {
                 Ok(told) => {
                     // One answer per ask, so one answer is one request no
@@ -367,7 +425,11 @@ impl ReaderLink {
                 }
             }
         }
-        answers
+        // Reaching the budget is enough to request one continuation. It may
+        // be a harmless empty pass when the queue contained exactly `limit`
+        // answers, and avoids pulling an answer out merely to peek.
+        let more = answers.len() == limit;
+        (answers, more)
     }
 }
 
@@ -376,7 +438,12 @@ impl ReaderLink {
 /// Deliberately serial. The worker holds one document and answers one thing at
 /// a time; a queue in front of it would only reorder the wait, and ordering is
 /// what makes the optimistic revision check mean anything (§9.5).
-fn serve(mut session: DocumentSession, asks: Receiver<Ask>, told: Sender<Told>) {
+fn serve(
+    mut session: DocumentSession,
+    asks: Receiver<Ask>,
+    told: Sender<Told>,
+    wakeup: WakeupSink,
+) {
     while let Ok(ask) = asks.recv() {
         let answers = handle(&mut session, ask);
         let fatal = answers
@@ -388,6 +455,7 @@ fn serve(mut session: DocumentSession, asks: Receiver<Ask>, told: Sender<Told>) 
             if told.send(answer).is_err() {
                 return;
             }
+            wakeup.ring();
         }
         if fatal {
             return;
@@ -702,6 +770,7 @@ mod tests {
                 source: PathBuf::from("nowhere.pdf"),
                 lost: false,
                 outstanding: 0,
+                wakeup_inbox: None,
             },
             told_sender,
             ask_receiver,
@@ -724,6 +793,29 @@ mod tests {
         told.send(Told::Fields(Vec::new())).unwrap();
         assert_eq!(link.collect().len(), 1);
         assert!(!link.is_busy());
+    }
+
+    #[test]
+    fn a_bounded_drain_yields_and_preserves_the_remaining_answers() {
+        let (mut link, told, _asks) = detached_link();
+        for _ in 0..3 {
+            link.outstanding += 1;
+            told.send(Told::Failed {
+                message: "test".into(),
+                fatal: false,
+            })
+            .unwrap();
+        }
+
+        let (first, more) = link.collect_bounded(2);
+        assert_eq!(first.len(), 2);
+        assert!(more);
+        assert_eq!(link.outstanding, 1);
+
+        let (last, more) = link.collect_bounded(2);
+        assert_eq!(last.len(), 1);
+        assert!(!more);
+        assert_eq!(link.outstanding, 0);
     }
 
     #[test]
