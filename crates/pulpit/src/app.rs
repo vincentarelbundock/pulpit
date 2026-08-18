@@ -424,6 +424,66 @@ impl Default for OverviewGrid {
     }
 }
 
+/// The shape of the widget tree above the document scrollable, as the last
+/// view pass drew it.
+///
+/// Iced diffs positionally: a view pass that changes the *shape* of the tree
+/// above the scrollable — a page swap, a layout change, fullscreen, the
+/// compact-sidebar threshold, a document opening — makes Iced discard the
+/// scrollable's own state, offset included, and mount a fresh one that
+/// reports itself at zero. `fingerprint` names that shape; `generation` is
+/// what a consumer actually compares against, rather than fingerprint
+/// equality, because a round trip such as Presenter → Settings → Presenter
+/// rebuilds the widget twice while the fingerprint ends up back at its
+/// starting value — comparing fingerprints alone would miss that the widget
+/// was thrown away and remounted in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SurfaceShape {
+    fingerprint: u64,
+    generation: u32,
+}
+
+impl SurfaceShape {
+    /// Fold in the fingerprint from the latest view pass, bumping the
+    /// generation exactly when it differs from the one last observed.
+    pub(crate) fn observe(self, fingerprint: u64) -> SurfaceShape {
+        if fingerprint == self.fingerprint {
+            self
+        } else {
+            SurfaceShape {
+                fingerprint,
+                generation: self.generation.wrapping_add(1),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod surface_shape_tests {
+    use super::SurfaceShape;
+
+    #[test]
+    fn an_unchanged_fingerprint_keeps_the_generation() {
+        let shape = SurfaceShape::default().observe(7);
+        let seen = shape.generation;
+        assert_eq!(shape.observe(7).generation, seen);
+    }
+
+    #[test]
+    fn a_round_trip_bumps_the_generation_twice() {
+        let shape = SurfaceShape::default();
+        let at_a = shape.observe(1);
+        let at_b = at_a.observe(2);
+        // Back to the fingerprint `at_a` already had, but the widget was
+        // rebuilt on the way out to B and rebuilt again on the way back —
+        // two remounts, so the generation must have moved twice, not
+        // returned to where it started.
+        let at_a_again = at_b.observe(1);
+        assert_ne!(at_a_again.generation, at_a.generation);
+        assert_ne!(at_a_again.generation, shape.generation);
+    }
+}
+
 /// How wide a page is rendered for the overview grid, the slider's preview
 /// card, and the panels' stand-in while a real frame renders. One width, one
 /// pass: a page is rendered once and its picture never changes for the life
@@ -1054,6 +1114,20 @@ pub struct App {
     /// keyboard needs them to move a selection up and down the grid and to
     /// keep it on screen, so the view records them as it builds.
     pub overview_grid: std::cell::Cell<OverviewGrid>,
+    /// The shape of the widget tree above the document scrollable, as the
+    /// view last drew it. Written by the view pass, the same way
+    /// `overview_grid` is: the shape depends on branches the view alone
+    /// evaluates (which page, which layout, fullscreen, the compact-sidebar
+    /// threshold…), so it records the fingerprint there rather than the
+    /// application re-deriving it from a narrower set of fields in `update`.
+    pub reader_surface_shape: std::cell::Cell<SurfaceShape>,
+    /// The surface generation the reader session was last reconciled with.
+    ///
+    /// Compared against `reader_surface_shape.get().generation` when a
+    /// `ScrollTo` report arrives: unequal means the report's surface was
+    /// mounted since the session last heard from one, and its offset is a
+    /// birth certificate, not news about where the reader is.
+    reader_surface_seen: u32,
     /// A slide the grid was asked to show before it knew its own shape.
     ///
     /// The shape is only known after the grid has laid itself out, so on the
@@ -1605,6 +1679,8 @@ impl App {
             overview_settling: None,
             overview_scroll: 0.0,
             overview_grid: std::cell::Cell::new(OverviewGrid::default()),
+            reader_surface_shape: std::cell::Cell::new(SurfaceShape::default()),
+            reader_surface_seen: 0,
             overview_reveal: None,
             thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
             thumbnail_queue: std::collections::VecDeque::new(),
@@ -4073,17 +4149,17 @@ impl App {
                 {
                     self.reader_fullscreen = !self.reader_fullscreen;
                     self.menu_open = false;
-                    // The normal layout cell and the fullscreen mount are two
-                    // geometries for the same reader. Resolve a fit against
-                    // the one being entered, keeping the logical page (and
-                    // any page reached while fullscreen) across the change.
                     // Fullscreen and the ordinary layout mount different
-                    // widget trees. The new scrollable therefore starts at
-                    // zero even though the reader session still owns the
-                    // real page and offset. Push that position into the newly
-                    // mounted surface after this update so leaving fullscreen
-                    // cannot visually jump back to page one.
-                    return self.remount_reader_surface();
+                    // widget trees for the reader, so toggling it is a
+                    // remount like any other: the fresh scrollable's first
+                    // `ScrollTo` will report zero, and the surface-generation
+                    // gate in `on_read_command` is what refuses to believe
+                    // that zero and re-fits the new surface to the reader's
+                    // actual page instead. Pushing a scroll from here would
+                    // race the not-yet-mounted widget — the new tree does not
+                    // exist until the next view pass — which is why this used
+                    // to be handled with an immediate push and no longer is.
+                    return Task::none();
                 }
                 let wanted = !self.coordinator.roles.audience_fullscreen;
                 self.coordinator.roles.audience_fullscreen = wanted;
@@ -7269,17 +7345,6 @@ impl App {
         )
     }
 
-    /// Refit a newly mounted document surface without losing the reading
-    /// position, then put its fresh scrollable at the reader's retained
-    /// offset.
-    fn remount_reader_surface(&mut self) -> Task<Message> {
-        let Some(cell) = self.page_surface_size() else {
-            return Task::none();
-        };
-        self.reader.remount_cell(cell.0, cell.1);
-        self.scroll_surface_to_reader()
-    }
-
     /// Something the reader's widgets asked for.
     ///
     /// The split is the one §5.3 draws: the viewport belongs to the session
@@ -7633,6 +7698,34 @@ impl App {
                 Task::none()
             }
             _ => {
+                // A `ScrollTo` is the surface's own report of where it is —
+                // except when the surface making it was not there a moment
+                // ago. Every genuine remount (a page swap, a layout change,
+                // fullscreen, the compact-sidebar threshold, a document
+                // opening…) mounts a fresh scrollable that starts at zero
+                // and dutifully reports that zero as its first `ScrollTo`.
+                // Believing it is how this used to drop a reader mid-deck
+                // back to page one on the way out of the overview or
+                // settings. The surface generation recorded by the view
+                // (`reader_surface_shape`) is compared against the one the
+                // session was last reconciled with; a mismatch means this
+                // report is a hello, not a scroll, so its offset is
+                // discarded, the new surface is fitted to the reader's own
+                // place, and that place — not the report — is what gets
+                // pushed back into it.
+                if let ReadCommand::ScrollTo { viewport, .. } = &command {
+                    let generation = self.reader_surface_shape.get().generation;
+                    if generation != self.reader_surface_seen {
+                        self.reader_surface_seen = generation;
+                        let width = self
+                            .page_surface_size()
+                            .map_or_else(|| self.reader.cell_width(), |(width, _)| width);
+                        self.reader.remount_cell(width, *viewport);
+                        self.apply_pending_position();
+                        self.request_reader_renders();
+                        return self.scroll_surface_to_reader();
+                    }
+                }
                 if let ReadCommand::SetOutlineCollapsed(collapsed) = &command {
                     self.outline_animation = if self.motion.is_reduced() {
                         iced::Animation::new(*collapsed).quick()
@@ -7667,11 +7760,15 @@ impl App {
                 if let Some(origin) = origin {
                     self.nav_history.record_jump(origin, self.current_place());
                 }
-                // The surface has just said how big its window is, which is
-                // the first moment a remembered page and a fraction of it
-                // mean a scroll offset. After the command rather than before:
-                // this same report carries the offset the widget opened at,
-                // and applying the restore first would be undone by it.
+                // A document open is itself a remount — the surface goes
+                // from `nothing(...)` to the real column — so the gate above
+                // has ordinarily already taken the held position out and
+                // pushed it into the surface before this point is reached.
+                // Kept as a fallback rather than removed: it costs nothing
+                // when `pending_position` is already spent, and it is still
+                // correct if a `ScrollTo` ever reaches here — same
+                // generation, so the widget was not just born — while a
+                // restored position is somehow still waiting.
                 if matches!(command, ReadCommand::ScrollTo { .. }) && self.apply_pending_position()
                 {
                     self.request_reader_renders();
@@ -8033,8 +8130,10 @@ impl App {
     /// PDF is open. Otherwise built-ins and saved layouts participate in the
     /// exact order [`LayoutStore::all`] provides, and adopting rather than
     /// merely mounting preserves the per-document choice. When the next
-    /// layout carries a document surface, remounting it preserves the page
-    /// and the fraction of that page currently at the top of the viewport.
+    /// layout carries a document surface, the surface-generation gate in
+    /// `on_read_command` preserves the page and the fraction of that page
+    /// currently at the top of the viewport once the fresh surface reports
+    /// in — there is no tree to push a scroll into yet at this point.
     fn cycle_layout(&mut self) -> Task<Message> {
         let next = next_usable_layout(
             self.layouts.all(),
@@ -8044,7 +8143,6 @@ impl App {
         .cloned();
         if let Some(layout) = next {
             self.adopt_layout(layout);
-            return self.remount_reader_surface();
         }
         Task::none()
     }

@@ -2974,6 +2974,17 @@ impl ReaderSession {
         }
     }
 
+    /// The width the page surface was last drawn at.
+    ///
+    /// A remount needs some width to resolve a fit against before the new
+    /// surface's own layout has produced one. When the layout cannot say
+    /// (`App::page_surface_size` returns `None` — no page cell in the active
+    /// layout, say), the width the session already had is a better guess
+    /// than zero: a mount that has not moved keeps the fit it already has.
+    pub fn cell_width(&self) -> f32 {
+        self.cell.0
+    }
+
     /// Put the column at `offset`, and say which page that is.
     fn scroll_to(&mut self, offset: f32) {
         self.controls.offset = self.column.clamp_offset(offset, self.cell.1);

@@ -41,6 +41,15 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         return view;
     }
 
+    // Named the widget tree's shape before building it, so `on_read_command`
+    // can tell a surface's first report apart from an ordinary scroll. See
+    // `document_surface_fingerprint`.
+    app.reader_surface_shape.set(
+        app.reader_surface_shape
+            .get()
+            .observe(document_surface_fingerprint(app)),
+    );
+
     // Startup and the `?` reference are one surface, not two versions of the
     // same information. When there is work behind it, the page adds only a
     // dismissal control; the reference itself remains identical.
@@ -830,6 +839,61 @@ fn grid_plan(count: usize, size: iced::Size, aspect: f32) -> GridPlan {
     let available = size.width - gap::S * (columns.saturating_sub(1)) as f32;
     let width = (available / columns as f32).max(MIN_CELL_WIDTH);
     plan_for(columns, width.min(MAX_CELL_WIDTH))
+}
+
+/// Every branch that decides the shape of the widget tree between the window
+/// root and the document scrollable, folded into one number.
+///
+/// Iced diffs the tree positionally: whichever of these flips — a page swap,
+/// the shortcuts reference page, a layout change, fullscreen, the
+/// compact-sidebar threshold, the toolbar strip appearing or not, a document
+/// opening or closing — tears down everything below the change, the document
+/// scrollable's own offset included, and mounts a fresh one that is born at
+/// zero and dutifully reports that zero. [`App::reader_surface_shape`] turns
+/// a change here into a generation the report-side gate in
+/// `App::on_read_command` compares its own record against, so that gate is
+/// only ever as reliable a witness to "this is a genuine remount" as this
+/// function is complete. Any new conditional wrapper anywhere along that
+/// path has to fold its condition in here too, or the remount it causes will
+/// report a false scroll to zero and the reader will lose its place.
+fn document_surface_fingerprint(app: &App) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let page_kind: u8 = match app.page {
+        Page::Presenter => 0,
+        Page::Library => 1,
+        Page::Editor => 2,
+        Page::Settings => 3,
+    };
+    let has_outline_panel = app
+        .active_layout
+        .widgets()
+        .iter()
+        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+    // Mirrors `presenter_toolbar`'s own "is there anything to show" check,
+    // without building the strip: the fingerprint only needs to know whether
+    // its presence would change, not what is in it.
+    let presenting =
+        crate::layout::PrimaryViewer::of(&app.active_layout) == crate::layout::PrimaryViewer::Slide;
+    let toolbar_present = !placed(app, crate::widgets::WidgetKind::MainMenu)
+        || (presenting && !placed(app, crate::widgets::WidgetKind::AudienceControls));
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    app.shortcuts_open.hash(&mut hasher);
+    page_kind.hash(&mut hasher);
+    app.state.document().is_none().hash(&mut hasher);
+    app.active_layout.id.hash(&mut hasher);
+    app.reader_fullscreen.hash(&mut hasher);
+    has_outline_panel.hash(&mut hasher);
+    app.compact_document_sidebar().hash(&mut hasher);
+    app.search_workspace.hash(&mut hasher);
+    toolbar_present.hash(&mut hasher);
+    // The document widget's own gate (`widgets::document::view::page_surface`):
+    // closed or open, and a page count of zero draws the same "nothing to
+    // read" stand-in an unopened document does.
+    app.reader.is_open().hash(&mut hasher);
+    (app.reader.page_count() == 0).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Whatever the layout does not carry itself.
