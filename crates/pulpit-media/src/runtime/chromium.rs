@@ -71,13 +71,17 @@ pub fn is_chromium_version(banner: &str) -> bool {
 /// [`FORBIDDEN_FLAGS`].
 pub fn launch_flags(profile: &Path, viewport: Viewport) -> Vec<String> {
     let (css_width, css_height) = viewport.css_size();
+    let mut user_data_dir = std::ffi::OsString::from("--user-data-dir=");
+    user_data_dir.push(profile);
     vec![
         "--headless=new".to_string(),
         "--remote-debugging-pipe".to_string(),
         // Chrome 136 and newer refuse remote debugging on the default
         // profile. pulpit requires a private one for *every* version, so
         // behaviour does not depend on that boundary.
-        format!("--user-data-dir={}", profile.display()),
+        user_data_dir
+            .into_string()
+            .unwrap_or_else(|os_str| format!("--user-data-dir={}", os_str.to_string_lossy())),
         format!("--window-size={css_width},{css_height}"),
         format!("--force-device-scale-factor={}", viewport.scale),
         "--hide-scrollbars".to_string(),
@@ -329,8 +333,14 @@ impl CdpPipe {
         let (from_browser_read, from_browser_write) = os_pipe()?;
 
         let mut command = Command::new(executable);
+        let mut user_data_dir = std::ffi::OsString::from("--user-data-dir=");
+        user_data_dir.push(profile);
         command
-            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg(
+                user_data_dir.into_string().unwrap_or_else(|os_str| {
+                    format!("--user-data-dir={}", os_str.to_string_lossy())
+                }),
+            )
             .args(extra_flags)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -340,10 +350,23 @@ impl CdpPipe {
         let child_write = from_browser_write.as_raw_fd();
         unsafe {
             command.pre_exec(move || {
-                // Chrome expects exactly fd 3 (its input) and fd 4 (its
-                // output); dup2 clears CLOEXEC on the duplicates.
-                if libc_dup2(child_read, 3) < 0 || libc_dup2(child_write, 4) < 0 {
+                // Chrome expects exactly fd 3 (its input) and fd 4 (its output).
+                // After dup2-ing, explicitly clear CLOEXEC. Note: dup2(old, new)
+                // only clears CLOEXEC when old != new; when they are equal it is
+                // a no-op and the flag is untouched, so we must clear it explicitly.
+                if libc_dup2(child_read, 3) < 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                if child_read == 3 {
+                    // dup2 was a no-op, clear CLOEXEC manually.
+                    libc_fcntl(3, F_SETFD, 0);
+                }
+                if libc_dup2(child_write, 4) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if child_write == 4 {
+                    // dup2 was a no-op, clear CLOEXEC manually.
+                    libc_fcntl(4, F_SETFD, 0);
                 }
                 Ok(())
             });
@@ -603,8 +626,9 @@ fn pipe_error(error: std::io::Error) -> MediaError {
 fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError> {
     use std::os::fd::{FromRawFd, OwnedFd};
     let mut fds = [0i32; 2];
-    // SAFETY: `fds` is a two-element array, which is what pipe(2) writes.
-    let result = unsafe { libc_pipe(fds.as_mut_ptr()) };
+    // SAFETY: `fds` is a two-element array, which is what pipe2(2) writes.
+    // O_CLOEXEC prevents the fds from leaking into child processes.
+    let result = unsafe { libc_pipe2(fds.as_mut_ptr(), O_CLOEXEC) };
     if result != 0 {
         return Err(MediaError::new(
             MediaErrorKind::LaunchFailed,
@@ -617,20 +641,24 @@ fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError>
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-// The two libc calls this adapter needs, declared directly so the crate does
+// The libc calls this adapter needs, declared directly so the crate does
 // not take a dependency for them.
-/// `fcntl` constants from `fcntl.h`, for making the read end non-blocking.
+/// `fcntl` constants from `fcntl.h`.
 #[cfg(unix)]
 const F_GETFL: i32 = 3;
 #[cfg(unix)]
 const F_SETFL: i32 = 4;
 #[cfg(unix)]
+const F_SETFD: i32 = 2;
+#[cfg(unix)]
 const O_NONBLOCK: i32 = 0o4000;
+#[cfg(unix)]
+const O_CLOEXEC: i32 = 0o2000000;
 
 #[cfg(unix)]
 extern "C" {
-    #[link_name = "pipe"]
-    fn libc_pipe(fds: *mut i32) -> i32;
+    #[link_name = "pipe2"]
+    fn libc_pipe2(fds: *mut i32, flags: i32) -> i32;
     #[link_name = "fcntl"]
     fn libc_fcntl(fd: i32, command: i32, argument: i32) -> i32;
     #[link_name = "dup2"]
@@ -673,7 +701,7 @@ impl AssetServer {
         page: Option<String>,
     ) -> Result<Self, MediaError> {
         use std::net::TcpListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| {
@@ -688,26 +716,51 @@ impl AssetServer {
             .map_err(|e| {
                 MediaError::new(MediaErrorKind::LaunchFailed, format!("no local port: {e}"))
             })?;
-        let secret = unguessable_token();
+        let secret = unguessable_token()?;
         let shutdown = Arc::new(AtomicBool::new(false));
+        let active_connections = Arc::new(AtomicUsize::new(0));
 
         let thread_secret = secret.clone();
         let thread_shutdown = shutdown.clone();
+        let root_clone = root.clone();
+        let allowlist_clone = allowlist.clone();
+        let page_clone = page.clone();
+        let active_connections_clone = active_connections.clone();
         listener.set_nonblocking(true).ok();
         std::thread::Builder::new()
             .name("pulpit-asset-origin".into())
             .spawn(move || {
+                const MAX_CONCURRENT: usize = 16;
                 while !thread_shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             stream.set_nonblocking(false).ok();
-                            let _ = serve_one(
-                                stream,
-                                &root,
-                                &allowlist,
-                                &thread_secret,
-                                page.as_deref(),
-                            );
+                            let current = active_connections_clone.load(Ordering::Relaxed);
+                            if current >= MAX_CONCURRENT {
+                                // At capacity; close immediately rather than queue.
+                                drop(stream);
+                                continue;
+                            }
+                            // Increment before spawning so the counter reflects
+                            // threads in flight, not just spawned successfully.
+                            active_connections_clone.fetch_add(1, Ordering::Relaxed);
+                            let secret = thread_secret.clone();
+                            let root = root_clone.clone();
+                            let allowlist = allowlist_clone.clone();
+                            let page = page_clone.clone();
+                            let active = active_connections_clone.clone();
+                            match std::thread::Builder::new().spawn(move || {
+                                // Guard ensures decrement happens even on error or panic.
+                                let _guard = ConnectionGuard(active);
+                                let _ =
+                                    serve_one(stream, &root, &allowlist, &secret, page.as_deref());
+                            }) {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    // Spawn failed; decrement the counter manually.
+                                    active_connections_clone.fetch_sub(1, Ordering::Relaxed);
+                                }
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(10))
@@ -752,6 +805,16 @@ impl Drop for AssetServer {
     }
 }
 
+/// Guard that decrements the active connection counter when dropped.
+/// Ensures cleanup happens even if serve_one errors or panics.
+struct ConnectionGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn serve_one(
     mut stream: std::net::TcpStream,
     root: &Path,
@@ -760,6 +823,7 @@ fn serve_one(
     generated: Option<&str>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -1017,28 +1081,21 @@ fn percent_decode(value: &str) -> String {
 }
 
 /// A token no page and no other local process can guess.
-pub fn unguessable_token() -> String {
-    // 128 bits from the OS, via the one source available without a
-    // dependency: `getrandom` through /dev/urandom.
+///
+/// 128 bits from the OS via `getrandom`, which reads from the secure
+/// system entropy source (/dev/urandom on Unix-like systems).
+pub fn unguessable_token() -> Result<String, MediaError> {
     let mut bytes = [0u8; 16];
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        let _ = file.read_exact(&mut bytes);
-    }
-    if bytes.iter().all(|byte| *byte == 0) {
-        // Never fall back to something predictable silently.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or_default();
-        let pid = std::process::id();
-        bytes[..4].copy_from_slice(&nanos.to_le_bytes());
-        bytes[4..8].copy_from_slice(&pid.to_le_bytes());
-        tracing::warn!("could not read the system random source for the asset origin token");
-    }
-    bytes
+    getrandom::getrandom(&mut bytes).map_err(|e| {
+        MediaError::new(
+            MediaErrorKind::LaunchFailed,
+            format!("could not read the system random source for the asset origin token: {e}"),
+        )
+    })?;
+    Ok(bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
+        .collect::<String>())
 }
 
 #[cfg(test)]
@@ -1243,8 +1300,8 @@ mod tests {
 
     #[test]
     fn an_unguessable_token_is_long_and_differs_between_calls() {
-        let first = unguessable_token();
-        let second = unguessable_token();
+        let first = unguessable_token().expect("failed to generate token");
+        let second = unguessable_token().expect("failed to generate token");
         assert_eq!(first.len(), 32);
         assert_ne!(first, second);
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));

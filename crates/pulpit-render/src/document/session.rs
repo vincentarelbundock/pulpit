@@ -58,11 +58,17 @@ impl DocumentWorkerCommand {
         }
         let mut command = match self {
             DocumentWorkerCommand::CurrentExe { flag } => {
+                use std::ffi::OsString;
+
                 let mut command = Command::new(std::env::current_exe()?);
                 // The document is named on the command line because a worker
                 // serves exactly one and is started for it: there is no state
                 // in which it is running with nothing open.
-                command.arg(format!("{flag}={}", source.display()));
+                // Build the argument as OsString to preserve non-UTF-8 bytes.
+                let mut arg = OsString::from(flag);
+                arg.push("=");
+                arg.push(source.as_os_str());
+                command.arg(arg);
                 command
             }
             DocumentWorkerCommand::Explicit { program, args } => {

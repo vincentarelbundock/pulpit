@@ -51,55 +51,67 @@ pub enum StartPage {
 }
 
 fn main() -> iced::Result {
-    let mut arguments = std::env::args().skip(1);
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut arguments = std::env::args_os().skip(1);
     let mut document: Option<PathBuf> = None;
     let mut worker = false;
     let mut start_page = StartPage::Presenter;
     while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--render-worker" => worker = true,
-            // A document worker is another role of this same executable: one
-            // open PDF, one execution context, one process (SPEC-document.md
-            // §5.1 and §6). It takes the document to open as its argument
-            // because a worker serves exactly one and is started for it.
-            _ if argument.starts_with("--document-worker=") => {
-                let path = argument.trim_start_matches("--document-worker=");
-                run_document_worker(PathBuf::from(path));
-                return Ok(());
-            }
-            "--typst-worker" => {
-                crate::typst_annotation::run_worker();
-                return Ok(());
-            }
-            // A media worker is another role of this same executable, so the
-            // supervisor spawns one without a second installed binary.
-            _ if argument.starts_with("--media-worker=") => {
-                let role = argument.trim_start_matches("--media-worker=");
-                if !pulpit_media::worker::run_role(role) {
-                    eprintln!("unknown media worker role: {role}");
-                    std::process::exit(2);
-                }
-                return Ok(());
-            }
-            "--layouts" => start_page = StartPage::Library,
-            "--edit-layout" => {
-                start_page = match arguments.next() {
-                    Some(id) => StartPage::Editor(id),
-                    None => {
-                        eprintln!("--edit-layout needs a layout id");
+        let arg_bytes = argument.as_bytes();
+        if argument == "--render-worker" {
+            worker = true;
+        } else if arg_bytes.starts_with(b"--document-worker=") {
+            // Extract the path part after the '=' without UTF-8 conversion
+            let path_bytes = &arg_bytes[b"--document-worker=".len()..];
+            let path = PathBuf::from(OsStr::from_bytes(path_bytes));
+            run_document_worker(path);
+            return Ok(());
+        } else if argument == "--typst-worker" {
+            crate::typst_annotation::run_worker();
+            return Ok(());
+        } else if arg_bytes.starts_with(b"--media-worker=") {
+            // Extract the role string and validate it's UTF-8 since run_role expects it
+            let role_bytes = &arg_bytes[b"--media-worker=".len()..];
+            match std::str::from_utf8(role_bytes) {
+                Ok(role) => {
+                    if !pulpit_media::worker::run_role(role) {
+                        eprintln!("unknown media worker role: {role}");
                         std::process::exit(2);
                     }
+                    return Ok(());
+                }
+                Err(_) => {
+                    eprintln!("media worker role is not valid UTF-8");
+                    std::process::exit(2);
                 }
             }
-            "--help" | "-h" => {
-                print_help();
-                return Ok(());
+        } else if argument == "--layouts" {
+            start_page = StartPage::Library;
+        } else if argument == "--edit-layout" {
+            start_page = match arguments.next() {
+                Some(id) => match id.into_string() {
+                    Ok(id_str) => StartPage::Editor(id_str),
+                    Err(_) => {
+                        eprintln!("--edit-layout argument is not valid UTF-8");
+                        std::process::exit(2);
+                    }
+                },
+                None => {
+                    eprintln!("--edit-layout needs a layout id");
+                    std::process::exit(2);
+                }
             }
-            "--version" | "-V" => {
-                println!("pulpit {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            other => document = Some(PathBuf::from(other)),
+        } else if argument == "--help" || argument == "-h" {
+            print_help();
+            return Ok(());
+        } else if argument == "--version" || argument == "-V" {
+            println!("pulpit {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        } else {
+            // This is the document file path, keep it as OsString
+            document = Some(PathBuf::from(argument));
         }
     }
 
@@ -121,14 +133,28 @@ fn main() -> iced::Result {
     let _instance = match crate::platform::acquire_instance(&directories.instance_lock()) {
         crate::platform::Instance::Acquired(lock) => Some(lock),
         crate::platform::Instance::AlreadyRunning { pid, lock } => {
-            eprintln!(
-                "pulpit is already running (process {pid}).\n\
-                 Switch to that window instead — a second copy would open a second\n\
-                 audience window and the two would flicker against each other.\n\
-                 If that process is gone, delete {}.",
-                lock.display()
-            );
-            tracing::warn!(pid, "refused to start a second instance");
+            match pid {
+                Some(pid_num) => {
+                    eprintln!(
+                        "pulpit is already running (process {pid_num}).\n\
+                         Switch to that window instead — a second copy would open a second\n\
+                         audience window and the two would flicker against each other.\n\
+                         If that process is gone, delete {}.",
+                        lock.display()
+                    );
+                    tracing::warn!(pid_num, "refused to start a second instance");
+                }
+                None => {
+                    eprintln!(
+                        "pulpit is already running (process id unavailable).\n\
+                         Switch to that window instead — a second copy would open a second\n\
+                         audience window and the two would flicker against each other.\n\
+                         If that process is gone, delete {}.",
+                        lock.display()
+                    );
+                    tracing::warn!("refused to start a second instance");
+                }
+            }
             return Ok(());
         }
         crate::platform::Instance::Unknown { reason } => {

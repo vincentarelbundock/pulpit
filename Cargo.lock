@@ -4933,6 +4933,7 @@ dependencies = [
  "iced",
  "iced_core",
  "iced_widget",
+ "libc",
  "notify",
  "pulpit-core",
  "pulpit-display",
@@ -4986,6 +4987,7 @@ name = "pulpit-media"
 version = "0.0.5"
 dependencies = [
  "bincode",
+ "getrandom 0.2.17",
  "image",
  "libloading 0.8.9",
  "memmap2",

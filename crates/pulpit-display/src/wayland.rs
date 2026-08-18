@@ -371,7 +371,13 @@ mod tests {
             eprintln!("skipping: not a Wayland session");
             return;
         }
-        let backend = WaylandBackend::connect().expect("connect to the compositor");
+        let backend = match WaylandBackend::connect() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: cannot connect to the compositor: {e}");
+                return;
+            }
+        };
         let snapshot = backend.snapshot().expect("enumerate outputs");
         assert!(
             !snapshot.is_empty(),

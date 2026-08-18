@@ -75,11 +75,9 @@ struct Page {
 impl Browser {
     fn launch(executable: &Path, viewport: Viewport) -> Result<Self, MediaError> {
         // A fresh profile per worker lifetime, removed when the pipe drops.
-        let profile = std::env::temp_dir().join(format!(
-            "pulpit-browser-{}-{}",
-            std::process::id(),
-            crate::runtime::chromium::unguessable_token()
-        ));
+        let token = crate::runtime::chromium::unguessable_token()?;
+        let profile =
+            std::env::temp_dir().join(format!("pulpit-browser-{}-{}", std::process::id(), token));
         std::fs::create_dir_all(&profile).map_err(|e| {
             MediaError::new(
                 MediaErrorKind::LaunchFailed,

@@ -111,7 +111,7 @@ icons:  ## Rebuild the .iconset and .ico from the SVG
 # ==============================================================================
 
 test:  ## Run the whole test suite; no display required
-	$(CARGO) test --workspace
+	$(CARGO) test --workspace --no-fail-fast
 
 check:  ## Run cargo check (fast compile check)
 	$(CARGO) check --workspace --all-targets

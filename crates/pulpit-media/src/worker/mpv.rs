@@ -249,32 +249,33 @@ impl Session {
                 "libmpv would not create a player",
             ));
         }
-        let option = |name: &str, value: &str| {
-            let name = CString::new(name).expect("option name");
-            let value = CString::new(value).expect("option value");
+        let option = |name: &str, value: &str| -> Result<(), MediaError> {
+            let name = c_string("option name", name)?;
+            let value = c_string("option value", value)?;
             unsafe { (api.set_option)(handle, name.as_ptr(), value.as_ptr()) };
+            Ok(())
         };
-        option("vo", "libmpv");
-        option("hwdec", "auto-safe");
+        option("vo", "libmpv")?;
+        option("hwdec", "auto-safe")?;
         // Hold the final frame at end of file instead of going black.
-        option("keep-open", "yes");
-        option("audio-display", "no");
+        option("keep-open", "yes")?;
+        option("audio-display", "no")?;
         // Local files only: the deck is untrusted input.
-        option("ytdl", "no");
-        option("load-scripts", "no");
-        option("osc", "no");
-        option("input-default-bindings", "no");
+        option("ytdl", "no")?;
+        option("load-scripts", "no")?;
+        option("osc", "no")?;
+        option("input-default-bindings", "no")?;
         if spec.playback.repeat {
-            option("loop-file", "inf");
+            option("loop-file", "inf")?;
         }
         if spec.playback.mute {
-            option("mute", "yes");
+            option("mute", "yes")?;
         }
         if !spec.playback.autoplay {
-            option("pause", "yes");
+            option("pause", "yes")?;
         }
         if spec.playback.start > 0.0 {
-            option("start", &format!("{}", spec.playback.start.max(0.0)));
+            option("start", &format!("{}", spec.playback.start.max(0.0)))?;
         }
         if unsafe { (api.initialize)(handle) } < 0 {
             unsafe { (api.destroy)(handle) };
@@ -284,7 +285,8 @@ impl Session {
             ));
         }
 
-        let api_type = CString::new("sw").expect("api type");
+        let api_type = CString::new("sw")
+            .map_err(|_| MediaError::new(MediaErrorKind::LaunchFailed, "api type contains NUL"))?;
         let mut params = [
             RenderParam {
                 kind: PARAM_API_TYPE,
@@ -306,7 +308,9 @@ impl Session {
 
         let file = CString::new(path.as_str())
             .map_err(|_| MediaError::new(MediaErrorKind::MalformedAsset, "path contains NUL"))?;
-        let loadfile = CString::new("loadfile").expect("command");
+        let loadfile = CString::new("loadfile").map_err(|_| {
+            MediaError::new(MediaErrorKind::LoadFailed, "loadfile command contains NUL")
+        })?;
         let mut argv = [loadfile.as_ptr(), file.as_ptr(), std::ptr::null::<c_char>()];
         if unsafe { (api.command)(handle, argv.as_mut_ptr()) } < 0 {
             unsafe {
@@ -334,7 +338,16 @@ impl Session {
     }
 
     fn set_flag(&self, api: &Api, name: &str, value: bool) {
-        let name = CString::new(name).expect("property name");
+        let name = match CString::new(name) {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    property = name,
+                    "property name contains NUL; skipping flag set"
+                );
+                return;
+            }
+        };
         let mut flag: c_int = value.into();
         unsafe {
             (api.set_property)(
@@ -347,7 +360,16 @@ impl Session {
     }
 
     fn set_double(&self, api: &Api, name: &str, value: f64) {
-        let name = CString::new(name).expect("property name");
+        let name = match CString::new(name) {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    property = name,
+                    "property name contains NUL; skipping double set"
+                );
+                return;
+            }
+        };
         let mut value = value;
         unsafe {
             (api.set_property)(
@@ -360,7 +382,16 @@ impl Session {
     }
 
     fn get_double(&self, api: &Api, name: &str) -> Option<f64> {
-        let name = CString::new(name).expect("property name");
+        let name = match CString::new(name) {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    property = name,
+                    "property name contains NUL; returning None"
+                );
+                return None;
+            }
+        };
         let mut value: f64 = 0.0;
         let ok = unsafe {
             (api.get_property)(
@@ -374,7 +405,16 @@ impl Session {
     }
 
     fn get_flag(&self, api: &Api, name: &str) -> bool {
-        let name = CString::new(name).expect("property name");
+        let name = match CString::new(name) {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    property = name,
+                    "property name contains NUL; returning false"
+                );
+                return false;
+            }
+        };
         let mut value: c_int = 0;
         unsafe {
             (api.get_property)(
@@ -388,9 +428,28 @@ impl Session {
     }
 
     fn seek(&self, api: &Api, seconds: f32) {
-        let command = CString::new("seek").expect("command");
-        let position = CString::new(format!("{}", seconds.max(0.0))).expect("seconds");
-        let mode = CString::new("absolute").expect("mode");
+        let command = match CString::new("seek") {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!("seek command contains NUL; skipping");
+                return;
+            }
+        };
+        let position_str = format!("{}", seconds.max(0.0));
+        let position = match CString::new(position_str.as_str()) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(seconds = seconds, "seek position contains NUL; skipping");
+                return;
+            }
+        };
+        let mode = match CString::new("absolute") {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::warn!("seek mode contains NUL; skipping");
+                return;
+            }
+        };
         let mut argv = [
             command.as_ptr(),
             position.as_ptr(),
@@ -410,7 +469,9 @@ impl Session {
             let mut size: [c_int; 2] = [width as c_int, height as c_int];
             // "rgb0": 4 bytes per pixel, R,G,B then padding the consumer
             // treats as alpha — forced opaque below.
-            let format = CString::new("rgb0").expect("format");
+            let format = CString::new("rgb0").map_err(|_| {
+                MediaError::new(MediaErrorKind::DecodeFailed, "pixel format contains NUL")
+            })?;
             let mut stride: usize = width as usize * 4;
             let mut params = [
                 RenderParam {
@@ -528,9 +589,21 @@ impl Session {
             }
             VideoCommand::SetMuted { muted } => self.set_flag(api, "mute", muted),
             VideoCommand::SetLooping { looping } => {
-                let value = if looping { "inf" } else { "no" };
-                let name = CString::new("loop-file").expect("property");
-                let value = CString::new(value).expect("value");
+                let value_str = if looping { "inf" } else { "no" };
+                let name = match CString::new("loop-file") {
+                    Ok(n) => n,
+                    Err(_) => {
+                        tracing::warn!("loop-file property name contains NUL; skipping");
+                        return;
+                    }
+                };
+                let value = match CString::new(value_str) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!(loop_value = value_str, "loop value contains NUL; skipping");
+                        return;
+                    }
+                };
                 unsafe {
                     (api.set_property)(
                         self.handle,
@@ -724,6 +797,24 @@ fn run_without_library() {
     }
 }
 
+/// Build a C string for libmpv, refusing an interior NUL instead of panicking.
+///
+/// Media option names and values can carry document-derived text, and a NUL
+/// byte in one of them used to take the whole worker down through
+/// `CString::new(..).expect(..)`. A malformed option must degrade to a refused
+/// option, never to a dead worker.
+/// `MediaError::message` is shown to a presenter mid-talk, so it names the
+/// option that was refused but never echoes its value: the value is
+/// document-derived text.
+fn c_string(what: &str, value: &str) -> Result<CString, MediaError> {
+    CString::new(value).map_err(|_| {
+        MediaError::new(
+            MediaErrorKind::MalformedAsset,
+            format!("{what} contains an interior NUL and was refused"),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +864,26 @@ mod tests {
             !last.contains(std::path::MAIN_SEPARATOR),
             "the last candidate is a bare name for the loader to resolve: {last}"
         );
+    }
+
+    /// Verify that CString creation failures from NUL bytes in media option
+    /// names or values do not panic.
+    #[test]
+    fn an_option_carrying_an_interior_nul_is_refused_not_fatal() {
+        // A NUL in a document-derived option used to reach
+        // `CString::new(..).expect(..)` and kill the worker. It must now come
+        // back as an ordinary refusal that names what went wrong.
+        let refused = c_string("option value", "loop\0file")
+            .expect_err("an interior NUL must be refused, not accepted");
+        assert_eq!(refused.kind, MediaErrorKind::MalformedAsset);
+        assert!(
+            refused.message.contains("option value"),
+            "the refusal should name which option was bad, got {:?}",
+            refused.message
+        );
+
+        // The ordinary case still produces a usable C string.
+        let accepted = c_string("option value", "libmpv").expect("plain text is fine");
+        assert_eq!(accepted.to_bytes(), b"libmpv");
     }
 }

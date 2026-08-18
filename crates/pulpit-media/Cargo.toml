@@ -38,6 +38,7 @@ serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+getrandom = "0.2"
 
 image = { version = "0.25", optional = true, default-features = false, features = [
     "jpeg",

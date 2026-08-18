@@ -1,6 +1,7 @@
 //! The layout library: built-ins, custom layouts on disk, and the export
 //! and import format.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -412,8 +413,19 @@ impl LayoutStore {
         // Same atomic dance as the settings store: a crash must leave either
         // the old file or the new one.
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, text.as_bytes())?;
+        {
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.flush()?;
+            // Durability before visibility: the rename must never expose a
+            // file whose contents are still in the page cache.
+            file.sync_all()?;
+        }
         std::fs::rename(&temporary, &path)?;
+        // Also fsync the directory so the rename itself survives a crash.
+        if let Ok(handle) = std::fs::File::open(&self.directory) {
+            let _ = handle.sync_all();
+        }
 
         match self
             .custom
