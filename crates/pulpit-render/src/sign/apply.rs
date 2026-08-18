@@ -1695,6 +1695,7 @@ mod tests {
 
         // The same path, spelled three ways that all resolve to one file.
         let indirect = directory.path().join(".").join("deck.pdf");
+        #[cfg(unix)]
         let link = directory.path().join("link.pdf");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&source, &link).expect("plant a symlink");

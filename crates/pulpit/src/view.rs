@@ -41,11 +41,18 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         return view;
     }
 
-    let mut page = match app.page {
-        Page::Presenter => presenter(app),
-        Page::Library => library_page(app),
-        Page::Editor => editor_page(app),
-        Page::Settings => settings_page(app),
+    // Startup and the `?` reference are one surface, not two versions of the
+    // same information. When there is work behind it, the page adds only the
+    // way back; the reference itself remains identical.
+    let mut page = if app.shortcuts_open {
+        shortcut_reference_page(app, app.state.document().is_some())
+    } else {
+        match app.page {
+            Page::Presenter => presenter(app),
+            Page::Library => library_page(app),
+            Page::Editor => editor_page(app),
+            Page::Settings => settings_page(app),
+        }
     };
 
     // A ringing cue washes the presenter window, under everything else so it
@@ -125,11 +132,6 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     // popup anchored there would be clipped by its own widget.
     if app.alarm_controls.open {
         page = stack![page, alarms_dialog(app)].into();
-    }
-    // With no document open the landing page already *is* the full reference,
-    // so the overlay would only cover an identical list with a dimmer copy.
-    if app.shortcuts_open && app.state.document().is_some() {
-        page = stack![page, shortcuts_overlay(app)].into();
     }
     if app.about_open {
         page = stack![page, about_overlay()].into();
@@ -360,7 +362,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
     // Reader or Presenter layout: opening a document starts in the Reader
     // unless that exact file carries an explicit remembered choice.
     if app.state.document().is_none() {
-        page = landing_page(app);
+        page = shortcut_reference_page(app, false);
     }
 
     if app.menu_open {
@@ -1177,22 +1179,25 @@ fn menu(app: &App) -> Element<'_, Message> {
 
 fn shortcut_hint<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
     let (primary, alternate) = app.action_shortcut_parts(action);
-    let mut hint = Row::new().spacing(gap::S).align_y(Alignment::Center);
-    if !primary.is_empty() {
-        hint = hint.push(
-            container(text(primary.join(" · ")).size(type_scale::LABEL))
-                .padding(iced::Padding::from([gap::XS, gap::S]))
-                .style(theme::ambient::keycap),
-        );
+    let mut hint = Row::new().spacing(2.0).align_y(Alignment::Center);
+    // Every binding is a key in its own right. Standard bindings stay first,
+    // but Vim/Zathura alternatives have the same visual weight instead of
+    // being demoted to parenthetical prose.
+    for key in shortcut_labels(primary, alternate) {
+        hint = hint.push(shortcut_keycap(key));
     }
-    if !alternate.is_empty() {
-        hint = hint.push(
-            text(format!("({})", alternate.join(" · ")))
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        );
-    }
-    hint.into()
+    hint.wrap().into()
+}
+
+fn shortcut_labels(primary: Vec<String>, alternate: Vec<String>) -> Vec<String> {
+    primary.into_iter().chain(alternate).collect()
+}
+
+fn shortcut_keycap(label: String) -> Element<'static, Message> {
+    container(text(label).size(type_scale::CAPTION))
+        .padding(iced::Padding::from([2.0, gap::XS]))
+        .style(theme::ambient::keycap)
+        .into()
 }
 
 /// The fullscreen menu item names the state pressing it will enter.
@@ -1214,14 +1219,23 @@ fn fullscreen_action_label(
 }
 
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
-    Row::new()
-        .spacing(gap::M)
-        .align_y(Alignment::Center)
-        .push(text(action.label()).size(type_scale::BODY))
-        .push(space::horizontal())
-        .push(shortcut_hint(app, action))
-        .wrap()
-        .into()
+    column![
+        container(
+            row![
+                container(text(action.label()).size(type_scale::LABEL))
+                    .width(Length::FillPortion(2)),
+                container(shortcut_hint(app, action))
+                    .width(Length::FillPortion(3))
+                    .align_x(Alignment::End),
+            ]
+            .spacing(gap::S)
+            .align_y(Alignment::Center),
+        )
+        .padding(iced::Padding::from([2.0, gap::S])),
+        table_rule(),
+    ]
+    .spacing(0)
+    .into()
 }
 
 fn shortcut_group<'a>(
@@ -1229,177 +1243,149 @@ fn shortcut_group<'a>(
     title: &'static str,
     actions: &'static [Action],
 ) -> Element<'a, Message> {
-    let mut content = Column::new().spacing(gap::S).push(
-        text(title)
-            .size(type_scale::HEADING)
-            .color(theme::ambient::text()),
+    let mut content = Column::new().spacing(0).push(
+        container(
+            text(title)
+                .size(type_scale::LABEL)
+                .color(theme::ambient::accent()),
+        )
+        .width(Length::Fill)
+        .padding(iced::Padding::from([gap::XS, gap::S]))
+        .style(theme::ambient::empty_cell),
     );
     for action in actions {
         content = content.push(shortcut_entry(app, *action));
     }
-    container(content)
+    content.into()
+}
+
+fn table_rule() -> Element<'static, Message> {
+    container(space::vertical())
         .width(Length::Fill)
-        .padding(gap::S)
+        .height(Length::Fixed(1.0))
+        .style(theme::ambient::divider(false))
         .into()
 }
 
-/// One keymap group in its own card, so each block of keys reads as a
-/// self-contained unit rather than as one undifferentiated list.
-fn shortcut_card<'a>(
-    app: &'a App,
-    title: &'static str,
-    actions: &'static [Action],
-) -> Element<'a, Message> {
-    container(shortcut_group(app, title, actions))
-        .width(Length::Fill)
-        .padding(gap::M)
-        .style(theme::ambient::dialog)
-        .into()
+const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5, 6];
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 2, 4];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[3, 5, 6];
+
+fn split_shortcut_tables(width: f32) -> bool {
+    width >= 1_100.0
 }
 
-/// A mode-neutral welcome surface. Opening a new document from here starts in
-/// the Reader. It carries the complete keymap: with no document open there is
-/// nothing to read behind an overlay, so the reference is the page rather
-/// than a layer above it.
-fn landing_page(app: &App) -> Element<'_, Message> {
+fn shortcut_table<'a>(app: &'a App, groups: &[usize]) -> Element<'a, Message> {
     use crate::settings::keys::SHORTCUT_GROUPS;
 
+    let heading = container(
+        row![
+            container(text("Command").size(type_scale::CAPTION)).width(Length::FillPortion(2)),
+            container(text("Keys").size(type_scale::CAPTION))
+                .width(Length::FillPortion(3))
+                .align_x(Alignment::End),
+        ]
+        .spacing(gap::S),
+    )
+    .padding(iced::Padding::from([gap::XS, gap::S]));
+    let mut table = Column::new().spacing(0).push(heading).push(table_rule());
+    for index in groups {
+        let group = SHORTCUT_GROUPS[*index];
+        table = table.push(shortcut_group(app, group.title, group.actions));
+    }
+    container(table)
+        .width(Length::Fill)
+        .style(theme::ambient::surface)
+        .into()
+}
+
+/// The one mode-neutral welcome and shortcut-reference surface.
+///
+/// Opening a new document from here starts in the Reader. If a document is
+/// already open, `can_go_back` exposes the document again without making a
+/// second, subtly different help layout.
+fn shortcut_reference_page(app: &App, can_go_back: bool) -> Element<'_, Message> {
     let guide = responsive(move |size| {
-        let column_for = |indices: &[usize]| {
-            let mut column = Column::new().spacing(gap::L);
-            for index in indices {
-                let group = SHORTCUT_GROUPS[*index];
-                column = column.push(shortcut_card(app, group.title, group.actions));
-            }
-            column.width(Length::Fill)
-        };
-        if size.width < 620.0 {
-            column_for(&[0, 1, 2, 3, 4, 5, 6]).into()
-        } else if size.width < 1000.0 {
-            row![column_for(&[0, 2, 4, 5]), column_for(&[1, 3, 6])]
-                .spacing(gap::L)
-                .into()
-        } else {
+        if split_shortcut_tables(size.width) {
             row![
-                column_for(&[0, 1]),
-                column_for(&[2, 3]),
-                column_for(&[4, 5, 6]),
+                shortcut_table(app, SHORTCUT_TABLE_LEFT),
+                shortcut_table(app, SHORTCUT_TABLE_RIGHT),
             ]
             .spacing(gap::L)
+            .align_y(Alignment::Start)
             .into()
+        } else {
+            shortcut_table(app, SHORTCUT_TABLE_ALL)
         }
     });
 
-    let website = button(
-        text("vincentarelbundock.github.io/pulpit  ↗")
-            .size(type_scale::BODY)
+    let brand = column![
+        text("Pulpit").size(type_scale::TITLE),
+        text("Read a PDF or present it on another screen.")
+            .size(type_scale::LABEL)
+            .color(theme::ambient::muted()),
+    ]
+    .spacing(2.0);
+    let documentation = button(
+        text("Documentation  ↗")
+            .size(type_scale::LABEL)
             .color(theme::ambient::accent()),
     )
     .style(theme::ambient::tool_button)
     .on_press(Message::OpenDocumentation);
+    let open = button(
+        row![
+            text("Open PDF").size(type_scale::BODY),
+            shortcut_hint(app, Action::OpenDocument),
+        ]
+        .spacing(gap::S)
+        .align_y(Alignment::Center),
+    )
+    .padding(iced::Padding::from([gap::S, gap::L]))
+    .style(theme::ambient::forward_button)
+    .on_press(Message::OpenDialog);
 
-    let hero = column![
-        text("Pulpit").size(type_scale::TITLE),
-        text("A calm place to read a PDF or present it on another screen.")
-            .size(type_scale::BODY)
-            .color(theme::ambient::muted()),
-        website,
-        button(text("Open a PDF    Ctrl+O").size(type_scale::BODY))
-            .padding(iced::Padding::from([gap::M, gap::XL]))
-            .style(theme::ambient::forward_button)
-            .on_press(Message::OpenDialog),
-        text(
-            "Acrobat / standard keys are shown first; Vim/Zathura alternatives are in parentheses."
+    let mut header = Row::new()
+        .spacing(gap::M)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+    if can_go_back {
+        let back = button(
+            row![
+                theme::icon::icon(theme::Icon::ArrowLeft, type_scale::BODY),
+                text("Back").size(type_scale::BODY),
+                shortcut_keycap("Esc".into()),
+            ]
+            .spacing(gap::S)
+            .align_y(Alignment::Center),
         )
-        .size(type_scale::LABEL)
-        .color(theme::ambient::muted()),
-    ]
-    .spacing(gap::M)
-    .align_x(Alignment::Center);
+        .style(theme::ambient::tool_button)
+        .on_press(Message::CloseShortcuts);
+        header = header.push(back);
+    }
+    header = header
+        .push(brand)
+        .push(documentation)
+        .push(space::horizontal())
+        .push(open);
+    let content = column![header.wrap(), guide]
+        .spacing(gap::M)
+        .width(Length::Fill);
 
-    let content = column![hero, guide]
-        .spacing(gap::XL)
-        .align_x(Alignment::Center);
     // The centring has to happen *inside* the scrollable. A vertical
     // scrollable hands its child a full-width, infinite-height box, so the
     // outer container has nothing narrower than itself to centre and the
     // capped-width column just sits against the left edge.
-    let centred = container(content)
+    let compact = container(content).width(Length::Fill).max_width(1_600.0);
+    let centred = container(compact)
         .width(Length::Fill)
         .align_x(Alignment::Center)
-        .padding(gap::XL);
+        .padding(gap::L);
     container(scrollable(centred).style(theme::ambient::scrollbar))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(theme::ambient::surface)
         .into()
-}
-
-/// The complete fixed keymap, grouped by the work each command performs.
-fn shortcuts_overlay(app: &App) -> Element<'_, Message> {
-    use crate::settings::keys::SHORTCUT_GROUPS;
-
-    let groups = responsive(move |size| {
-        let column_for = |indices: &[usize]| {
-            let mut column = Column::new().spacing(gap::M);
-            for index in indices {
-                let group = SHORTCUT_GROUPS[*index];
-                column = column.push(shortcut_card(app, group.title, group.actions));
-            }
-            column.width(Length::Fill)
-        };
-        if size.width < 620.0 {
-            column_for(&[0, 1, 2, 3, 4, 5, 6]).into()
-        } else if size.width < 920.0 {
-            row![column_for(&[0, 2, 4, 5]), column_for(&[1, 3, 6])]
-                .spacing(gap::L)
-                .into()
-        } else {
-            row![
-                column_for(&[0, 1]),
-                column_for(&[2, 3]),
-                column_for(&[4, 5, 6]),
-            ]
-            .spacing(gap::L)
-            .into()
-        }
-    });
-    let header = Row::new()
-        .align_y(Alignment::Center)
-        .push(text("Keyboard shortcuts").size(type_scale::TITLE))
-        .push(space::horizontal())
-        .push(
-            button(text("Close"))
-                .style(theme::ambient::tool_button)
-                .on_press(Message::CloseShortcuts),
-        );
-    let content = Column::new()
-        .spacing(gap::M)
-        .push(header)
-        .push(
-            text("Acrobat / standard keys are shown first; Vim/Zathura alternatives are in parentheses.")
-                .size(type_scale::BODY)
-                .color(theme::ambient::muted()),
-        )
-        .push(groups);
-    let card = container(content)
-        .padding(gap::L)
-        .max_width(1180.0)
-        .style(theme::ambient::dialog);
-    let layer = container(scrollable(card).style(theme::ambient::scrollbar))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .padding(gap::L);
-    let backdrop = mouse_area(
-        container(space::vertical())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::ambient::scrim),
-    )
-    .on_press(Message::CloseShortcuts);
-    stack![backdrop, layer].into()
 }
 
 fn about_overlay() -> Element<'static, Message> {
@@ -3612,6 +3598,31 @@ fn local_offset_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_shortcut_remains_its_own_keycap_and_alternates_stand_beside_the_others() {
+        let labels = shortcut_labels(
+            vec!["\u{2192}".into(), "PgDn".into()],
+            vec!["J".into(), "Space".into()],
+        );
+        assert_eq!(labels, ["\u{2192}", "PgDn", "J", "Space"]);
+    }
+
+    #[test]
+    fn the_reference_splits_into_two_balanced_tables_only_when_they_have_room() {
+        use crate::settings::keys::SHORTCUT_GROUPS;
+
+        assert!(split_shortcut_tables(1_200.0));
+        assert!(!split_shortcut_tables(1_000.0));
+
+        let actions = |groups: &[usize]| {
+            groups
+                .iter()
+                .map(|index| SHORTCUT_GROUPS[*index].actions.len())
+                .sum::<usize>()
+        };
+        assert_eq!(actions(SHORTCUT_TABLE_LEFT), actions(SHORTCUT_TABLE_RIGHT));
+    }
 
     #[test]
     fn fullscreen_menu_item_names_the_action_not_the_current_state() {

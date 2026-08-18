@@ -156,11 +156,15 @@ fn scrubber<Message: Clone + 'static>(
                 .width(Length::Fill)
                 .center_y(Length::Fill),
             button(
-                text(label.clone())
-                    .size(size)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .color(theme::ambient::text()),
+                container(
+                    text(label.clone())
+                        .size(size)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .color(theme::ambient::text()),
+                )
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .center_y(Length::Fill),
             )
             .width(Length::Fixed(reading_width))
             .height(Length::Fill)

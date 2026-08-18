@@ -59,19 +59,20 @@ fn sweep_stale_regions_in_directory(base: &Path, current_pid: u32) {
             continue;
         }
 
-        // On Linux, check if the process is still running.
+        // On Linux, check if the process is still running, then remove the
+        // stale file. Other platforms skip the entry above because they
+        // cannot reliably establish that the owning process is gone.
         #[cfg(target_os = "linux")]
         {
             if is_process_alive(pid) {
                 continue;
             }
-        }
 
-        // The pid is not running (or we're on a platform where we can't check).
-        // Try to remove the file. Silently ignore errors: a failed removal
-        // must never prevent a region from being created, and errors here
-        // (permission denied, file already gone, etc.) are not actionable.
-        let _ = std::fs::remove_file(&path);
+            // Silently ignore errors: a failed removal must never prevent a
+            // region from being created, and errors here (permission denied,
+            // file already gone, etc.) are not actionable.
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
