@@ -5224,6 +5224,12 @@ impl App {
         self.annotations.clear();
         self.warned_marks_are_not_kept = false;
         self.reader.closed();
+        // The previous document's rail is not this document's. A remembered
+        // position for the new file, if any, is consulted later and can
+        // reopen either pane; until then both start closed, which is also
+        // the declared answer for a file with no record at all.
+        self.set_outline_collapsed(true, false);
+        self.search_workspace = false;
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -7726,12 +7732,14 @@ impl App {
                         return self.scroll_surface_to_reader();
                     }
                 }
+                // Session and animation move together through
+                // `set_outline_collapsed`, the same pairing the mount gate
+                // above uses to restore a remembered sidebar — the point of
+                // sharing it is that the two cannot desync again the way
+                // `open_document` once let them.
                 if let ReadCommand::SetOutlineCollapsed(collapsed) = &command {
-                    self.outline_animation = if self.motion.is_reduced() {
-                        iced::Animation::new(*collapsed).quick()
-                    } else {
-                        self.outline_animation.clone().go(*collapsed, self.now)
-                    };
+                    self.set_outline_collapsed(*collapsed, true);
+                    return Task::none();
                 }
                 // The reader's jumps: a page chosen in the overview, typed
                 // into the page box, or arrived at by following a link. A
@@ -8033,6 +8041,11 @@ impl App {
             page: page.get(),
             zoom: stored_zoom(zoom),
             fraction,
+            // Inverted: the record speaks of the rail in terms a reader
+            // would use ("open"), the session in terms the widget tree
+            // needs ("collapsed").
+            outline_open: !self.reader.controls().outline_collapsed,
+            search_open: self.search_workspace,
         };
         // Nothing to write when nothing moved, which is most ticks: the
         // settings are only dirtied by a position that is actually new.
@@ -8062,6 +8075,27 @@ impl App {
             .position_for(self.document_hash.as_deref(), self.documents.path());
     }
 
+    /// Set the outline rail's collapsed state on the reader session and on
+    /// the screen from one place, so the two cannot disagree the way
+    /// `outline_animation` and the session's own `outline_collapsed` used
+    /// to after a document open reset one but not the other.
+    ///
+    /// `animate` is false for a restore: the record is putting the reader
+    /// back where it was, not answering a click, so the rail should simply
+    /// be there on arrival rather than sliding open in front of it — the
+    /// same immediate form the reduced-motion setting already uses.
+    fn set_outline_collapsed(&mut self, collapsed: bool, animate: bool) {
+        self.reader
+            .apply(&crate::widgets::event::ReadCommand::SetOutlineCollapsed(
+                collapsed,
+            ));
+        self.outline_animation = if animate && !self.motion.is_reduced() {
+            self.outline_animation.clone().go(collapsed, self.now)
+        } else {
+            iced::Animation::new(collapsed).quick()
+        };
+    }
+
     /// Apply the held position, now that the surface has reported a window.
     ///
     /// Returns whether anything moved, so the caller knows whether the
@@ -8070,17 +8104,11 @@ impl App {
         let Some(position) = self.pending_position.take() else {
             return false;
         };
-        use crate::settings::RestoredPosition;
-        let (page, zoom, fraction) = match position {
-            RestoredPosition::Exact {
-                page,
-                zoom,
-                fraction,
-            } => (page, Some(reader_zoom(zoom)), fraction),
-            RestoredPosition::PageOnly { page } => (page, None, 0.0),
-        };
+        let (page, zoom, fraction, outline_open, search_open) = restored_fields(position);
         self.reader
             .restore_position(pulpit_core::page::PageIndex(page), zoom, fraction);
+        self.set_outline_collapsed(!outline_open, false);
+        self.search_workspace = search_open;
         true
     }
 
@@ -13559,6 +13587,83 @@ fn reader_zoom(zoom: crate::settings::StoredZoom) -> crate::widgets::document::m
             crate::widgets::document::model::MAX_ZOOM,
         )),
         StoredZoom::Fixed(_) => Zoom::default(),
+    }
+}
+
+/// What a restored record hands `apply_pending_position`: the page, a zoom
+/// (`None` for a page-only match — the document may not be the same shape,
+/// so no zoom is honestly still correct), the scroll fraction, and the two
+/// sidebar flags.
+///
+/// The sidebar flags come through unconditionally, on both arms, unlike the
+/// zoom and the fraction: whether the rail was open is a UI choice, not a
+/// coordinate into text that may have moved, so a page-only match still
+/// honours it.
+fn restored_fields(
+    position: crate::settings::RestoredPosition,
+) -> (
+    usize,
+    Option<crate::widgets::document::model::Zoom>,
+    f32,
+    bool,
+    bool,
+) {
+    use crate::settings::RestoredPosition;
+    match position {
+        RestoredPosition::Exact {
+            page,
+            zoom,
+            fraction,
+            outline_open,
+            search_open,
+        } => (
+            page,
+            Some(reader_zoom(zoom)),
+            fraction,
+            outline_open,
+            search_open,
+        ),
+        RestoredPosition::PageOnly {
+            page,
+            outline_open,
+            search_open,
+        } => (page, None, 0.0, outline_open, search_open),
+    }
+}
+
+#[cfg(test)]
+mod restored_fields_tests {
+    use super::restored_fields;
+    use crate::settings::{RestoredPosition, StoredZoom};
+    use crate::widgets::document::model::Zoom;
+
+    #[test]
+    fn an_exact_match_carries_the_zoom_and_fraction_and_the_sidebar() {
+        assert_eq!(
+            restored_fields(RestoredPosition::Exact {
+                page: 8,
+                zoom: StoredZoom::FitPage,
+                fraction: 0.5,
+                outline_open: true,
+                search_open: true,
+            }),
+            (8, Some(Zoom::FitPage), 0.5, true, true)
+        );
+    }
+
+    #[test]
+    fn a_page_only_match_drops_the_zoom_and_fraction_but_keeps_the_sidebar() {
+        // A page-only match is what a recompiled document gets: the text
+        // under the fraction moved, and the zoom was chosen for a document
+        // that may not be this shape, but the rail is neither of those.
+        assert_eq!(
+            restored_fields(RestoredPosition::PageOnly {
+                page: 8,
+                outline_open: true,
+                search_open: false,
+            }),
+            (8, None, 0.0, true, false)
+        );
     }
 }
 

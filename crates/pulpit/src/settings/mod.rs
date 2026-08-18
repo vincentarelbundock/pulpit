@@ -367,6 +367,19 @@ pub struct ReadingPosition {
     /// about a particular zoom in a particular window, and neither is
     /// necessarily the one the document is reopened in.
     pub fraction: f32,
+    /// Whether the outline rail was open.
+    ///
+    /// Lives beside the page rather than in a global preference because it
+    /// is not one: it is part of where the reader was in *this* document,
+    /// same as the page and the scroll fraction are, and it is exactly as
+    /// meaningless as those are for a document nobody has opened yet.
+    /// `serde(default)` reads an older record — written before the sidebar
+    /// had a memory — as closed, which is the wanted answer for it.
+    #[serde(default)]
+    pub outline_open: bool,
+    /// Whether the search pane was open. Same reasoning as `outline_open`.
+    #[serde(default)]
+    pub search_open: bool,
 }
 
 /// The reader's zoom, in the settings schema's own vocabulary.
@@ -394,6 +407,8 @@ pub enum RestoredPosition {
         page: usize,
         zoom: StoredZoom,
         fraction: f32,
+        outline_open: bool,
+        search_open: bool,
     },
     /// The same path, different bytes: the document was rebuilt or edited
     /// under us. The page number is the most that can honestly survive that —
@@ -402,7 +417,16 @@ pub enum RestoredPosition {
     /// has moved is a precision the record no longer has. The zoom is dropped
     /// with it rather than applied to a document that may not be the same
     /// shape.
-    PageOnly { page: usize },
+    ///
+    /// The sidebar state survives this drop, unlike the fraction and the
+    /// zoom: whether the rail was open is a UI choice, not a coordinate into
+    /// the text, so it stays meaningful even when the bytes underneath moved
+    /// and only the page number could honestly come with it.
+    PageOnly {
+        page: usize,
+        outline_open: bool,
+        search_open: bool,
+    },
 }
 
 /// How many documents remember a position. The same bound and the same
@@ -430,13 +454,19 @@ impl ReadingSettings {
                     page: entry.page,
                     zoom: entry.zoom,
                     fraction: entry.fraction,
+                    outline_open: entry.outline_open,
+                    search_open: entry.search_open,
                 });
             }
         }
         self.positions
             .iter()
             .find(|entry| entry.path == path)
-            .map(|entry| RestoredPosition::PageOnly { page: entry.page })
+            .map(|entry| RestoredPosition::PageOnly {
+                page: entry.page,
+                outline_open: entry.outline_open,
+                search_open: entry.search_open,
+            })
     }
 
     /// Record where a document was left, most recent first.
@@ -898,6 +928,8 @@ mod tests {
             page,
             zoom: StoredZoom::FitPage,
             fraction: 0.5,
+            outline_open: false,
+            search_open: false,
         }
     }
 
@@ -912,6 +944,28 @@ mod tests {
                 page: 8,
                 zoom: StoredZoom::FitPage,
                 fraction: 0.5,
+                outline_open: false,
+                search_open: false,
+            })
+        );
+    }
+
+    #[test]
+    fn the_sidebar_state_comes_back_with_the_rest_of_an_exact_match() {
+        let mut reading = ReadingSettings::default();
+        let mut open = position(Some("abc"), "/papers/draft.pdf", 8);
+        open.outline_open = true;
+        open.search_open = true;
+        reading.remember_position(open);
+
+        assert_eq!(
+            reading.position_for(Some("abc"), std::path::Path::new("/papers/draft.pdf")),
+            Some(RestoredPosition::Exact {
+                page: 8,
+                zoom: StoredZoom::FitPage,
+                fraction: 0.5,
+                outline_open: true,
+                search_open: true,
             })
         );
     }
@@ -940,7 +994,31 @@ mod tests {
         // has moved.
         assert_eq!(
             reading.position_for(Some("def"), std::path::Path::new("/papers/draft.pdf")),
-            Some(RestoredPosition::PageOnly { page: 8 })
+            Some(RestoredPosition::PageOnly {
+                page: 8,
+                outline_open: false,
+                search_open: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_recompiled_document_keeps_the_sidebar_unlike_the_fraction_and_zoom() {
+        let mut reading = ReadingSettings::default();
+        let mut open = position(Some("abc"), "/papers/draft.pdf", 8);
+        open.outline_open = true;
+        open.search_open = true;
+        reading.remember_position(open);
+
+        // The rail is a UI choice, not a coordinate into text that may have
+        // moved, so it comes back even though the fraction and zoom do not.
+        assert_eq!(
+            reading.position_for(Some("def"), std::path::Path::new("/papers/draft.pdf")),
+            Some(RestoredPosition::PageOnly {
+                page: 8,
+                outline_open: true,
+                search_open: true,
+            })
         );
     }
 
@@ -953,7 +1031,11 @@ mod tests {
         // the path is still a path, and still the weaker answer.
         assert_eq!(
             reading.position_for(None, std::path::Path::new("/papers/draft.pdf")),
-            Some(RestoredPosition::PageOnly { page: 8 })
+            Some(RestoredPosition::PageOnly {
+                page: 8,
+                outline_open: false,
+                search_open: false,
+            })
         );
         assert_eq!(
             reading.position_for(None, std::path::Path::new("/papers/other.pdf")),
@@ -1016,6 +1098,42 @@ mod tests {
         let read: Settings = toml::from_str("schema = 2\n").expect("settings parse");
         assert_eq!(read.reading, ReadingSettings::default());
         assert!(read.reading.remember);
+    }
+
+    #[test]
+    fn a_position_recorded_before_the_sidebar_had_memory_reads_as_closed() {
+        // A record written by a pulpit that predates `outline_open` and
+        // `search_open` has neither key in its TOML table; `serde(default)`
+        // reads that as `false` for both, which is exactly the wanted
+        // "never seen a sidebar preference for this file" answer.
+        let toml = r#"
+            schema = 2
+
+            [[reading.positions]]
+            hash = "abc"
+            path = "/papers/draft.pdf"
+            page = 8
+            zoom = "fit-page"
+            fraction = 0.5
+        "#;
+        let read: Settings = toml::from_str(toml).expect("settings parse");
+        let entry = &read.reading.positions[0];
+        assert!(!entry.outline_open);
+        assert!(!entry.search_open);
+    }
+
+    #[test]
+    fn an_open_sidebar_survives_a_round_trip_through_the_settings_file() {
+        let mut settings = Settings::default();
+        let mut open = position(Some("abc"), "/papers/draft.pdf", 8);
+        open.outline_open = true;
+        open.search_open = true;
+        settings.reading.remember_position(open);
+        let written = toml::to_string_pretty(&settings).expect("settings serialise");
+        let read: Settings = toml::from_str(&written).expect("settings parse");
+        assert_eq!(read.reading, settings.reading);
+        assert!(read.reading.positions[0].outline_open);
+        assert!(read.reading.positions[0].search_open);
     }
 
     #[test]
