@@ -6,46 +6,6 @@
 //! should be testable without a window.
 
 use pulpit_core::search::{Hit, SearchProblem, SearchState};
-use std::ops::Range;
-
-/// One result card per page, whatever number of occurrences the page carries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageGroup {
-    pub page: pulpit_core::page::PageIndex,
-    pub hit_range: Range<usize>,
-}
-
-/// Fixed-height cards make the result stream virtualizable without measuring
-/// hundreds of off-screen snippets on every view pass.
-pub const RESULT_ROW_HEIGHT: f32 = 82.0;
-const RESULT_OVERSCAN_ROWS: usize = 2;
-
-/// Collapse consecutive, document-ordered hits into one card per page.
-pub fn page_groups(hits: &[Hit]) -> Vec<PageGroup> {
-    let mut groups: Vec<PageGroup> = Vec::new();
-    for (index, hit) in hits.iter().enumerate() {
-        match groups.last_mut() {
-            Some(group) if group.page == hit.page => group.hit_range.end = index + 1,
-            _ => groups.push(PageGroup {
-                page: hit.page,
-                hit_range: index..index + 1,
-            }),
-        }
-    }
-    groups
-}
-
-/// Which result cards to build for one viewport.
-pub fn visible_group_range(count: usize, scroll: f32, viewport: f32) -> Range<usize> {
-    if count == 0 || viewport <= 0.0 {
-        return 0..0;
-    }
-    let first_visible = (scroll.max(0.0) / RESULT_ROW_HEIGHT).floor() as usize;
-    let first = first_visible.saturating_sub(RESULT_OVERSCAN_ROWS);
-    let visible = (viewport / RESULT_ROW_HEIGHT).ceil() as usize;
-    let last = (first_visible + visible + RESULT_OVERSCAN_ROWS + 1).min(count);
-    first.min(last)..last
-}
 
 /// The line under the search box.
 pub fn summary(state: &SearchState) -> String {
@@ -170,31 +130,6 @@ mod tests {
         assert_eq!(
             (before.as_str(), matched.as_str(), after.as_str()),
             ("a ", "needle", " here")
-        );
-    }
-
-    #[test]
-    fn hits_are_grouped_once_per_page_for_the_workspace() {
-        let hits = vec![hit(0, 0), hit(0, 1), hit(4, 0), hit(4, 1), hit(4, 2)];
-        let groups = page_groups(&hits);
-
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].page, PageIndex(0));
-        assert_eq!(groups[0].hit_range, 0..2);
-        assert_eq!(groups[1].page, PageIndex(4));
-        assert_eq!(groups[1].hit_range, 2..5);
-    }
-
-    #[test]
-    fn a_thousand_page_result_stream_builds_only_the_visible_window() {
-        let visible = visible_group_range(1_000, 200.0 * RESULT_ROW_HEIGHT, 600.0);
-
-        assert!(visible.start > 0);
-        assert!(visible.end < 1_000);
-        let viewport_rows = (600.0 / RESULT_ROW_HEIGHT).ceil() as usize;
-        assert!(
-            visible.len() <= viewport_rows + RESULT_OVERSCAN_ROWS * 2 + 1,
-            "only visible rows plus overscan are built"
         );
     }
 }

@@ -20,6 +20,7 @@ pub mod event;
 pub mod media;
 pub mod navigation;
 pub mod notes;
+pub mod panel;
 pub mod patch;
 pub mod plan;
 pub mod registry;

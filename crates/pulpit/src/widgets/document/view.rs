@@ -23,6 +23,9 @@ use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
 use super::model::{OutlineView, PageSpread, Zoom};
 
+/// One outline row plus the two-point gap below it.
+pub const OUTLINE_ROW_HEIGHT: f32 = 28.0;
+
 /// Hand one reader widget its part of the document.
 pub fn view<'ctx, 'a, Message: Clone + 'static>(
     ctx: &WidgetViewContext<'ctx, 'a, Message>,
@@ -103,7 +106,7 @@ fn page_surface<'a, Message: Clone + 'static>(
     }
 
     let surface = PageSurface::from(reader);
-    responsive(move |viewport| {
+    let page: Element<'a, Message> = responsive(move |viewport| {
         let sheets = surface.sheets(compose, mode, on_event);
         let scroller = scrollable(
             container(sheets)
@@ -155,7 +158,32 @@ fn page_surface<'a, Message: Clone + 'static>(
             })
             .into()
     })
-    .into()
+    .into();
+    if !mode.interactive()
+        || !reader.document_keyboard_focus
+        || reader.focused_widget.is_some()
+        || reader.composing.is_some()
+    {
+        return page;
+    }
+    crate::widgets::panel::on_key(page, move |key, modifiers| {
+        use iced::keyboard::{key::Named, Key};
+        if modifiers.control() || modifiers.alt() || modifiers.logo() {
+            return None;
+        }
+        match key {
+            Key::Named(Named::ArrowDown) => Some(on_event(WidgetEvent::Read(
+                ReadCommand::ScrollByPoints(48.0),
+            ))),
+            Key::Named(Named::ArrowUp) => Some(on_event(WidgetEvent::Read(
+                ReadCommand::ScrollByPoints(-48.0),
+            ))),
+            Key::Named(Named::Tab) => Some(on_event(WidgetEvent::Panel(
+                crate::widgets::event::PanelCommand::FocusSidebar,
+            ))),
+            _ => None,
+        }
+    })
 }
 
 /// The owned part of a page surface.
@@ -1579,6 +1607,8 @@ fn outline<Message: Clone + 'static>(
     mode: Mode,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
+    use crate::widgets::document::model::OutlineItemId;
+
     let live = mode.interactive() && reader.open;
     let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
 
@@ -1635,174 +1665,213 @@ fn outline<Message: Clone + 'static>(
             nothing("This document has no bookmarks.")
         }
         OutlineView::Bookmarks => {
-            let mut list = column![].spacing(2.0);
-            for (index, entry) in reader.outline.iter().enumerate() {
-                let indent = (entry.depth.min(6) as f32) * 12.0;
-                let label = text(entry.title.clone())
-                    .size(theme::type_scale::LABEL)
-                    .width(Length::Fill);
-                let focused = reader.outline_focus == Some(index);
-                let marker: Element<'static, Message> = if focused {
-                    container(space::vertical().width(3.0).height(Length::Fill))
-                        .style(theme::ambient::accent_rule)
+            let entries = reader.outline.to_vec();
+            let focus = reader.outline_focus.cloned();
+            virtual_outline(
+                entries.len(),
+                reader.outline_scroll,
+                reader.outline_viewport.clone(),
+                on_event,
+                move |index| {
+                    let entry = &entries[index];
+                    let id = OutlineItemId::Bookmark {
+                        source_ordinal: entry.source_ordinal,
+                    };
+                    let indent = (entry.depth.min(6) as f32) * 12.0;
+                    let label = text(entry.title.clone())
+                        .size(theme::type_scale::LABEL)
+                        .width(Length::Fill);
+                    let focused = focus.as_ref() == Some(&id);
+                    let marker: Element<'static, Message> = if focused {
+                        container(space::vertical().width(3.0).height(Length::Fill))
+                            .style(theme::ambient::accent_rule)
+                            .into()
+                    } else {
+                        space::horizontal().width(3.0).into()
+                    };
+                    let control = button(
+                        row![
+                            marker,
+                            space::horizontal().width(Length::Fixed(indent)),
+                            label
+                        ]
+                        .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
+                    .padding(Padding::from([3.0, 6.0]))
+                    .style(if focused {
+                        theme::ambient::focus_button
+                    } else {
+                        theme::ambient::tool_button
+                    });
+                    let control = if live {
+                        control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
+                    } else {
+                        control
+                    };
+                    container(control)
+                        .id(outline_item_id(&id))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT))
                         .into()
-                } else {
-                    space::horizontal().width(3.0).into()
-                };
-                let control = button(
-                    row![
-                        marker,
-                        space::horizontal().width(Length::Fixed(indent)),
-                        label
-                    ]
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding(Padding::from([3.0, 6.0]))
-                .style(if focused {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
-                list = list.push(if live {
-                    control.on_press(send(ReadCommand::GoToPage(entry.page)))
-                } else {
-                    control
-                });
-            }
-            crate::widgets::scroll::vertical(list)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+                },
+            )
         }
         OutlineView::Fields if reader.fields.is_empty() => {
             nothing("This document has no form fields.")
         }
         OutlineView::Fields => {
-            let mut list = column![].spacing(2.0);
-            for (index, field) in reader.fields.iter().enumerate() {
-                // A choice field with several selections has no single value,
-                // so "filled" asks both questions rather than only the first.
-                let filled = !field.value.is_empty() || !field.selected.is_empty();
-                let wanted = field.required && !filled;
-                // The name as the file gives it. A field with no name is a
-                // field nothing can say anything about, and it is still listed:
-                // it is on the page either way.
-                let name = if field.name.is_empty() {
-                    "(unnamed)".to_string()
-                } else {
-                    field.name.clone()
-                };
-                let label = text(name)
+            let fields = reader.fields.to_vec();
+            let focus = reader.outline_focus.cloned();
+            virtual_outline(
+                fields.len(),
+                reader.outline_scroll,
+                reader.outline_viewport.clone(),
+                on_event,
+                move |index| {
+                    let field = &fields[index];
+                    let id = OutlineItemId::Field {
+                        name: field.name.clone(),
+                        source_ordinal: index,
+                    };
+                    // A choice field with several selections has no single value,
+                    // so "filled" asks both questions rather than only the first.
+                    let filled = !field.value.is_empty() || !field.selected.is_empty();
+                    let wanted = field.required && !filled;
+                    // The name as the file gives it. A field with no name is a
+                    // field nothing can say anything about, and it is still listed:
+                    // it is on the page either way.
+                    let name = if field.name.is_empty() {
+                        "(unnamed)".to_string()
+                    } else {
+                        field.name.clone()
+                    };
+                    let label = text(name)
+                        .size(theme::type_scale::LABEL)
+                        .width(Length::Fill)
+                        .color(if wanted {
+                            theme::ambient::alert()
+                        } else {
+                            theme::ambient::text()
+                        });
+                    // Two words at most, in the muted role: what kind of control
+                    // it is, and whether anything is in it. The status is said in
+                    // words rather than in a colour alone, because a colour is the
+                    // one thing a reader cannot be asked to decode.
+                    let kind = text(field.kind.label().to_string())
+                        .size(theme::type_scale::LABEL)
+                        .color(theme::ambient::muted());
+                    let status = text(
+                        if wanted {
+                            "required"
+                        } else if filled {
+                            "filled"
+                        } else {
+                            "empty"
+                        }
+                        .to_string(),
+                    )
                     .size(theme::type_scale::LABEL)
-                    .width(Length::Fill)
                     .color(if wanted {
                         theme::ambient::alert()
                     } else {
-                        theme::ambient::text()
-                    });
-                // Two words at most, in the muted role: what kind of control
-                // it is, and whether anything is in it. The status is said in
-                // words rather than in a colour alone, because a colour is the
-                // one thing a reader cannot be asked to decode.
-                let kind = text(field.kind.label().to_string())
-                    .size(theme::type_scale::LABEL)
-                    .color(theme::ambient::muted());
-                let status = text(
-                    if wanted {
-                        "required"
-                    } else if filled {
-                        "filled"
-                    } else {
-                        "empty"
-                    }
-                    .to_string(),
-                )
-                .size(theme::type_scale::LABEL)
-                .color(if wanted {
-                    theme::ambient::alert()
-                } else {
-                    theme::ambient::muted()
-                });
-                let focused = reader.outline_focus == Some(index);
-                let marker: Element<'static, Message> = if focused {
-                    container(space::vertical().width(3.0).height(Length::Fill))
-                        .style(theme::ambient::accent_rule)
-                        .into()
-                } else {
-                    space::horizontal().width(3.0).into()
-                };
-                let control = button(
-                    row![marker, label, kind, status]
-                        .spacing(theme::space::XS)
-                        .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding(Padding::from([3.0, 6.0]))
-                .style(if focused {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
-                // A field the producer placed nowhere has no page to go to, so
-                // the row says it exists and does not offer a jump it cannot
-                // make.
-                let target = field.widgets.first().map(|widget| widget.page);
-                list = list.push(match (live, target) {
-                    (true, Some(page)) => control.on_press(send(ReadCommand::GoToField {
-                        page,
-                        name: field.name.clone(),
-                    })),
-                    _ => control,
-                });
-            }
-            crate::widgets::scroll::vertical(list)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        }
-        OutlineView::Thumbnails => {
-            let mut list = column![].spacing(theme::space::XS);
-            for index in 0..reader.page_count {
-                let page = PageIndex(index);
-                let selected = page == reader.controls.page;
-                let label = text(format!("{page}"))
-                    .size(theme::type_scale::LABEL)
-                    .color(if selected {
-                        theme::ambient::accent()
-                    } else {
                         theme::ambient::muted()
                     });
-                let focused = reader.outline_focus == Some(index);
-                let marker: Element<'static, Message> = if focused {
-                    container(space::vertical().width(3.0).height(Length::Fill))
-                        .style(theme::ambient::accent_rule)
-                        .into()
-                } else {
-                    space::horizontal().width(3.0).into()
-                };
-                let control = button(row![marker, label].spacing(theme::space::XS))
+                    let focused = focus.as_ref() == Some(&id);
+                    let marker: Element<'static, Message> = if focused {
+                        container(space::vertical().width(3.0).height(Length::Fill))
+                            .style(theme::ambient::accent_rule)
+                            .into()
+                    } else {
+                        space::horizontal().width(3.0).into()
+                    };
+                    let control = button(
+                        row![marker, label, kind, status]
+                            .spacing(theme::space::XS)
+                            .align_y(Alignment::Center),
+                    )
                     .width(Length::Fill)
+                    .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
                     .padding(Padding::from([3.0, 6.0]))
-                    .style(if focused || selected {
-                        theme::ambient::selected_button
+                    .style(if focused {
+                        theme::ambient::focus_button
                     } else {
                         theme::ambient::tool_button
                     });
-                list = list.push(if live {
-                    control.on_press(send(ReadCommand::GoToPage(page)))
-                } else {
-                    control
-                });
-            }
-            crate::widgets::scroll::vertical(list)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+                    // A field the producer placed nowhere has no page to go to, so
+                    // the row says it exists and does not offer a jump it cannot
+                    // make.
+                    let target = field.widgets.first().map(|widget| widget.page);
+                    let control = match (live, target) {
+                        (true, Some(_)) => {
+                            control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
+                        }
+                        _ => control,
+                    };
+                    container(control)
+                        .id(outline_item_id(&id))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT))
+                        .into()
+                },
+            )
+        }
+        OutlineView::Thumbnails => {
+            let page_count = reader.page_count;
+            let selected_page = reader.controls.page;
+            let focus = reader.outline_focus.cloned();
+            virtual_outline(
+                page_count,
+                reader.outline_scroll,
+                reader.outline_viewport.clone(),
+                on_event,
+                move |index| {
+                    let page = PageIndex(index);
+                    let id = OutlineItemId::Page(page);
+                    let selected = page == selected_page;
+                    let label = text(format!("{page}"))
+                        .size(theme::type_scale::LABEL)
+                        .color(if selected {
+                            theme::ambient::accent()
+                        } else {
+                            theme::ambient::muted()
+                        });
+                    let focused = focus.as_ref() == Some(&id);
+                    let marker: Element<'static, Message> = if focused {
+                        container(space::vertical().width(3.0).height(Length::Fill))
+                            .style(theme::ambient::accent_rule)
+                            .into()
+                    } else {
+                        space::horizontal().width(3.0).into()
+                    };
+                    let control = button(row![marker, label].spacing(theme::space::XS))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
+                        .padding(Padding::from([3.0, 6.0]))
+                        .style(if focused {
+                            theme::ambient::focus_button
+                        } else if selected {
+                            theme::ambient::selected_button
+                        } else {
+                            theme::ambient::tool_button
+                        });
+                    let control = if live {
+                        control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
+                    } else {
+                        control
+                    };
+                    container(control)
+                        .id(outline_item_id(&id))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT))
+                        .into()
+                },
+            )
         }
     };
 
-    container(
+    let panel = container(
         column![header, body]
             .spacing(theme::space::XS)
             .width(Length::Fill)
@@ -1810,8 +1879,96 @@ fn outline<Message: Clone + 'static>(
     )
     .padding(theme::space::S)
     .width(Length::Fill)
-    .height(Length::Fill)
+    .height(Length::Fill);
+
+    let keyboard_focus = reader.outline_focus.is_some();
+    if !live {
+        return panel.into();
+    }
+    crate::widgets::panel::on_key(panel, move |key, modifiers| {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+
+        if modifiers.control() || modifiers.alt() || modifiers.logo() {
+            return None;
+        }
+        if !keyboard_focus {
+            return matches!(key, Key::Named(Named::Tab)).then(|| {
+                on_event(WidgetEvent::Panel(
+                    crate::widgets::event::PanelCommand::FocusSidebar,
+                ))
+            });
+        }
+        match key {
+            Key::Named(Named::ArrowUp) => Some(send(ReadCommand::MoveOutlineFocus(-1))),
+            Key::Named(Named::ArrowDown) => Some(send(ReadCommand::MoveOutlineFocus(1))),
+            Key::Named(Named::Enter) => Some(send(ReadCommand::ActivateFocusedOutlineItem)),
+            Key::Named(Named::Escape | Named::Tab) => Some(on_event(WidgetEvent::Panel(
+                crate::widgets::event::PanelCommand::FocusDocument,
+            ))),
+            _ => None,
+        }
+    })
+}
+
+/// Build only the fixed-height outline rows near the viewport while keeping
+/// the scrollbar's full extent.
+fn virtual_outline<Message: Clone + 'static>(
+    count: usize,
+    scroll: f32,
+    measured_viewport: std::rc::Rc<std::cell::Cell<f32>>,
+    on_event: fn(WidgetEvent) -> Message,
+    row_at: impl Fn(usize) -> Element<'static, Message> + 'static,
+) -> Element<'static, Message> {
+    responsive(move |size| {
+        measured_viewport.set(size.height);
+        let window =
+            crate::widgets::scroll::virtual_window(count, OUTLINE_ROW_HEIGHT, scroll, size.height);
+        let mut rows = Column::new();
+        if window.before > 0.0 {
+            rows = rows.push(space::vertical().height(window.before));
+        }
+        for index in window.rows {
+            rows = rows.push(row_at(index));
+        }
+        if window.after > 0.0 {
+            rows = rows.push(space::vertical().height(window.after));
+        }
+        crate::widgets::scroll::vertical(rows)
+            .id(outline_scrollable_id())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_scroll(move |viewport| {
+                on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
+                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                    viewport: viewport.bounds().height.max(0.0).round() as u32,
+                }))
+            })
+            .into()
+    })
     .into()
+}
+
+/// The one mounted outline stream.
+pub fn outline_scrollable_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("pulpit-document-outline")
+}
+
+/// Stable widget identity for a row whose list position may change.
+pub fn outline_item_id(
+    item: &crate::widgets::document::model::OutlineItemId,
+) -> iced::advanced::widget::Id {
+    use crate::widgets::document::model::OutlineItemId;
+
+    let key = match item {
+        OutlineItemId::Bookmark { source_ordinal } => format!("bookmark-{source_ordinal}"),
+        OutlineItemId::Page(page) => format!("page-{}", page.get()),
+        OutlineItemId::Field {
+            name,
+            source_ordinal,
+        } => format!("field-{source_ordinal}-{name}"),
+    };
+    iced::advanced::widget::Id::from(format!("pulpit-outline-{key}"))
 }
 
 /// The annotation toolbar: what a press does to the page.

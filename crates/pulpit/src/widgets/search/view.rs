@@ -5,7 +5,10 @@
 //! [`pulpit_core::search::SearchState`] in front of it, which is what makes
 //! "search in every view" one widget rather than two.
 
-use iced::widget::{button, column, container, rich_text, row, space, span, text, text_input};
+use iced::keyboard::{key::Named, Key};
+use iced::widget::{
+    button, column, container, responsive, rich_text, row, space, span, text, Column,
+};
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
@@ -15,6 +18,8 @@ use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent};
 
 use super::model::{row_label, row_parts, summary};
+
+pub const RESULT_ROW_HEIGHT: f32 = 40.0;
 
 /// The search box's input, so a key binding can put the caret in it. One
 /// search at a time, so one id.
@@ -26,13 +31,21 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     ctx: &WidgetViewContext<'ctx, 'a, Message>,
     _widget: &Widget,
 ) -> Element<'a, Message> {
-    let search = &ctx.context.search;
-    let mode = ctx.context.mode;
-    let on_event = ctx.on_event;
-    let live = mode.interactive();
-    let state = search.state;
+    let search = ctx.context.search.clone();
+    pane(search, ctx.context.mode.interactive(), ctx.on_event)
+}
 
-    let mut field = text_input("Find in document", state.query().text())
+pub fn pane<Message: Clone + 'static>(
+    search: SearchData<'_>,
+    live: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let state = search.state;
+    let input_focus = search.input_focus;
+    let results_focus = search.results_focus;
+    let document_focus = !input_focus && !results_focus;
+
+    let mut field = iced::widget::TextInput::new("Find in document", state.query().text())
         .id(input_id())
         .size(theme::type_scale::BODY)
         .width(Length::Fill);
@@ -121,68 +134,153 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     }
     pane = pane.push(results(search, live, on_event));
 
-    container(pane)
+    let panel: Element<'static, Message> = container(pane)
         .padding(theme::space::S)
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
+        .into();
+
+    crate::widgets::panel::on_key(panel, move |key, modifiers| {
+        if !live || modifiers.control() || modifiers.alt() || modifiers.logo() {
+            return None;
+        }
+        let panel_event = |command| Some(on_event(WidgetEvent::Panel(command)));
+        if document_focus {
+            return matches!(key, Key::Named(Named::Tab)).then(|| {
+                on_event(WidgetEvent::Panel(
+                    crate::widgets::event::PanelCommand::FocusSidebar,
+                ))
+            });
+        }
+        if input_focus {
+            return match key {
+                Key::Named(Named::ArrowDown) | Key::Named(Named::Enter) => {
+                    Some(on_event(WidgetEvent::Find(FindCommand::Next)))
+                }
+                Key::Named(Named::ArrowUp) => {
+                    Some(on_event(WidgetEvent::Find(FindCommand::Previous)))
+                }
+                Key::Named(Named::Escape) | Key::Named(Named::Tab) => {
+                    panel_event(crate::widgets::event::PanelCommand::FocusDocument)
+                }
+                _ => None,
+            };
+        }
+        if results_focus {
+            return match key {
+                Key::Named(Named::ArrowDown) => {
+                    Some(on_event(WidgetEvent::Find(FindCommand::Next)))
+                }
+                Key::Named(Named::ArrowUp) => {
+                    Some(on_event(WidgetEvent::Find(FindCommand::Previous)))
+                }
+                Key::Named(Named::Enter) => {
+                    Some(on_event(WidgetEvent::Find(FindCommand::ActivateCurrent)))
+                }
+                Key::Named(Named::Escape) | Key::Named(Named::Tab) => {
+                    panel_event(crate::widgets::event::PanelCommand::FocusDocument)
+                }
+                Key::Character(value) if value.eq_ignore_ascii_case("n") => {
+                    Some(on_event(WidgetEvent::Find(if modifiers.shift() {
+                        FindCommand::Previous
+                    } else {
+                        FindCommand::Next
+                    })))
+                }
+                _ => None,
+            };
+        }
+        None
+    })
 }
 
 /// One row per hit, in document order, with the current one marked.
 fn results<Message: Clone + 'static>(
-    search: &SearchData<'_>,
+    search: SearchData<'_>,
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let state = search.state;
-    let current = state.position().map(|at| at - 1);
-    let mut rows = column![].spacing(2);
-    for (index, hit) in state.hits().iter().enumerate() {
-        let (before, matched, after) = row_parts(hit);
-        let mut highlight = theme::ambient::accent();
-        highlight.a = 0.18;
-        // These are spans in one text flow, not adjacent layout widgets: the
-        // page number stays beside the excerpt and the whole line wraps as a
-        // sentence when the panel is narrow.
-        let body = rich_text::<(), Message, iced::Theme, iced::Renderer>([
-            span(row_label(hit)).color(theme::ambient::muted()),
-            span("  "),
-            span(before).color(theme::ambient::muted()),
-            span(matched)
-                .color(theme::ambient::text())
-                .background(highlight)
-                .padding([0.0, 2.0]),
-            span(after).color(theme::ambient::muted()),
-        ])
-        .size(theme::type_scale::LABEL)
-        .width(Length::Fill);
-
-        let focused = search.keyboard_focus && Some(index) == current;
-        let marker: Element<'static, Message> = if focused {
-            container(space::vertical().width(3.0).height(Length::Fill))
-                .style(theme::ambient::accent_rule)
-                .into()
-        } else {
-            space::horizontal().width(3.0).into()
-        };
-        let mut control = button(row![marker, body].spacing(theme::space::XS))
-            .padding(theme::space::XS)
-            .width(Length::Fill)
-            .style(if focused {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
-        if live {
-            control = control.on_press(on_event(WidgetEvent::Find(FindCommand::Focus(index))));
-        }
-        rows = rows.push(control);
-    }
-    if state.hits().is_empty() {
+    let hits = search.state.hits().to_vec();
+    let current = search.state.current().map(pulpit_core::search::Hit::key);
+    if hits.is_empty() {
         return space::vertical().height(Length::Fill).into();
     }
-    crate::widgets::scroll::vertical(rows)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    let scroll = search.scroll;
+    let keyboard_focus = search.results_focus;
+    let measured_viewport = search.viewport.clone();
+    responsive(move |size| {
+        measured_viewport.set(size.height);
+        let window = crate::widgets::scroll::virtual_window(
+            hits.len(),
+            RESULT_ROW_HEIGHT,
+            scroll,
+            size.height,
+        );
+        let mut rows = Column::new();
+        if window.before > 0.0 {
+            rows = rows.push(space::vertical().height(window.before));
+        }
+        for hit in &hits[window.rows.clone()] {
+            let (before, matched, after) = row_parts(hit);
+            let mut highlight = theme::ambient::accent();
+            highlight.a = 0.18;
+            // These are spans in one text flow, not adjacent layout widgets: the
+            // page number stays beside the excerpt and the whole line wraps as a
+            // sentence when the panel is narrow.
+            let body = rich_text::<(), Message, iced::Theme, iced::Renderer>([
+                span(row_label(hit)).color(theme::ambient::muted()),
+                span("  "),
+                span(before).color(theme::ambient::muted()),
+                span(matched)
+                    .color(theme::ambient::text())
+                    .background(highlight)
+                    .padding([0.0, 2.0]),
+                span(after).color(theme::ambient::muted()),
+            ])
+            .size(theme::type_scale::LABEL)
+            .width(Length::Fill);
+
+            let focused = keyboard_focus && Some(hit.key()) == current;
+            let marker: Element<'static, Message> = if focused {
+                container(space::vertical().width(3.0).height(Length::Fill))
+                    .style(theme::ambient::accent_rule)
+                    .into()
+            } else {
+                space::horizontal().width(3.0).into()
+            };
+            let mut control = button(row![marker, body].spacing(theme::space::XS))
+                .padding(theme::space::XS)
+                .width(Length::Fill)
+                .height(Length::Fixed(RESULT_ROW_HEIGHT))
+                .style(if focused {
+                    theme::ambient::focus_button
+                } else {
+                    theme::ambient::tool_button
+                });
+            if live {
+                control =
+                    control.on_press(on_event(WidgetEvent::Find(FindCommand::Focus(hit.key()))));
+            }
+            rows = rows.push(control);
+        }
+        if window.after > 0.0 {
+            rows = rows.push(space::vertical().height(window.after));
+        }
+        crate::widgets::scroll::vertical(rows)
+            .id(results_id())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_scroll(move |viewport| {
+                on_event(WidgetEvent::Find(FindCommand::Scrolled {
+                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                    viewport: viewport.bounds().height.max(0.0).round() as u32,
+                }))
+            })
+            .into()
+    })
+    .into()
+}
+
+pub fn results_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("pulpit-search-results")
 }

@@ -382,6 +382,7 @@ pub struct ComposingMark {
 /// One entry in the outline rail.
 #[derive(Debug, Clone)]
 pub struct OutlineRow {
+    pub source_ordinal: usize,
     pub title: String,
     pub page: pulpit_core::page::PageIndex,
     /// How deep in the bookmark tree, for the indent.
@@ -417,7 +418,10 @@ pub struct ReaderData<'a> {
     pub outline: &'a [OutlineRow],
     /// The outline row owned by the keyboard, when the sidebar rather than
     /// the document owns navigation.
-    pub outline_focus: Option<usize>,
+    pub outline_focus: Option<&'a crate::widgets::document::model::OutlineItemId>,
+    pub outline_scroll: f32,
+    pub outline_viewport: std::rc::Rc<std::cell::Cell<f32>>,
+    pub document_keyboard_focus: bool,
     /// Does this document have fields at all (§8.6)? The navigator is offered
     /// only where there is something to navigate.
     pub has_form: bool,
@@ -532,10 +536,15 @@ pub struct Context<'a> {
 
 /// What the search pane is allowed to know: the state, and nothing about
 /// where its hits came from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SearchData<'a> {
     pub state: &'a pulpit_core::search::SearchState,
-    pub keyboard_focus: bool,
+    pub input_focus: bool,
+    pub results_focus: bool,
+    pub scroll: f32,
+    /// Updated during responsive layout so keyboard reveals use the actual
+    /// result viewport even before the first wheel event.
+    pub viewport: std::rc::Rc<std::cell::Cell<f32>>,
 }
 
 #[cfg(test)]

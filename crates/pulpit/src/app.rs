@@ -280,9 +280,9 @@ pub enum Message {
     Read(crate::widgets::event::ReadCommand),
     /// Something asked of the search pane, in whatever view it is placed.
     Find(crate::widgets::event::FindCommand),
+    Panel(crate::widgets::event::PanelCommand),
     /// Dismiss the transient search workspace without forgetting its query.
     /// The workspace reports its offset so it can virtualize a long result set.
-    SearchScrolled(f32),
     /// Put back the edits a previous run did not save, or do not.
     RestoreReaderEdits,
     DiscardReaderEdits,
@@ -697,8 +697,9 @@ enum SearchOrigin {
 enum KeyboardRegion {
     #[default]
     Document,
-    Search,
-    Outline(usize),
+    SearchInput,
+    SearchResults,
+    Outline,
 }
 
 pub struct App {
@@ -1113,6 +1114,7 @@ pub struct App {
     search_origin: Option<SearchOrigin>,
     /// Vertical offset of the page-grouped result stream.
     pub search_scroll: f32,
+    pub search_viewport: std::rc::Rc<std::cell::Cell<f32>>,
     /// The thread talking to this document's worker, when document mode is
     /// available for it. `None` when nothing is open, or when the worker
     /// could not be started — presentation mode does not depend on it.
@@ -1519,6 +1521,7 @@ impl App {
             search_focus_pending: false,
             search_origin: None,
             search_scroll: 0.0,
+            search_viewport: std::rc::Rc::new(std::cell::Cell::new(600.0)),
             reader_render: ReaderRenderState::default(),
             reader_crop: pulpit_core::notes::Region::FULL,
             reader_link: None,
@@ -2175,86 +2178,6 @@ impl App {
                     }
                     return Task::none();
                 }
-                // The reading surface and its sidebar share arrows by owning
-                // them explicitly. Tab crosses that boundary; Escape gives
-                // the arrows back to the document without putting the rail
-                // away. This comes before `captured` because Up and Down in a
-                // one-line search box have no useful caret meaning.
-                if !control && !alt {
-                    if key.as_deref() == Some("Tab") {
-                        let was_search = self.keyboard_region == KeyboardRegion::Search;
-                        self.keyboard_region = if self.search_workspace {
-                            match self.keyboard_region {
-                                KeyboardRegion::Search => KeyboardRegion::Document,
-                                _ => KeyboardRegion::Search,
-                            }
-                        } else if self.reader.outline_len() > 0
-                            && !self.reader.controls().outline_collapsed
-                        {
-                            match self.keyboard_region {
-                                KeyboardRegion::Outline(_) => KeyboardRegion::Document,
-                                _ => KeyboardRegion::Outline(
-                                    self.reader.nearest_outline_row().unwrap_or(0),
-                                ),
-                            }
-                        } else {
-                            KeyboardRegion::Document
-                        };
-                        if self.search_workspace {
-                            return if self.keyboard_region == KeyboardRegion::Search {
-                                iced::widget::operation::focus(
-                                    crate::widgets::search::view::input_id(),
-                                )
-                            } else if was_search {
-                                // No document widget needs a caret. Focusing
-                                // an intentionally absent id makes Iced
-                                // unfocus every text/control widget while our
-                                // explicit region gives arrows to the page.
-                                iced::widget::operation::focus(iced::advanced::widget::Id::new(
-                                    "pulpit-document-keyboard",
-                                ))
-                            } else {
-                                Task::none()
-                            };
-                        }
-                        return Task::none();
-                    }
-                    match (self.keyboard_region, key.as_deref()) {
-                        (KeyboardRegion::Search, Some("Down")) => {
-                            return self.on_find_command(crate::widgets::event::FindCommand::Next)
-                        }
-                        (KeyboardRegion::Search, Some("Up")) => {
-                            return self
-                                .on_find_command(crate::widgets::event::FindCommand::Previous)
-                        }
-                        (KeyboardRegion::Search, Some("Escape")) => {
-                            self.keyboard_region = KeyboardRegion::Document;
-                            return iced::widget::operation::focus(
-                                iced::advanced::widget::Id::new("pulpit-document-keyboard"),
-                            );
-                        }
-                        (KeyboardRegion::Outline(index), Some("Down")) => {
-                            let last = self.reader.outline_len().saturating_sub(1);
-                            self.keyboard_region = KeyboardRegion::Outline((index + 1).min(last));
-                            return Task::none();
-                        }
-                        (KeyboardRegion::Outline(index), Some("Up")) => {
-                            self.keyboard_region = KeyboardRegion::Outline(index.saturating_sub(1));
-                            return Task::none();
-                        }
-                        (KeyboardRegion::Outline(index), Some("Enter")) => {
-                            if let Some(command) = self.reader.outline_command(index) {
-                                return self.on_read_command(command);
-                            }
-                            return Task::none();
-                        }
-                        (KeyboardRegion::Outline(_), Some("Escape")) => {
-                            self.keyboard_region = KeyboardRegion::Document;
-                            return Task::none();
-                        }
-                        _ => {}
-                    }
-                }
                 // A widget that captured the event owns the keyboard. Its
                 // own message handles the press; the application keymap is
                 // only the fallback for an otherwise-unclaimed event.
@@ -2690,10 +2613,7 @@ impl App {
             }
             Message::Read(command) => self.on_read_command(command),
             Message::Find(command) => self.on_find_command(command),
-            Message::SearchScrolled(offset) => {
-                self.search_scroll = offset.max(0.0);
-                Task::none()
-            }
+            Message::Panel(command) => self.on_panel_command(command),
             Message::RestoreReaderEdits => self.restore_reader_edits(),
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
@@ -3502,10 +3422,11 @@ impl App {
                     reader.outline_reveal = self
                         .outline_animation
                         .interpolate(1.0_f32, 0.0_f32, self.now);
-                    reader.outline_focus = match self.keyboard_region {
-                        KeyboardRegion::Outline(index) => Some(index),
-                        _ => None,
-                    };
+                    if self.keyboard_region != KeyboardRegion::Outline {
+                        reader.outline_focus = None;
+                    }
+                    reader.document_keyboard_focus =
+                        self.keyboard_region == KeyboardRegion::Document;
                     reader.composing = self.composing_mark.clone();
                     // Likewise the history: it spans both modes and outlives
                     // any one session, so the application is what knows it.
@@ -3525,7 +3446,10 @@ impl App {
                     // room the results want.
                     &crate::widgets::sample::SEARCH
                 },
-                keyboard_focus: live && self.keyboard_region == KeyboardRegion::Search,
+                input_focus: live && self.keyboard_region == KeyboardRegion::SearchInput,
+                results_focus: live && self.keyboard_region == KeyboardRegion::SearchResults,
+                scroll: if live { self.search_scroll } else { 0.0 },
+                viewport: self.search_viewport.clone(),
             },
             search_open: live && self.search_workspace,
             search_reveal: if live { self.search_reveal() } else { 0.0 },
@@ -5166,8 +5090,10 @@ impl App {
                         outline
                             .flattened()
                             .into_iter()
-                            .filter_map(|entry| {
+                            .enumerate()
+                            .filter_map(|(source_ordinal, entry)| {
                                 Some(crate::widgets::context::OutlineRow {
+                                    source_ordinal,
                                     title: entry.title.clone(),
                                     // A bookmark that points at a URI orders
                                     // nothing in this document, so it is not a
@@ -6893,20 +6819,6 @@ impl App {
 
         let key = key?;
 
-        // With neither sidebar holding a keyboard selection, arrows are the
-        // fine-grained reading motion. Page Up and Page Down remain the large
-        // viewport-sized motion below.
-        if self.keyboard_region == KeyboardRegion::Document && !control {
-            let points = match key {
-                "Down" => Some(48.0),
-                "Up" => Some(-48.0),
-                _ => None,
-            };
-            if let Some(points) = points {
-                return Some(self.on_read_command(ReadCommand::ScrollByPoints(points)));
-            }
-        }
-
         // Scrolling first: it is what the keys were bound to before anything
         // else was, and a reader pressing Page Down means the page.
         let windows = match key {
@@ -7028,6 +6940,41 @@ impl App {
         }
 
         match &command {
+            ReadCommand::MoveOutlineFocus(direction) => {
+                let direction = *direction;
+                let index = self.reader.move_outline_focus(direction);
+                index.map_or_else(Task::none, |index| {
+                    self.reveal_outline_selection(
+                        index,
+                        if direction < 0 {
+                            crate::widgets::scroll::RevealDirection::Up
+                        } else {
+                            crate::widgets::scroll::RevealDirection::Down
+                        },
+                    )
+                })
+            }
+            ReadCommand::ActivateOutlineItem(item) => {
+                self.keyboard_region = KeyboardRegion::Outline;
+                if self.reader.focus_outline_item(item.clone()) {
+                    let activate = self
+                        .reader
+                        .focused_outline_command()
+                        .map_or_else(Task::none, |command| self.on_read_command(command));
+                    Task::batch([
+                        activate,
+                        iced::advanced::widget::operate(
+                            iced::advanced::widget::operation::focusable::unfocus(),
+                        ),
+                    ])
+                } else {
+                    Task::none()
+                }
+            }
+            ReadCommand::ActivateFocusedOutlineItem => self
+                .reader
+                .focused_outline_command()
+                .map_or_else(Task::none, |command| self.on_read_command(command)),
             // Handled above the session: the history is the application's,
             // and where these land may not even be a page in this document.
             ReadCommand::HistoryBack => self.nav_back(),
@@ -7149,10 +7096,15 @@ impl App {
                 Task::none()
             }
             ReadCommand::PagePressed => {
+                let unfocus = || {
+                    iced::advanced::widget::operate(
+                        iced::advanced::widget::operation::focusable::unfocus(),
+                    )
+                };
                 // A press an armed tool does not take belongs to the
                 // document's own links and fields, and is not this path's.
                 if self.reader.pointer_pressed() {
-                    return Task::none();
+                    return unfocus();
                 }
                 // A press that missed an open option list puts it away and
                 // chooses nothing — the click-away every dropdown has. The
@@ -7165,7 +7117,7 @@ impl App {
                 // because that is what takes the caret back *out* of a field
                 // and commits what was typed into it (§8.6).
                 if self.ask_form_pointer(FormPointer::Down) {
-                    return Task::none();
+                    return unfocus();
                 }
                 // …unless the armed tool *places* a mark rather than drawing
                 // one. Those have no gesture: the click chooses the spot and
@@ -7180,7 +7132,7 @@ impl App {
                         editing: None,
                     });
                 }
-                Task::none()
+                unfocus()
             }
             ReadCommand::PickDate(date) => {
                 // A chosen day becomes an ordinary field edit: the same
@@ -7334,13 +7286,10 @@ impl App {
                 }
                 let _needs_render = self.reader.apply(&command);
                 if matches!(command, ReadCommand::SetOutlineView(_))
-                    && matches!(self.keyboard_region, KeyboardRegion::Outline(_))
+                    && self.keyboard_region == KeyboardRegion::Outline
+                    && !self.reader.focus_nearest_outline_item()
                 {
-                    self.keyboard_region = self
-                        .reader
-                        .nearest_outline_row()
-                        .map(KeyboardRegion::Outline)
-                        .unwrap_or(KeyboardRegion::Document);
+                    self.keyboard_region = KeyboardRegion::Document;
                 }
                 if let Some(origin) = origin {
                     self.nav_history.record_jump(origin, self.current_place());
@@ -8382,8 +8331,13 @@ impl App {
     /// and the page scan is left to [`App::pump_search`].
     fn on_find_command(&mut self, command: crate::widgets::event::FindCommand) -> Task<Message> {
         use crate::widgets::event::FindCommand;
+        let input_was_focused = self.keyboard_region == KeyboardRegion::SearchInput;
+        let leave_input = || {
+            iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
+        };
         match command {
             FindCommand::Type(typed) => {
+                self.keyboard_region = KeyboardRegion::SearchInput;
                 let mut query = pulpit_core::search::Query::new(
                     &typed,
                     self.search.query().case_sensitive,
@@ -8413,25 +8367,132 @@ impl App {
             }
             FindCommand::Next => {
                 if self.search_workspace {
-                    self.keyboard_region = KeyboardRegion::Search;
+                    self.keyboard_region = KeyboardRegion::SearchResults;
                 }
                 let hit = self.search.advance().cloned();
-                self.go_to_hit(hit)
+                Task::batch([
+                    self.go_to_hit(hit),
+                    self.reveal_search_selection(crate::widgets::scroll::RevealDirection::Down),
+                    if input_was_focused {
+                        leave_input()
+                    } else {
+                        Task::none()
+                    },
+                ])
             }
             FindCommand::Previous => {
                 if self.search_workspace {
-                    self.keyboard_region = KeyboardRegion::Search;
+                    self.keyboard_region = KeyboardRegion::SearchResults;
                 }
                 let hit = self.search.retreat().cloned();
-                self.go_to_hit(hit)
+                Task::batch([
+                    self.go_to_hit(hit),
+                    self.reveal_search_selection(crate::widgets::scroll::RevealDirection::Up),
+                    if input_was_focused {
+                        leave_input()
+                    } else {
+                        Task::none()
+                    },
+                ])
             }
-            FindCommand::Focus(index) => {
-                self.keyboard_region = KeyboardRegion::Search;
-                let hit = self.search.focus(index).cloned();
+            FindCommand::Focus(key) => {
+                self.keyboard_region = KeyboardRegion::SearchResults;
+                let hit = self.search.focus_key(key).cloned();
                 // A pressed result is a choice, so closing Search later must
                 // not undo it. Search itself stays open for further matches.
                 self.search_origin = None;
+                Task::batch([
+                    self.go_to_hit(hit),
+                    self.reveal_search_selection(crate::widgets::scroll::RevealDirection::Nearest),
+                    if input_was_focused {
+                        leave_input()
+                    } else {
+                        Task::none()
+                    },
+                ])
+            }
+            FindCommand::ActivateCurrent => {
+                self.search_origin = None;
+                let hit = self.search.current().cloned();
                 self.go_to_hit(hit)
+            }
+            FindCommand::Scrolled { offset, viewport } => {
+                self.search_scroll = offset as f32;
+                self.search_viewport.set(viewport as f32);
+                Task::none()
+            }
+        }
+    }
+
+    fn reveal_outline_selection(
+        &mut self,
+        index: usize,
+        direction: crate::widgets::scroll::RevealDirection,
+    ) -> Task<Message> {
+        let (current, viewport) = self.reader.outline_scroll_position();
+        let offset = crate::widgets::scroll::reveal_offset(
+            index,
+            crate::widgets::document::view::OUTLINE_ROW_HEIGHT,
+            current,
+            viewport,
+            self.reader.outline_len(),
+            direction,
+        );
+        if (offset - current).abs() <= f32::EPSILON {
+            return Task::none();
+        }
+        self.reader.report_outline_scroll(offset, viewport);
+        iced::widget::operation::scroll_to(
+            crate::widgets::document::view::outline_scrollable_id(),
+            iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+        )
+    }
+
+    fn reveal_search_selection(
+        &self,
+        direction: crate::widgets::scroll::RevealDirection,
+    ) -> Task<Message> {
+        let Some(index) = self.search.position().map(|position| position - 1) else {
+            return Task::none();
+        };
+        let offset = crate::widgets::scroll::reveal_offset(
+            index,
+            crate::widgets::search::view::RESULT_ROW_HEIGHT,
+            self.search_scroll,
+            self.search_viewport.get(),
+            self.search.hits().len(),
+            direction,
+        );
+        if (offset - self.search_scroll).abs() <= f32::EPSILON {
+            Task::none()
+        } else {
+            iced::widget::operation::scroll_to(
+                crate::widgets::search::view::results_id(),
+                iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+            )
+        }
+    }
+
+    fn on_panel_command(&mut self, command: crate::widgets::event::PanelCommand) -> Task<Message> {
+        use crate::widgets::event::PanelCommand;
+        match command {
+            PanelCommand::FocusDocument => {
+                self.keyboard_region = KeyboardRegion::Document;
+                iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::unfocus(),
+                )
+            }
+            PanelCommand::FocusSidebar if self.search_workspace => {
+                self.keyboard_region = KeyboardRegion::SearchInput;
+                iced::widget::operation::focus(crate::widgets::search::view::input_id())
+            }
+            PanelCommand::FocusSidebar => {
+                self.keyboard_region = if self.reader.focus_nearest_outline_item() {
+                    KeyboardRegion::Outline
+                } else {
+                    KeyboardRegion::Document
+                };
+                Task::none()
             }
         }
     }
@@ -8450,7 +8511,7 @@ impl App {
             Some(SearchOrigin::Presenter(self.current_place()))
         };
         self.search_workspace = true;
-        self.keyboard_region = KeyboardRegion::Search;
+        self.keyboard_region = KeyboardRegion::SearchInput;
         self.search_focus_pending = true;
         self.search_animation = if self.motion.is_reduced() {
             iced::Animation::new(true).quick()
@@ -8500,6 +8561,14 @@ impl App {
     pub fn search_reveal(&self) -> f32 {
         self.search_animation
             .interpolate(0.0_f32, 1.0_f32, self.now)
+    }
+
+    pub fn search_input_focused(&self) -> bool {
+        self.keyboard_region == KeyboardRegion::SearchInput
+    }
+
+    pub fn search_results_focused(&self) -> bool {
+        self.keyboard_region == KeyboardRegion::SearchResults
     }
 
     /// Point the search at the open document under a new query.

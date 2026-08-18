@@ -454,6 +454,35 @@ pub fn selected_button(
     }
 }
 
+/// Keyboard focus inside a composite panel. Unlike selection, this is a
+/// transient navigation affordance and therefore keeps the normal text color
+/// while drawing a persistent accent edge.
+pub fn focus_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
+    move |_, status| {
+        let intensity = match status {
+            button::Status::Hovered | button::Status::Pressed => 0.22,
+            button::Status::Disabled => 0.06,
+            button::Status::Active => 0.12,
+        };
+        button::Style {
+            background: Some(Background::Color(Palette::tinted(
+                palette.accent,
+                intensity,
+            ))),
+            text_color: match status {
+                button::Status::Disabled => palette.muted,
+                _ => palette.text,
+            },
+            border: Border {
+                color: palette.accent,
+                width: 1.0,
+                radius: radius::SMALL.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 /// A destructive action: reachable, never adjacent-by-accident.
 pub fn alert_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
     move |_, status| {
@@ -874,6 +903,9 @@ pub mod ambient {
     }
     pub fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
         super::selected_button(palette())(theme, status)
+    }
+    pub fn focus_button(theme: &Theme, status: button::Status) -> button::Style {
+        super::focus_button(palette())(theme, status)
     }
     pub fn alert_button(theme: &Theme, status: button::Status) -> button::Style {
         super::alert_button(palette())(theme, status)

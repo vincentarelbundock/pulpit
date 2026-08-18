@@ -14,7 +14,7 @@
 use pdfium_render::prelude::{PdfiumLibraryBindings, FPDF_PAGE, FPDF_TEXTPAGE};
 
 use pulpit_core::page::{PageGeometry, PageIndex, PageQuad, PageRect, PageRotation};
-use pulpit_core::search::{Hit, HitSource, PreparedQuery, TextMatch};
+use pulpit_core::search::{Hit, HitSource, IndexedText, PreparedQuery, TextMatch};
 
 /// PDFium's own search flags: `FPDF_MATCHCASE` and `FPDF_MATCHWHOLEWORD`.
 const MATCH_CASE: std::os::raw::c_ulong = 0x0000_0001;
@@ -234,6 +234,7 @@ fn find_regex_on_page(
             Some(*offset)
         }))
         .collect();
+    let indexed = IndexedText::new(&text);
     query
         .matches_in(&text)
         .into_iter()
@@ -252,7 +253,7 @@ fn find_regex_on_page(
                 end.saturating_sub(start) as i32,
                 most_quads,
             );
-            Hit::from_text(page, HitSource::PageText, ordinal, &text, found, quads)
+            Hit::from_indexed_text(page, HitSource::PageText, ordinal, &indexed, found, quads)
         })
         .collect()
 }

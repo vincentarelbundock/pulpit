@@ -52,8 +52,16 @@ pub enum WidgetEvent {
     /// presenter layout and a document layout alike, and a presenter looking
     /// for a slide by what its notes say has no reader to send it to.
     Find(FindCommand),
+    /// Keyboard ownership crossing between a side panel and the document.
+    Panel(PanelCommand),
     /// Something asked of the application's own chrome.
     Chrome(ChromeCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelCommand {
+    FocusDocument,
+    FocusSidebar,
 }
 
 /// What the search pane can ask for.
@@ -65,7 +73,15 @@ pub enum FindCommand {
     Next,
     Previous,
     /// Go to one particular hit: a press in the results list.
-    Focus(usize),
+    Focus(pulpit_core::search::HitKey),
+    /// Confirm the currently previewed occurrence.
+    ActivateCurrent,
+    /// The result stream reports its real viewport so keyboard selection can
+    /// be revealed without guessing around its header and controls.
+    Scrolled {
+        offset: u32,
+        viewport: u32,
+    },
     ToggleCaseSensitive,
     ToggleWholeWord,
     /// Treat the query as a Rust regular expression.
@@ -182,6 +198,13 @@ pub enum ReadCommand {
     },
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
+    MoveOutlineFocus(i32),
+    ActivateOutlineItem(crate::widgets::document::model::OutlineItemId),
+    ActivateFocusedOutlineItem,
+    OutlineScrolled {
+        offset: u32,
+        viewport: u32,
+    },
     /// Collapse the outline rail to its header, or open it again.
     SetOutlineCollapsed(bool),
     /// Arm a document tool, or hand the pointer back to the document's own

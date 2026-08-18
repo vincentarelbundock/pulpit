@@ -20,7 +20,8 @@ use pulpit_render::document::{
 
 use crate::widgets::context::{OutlineRow, ReaderData, ReaderPage};
 use crate::widgets::document::model::{
-    Column, CropChoice, CropState, OutlineView, PageSpread, PlacedPage, ReaderControls, Zoom,
+    Column, CropChoice, CropState, OutlineItemId, OutlineView, PageSpread, PlacedPage,
+    ReaderControls, Zoom,
 };
 use crate::widgets::event::ReadCommand;
 
@@ -301,6 +302,9 @@ pub struct ReaderSession {
     cell_known: bool,
     scale: f32,
     outline: Vec<OutlineRow>,
+    outline_focus: Option<OutlineItemId>,
+    outline_scroll: [f32; 3],
+    outline_viewport: [std::rc::Rc<std::cell::Cell<f32>>; 3],
     level: CompatibilityLevel,
     warnings: Vec<DocumentWarning>,
     /// Whether this document has fields that can be filled at all (§8.6).
@@ -491,6 +495,9 @@ impl ReaderSession {
             // than to a division by zero.
             cell: (800.0, 600.0),
             cell_known: false,
+            outline_viewport: std::array::from_fn(|_| {
+                std::rc::Rc::new(std::cell::Cell::new(600.0))
+            }),
             ..ReaderSession::default()
         }
     }
@@ -557,6 +564,7 @@ impl ReaderSession {
     /// Take the engine's field list as it stands.
     pub fn set_fields(&mut self, fields: Vec<pulpit_render::document::FormField>) {
         self.fields = fields;
+        self.repair_outline_focus();
     }
 
     /// The widgets on `page` that are drawn but can never be filled (§6.4).
@@ -1248,6 +1256,7 @@ impl ReaderSession {
 
     pub fn set_outline(&mut self, outline: Vec<OutlineRow>) {
         self.outline = outline;
+        self.repair_outline_focus();
     }
 
     pub fn outline_len(&self) -> usize {
@@ -1258,27 +1267,50 @@ impl ReaderSession {
         }
     }
 
-    pub fn outline_command(&self, index: usize) -> Option<ReadCommand> {
+    pub fn outline_item_at(&self, index: usize) -> Option<OutlineItemId> {
         match self.controls.outline {
-            OutlineView::Bookmarks => self
-                .outline
-                .get(index)
-                .map(|entry| ReadCommand::GoToPage(entry.page)),
-            OutlineView::Thumbnails => {
-                (index < self.pages.len()).then_some(ReadCommand::GoToPage(PageIndex(index)))
+            OutlineView::Bookmarks => {
+                self.outline
+                    .get(index)
+                    .map(|entry| OutlineItemId::Bookmark {
+                        source_ordinal: entry.source_ordinal,
+                    })
             }
-            OutlineView::Fields => self.fields.get(index).and_then(|field| {
-                field.widgets.first().map(|widget| ReadCommand::GoToField {
-                    page: widget.page,
-                    name: field.name.clone(),
-                })
+            OutlineView::Thumbnails => {
+                (index < self.pages.len()).then_some(OutlineItemId::Page(PageIndex(index)))
+            }
+            OutlineView::Fields => self.fields.get(index).map(|field| OutlineItemId::Field {
+                name: field.name.clone(),
+                source_ordinal: index,
             }),
         }
     }
 
-    pub fn nearest_outline_row(&self) -> Option<usize> {
+    pub fn outline_index_of(&self, id: &OutlineItemId) -> Option<usize> {
+        match id {
+            OutlineItemId::Bookmark { source_ordinal } => self
+                .outline
+                .iter()
+                .position(|entry| entry.source_ordinal == *source_ordinal),
+            OutlineItemId::Page(page) => (page.get() < self.pages.len()).then_some(page.get()),
+            OutlineItemId::Field {
+                name,
+                source_ordinal,
+            } => self
+                .fields
+                .get(*source_ordinal)
+                .filter(|field| field.name == *name)
+                .map(|_| *source_ordinal),
+        }
+    }
+
+    pub fn outline_focus(&self) -> Option<&OutlineItemId> {
+        self.outline_focus.as_ref()
+    }
+
+    pub fn focus_nearest_outline_item(&mut self) -> bool {
         let page = self.controls.page;
-        match self.controls.outline {
+        let index = match self.controls.outline {
             OutlineView::Bookmarks => self
                 .outline
                 .iter()
@@ -1298,7 +1330,92 @@ impl ReaderSession {
                         .is_some_and(|widget| widget.page >= page)
                 })
                 .or_else(|| (!self.fields.is_empty()).then_some(self.fields.len() - 1)),
+        };
+        self.outline_focus = index.and_then(|index| self.outline_item_at(index));
+        self.outline_focus.is_some()
+    }
+
+    pub fn move_outline_focus(&mut self, direction: i32) -> Option<usize> {
+        if self.outline_len() == 0 {
+            self.outline_focus = None;
+            return None;
         }
+        let current = self
+            .outline_focus
+            .as_ref()
+            .and_then(|id| self.outline_index_of(id))
+            .or_else(|| {
+                self.focus_nearest_outline_item();
+                self.outline_focus
+                    .as_ref()
+                    .and_then(|id| self.outline_index_of(id))
+            })?;
+        let next = if direction < 0 {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(self.outline_len() - 1)
+        };
+        self.outline_focus = self.outline_item_at(next);
+        Some(next)
+    }
+
+    pub fn focus_outline_item(&mut self, id: OutlineItemId) -> bool {
+        if self.outline_index_of(&id).is_none() {
+            return false;
+        }
+        self.outline_focus = Some(id);
+        true
+    }
+
+    pub fn focused_outline_command(&self) -> Option<ReadCommand> {
+        match self.outline_focus.as_ref()? {
+            OutlineItemId::Bookmark { source_ordinal } => self
+                .outline
+                .iter()
+                .find(|entry| entry.source_ordinal == *source_ordinal)
+                .map(|entry| ReadCommand::GoToPage(entry.page)),
+            OutlineItemId::Page(page) => Some(ReadCommand::GoToPage(*page)),
+            OutlineItemId::Field {
+                name,
+                source_ordinal,
+            } => self.fields.get(*source_ordinal).and_then(|field| {
+                (field.name == *name).then(|| {
+                    field.widgets.first().map(|widget| ReadCommand::GoToField {
+                        page: widget.page,
+                        name: field.name.clone(),
+                    })
+                })
+            })?,
+        }
+    }
+
+    fn repair_outline_focus(&mut self) {
+        let valid = self
+            .outline_focus
+            .as_ref()
+            .is_some_and(|id| self.outline_index_of(id).is_some());
+        if !valid {
+            self.focus_nearest_outline_item();
+        }
+    }
+
+    fn outline_slot(&self) -> usize {
+        match self.controls.outline {
+            OutlineView::Bookmarks => 0,
+            OutlineView::Thumbnails => 1,
+            OutlineView::Fields => 2,
+        }
+    }
+
+    pub fn outline_scroll_position(&self) -> (f32, f32) {
+        let slot = self.outline_slot();
+        (self.outline_scroll[slot], self.outline_viewport[slot].get())
+    }
+
+    pub fn report_outline_scroll(&mut self, offset: f32, viewport: f32) {
+        let slot = self.outline_slot();
+        self.outline_scroll[slot] = offset.max(0.0);
+        self.outline_viewport[slot].set(viewport.max(0.0));
     }
 
     /// The worker applied something.
@@ -3048,6 +3165,20 @@ impl ReaderSession {
             }
             ReadCommand::SetOutlineView(view) => {
                 self.controls.outline = *view;
+                self.repair_outline_focus();
+                false
+            }
+            ReadCommand::MoveOutlineFocus(direction) => {
+                self.move_outline_focus(*direction);
+                false
+            }
+            ReadCommand::ActivateOutlineItem(id) => {
+                self.focus_outline_item(id.clone());
+                false
+            }
+            ReadCommand::ActivateFocusedOutlineItem => false,
+            ReadCommand::OutlineScrolled { offset, viewport } => {
+                self.report_outline_scroll(*offset as f32, *viewport as f32);
                 false
             }
             ReadCommand::SetOutlineCollapsed(collapsed) => {
@@ -3507,7 +3638,10 @@ impl ReaderSession {
             },
             scale: self.scale,
             outline: &self.outline,
-            outline_focus: None,
+            outline_focus: self.outline_focus.as_ref(),
+            outline_scroll: self.outline_scroll_position().0,
+            outline_viewport: self.outline_viewport[self.outline_slot()].clone(),
+            document_keyboard_focus: false,
             has_form: self.has_form,
             fields: &self.fields,
             date_picker: self.date_picker.as_ref(),
@@ -4493,6 +4627,54 @@ mod tests {
         use crate::widgets::document::model::OutlineView;
         assert!(!session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails)));
         assert_eq!(session.controls().outline, OutlineView::Thumbnails);
+    }
+
+    #[test]
+    fn outline_arrows_move_a_stable_focus_without_moving_the_document() {
+        use crate::widgets::document::model::{OutlineItemId, OutlineView};
+
+        let mut session = open(20);
+        session.apply(&ReadCommand::GoToPage(PageIndex(7)));
+        session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails));
+        assert!(session.focus_nearest_outline_item());
+        assert_eq!(
+            session.outline_focus(),
+            Some(&OutlineItemId::Page(PageIndex(7)))
+        );
+
+        assert_eq!(session.move_outline_focus(1), Some(8));
+        assert_eq!(
+            session.outline_focus(),
+            Some(&OutlineItemId::Page(PageIndex(8)))
+        );
+        assert_eq!(session.controls().page, PageIndex(7));
+    }
+
+    #[test]
+    fn bookmark_focus_survives_a_reordered_outline() {
+        use crate::widgets::context::OutlineRow;
+        use crate::widgets::document::model::OutlineItemId;
+
+        let row = |source_ordinal, title: &str, page| OutlineRow {
+            source_ordinal,
+            title: title.to_string(),
+            page: PageIndex(page),
+            depth: 0,
+        };
+        let mut session = open(10);
+        session.set_outline(vec![row(4, "Methods", 3), row(9, "Results", 7)]);
+        assert!(session.focus_outline_item(OutlineItemId::Bookmark { source_ordinal: 9 }));
+
+        session.set_outline(vec![row(2, "Introduction", 0), row(9, "Results", 7)]);
+
+        assert_eq!(
+            session.outline_focus(),
+            Some(&OutlineItemId::Bookmark { source_ordinal: 9 })
+        );
+        assert_eq!(
+            session.outline_index_of(session.outline_focus().unwrap()),
+            Some(1)
+        );
     }
 
     #[test]

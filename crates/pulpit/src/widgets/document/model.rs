@@ -629,6 +629,14 @@ pub enum OutlineView {
     Fields,
 }
 
+/// Stable identity of an item in one of the outline rail's finite views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutlineItemId {
+    Bookmark { source_ordinal: usize },
+    Page(PageIndex),
+    Field { name: String, source_ordinal: usize },
+}
+
 impl OutlineView {
     pub fn label(self) -> &'static str {
         match self {

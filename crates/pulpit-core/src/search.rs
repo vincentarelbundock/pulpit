@@ -347,9 +347,34 @@ pub struct Hit {
     pub highlight: TextMatch,
 }
 
+/// Stable identity of one occurrence across incrementally arriving chunks.
+pub type HitKey = (PageIndex, HitSource, usize);
+
+/// One character index shared by every hit found in the same run of text.
+///
+/// Matches use character offsets so snippets stay Unicode-correct. Building
+/// that index once prevents a page with many matches from decoding and
+/// allocating its complete text once per result.
+#[derive(Debug, Clone)]
+pub struct IndexedText {
+    chars: Vec<char>,
+}
+
+impl IndexedText {
+    pub fn new(text: &str) -> Self {
+        Self {
+            chars: text.chars().collect(),
+        }
+    }
+
+    fn context_window(&self, found: TextMatch) -> (String, TextMatch) {
+        context_window(&self.chars, found)
+    }
+}
+
 impl Hit {
     /// The identity of a hit: what makes two of them the same occurrence.
-    pub fn key(&self) -> (PageIndex, HitSource, usize) {
+    pub fn key(&self) -> HitKey {
         (self.page, self.source, self.ordinal)
     }
 
@@ -363,7 +388,26 @@ impl Hit {
         found: TextMatch,
         quads: Vec<PageQuad>,
     ) -> Hit {
-        let (context, highlight) = context_window(haystack, found);
+        Self::from_indexed_text(
+            page,
+            source,
+            ordinal,
+            &IndexedText::new(haystack),
+            found,
+            quads,
+        )
+    }
+
+    /// Build a hit while reusing the character index for its text run.
+    pub fn from_indexed_text(
+        page: PageIndex,
+        source: HitSource,
+        ordinal: usize,
+        text: &IndexedText,
+        found: TextMatch,
+        quads: Vec<PageQuad>,
+    ) -> Hit {
+        let (context, highlight) = text.context_window(found);
         Hit {
             page,
             source,
@@ -375,12 +419,11 @@ impl Hit {
     }
 }
 
-/// A window of `haystack` around `found`, with the match's position inside it.
+/// A window of `chars` around `found`, with the match's position inside it.
 ///
 /// Whitespace is collapsed first: a PDF text layer is full of hard newlines
 /// that mean nothing, and a results list is one line per hit.
-fn context_window(haystack: &str, found: TextMatch) -> (String, TextMatch) {
-    let chars: Vec<char> = haystack.chars().collect();
+fn context_window(chars: &[char], found: TextMatch) -> (String, TextMatch) {
     let start = found.offset.saturating_sub(CONTEXT_CHARS);
     let end = (found.offset + found.len + CONTEXT_CHARS).min(chars.len());
     let clipped_start = found.offset.min(chars.len());
@@ -730,6 +773,14 @@ impl SearchState {
         self.current()
     }
 
+    /// Focus an occurrence by identity rather than by its current position in
+    /// a list that may still be receiving earlier hits.
+    pub fn focus_key(&mut self, key: HitKey) -> Option<&Hit> {
+        let index = self.hits.binary_search_by_key(&key, Hit::key).ok()?;
+        self.cursor = Some(index);
+        self.current()
+    }
+
     /// The hits to draw on one page, for the overlay.
     pub fn hits_on(&self, page: PageIndex) -> impl Iterator<Item = &Hit> {
         self.hits
@@ -750,12 +801,13 @@ pub fn search_notes(query: &Query, notes: &TextNotes, page_count: usize) -> Vec<
         let Some(text) = notes.for_page(page) else {
             continue;
         };
+        let indexed = IndexedText::new(text);
         for (ordinal, found) in prepared.matches_in(text).into_iter().enumerate() {
-            hits.push(Hit::from_text(
+            hits.push(Hit::from_indexed_text(
                 PageIndex(page),
                 HitSource::Notes,
                 ordinal,
-                text,
+                &indexed,
                 found,
                 Vec::new(),
             ));
@@ -777,13 +829,14 @@ pub fn search_outline(query: &Query, outline: &Outline) -> Vec<Hit> {
         let Some(page) = entry.page() else {
             continue;
         };
+        let indexed = IndexedText::new(&entry.title);
         for found in prepared.matches_in(&entry.title) {
             let ordinal = ordinals.entry(page).or_default();
-            hits.push(Hit::from_text(
+            hits.push(Hit::from_indexed_text(
                 PageIndex(page),
                 HitSource::Outline,
                 *ordinal,
-                &entry.title,
+                &indexed,
                 found,
                 Vec::new(),
             ));
@@ -958,6 +1011,40 @@ mod tests {
     }
 
     #[test]
+    fn one_character_index_builds_unicode_correct_contexts_for_many_hits() {
+        let hay = "préface needle\nμετά needle conclusion";
+        let found = query("needle").matches_in(hay);
+        let indexed = IndexedText::new(hay);
+
+        let hits: Vec<_> = found
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(ordinal, found)| {
+                Hit::from_indexed_text(
+                    PageIndex(0),
+                    HitSource::PageText,
+                    ordinal,
+                    &indexed,
+                    found,
+                    Vec::new(),
+                )
+            })
+            .collect();
+
+        assert_eq!(hits.len(), 2);
+        for hit in hits {
+            let marked: String = hit
+                .context
+                .chars()
+                .skip(hit.highlight.offset)
+                .take(hit.highlight.len)
+                .collect();
+            assert_eq!(marked, "needle");
+        }
+    }
+
+    #[test]
     fn a_stale_chunk_lands_nowhere() {
         let mut state = SearchState::new();
         state.open(100);
@@ -1064,6 +1151,36 @@ mod tests {
             },
         );
         assert_eq!(state.current().unwrap().page, PageIndex(40));
+        assert_eq!(state.position(), Some(2));
+    }
+
+    #[test]
+    fn a_result_can_be_focused_by_stable_identity() {
+        let mut state = SearchState::new();
+        state.open(100);
+        let generation = state.set_query(query("pdf"));
+        let wanted = page_hit(40, 2);
+        let key = wanted.key();
+        state.accept(
+            generation,
+            HitChunk {
+                from_page: 32,
+                to_page: 64,
+                hits: vec![wanted],
+                truncated: false,
+            },
+        );
+        state.accept(
+            generation,
+            HitChunk {
+                from_page: 0,
+                to_page: 32,
+                hits: vec![page_hit(2, 0)],
+                truncated: false,
+            },
+        );
+
+        assert_eq!(state.focus_key(key).map(Hit::key), Some(key));
         assert_eq!(state.position(), Some(2));
     }
 
