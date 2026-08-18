@@ -17,7 +17,7 @@ pub struct PageGroup {
 
 /// Fixed-height cards make the result stream virtualizable without measuring
 /// hundreds of off-screen snippets on every view pass.
-pub const RESULT_ROW_HEIGHT: f32 = 156.0;
+pub const RESULT_ROW_HEIGHT: f32 = 82.0;
 const RESULT_OVERSCAN_ROWS: usize = 2;
 
 /// Collapse consecutive, document-ordered hits into one card per page.
@@ -191,8 +191,9 @@ mod tests {
 
         assert!(visible.start > 0);
         assert!(visible.end < 1_000);
+        let viewport_rows = (600.0 / RESULT_ROW_HEIGHT).ceil() as usize;
         assert!(
-            visible.len() <= 9,
+            visible.len() <= viewport_rows + RESULT_OVERSCAN_ROWS * 2 + 1,
             "only visible rows plus overscan are built"
         );
     }

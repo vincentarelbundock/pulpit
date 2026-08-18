@@ -289,8 +289,12 @@ fn presenter(app: &App) -> Element<'_, Message> {
     if app.overview {
         page = stack![page, overview(app)].into();
     }
-    if app.search_workspace {
-        page = stack![page, search_workspace(app)].into();
+    let search_reveal = app.search_reveal();
+    if search_reveal > f32::EPSILON {
+        page = row![search_workspace(app, search_reveal), page]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     if let Some(prompt) = unbound_key(app) {
         page = stack![page, prompt].into();
@@ -298,12 +302,9 @@ fn presenter(app: &App) -> Element<'_, Message> {
     page
 }
 
-/// Search temporarily becomes the working surface in Reader and Presenter.
-///
-/// The same page-grouped stream is used in both modes. It builds only the
-/// cards near the viewport, so a thousand-page document costs one window of
-/// widgets rather than one widget tree per match.
-fn search_workspace(app: &App) -> Element<'_, Message> {
+/// Search is a transient rail beside the working surface. The document's own
+/// outline remains mounted, so bookmarks and search can be consulted together.
+fn search_workspace(app: &App, reveal: f32) -> Element<'_, Message> {
     use crate::widgets::event::FindCommand;
     use crate::widgets::search::model::{page_groups, summary, visible_group_range};
 
@@ -317,7 +318,7 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         .size(type_scale::BODY)
         .width(Length::Fill)
         .on_input(|typed| Message::Find(FindCommand::Type(typed)))
-        .on_submit(Message::Find(FindCommand::Next));
+        .on_submit(Message::CloseSearchWorkspace);
 
     let toggle = |label: &'static str, selected: bool, command: FindCommand| {
         button(text(label).size(type_scale::LABEL))
@@ -339,8 +340,17 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         format!("{status} on {group_count} pages")
     };
 
-    let controls = row![
-        field,
+    let options = row![
+        button(text("‹").size(type_scale::LABEL))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press_maybe(
+                (!state.hits().is_empty()).then_some(Message::Find(FindCommand::Previous))
+            ),
+        button(text("›").size(type_scale::LABEL))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press_maybe((!state.hits().is_empty()).then_some(Message::Find(FindCommand::Next))),
         toggle(
             "Aa",
             state.query().case_sensitive,
@@ -378,7 +388,7 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         .into()
     } else {
         responsive(move |size| {
-            use crate::widgets::search::model::RESULT_ROW_HEIGHT;
+            const RESULT_ROW_HEIGHT: f32 = 82.0;
 
             let visible = visible_group_range(groups.len(), app.search_scroll, size.height);
             let mut rows = Column::new();
@@ -413,8 +423,9 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
     };
 
     let body = column![
-        text("Search document").size(type_scale::TITLE),
-        controls,
+        text("Search").size(type_scale::TITLE),
+        field,
+        options,
         activity,
         text(page_status)
             .size(type_scale::CAPTION)
@@ -429,7 +440,7 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
     .padding(gap::M);
 
     container(body)
-        .width(Length::Fill)
+        .width(Length::Fixed(280.0 * reveal.clamp(0.0, 1.0)))
         .height(Length::Fill)
         .style(theme::ambient::dialog)
         .into()
@@ -445,7 +456,7 @@ fn search_result_card(
     current: Option<usize>,
 ) -> Element<'_, Message> {
     use crate::widgets::event::FindCommand;
-    use crate::widgets::search::model::RESULT_ROW_HEIGHT;
+    const RESULT_ROW_HEIGHT: f32 = 82.0;
 
     let hits = &app.search.hits()[group.hit_range.clone()];
     let count = hits.len();
@@ -471,28 +482,6 @@ fn search_result_card(
         if count == 1 { "match" } else { "matches" },
     );
 
-    let preview: Element<'_, Message> = match app.thumbnails.get(group.page.get()) {
-        Some(handle) => container(
-            image(handle)
-                .content_fit(ContentFit::Contain)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fixed(184.0))
-        .height(Length::Fixed(112.0))
-        .style(theme::ambient::canvas)
-        .into(),
-        None => container(
-            text(format!("{}", group.page))
-                .size(type_scale::TITLE)
-                .color(theme::ambient::muted()),
-        )
-        .center_x(Length::Fixed(184.0))
-        .center_y(Length::Fixed(112.0))
-        .style(theme::ambient::canvas)
-        .into(),
-    };
-
     let mut excerpts =
         Column::new()
             .spacing(gap::XS)
@@ -501,36 +490,32 @@ fn search_result_card(
             } else {
                 theme::ambient::text()
             }));
-    for hit in hits.iter().take(2) {
+    for hit in hits.iter().take(1) {
         excerpts = excerpts.push(
             text(hit.context.clone())
                 .size(type_scale::LABEL)
                 .color(theme::ambient::muted()),
         );
     }
-    if count > 2 {
+    if count > 1 {
         excerpts = excerpts.push(
-            text(format!("+{} more on this page", count - 2))
+            text(format!("+{} more on this page", count - 1))
                 .size(type_scale::CAPTION)
                 .color(theme::ambient::accent()),
         );
     }
 
-    button(
-        row![preview, container(excerpts).width(Length::Fill)]
-            .spacing(gap::M)
-            .align_y(Alignment::Center),
-    )
-    .padding(gap::S)
-    .width(Length::Fill)
-    .height(Length::Fixed(RESULT_ROW_HEIGHT))
-    .style(if selected {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    })
-    .on_press(Message::Find(FindCommand::Focus(group.hit_range.start)))
-    .into()
+    button(container(excerpts).width(Length::Fill))
+        .padding(gap::S)
+        .width(Length::Fill)
+        .height(Length::Fixed(RESULT_ROW_HEIGHT))
+        .style(if selected {
+            theme::ambient::selected_button
+        } else {
+            theme::ambient::tool_button
+        })
+        .on_press(Message::Find(FindCommand::Focus(group.hit_range.start)))
+        .into()
 }
 
 /// What the slider is pointing at, while it is being dragged.

@@ -683,6 +683,17 @@ impl SaveReview {
     const SHOWN: usize = 6;
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SearchOrigin {
+    Reader {
+        page: pulpit_core::page::PageIndex,
+        zoom: crate::widgets::document::model::Zoom,
+        fraction: f32,
+        spread: crate::widgets::document::model::PageSpread,
+    },
+    Presenter(pulpit_core::Place),
+}
+
 pub struct App {
     pub state: PresentationState,
     /// Where the presenter has been, for the two navigation buttons. Only
@@ -1075,9 +1086,16 @@ pub struct App {
     /// through a different layout, and two models would be two answers to one
     /// question.
     pub search: pulpit_core::search::SearchState,
-    /// Search is an activity over the whole Reader or Presenter, never a cell
-    /// that permanently takes document space.
+    /// Search is a transient rail beside Reader or Presenter, never a layout
+    /// cell that permanently takes document space.
     pub search_workspace: bool,
+    /// The search rail's disclosure transition. Kept beside the outline's
+    /// animation so opening either rail has the same timing and reduced-motion
+    /// behaviour.
+    search_animation: iced::Animation<bool>,
+    /// Where search began. Keyboard stepping is only a preview; closing the
+    /// rail restores this exact view unless a result was explicitly chosen.
+    search_origin: Option<SearchOrigin>,
     /// Vertical offset of the page-grouped result stream.
     pub search_scroll: f32,
     /// The thread talking to this document's worker, when document mode is
@@ -1375,6 +1393,7 @@ impl App {
             // asked; full motion until then, so nothing is reduced on a guess.
             motion: crate::platform::Motion::Full,
             outline_animation: iced::Animation::new(false).quick(),
+            search_animation: iced::Animation::new(false).quick(),
             editing_colors: match theme.resolved {
                 crate::platform::appearance::Resolved::Light => crate::settings::ColorScheme::Light,
                 crate::platform::appearance::Resolved::Dark
@@ -1481,6 +1500,7 @@ impl App {
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
             search_workspace: false,
+            search_origin: None,
             search_scroll: 0.0,
             reader_render: ReaderRenderState::default(),
             reader_crop: pulpit_core::notes::Region::FULL,
@@ -1631,6 +1651,7 @@ impl App {
             // than a fade.
             || self.alarm_controls.ringing.is_some()
             || self.outline_animation.is_animating(self.now)
+            || self.search_animation.is_animating(self.now)
             || self.needs_reconcile
             // An edit on its way to the page: the worker has been asked and
             // has not answered, or it has and the snapshot the render pool
@@ -2192,8 +2213,7 @@ impl App {
                     return self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop);
                 }
                 if key.as_deref() == Some("Escape") && self.search_workspace {
-                    self.search_workspace = false;
-                    return Task::none();
+                    return self.close_search(true);
                 }
                 // The editor owns the keyboard while it is open: presenter
                 // shortcuts must not blank the audience while someone is
@@ -2572,10 +2592,7 @@ impl App {
             }
             Message::Read(command) => self.on_read_command(command),
             Message::Find(command) => self.on_find_command(command),
-            Message::CloseSearchWorkspace => {
-                self.search_workspace = false;
-                Task::none()
-            }
+            Message::CloseSearchWorkspace => self.close_search(true),
             Message::SearchScrolled(offset) => {
                 self.search_scroll = offset.max(0.0);
                 Task::none()
@@ -3686,12 +3703,12 @@ impl App {
                     !collapsed,
                 ))
             }
-            // Search temporarily takes the whole working surface in Reader and
-            // Presenter alike. It is never a layout cell or a permanent rail.
             Action::FocusSearch => {
-                self.search_workspace = true;
-                self.overview = false;
-                iced::widget::operation::focus(crate::widgets::search::view::workspace_input_id())
+                if self.search_workspace {
+                    self.close_search(true)
+                } else {
+                    self.open_search()
+                }
             }
             Action::FindNext => self.on_find_command(crate::widgets::event::FindCommand::Next),
             Action::FindPrevious => {
@@ -8245,24 +8262,84 @@ impl App {
             }
             FindCommand::Next => {
                 let hit = self.search.advance().cloned();
-                if hit.is_some() {
-                    self.search_workspace = false;
-                }
                 self.go_to_hit(hit)
             }
             FindCommand::Previous => {
                 let hit = self.search.retreat().cloned();
-                if hit.is_some() {
-                    self.search_workspace = false;
-                }
                 self.go_to_hit(hit)
             }
             FindCommand::Focus(index) => {
                 let hit = self.search.focus(index).cloned();
-                self.search_workspace = false;
-                self.go_to_hit(hit)
+                // A pressed result is a choice, unlike keyboard stepping.
+                // Forgetting the origin before closing commits that choice.
+                self.search_origin = None;
+                let goto = self.go_to_hit(hit);
+                let close = self.close_search(false);
+                Task::batch([goto, close])
             }
         }
+    }
+
+    fn open_search(&mut self) -> Task<Message> {
+        self.search_origin = if self.uses_document_viewer() {
+            self.reader
+                .reading_position()
+                .map(|(page, zoom, fraction)| SearchOrigin::Reader {
+                    page,
+                    zoom,
+                    fraction,
+                    spread: self.reader.controls().spread,
+                })
+        } else {
+            Some(SearchOrigin::Presenter(self.current_place()))
+        };
+        self.search_workspace = true;
+        self.search_animation = if self.motion.is_reduced() {
+            iced::Animation::new(true).quick()
+        } else {
+            self.search_animation.clone().go(true, self.now)
+        };
+        self.overview = false;
+        iced::widget::operation::focus(crate::widgets::search::view::workspace_input_id())
+    }
+
+    fn close_search(&mut self, restore_origin: bool) -> Task<Message> {
+        self.search_workspace = false;
+        self.search_animation = if self.motion.is_reduced() {
+            iced::Animation::new(false).quick()
+        } else {
+            self.search_animation.clone().go(false, self.now)
+        };
+        let origin = self.search_origin.take();
+        if !restore_origin {
+            return Task::none();
+        }
+        match origin {
+            Some(SearchOrigin::Reader {
+                page,
+                zoom,
+                fraction,
+                spread,
+            }) if self.uses_document_viewer() => {
+                self.navigating_history = true;
+                let spread_task =
+                    self.on_read_command(crate::widgets::event::ReadCommand::SetSpread(spread));
+                let zoom_task =
+                    self.on_read_command(crate::widgets::event::ReadCommand::SetZoom(zoom));
+                self.reader.restore_position(page, Some(zoom), fraction);
+                self.navigating_history = false;
+                Task::batch([spread_task, zoom_task])
+            }
+            Some(SearchOrigin::Presenter(place)) if !self.uses_document_viewer() => {
+                self.go_to_place(place)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    pub fn search_reveal(&self) -> f32 {
+        self.search_animation
+            .interpolate(0.0_f32, 1.0_f32, self.now)
     }
 
     /// Point the search at the open document under a new query.
