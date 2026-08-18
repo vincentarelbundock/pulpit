@@ -3299,6 +3299,12 @@ impl App {
                                 self.annotation_controls = crate::widgets::AnnotationControls::new(
                                     annotation_options_in(&self.active_layout),
                                 );
+                                // The edit may have changed which panels are
+                                // present or how much of the window they take.
+                                // The pictures for the old tree are only
+                                // stand-ins for the new one, not an answer at
+                                // its sizes.
+                                self.replan_layout_renders();
                             }
                         }
                     }
@@ -3369,6 +3375,19 @@ impl App {
             crate::widgets::AnnotationControls::new(annotation_options_in(&self.active_layout));
         self.persist();
         self.check_layout_ratio();
+        self.replan_layout_renders();
+    }
+
+    /// Re-plan every render surface whose geometry comes from the layout.
+    ///
+    /// Mounting another tree does not produce a resize event: the outer
+    /// presenter window is unchanged. Without an explicit plan here, moving
+    /// from Reader to Presenter can leave Current Slide holding the Reader's
+    /// small fallback indefinitely, and restoring a remembered layout after
+    /// a document opens has the same failure on its first page.
+    fn replan_layout_renders(&mut self) {
+        self.request_renders();
+        self.request_reader_renders();
     }
 
     /// The ratio of the presenter's own display, when one is known.
@@ -13456,6 +13475,49 @@ mod canonical_frame_tests {
             plan.iter().all(|request| request.0 == 4),
             "every request is for the committed page: {plan:?}"
         );
+    }
+
+    /// Reader and Presenter occupy the same outer window, so changing between
+    /// them produces no resize event. Their render demands still differ: the
+    /// layout change itself must cause this second plan to be submitted.
+    #[test]
+    fn switching_from_reader_to_presenter_adds_the_sharp_current_panel() {
+        let reader =
+            crate::layout::builtin::reader_default(crate::layout::model::AspectRatio::SixteenNine);
+        let presenter = crate::layout::builtin::presenter_default();
+        let window = (1_800.0, 1_125.0);
+        let scale = 2.0;
+        let aspect = 16.0 / 9.0;
+
+        let reader_widths = crate::layout::panels::slide_widths(&reader, window, scale, aspect);
+        let reader_plan = super::live_slide_plan(
+            0,
+            20,
+            3_840,
+            reader_widths,
+            crate::layout::panels::demand(&reader),
+            None,
+        );
+        assert!(reader_plan
+            .iter()
+            .all(|request| request.2 != pulpit_render::protocol::Priority::Presenter));
+
+        let presenter_widths =
+            crate::layout::panels::slide_widths(&presenter, window, scale, aspect);
+        let presenter_plan = super::live_slide_plan(
+            0,
+            20,
+            3_840,
+            presenter_widths,
+            crate::layout::panels::demand(&presenter),
+            None,
+        );
+        assert!(presenter_plan.iter().any(|request| {
+            request.0 == 0
+                && request.2 == pulpit_render::protocol::Priority::Presenter
+                && request.3 == Quality::Refined
+                && request.4 == presenter_widths.current
+        }));
     }
 
     #[test]
