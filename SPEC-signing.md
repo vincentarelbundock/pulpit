@@ -1,8 +1,8 @@
 # pulpit cryptographic signature specification
 
 Companion to `SPEC-document.md`, which defers this feature at §3.3. Adds
-§20–§36; the numbering is preserved because `Cargo.toml`, `LICENSES/README.md`
-and `NOTES-lopdf-audit.md` cite these section numbers.
+§20–§36; the numbering is preserved because `Cargo.toml` and
+`LICENSES/README.md` cite these section numbers.
 
 Derived from a close reading of **pyHanko** (MIT, Matthias Valvekens), used as a
 reference and a source rather than a dependency: porting its logic is permitted
@@ -25,9 +25,13 @@ The full prose specification of the implemented mechanics is in the git history
 **Byte-range mechanics (§23), incremental writer (§24)**
 - Placeholder write, offset back-patch, digest, reservation fill; CMS size
   estimation.
-- Purpose-built writer in `pdfwrite`, chosen over `lopdf` — audit and reasons in
-  `NOTES-lopdf-audit.md`. `/ID` id1 preserved and id2 regenerated; xref kind
-  matched; hybrid-reference files refused; `/Contents` never encrypted.
+- Purpose-built writer in `pdfwrite`, chosen over `lopdf` per §35 S0 step 4:
+  lopdf 0.32.0 cloned both `/ID` elements rather than regenerating id2, had no
+  `/Contents` encryption exemption, and merged hybrid-reference files instead of
+  refusing them — none of them incidental, since it is a general-purpose library
+  with no signing awareness. `/ID` id1 preserved and id2 regenerated; xref kind
+  matched; hybrid-reference files refused; encrypted documents refused outright,
+  so `/Contents` is never encrypted.
 - §29 split-signing typestate (`SigningSession → TbsDocument → digest → sign →
   finish`), so no object can be written after the digest.
 

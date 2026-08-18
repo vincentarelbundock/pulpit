@@ -1284,7 +1284,15 @@ fn landing_page(app: &App) -> Element<'_, Message> {
         .spacing(gap::XL)
         .align_x(Alignment::Center)
         .max_width(1000.0);
-    container(scrollable(container(content).padding(gap::XXL)).style(theme::ambient::scrollbar))
+    // The centring has to happen *inside* the scrollable. A vertical
+    // scrollable hands its child a full-width, infinite-height box, so the
+    // outer container has nothing narrower than itself to centre and the
+    // capped-width column just sits against the left edge.
+    let centred = container(content)
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .padding(gap::XXL);
+    container(scrollable(centred).style(theme::ambient::scrollbar))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
