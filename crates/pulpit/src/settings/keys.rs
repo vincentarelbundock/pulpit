@@ -1,8 +1,10 @@
-//! Keyboard and presenter-remote bindings.
+//! Fixed keyboard shortcuts and presenter-remote fallbacks.
 //!
-//! Remotes are the reason this is configurable at all: many report ordinary
-//! keys, some report media keys, and a few report nothing a toolkit can name.
-//! Every binding therefore has a raw-scancode fallback.
+//! Keyboard shortcuts are intentionally not user-configurable yet. Keeping a
+//! single curated map lets the interface teach the same small vocabulary in
+//! menus, on the landing page, and in the complete reference. Presenter
+//! remotes are recognised separately so their hardware aliases never crowd
+//! that reference.
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +96,118 @@ pub enum Action {
     Quit,
 }
 
+/// A semantic section in the complete shortcut reference.
+#[derive(Debug, Clone, Copy)]
+pub struct ShortcutGroup {
+    pub title: &'static str,
+    pub actions: &'static [Action],
+}
+
+/// The information architecture of the complete shortcut reference.
+///
+/// The grouping is semantic, not balanced by item count. Actions deliberately
+/// left without a keyboard shortcut are absent because there is nothing a
+/// user can press for them while shortcut customisation is unavailable.
+pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
+    ShortcutGroup {
+        title: "Move through pages",
+        actions: &[
+            Action::Next,
+            Action::Previous,
+            Action::First,
+            Action::Last,
+            Action::ShowOverview,
+        ],
+    },
+    ShortcutGroup {
+        title: "Preview",
+        actions: &[
+            Action::PreviewNext,
+            Action::PreviewPrevious,
+            Action::CommitPreview,
+            Action::CancelPreview,
+        ],
+    },
+    ShortcutGroup {
+        title: "Present",
+        actions: &[
+            Action::Blank,
+            Action::BlankAlternate,
+            Action::ToggleTimer,
+            Action::ResetTimer,
+            Action::SwapDisplays,
+            Action::ToggleAudienceFullscreen,
+        ],
+    },
+    ShortcutGroup {
+        title: "Annotate",
+        actions: &[
+            Action::AnnotateInk,
+            Action::AnnotateHighlighter,
+            Action::AnnotateEraser,
+            Action::AnnotatePointer,
+            Action::UndoAnnotation,
+            Action::RedoAnnotation,
+            Action::ClearAnnotations,
+            Action::ToggleAnnotationAudience,
+        ],
+    },
+    ShortcutGroup {
+        title: "Read & search",
+        actions: &[
+            Action::ToggleReader,
+            Action::ToggleOutline,
+            Action::FocusSearch,
+            Action::FindNext,
+            Action::FindPrevious,
+        ],
+    },
+    ShortcutGroup {
+        title: "Page view",
+        actions: &[
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::ZoomReset,
+            Action::FitPage,
+            Action::FitWidth,
+            Action::RotateReader,
+            Action::ToggleDualPage,
+        ],
+    },
+    ShortcutGroup {
+        title: "Files & application",
+        actions: &[
+            Action::OpenDocument,
+            Action::ReloadDocument,
+            Action::ShowLayouts,
+            Action::ShowShortcuts,
+            Action::Quit,
+        ],
+    },
+];
+
+/// The compact reference shown before a document is open.
+pub const QUICK_START_ACTIONS: [Action; 8] = [
+    Action::Next,
+    Action::Previous,
+    Action::First,
+    Action::Last,
+    Action::FocusSearch,
+    Action::ShowOverview,
+    Action::ToggleReader,
+    Action::ShowShortcuts,
+];
+
+/// Keys worth teaching specifically for live presentation.
+pub const PRESENTING_ACTIONS: [Action; 6] = [
+    Action::PreviewNext,
+    Action::PreviewPrevious,
+    Action::CommitPreview,
+    Action::Blank,
+    Action::BlankAlternate,
+    Action::ToggleTimer,
+];
+
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
     pub const ALL: [Action; 42] = [
@@ -152,7 +266,7 @@ impl Action {
             Action::CommitPreview => "Show the previewed page",
             Action::CancelPreview => "Cancel preview",
             Action::Blank => "Blank",
-            Action::BlankAlternate => "Blank (other colour)",
+            Action::BlankAlternate => "Alternate blank colour",
             Action::ToggleTimer => "Start/pause timer",
             Action::ResetTimer => "Reset timer",
             Action::SwapDisplays => "Swap displays",
@@ -183,7 +297,7 @@ impl Action {
             Action::FitPage => "Fit page",
             Action::FitWidth => "Fit width",
             Action::RotateReader => "Rotate pages",
-            Action::ToggleDualPage => "One or two pages across",
+            Action::ToggleDualPage => "Toggle two-page view",
             Action::Quit => "Quit",
         }
     }
@@ -398,37 +512,27 @@ impl Default for Keymap {
             |key: &str, mods: Mods, action: Action| (KeyBinding::named_with(key, mods), action);
         Self {
             bindings: vec![
-                // Navigation is vim-first: `j`/`l` forward and `k`/`h` back,
-                // so the keys a zathura or vim user reaches for are the ones
-                // that work. Nothing conventional is taken away — space, the
-                // arrows and the paging keys stay bound, because the person
-                // driving the laptop is not always the person who chose the
-                // bindings, and no remote emits `j`.
-                named("j", Action::Next),
-                named("l", Action::Next),
+                // Conventional reader keys are primary. The one familiar
+                // Vim/Zathura alternative follows them and is shown in
+                // parentheses in the reference. PageUp/PageDown remain
+                // visible exceptions because many presenter remotes emit
+                // them and many keyboards label them explicitly.
                 named("Right", Action::Next),
-                named("Down", Action::Next),
-                named("Space", Action::Next),
                 named("PageDown", Action::Next),
-                named("k", Action::Previous),
-                named("h", Action::Previous),
+                named("j", Action::Next),
                 named("Left", Action::Previous),
-                named("Up", Action::Previous),
                 named("PageUp", Action::Previous),
-                named("Backspace", Action::Previous),
+                named("k", Action::Previous),
                 named("Home", Action::First),
-                // `G` for the last slide, as in vim. Its partner `gg` needs a
-                // key-sequence buffer that resolution does not have, so the
-                // first slide is `Home` until sequences exist.
-                with("g", Mods::shift(), Action::Last),
                 named("End", Action::Last),
+                with("g", Mods::shift(), Action::Last),
                 named("Tab", Action::PreviewNext),
                 with("Tab", Mods::shift(), Action::PreviewPrevious),
                 // `Enter` commits the preview and does *not* also advance.
                 // It used to do both, which meant one of the two bindings was
                 // dead — and since the toolkit never reports "Return", the
-                // dead one was the commit. Next has six other keys; commit
-                // has none, so this is where `Enter` belongs.
+                // dead one was the commit. Page navigation has dedicated
+                // keys; commit has none, so this is where `Enter` belongs.
                 named("Enter", Action::CommitPreview),
                 named("Escape", Action::CancelPreview),
                 // Blanking is the most reflexive key at a lectern, so it does
@@ -449,8 +553,8 @@ impl Default for Keymap {
                 // This binding existed before and never fired, because the
                 // timer reset had taken "r" earlier in the list.
                 named("r", Action::ToggleReader),
-                // Layouts keep their mnemonic one row up, "l" itself being a
-                // navigation key now.
+                // Keep layout selection behind a modifier so the small bare
+                // letter vocabulary stays reserved for live actions.
                 with("l", Mods::shift(), Action::ShowLayouts),
                 with("/", Mods::shift(), Action::ShowShortcuts),
                 // The four tools sit under the digits, in the order the
@@ -460,14 +564,10 @@ impl Default for Keymap {
                 named("2", Action::AnnotateHighlighter),
                 named("3", Action::AnnotateEraser),
                 named("4", Action::AnnotatePointer),
-                // Undo and redo of a stroke are editing, not navigation, so
-                // they follow the convention every other editor uses. `u` is
-                // kept as vim's undo; vim's `Ctrl+R` redo is the one vim key
-                // given up, because reload has the stronger claim on it.
+                // Editing convention first, then the familiar Vim undo.
                 with("z", Mods::ctrl(), Action::UndoAnnotation),
                 named("u", Action::UndoAnnotation),
                 with("z", Mods::ctrl_shift(), Action::RedoAnnotation),
-                with("y", Mods::ctrl(), Action::RedoAnnotation),
                 named("c", Action::ClearAnnotations),
                 named("v", Action::ToggleAnnotationAudience),
                 // Anything that leaves the deck — opening, reloading, quitting,
@@ -486,7 +586,6 @@ impl Default for Keymap {
                 named("/", Action::FocusSearch),
                 named("f3", Action::FindNext),
                 with("f3", Mods::shift(), Action::FindPrevious),
-                named("?", Action::FindPrevious),
                 // Zathura/Vim match traversal. Lowercase advances and the
                 // shifted form walks back through the same live result set.
                 named("n", Action::FindNext),
@@ -506,24 +605,11 @@ impl Default for Keymap {
                 with("r", Mods::shift(), Action::RotateReader),
                 named("d", Action::ToggleDualPage),
                 with("r", Mods::ctrl(), Action::ReloadDocument),
-                named("F5", Action::ReloadDocument),
                 named("f", Action::ToggleAudienceFullscreen),
                 with("q", Mods::ctrl(), Action::Quit),
-                // Link focus has no default key. Stepping through a slide's
-                // links is rare enough that it does not earn one of the bare
-                // letters, and both actions stay bindable for anyone whose
-                // decks lean on internal navigation.
-                //
-                // Common presenter remotes: most emit these logical keys.
-                named("F1", Action::Blank),
-                named("Escape", Action::CancelPreview),
-                named("MediaPlayPause", Action::Blank),
-                named("MediaTrackNext", Action::Next),
-                named("MediaTrackPrevious", Action::Previous),
-                named("BrowserForward", Action::Next),
-                named("BrowserBack", Action::Previous),
-                named("AudioVolumeUp", Action::Next),
-                named("AudioVolumeDown", Action::Previous),
+                // Link focus has no fixed shortcut. It remains an internal
+                // action for pointer/focus routing, not a key the reference
+                // can honestly advertise.
             ],
         }
     }
@@ -655,15 +741,21 @@ impl Keymap {
 
     /// The binding to *show* for an action, if any.
     ///
-    /// Menu labels quote one key, not the whole list, and a scancode is not
-    /// something a person can read off a key cap — so this is the first named
-    /// binding, in keymap order, which is the one the defaults put first on
-    /// purpose.
+    /// Menu labels quote one key, not the whole list. Prefer the conventional
+    /// binding even where the resolver's table happens to list an alternate
+    /// first, then fall back to any readable named binding.
     pub fn display_binding(&self, action: Action) -> Option<&KeyBinding> {
         self.bindings
             .iter()
             .find(|(binding, bound)| {
-                *bound == action && matches!(binding, KeyBinding::Named { .. })
+                *bound == action
+                    && matches!(binding, KeyBinding::Named { .. })
+                    && !Self::is_alternate(action, binding)
+            })
+            .or_else(|| {
+                self.bindings.iter().find(|(binding, bound)| {
+                    *bound == action && matches!(binding, KeyBinding::Named { .. })
+                })
             })
             .map(|(binding, _)| binding)
     }
@@ -674,6 +766,55 @@ impl Keymap {
             .filter(|(_, bound)| *bound == action)
             .map(|(binding, _)| binding.describe())
             .collect()
+    }
+
+    /// Whether a visible binding is the Vim/Zathura alternative shown in
+    /// parentheses rather than part of the primary keycap.
+    pub fn is_alternate(action: Action, binding: &KeyBinding) -> bool {
+        let KeyBinding::Named { key, mods } = binding else {
+            return false;
+        };
+        match action {
+            Action::Next => key.eq_ignore_ascii_case("j") && *mods == Mods::NONE,
+            Action::Previous => key.eq_ignore_ascii_case("k") && *mods == Mods::NONE,
+            Action::Last => key.eq_ignore_ascii_case("g") && *mods == Mods::shift(),
+            Action::FocusSearch => key == "/" && *mods == Mods::NONE,
+            Action::FindNext => key.eq_ignore_ascii_case("n") && *mods == Mods::NONE,
+            Action::FindPrevious => key.eq_ignore_ascii_case("n") && *mods == Mods::shift(),
+            Action::ZoomIn => key == "+" && *mods == Mods::NONE,
+            Action::ZoomOut => key == "-" && *mods == Mods::NONE,
+            Action::ZoomReset => key == "=" && *mods == Mods::NONE,
+            Action::FitPage => key.eq_ignore_ascii_case("a") && *mods == Mods::NONE,
+            Action::UndoAnnotation => key.eq_ignore_ascii_case("u") && *mods == Mods::NONE,
+            _ => false,
+        }
+    }
+
+    /// Fixed aliases emitted by common presenter remotes.
+    ///
+    /// They intentionally live outside `bindings`: hardware names should
+    /// work without becoming nine noisy keycaps in the keyboard reference.
+    pub fn resolve_remote(key: Option<&str>, mods: Mods) -> Option<Action> {
+        if mods != Mods::NONE {
+            return None;
+        }
+        match key? {
+            key if key.eq_ignore_ascii_case("F1") => Some(Action::Blank),
+            key if key.eq_ignore_ascii_case("MediaPlayPause") => Some(Action::Blank),
+            key if key.eq_ignore_ascii_case("MediaTrackNext")
+                || key.eq_ignore_ascii_case("BrowserForward")
+                || key.eq_ignore_ascii_case("AudioVolumeUp") =>
+            {
+                Some(Action::Next)
+            }
+            key if key.eq_ignore_ascii_case("MediaTrackPrevious")
+                || key.eq_ignore_ascii_case("BrowserBack")
+                || key.eq_ignore_ascii_case("AudioVolumeDown") =>
+            {
+                Some(Action::Previous)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -696,6 +837,19 @@ mod tests {
         assert_eq!(
             keymap.display_binding(Action::ShowOverview),
             Some(&KeyBinding::named_with("m", Mods::ctrl()))
+        );
+    }
+
+    #[test]
+    fn menus_prefer_the_conventional_binding_over_the_vim_alternative() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.display_binding(Action::ZoomIn),
+            Some(&KeyBinding::named_with("=", Mods::ctrl()))
+        );
+        assert_eq!(
+            keymap.display_binding(Action::FitPage),
+            Some(&KeyBinding::named_with("0", Mods::ctrl()))
         );
     }
 
@@ -781,23 +935,29 @@ mod tests {
     }
 
     #[test]
-    fn documented_remote_keys_resolve() {
+    fn keyboard_and_remote_aliases_are_separate() {
         let keymap = Keymap::default();
+        for key in ["Right", "Left", "PageDown", "PageUp"] {
+            assert!(keymap.resolve(Some(key), None).is_some(), "{key}");
+        }
         for key in [
-            "Right",
-            "Left",
-            "PageDown",
-            "PageUp",
             "MediaTrackNext",
             "MediaTrackPrevious",
             "BrowserForward",
             "BrowserBack",
-            "F5",
+            "AudioVolumeUp",
+            "AudioVolumeDown",
+            "MediaPlayPause",
             "F1",
         ] {
+            assert_eq!(
+                keymap.resolve(Some(key), None),
+                None,
+                "{key} leaked into help"
+            );
             assert!(
-                keymap.resolve(Some(key), None).is_some(),
-                "{key} is not bound"
+                Keymap::resolve_remote(Some(key), Mods::NONE).is_some(),
+                "{key}"
             );
         }
     }
@@ -909,18 +1069,10 @@ mod tests {
     }
 
     #[test]
-    fn vim_navigation_keys_are_the_primary_bindings() {
+    fn the_curated_vim_zathura_alternatives_resolve() {
         let keymap = Keymap::default();
-        for key in ["j", "l"] {
-            assert_eq!(keymap.resolve(Some(key), None), Some(Action::Next), "{key}");
-        }
-        for key in ["k", "h"] {
-            assert_eq!(
-                keymap.resolve(Some(key), None),
-                Some(Action::Previous),
-                "{key}"
-            );
-        }
+        assert_eq!(keymap.resolve(Some("j"), None), Some(Action::Next));
+        assert_eq!(keymap.resolve(Some("k"), None), Some(Action::Previous));
         assert_eq!(
             keymap.resolve_with_mods(Some("G"), Mods::shift(), None),
             Some(Action::Last)
@@ -932,20 +1084,20 @@ mod tests {
     }
 
     #[test]
-    fn conventional_navigation_keys_are_not_taken_away() {
-        // Vim-first is not vim-only: a remote emits none of these letters,
-        // and the person driving the laptop did not necessarily choose the
-        // bindings.
+    fn navigation_keeps_arrows_and_page_keys_without_excess_aliases() {
         let keymap = Keymap::default();
-        for key in ["Space", "Right", "Down", "PageDown"] {
+        for key in ["Right", "PageDown"] {
             assert_eq!(keymap.resolve(Some(key), None), Some(Action::Next), "{key}");
         }
-        for key in ["Left", "Up", "PageUp", "Backspace"] {
+        for key in ["Left", "PageUp"] {
             assert_eq!(
                 keymap.resolve(Some(key), None),
                 Some(Action::Previous),
                 "{key}"
             );
+        }
+        for key in ["l", "h", "Down", "Up", "Space", "Backspace"] {
+            assert_eq!(keymap.resolve(Some(key), None), None, "{key} is excessive");
         }
     }
 
@@ -997,15 +1149,41 @@ mod tests {
     }
 
     #[test]
-    fn link_focus_has_no_default_key_but_stays_bindable() {
-        let mut keymap = Keymap::default();
+    fn link_focus_has_no_fixed_keyboard_shortcut() {
+        let keymap = Keymap::default();
         assert!(keymap.keys_for(Action::FocusNextLink).is_empty());
-        keymap.bind(KeyBinding::named("n"), Action::FocusNextLink);
+        assert!(keymap.keys_for(Action::FocusPreviousLink).is_empty());
+    }
+
+    #[test]
+    fn every_fixed_shortcut_appears_in_exactly_one_semantic_group() {
+        let keymap = Keymap::default();
+        for action in Action::ALL {
+            let occurrences = SHORTCUT_GROUPS
+                .iter()
+                .flat_map(|group| group.actions.iter())
+                .filter(|listed| **listed == action)
+                .count();
+            let has_binding = !keymap.keys_for(action).is_empty();
+            assert_eq!(occurrences, usize::from(has_binding), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn landing_reference_is_a_live_subset_of_the_fixed_keymap() {
+        let keymap = Keymap::default();
+        for action in QUICK_START_ACTIONS.into_iter().chain(PRESENTING_ACTIONS) {
+            assert!(!keymap.keys_for(action).is_empty(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn remote_aliases_reject_modifiers_and_unknown_scancodes() {
         assert_eq!(
-            keymap.resolve(Some("n"), None),
-            Some(Action::FocusNextLink),
-            "a presenter whose decks lean on links can still have the key"
+            Keymap::resolve_remote(Some("MediaTrackNext"), Mods::shift()),
+            None
         );
+        assert_eq!(Keymap::default().resolve(None, Some(191)), None);
     }
 }
 

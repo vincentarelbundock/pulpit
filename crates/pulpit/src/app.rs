@@ -11,7 +11,7 @@ use crate::doc::{DocumentManager, DocumentWatcher, ReloadPolicy};
 use crate::layout::{AspectRatio, Layout, LayoutId, LayoutStore};
 use crate::reader::AppliedKind;
 use crate::settings::diagnostics::describe_warning;
-use crate::settings::{Action, DiagnosticsBundle, KeyBinding, Settings, SettingsStore};
+use crate::settings::{Action, DiagnosticsBundle, Settings, SettingsStore};
 use pulpit_core::annotation::AnnotationTool;
 use pulpit_core::{Blank, Command as Nav, DocumentInfo, NotesMapping, PresentationState};
 use pulpit_display::{
@@ -186,10 +186,6 @@ pub enum Message {
     /// another display changes it.
     PresenterScale(f32),
     SetMapping(NotesMapping),
-    /// Bind the most recent unrecognised key press to an action.
-    BindUnboundKey(Action),
-    /// Stop offering to bind it.
-    ForgetUnboundKey,
     /// The left mouse button came up, anywhere. Ends a slider drag.
     PointerReleased,
     /// The overview was scrolled; the grid builds only what is on screen.
@@ -1018,9 +1014,6 @@ pub struct App {
     /// Wall clock and monotonic clock at the previous tick, used to notice a
     /// suspend/resume: the monotonic clock stops while the machine sleeps.
     last_wall: std::time::SystemTime,
-    /// The most recent key press that resolved to no action, offered in the
-    /// UI so an unidentified remote key can be bound on the spot.
-    pub unbound_key: Option<(Option<String>, u32)>,
     /// The deck as thumbnails, over the presenter screen.
     pub overview: bool,
     /// A scroll the keyboard asked for and has not seen arrive yet: the
@@ -1553,7 +1546,6 @@ impl App {
             placement_retries: Vec::new(),
             presenter_refocus_deadlines: Vec::new(),
             last_wall: std::time::SystemTime::now(),
-            unbound_key: None,
             overview: false,
             overview_scroll_claim: None,
             overview_settling: None,
@@ -2310,11 +2302,12 @@ impl App {
                 // must close the Search tab it opened. Ordinary text input
                 // and every other shortcut remain owned by the widget.
                 if captured {
-                    let action = self.settings.keymap.resolve_with_mods(
-                        key.as_deref(),
-                        crate::settings::Mods::new(control, shift, alt),
-                        scancode,
-                    );
+                    let mods = crate::settings::Mods::new(control, shift, alt);
+                    let action = self
+                        .settings
+                        .keymap
+                        .resolve_with_mods(key.as_deref(), mods, scancode)
+                        .or_else(|| crate::settings::Keymap::resolve_remote(key.as_deref(), mods));
                     if self.search_workspace
                         && self.uses_document_viewer()
                         && action == Some(Action::ToggleOutline)
@@ -2399,14 +2392,12 @@ impl App {
                         || self.about_open
                         || self.menu_open
                         || self.audience_start_menu_open
-                        || self.unbound_key.is_some()
                         || self.overview)
                 {
                     self.shortcuts_open = false;
                     self.about_open = false;
                     self.menu_open = false;
                     self.audience_start_menu_open = false;
-                    self.unbound_key = None;
                     // Backing out of the overview returns to the slide that
                     // was showing, without committing a jump: the grid moves
                     // the preview, so abandoning it is what undoes the look
@@ -2452,25 +2443,15 @@ impl App {
                 {
                     return task;
                 }
-                match self.settings.keymap.resolve_with_mods(
-                    key.as_deref(),
-                    crate::settings::Mods::new(control, shift, alt),
-                    scancode,
-                ) {
+                let mods = crate::settings::Mods::new(control, shift, alt);
+                match self
+                    .settings
+                    .keymap
+                    .resolve_with_mods(key.as_deref(), mods, scancode)
+                    .or_else(|| crate::settings::Keymap::resolve_remote(key.as_deref(), mods))
+                {
                     Some(action) => self.update(Message::Do(action)),
-                    None => {
-                        // An unbound press is the raw-scancode fallback path:
-                        // record it and offer it for binding in the presenter
-                        // window, so a remote whose keys the toolkit cannot
-                        // name is still usable without editing a config file.
-                        if let Some(code) = scancode.filter(|_| offers_binding(key.as_deref())) {
-                            let name = key.clone().unwrap_or_else(|| "unidentified".into());
-                            self.diagnostics
-                                .note(format!("unbound key: {name} (scancode {code})"));
-                            self.unbound_key = Some((key, code));
-                        }
-                        Task::none()
-                    }
+                    None => Task::none(),
                 }
             }
             Message::PasteAnnotationText { target, value } => {
@@ -2684,28 +2665,6 @@ impl App {
                     self.persist();
                 }
                 self.invalidate_renders();
-                Task::none()
-            }
-            Message::BindUnboundKey(action) => {
-                if let Some((name, code)) = self.unbound_key.take() {
-                    // Prefer the logical name when the toolkit produced one;
-                    // fall back to the raw scancode otherwise.
-                    let binding = match name {
-                        Some(name) if name != "unidentified" => KeyBinding::named(&name),
-                        _ => KeyBinding::scancode(code),
-                    };
-                    self.notify(format!(
-                        "bound {} to {}",
-                        binding.describe(),
-                        action.label()
-                    ));
-                    self.settings.keymap.bind(binding, action);
-                    self.persist();
-                }
-                Task::none()
-            }
-            Message::ForgetUnboundKey => {
-                self.unbound_key = None;
                 Task::none()
             }
             Message::SlideCursor { x, y } => {
@@ -3750,19 +3709,26 @@ impl App {
         }
     }
 
-    /// The key a menu entry should quote for an action, read from the live
-    /// keymap rather than written beside the entry. Menu labels used to spell
-    /// their own keys, so they went stale the moment a binding moved — and
-    /// they never showed a rebinding at all.
+    /// The primary key a menu entry should quote for an action.
     pub fn action_shortcut(&self, action: crate::settings::keys::Action) -> Option<String> {
+        let binding = self.settings.keymap.display_binding(action)?;
+        self.format_key_binding(binding)
+    }
+
+    fn format_key_binding(&self, binding: &crate::settings::KeyBinding) -> Option<String> {
         use crate::platform::input::Modifier;
         use crate::platform::Shortcut;
         use crate::settings::keys::KeyBinding;
 
-        let binding = self.settings.keymap.display_binding(action)?;
         let KeyBinding::Named { key, mods } = binding else {
             return None;
         };
+        // The toolkit reports the question-mark key as Shift+/. The help is
+        // teaching the character printed on the keypress, not its event
+        // representation.
+        if key == "/" && mods.shift && !mods.ctrl && !mods.alt {
+            return Some("?".into());
+        }
         let mut modifiers = Vec::new();
         // `ctrl` in a keymap means "the modifier this desktop uses for
         // application commands", which is Command on macOS.
@@ -3781,36 +3747,28 @@ impl App {
         }))
     }
 
-    /// Every readable binding for an action, formatted for this desktop.
-    pub fn action_shortcuts(&self, action: crate::settings::keys::Action) -> Vec<String> {
-        self.settings
-            .keymap
-            .bindings
-            .iter()
-            .filter_map(|(binding, bound)| {
-                (*bound == action).then_some(binding).map(|binding| {
-                    use crate::platform::input::Modifier;
-                    use crate::platform::Shortcut;
-                    let KeyBinding::Named { key, mods } = binding else {
-                        return binding.describe();
-                    };
-                    let mut modifiers = Vec::new();
-                    if mods.ctrl {
-                        modifiers.push(Modifier::Primary);
-                    }
-                    if mods.alt {
-                        modifiers.push(Modifier::Alt);
-                    }
-                    if mods.shift {
-                        modifiers.push(Modifier::Shift);
-                    }
-                    self.platform.input.format(&Shortcut {
-                        modifiers,
-                        key: display_key(key),
-                    })
-                })
-            })
-            .collect()
+    /// Primary keyboard bindings and the Vim/Zathura alternative, formatted
+    /// for this desktop. Hardware aliases are deliberately absent.
+    pub fn action_shortcut_parts(
+        &self,
+        action: crate::settings::keys::Action,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut primary = Vec::new();
+        let mut alternate = Vec::new();
+        for (binding, bound) in &self.settings.keymap.bindings {
+            if *bound != action {
+                continue;
+            }
+            let Some(formatted) = self.format_key_binding(binding) else {
+                continue;
+            };
+            if crate::settings::Keymap::is_alternate(action, binding) {
+                alternate.push(formatted);
+            } else {
+                primary.push(formatted);
+            }
+        }
+        (primary, alternate)
     }
 
     pub fn document_title(&self) -> String {
@@ -7083,10 +7041,6 @@ impl App {
             };
             return Some(self.on_read_command(command));
         }
-        if control && key.eq_ignore_ascii_case("y") {
-            return Some(self.on_read_command(ReadCommand::Redo));
-        }
-
         // The rest are single keys, so a modifier means the press belongs to
         // some other binding and not to the toolbar.
         if control {
@@ -11940,62 +11894,6 @@ fn shared_pixels(pixels: &std::sync::Arc<Vec<u8>>) -> bytes::Bytes {
     bytes::Bytes::from_owner(SharedPixels(std::sync::Arc::clone(pixels)))
 }
 
-/// Should an unbound press of this key offer to be bound?
-///
-/// The prompt exists for one thing: a presentation remote whose buttons the
-/// toolkit cannot name, which would otherwise be unusable without editing a
-/// configuration file by hand. It is not for ordinary typing. Brushing a
-/// letter or a digit — which is what most stray presses are — must do
-/// nothing, or the offer becomes a nag in the middle of a talk.
-fn offers_binding(key: Option<&str>) -> bool {
-    if is_modifier(key) || is_system_key(key) {
-        return false;
-    }
-    match key {
-        // Nothing was named: exactly the remote-control case.
-        None => true,
-        Some("unidentified") => true,
-        // A single character is someone touching the keyboard.
-        Some(name) => name.chars().count() > 1,
-    }
-}
-
-/// Is this a power-management notification rather than an intentional key?
-///
-/// Some keyboards and compositors emit `WakeUp` when the machine resumes.
-/// Offering to bind that notification puts a configuration prompt in front
-/// of the presentation before the presenter has pressed anything.
-fn is_system_key(key: Option<&str>) -> bool {
-    matches!(key, Some("WakeUp" | "Power" | "Sleep" | "Standby"))
-}
-
-/// Is this key a modifier?
-///
-/// Modifiers are pressed constantly and mean nothing on their own, so
-/// offering to bind one — "“Alt” is not bound. Use it for: Next page…" — is
-/// noise in front of a live presentation. A remote's unnamed buttons, which
-/// is what the binding prompt exists for, are never modifiers.
-fn is_modifier(key: Option<&str>) -> bool {
-    let Some(key) = key else { return false };
-    matches!(
-        key,
-        "Alt"
-            | "Control"
-            | "Shift"
-            | "Super"
-            | "Meta"
-            | "Hyper"
-            | "AltGraph"
-            | "CapsLock"
-            | "NumLock"
-            | "ScrollLock"
-            | "Fn"
-            | "FnLock"
-            | "Symbol"
-            | "SymbolLock"
-    )
-}
-
 /// Escape means Back on the pages that are places rather than modes.
 ///
 /// Settings and the layout library both take the whole window and both offer
@@ -12080,6 +11978,10 @@ fn platform_description() -> String {
 fn display_key(key: &str) -> String {
     match key {
         "slash" => "/".into(),
+        "Right" => "→".into(),
+        "Left" => "←".into(),
+        "PageDown" => "PgDn".into(),
+        "PageUp" => "PgUp".into(),
         other if other.len() == 1 => other.to_ascii_uppercase(),
         other if other.len() <= 3 && other.starts_with(['f', 'F']) => other.to_ascii_uppercase(),
         other => other.to_string(),
@@ -12426,10 +12328,8 @@ mod save_review_tests {
 }
 
 #[cfg(test)]
-mod key_prompt_tests {
-    use super::{
-        back_to_presenter_key, is_modifier, is_system_key, offers_binding, shows_a_notice,
-    };
+mod shell_key_tests {
+    use super::{back_to_presenter_key, shows_a_notice};
     use crate::designer::Page;
 
     #[test]
@@ -12454,42 +12354,6 @@ mod key_prompt_tests {
     fn something_open_in_front_of_the_page_takes_the_press_first() {
         assert!(!back_to_presenter_key(Page::Library, Some("Escape"), true));
         assert!(back_to_presenter_key(Page::Library, Some("Escape"), false));
-    }
-
-    #[test]
-    fn typing_never_offers_a_binding() {
-        for key in ["a", "Z", "7", "é", "/"] {
-            assert!(!offers_binding(Some(key)), "{key} is someone typing");
-        }
-    }
-
-    #[test]
-    fn a_remotes_unnamed_button_does() {
-        assert!(offers_binding(None));
-        assert!(offers_binding(Some("unidentified")));
-    }
-
-    #[test]
-    fn a_named_key_a_remote_might_send_does() {
-        for key in ["F13", "XF86Forward", "PageDown", "BrowserBack"] {
-            assert!(offers_binding(Some(key)), "{key} is worth binding");
-        }
-    }
-
-    #[test]
-    fn modifiers_never_do() {
-        for key in ["Alt", "Control", "Shift", "Super", "CapsLock"] {
-            assert!(is_modifier(Some(key)));
-            assert!(!offers_binding(Some(key)));
-        }
-    }
-
-    #[test]
-    fn power_management_notifications_never_offer_a_binding() {
-        for key in ["WakeUp", "Power", "Sleep", "Standby"] {
-            assert!(is_system_key(Some(key)));
-            assert!(!offers_binding(Some(key)));
-        }
     }
 
     #[test]

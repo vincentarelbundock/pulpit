@@ -228,6 +228,20 @@ pub fn dialog(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
     }
 }
 
+/// A compact keyboard token: quieter than a button, but distinct from prose.
+pub fn keycap(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
+    move |_| container::Style {
+        background: Some(Background::Color(palette.canvas)),
+        border: Border {
+            color: palette.border(),
+            width: 1.0,
+            radius: radius::SMALL.into(),
+        },
+        text_color: Some(palette.text),
+        ..container::Style::default()
+    }
+}
+
 /// A drop-down, in this application's colours rather than the library's.
 ///
 /// Iced styles an unstyled `pick_list` from its own built-in theme, whose
@@ -1019,6 +1033,9 @@ pub mod ambient {
     }
     pub fn dialog(theme: &Theme) -> container::Style {
         super::dialog(palette())(theme)
+    }
+    pub fn keycap(theme: &Theme) -> container::Style {
+        super::keycap(palette())(theme)
     }
     pub fn drop_down(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         super::drop_down(palette())(theme, status)

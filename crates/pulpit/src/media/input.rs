@@ -38,7 +38,6 @@ pub const GLOBAL_KEYS: &[&str] = &[
     "Home",
     "End",
     "F1",
-    "F5",
     "F11",
 ];
 
@@ -343,7 +342,7 @@ mod tests {
     fn navigation_keys_stay_global_even_while_a_deck_has_focus() {
         let mut router = InputRouter::new();
         router.focus(Some(BALLS));
-        for key in ["ArrowRight", "PageDown", "Home", "F5"] {
+        for key in ["ArrowRight", "PageDown", "Home", "F1"] {
             assert_eq!(
                 router.key_pressed(key, None),
                 Routed::GlobalShortcut,

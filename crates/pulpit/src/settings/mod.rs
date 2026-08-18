@@ -27,7 +27,7 @@ use pulpit_display::DisplayRoles;
 use serde::{Deserialize, Serialize};
 
 /// Current settings schema version. Bump it *and* add a migration.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// How pulpit reacts when a second display appears mid-talk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -51,6 +51,10 @@ pub struct Settings {
     pub rendering: RenderSettings,
     pub notes: NotesSettings,
     pub timer: TimerSettings,
+    /// The fixed runtime keymap. It is skipped on disk: shortcut
+    /// customisation is intentionally unavailable until the interaction and
+    /// migration design is ready to support it well.
+    #[serde(skip)]
     pub keymap: Keymap,
     pub recent: VecDeque<PathBuf>,
     pub diagnostics: DiagnosticsSettings,

@@ -40,10 +40,17 @@ Four ways to move through the deck:
 - *Jump menu* (`o`), the whole deck as thumbnails, so you land on a slide by
   eye rather than by number. Picking one closes the menu.
 
-Press `?` at any time to open the complete keyboard reference. It is built
-from the active keymap, so customised bindings and unbound commands are shown
-as they really are. The same reference fills the presenter when no document
-is open, beside the button that opens one.
+Press `?` at any time to open the complete keyboard reference. Acrobat and
+standard reader keys are shown first, with one Vim/Zathura alternative in parentheses;
+`PageUp` and `PageDown` remain visible beside the arrows. Keyboard shortcuts
+are deliberately fixed for now, so the reference is the application contract
+rather than a settings editor.
+
+With no document open, Pulpit shows a mode-neutral welcome page instead of a
+Reader or Presenter layout. It leads with *Open a PDF*, teaches compact
+getting-started and presenting subsets of the same fixed shortcuts, and links
+to the online documentation. Opening a file from there still uses the shape
+of its first page to choose Reader or Presenter automatically.
 
 = Annotations
 

@@ -121,7 +121,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         page = stack![page, alarms_dialog(app)].into();
     }
     if app.shortcuts_open {
-        page = stack![page, shortcuts_overlay(app, true)].into();
+        page = stack![page, shortcuts_overlay(app)].into();
     }
     if app.about_open {
         page = stack![page, about_overlay()].into();
@@ -348,11 +348,12 @@ fn presenter(app: &App) -> Element<'_, Message> {
         None => body,
     };
 
-    // With no file open, the layout has no useful content to draw. Make the
-    // keyboard-first interface teach itself, using the very same reference
-    // as the Help command so startup documentation cannot go stale.
+    // Empty startup is its own mode-neutral surface. It must not mount a
+    // Reader or Presenter layout: opening a document still gets the ordinary
+    // shape-based mode detection with no remembered empty-state choice in
+    // the way.
     if app.state.document().is_none() {
-        page = stack![page, shortcuts_overlay(app, false)].into();
+        page = landing_page(app);
     }
 
     if app.menu_open {
@@ -368,9 +369,6 @@ fn presenter(app: &App) -> Element<'_, Message> {
     page = stack![page, scrub_layer(app)].into();
     if app.overview {
         page = stack![page, overview(app)].into();
-    }
-    if let Some(prompt) = unbound_key(app) {
-        page = stack![page, prompt].into();
     }
     page
 }
@@ -1177,169 +1175,168 @@ fn menu(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// The complete live keymap, grouped by the work each command performs.
-fn shortcuts_overlay(app: &App, dismissable: bool) -> Element<'_, Message> {
-    const GROUPS: [(&str, &[Action]); 6] = [
-        (
-            "Navigation",
-            &[
-                Action::Next,
-                Action::Previous,
-                Action::First,
-                Action::Last,
-                Action::ShowOverview,
-            ],
-        ),
-        (
-            "Preview",
-            &[
-                Action::PreviewNext,
-                Action::PreviewPrevious,
-                Action::CommitPreview,
-                Action::CancelPreview,
-            ],
-        ),
-        (
-            "Presentation",
-            &[
-                Action::Blank,
-                Action::BlankAlternate,
-                Action::ToggleTimer,
-                Action::ResetTimer,
-                Action::SwapDisplays,
-                Action::ToggleAudienceFullscreen,
-            ],
-        ),
-        (
-            "Annotations",
-            &[
-                Action::AnnotateInk,
-                Action::AnnotateHighlighter,
-                Action::AnnotateEraser,
-                Action::AnnotatePointer,
-                Action::UndoAnnotation,
-                Action::RedoAnnotation,
-                Action::ClearAnnotations,
-                Action::ToggleAnnotationAudience,
-            ],
-        ),
-        (
-            "Reader",
-            &[
-                Action::ToggleReader,
-                Action::ToggleOutline,
-                Action::FocusSearch,
-                Action::FindNext,
-                Action::FindPrevious,
-                Action::ZoomIn,
-                Action::ZoomOut,
-                Action::ZoomReset,
-                Action::FitPage,
-                Action::FitWidth,
-                Action::RotateReader,
-                Action::ToggleDualPage,
-                Action::FocusNextLink,
-                Action::FocusPreviousLink,
-            ],
-        ),
-        (
-            "Application",
-            &[
-                Action::OpenDocument,
-                Action::ReloadDocument,
-                Action::ShowLayouts,
-                Action::ShowShortcuts,
-                Action::Quit,
-            ],
-        ),
-    ];
+fn shortcut_hint<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
+    let (primary, alternate) = app.action_shortcut_parts(action);
+    let mut hint = Row::new().spacing(gap::S).align_y(Alignment::Center);
+    if !primary.is_empty() {
+        hint = hint.push(
+            container(text(primary.join(" · ")).size(type_scale::LABEL))
+                .padding(iced::Padding::from([gap::XS, gap::S]))
+                .style(theme::ambient::keycap),
+        );
+    }
+    if !alternate.is_empty() {
+        hint = hint.push(
+            text(format!("({})", alternate.join(" · ")))
+                .size(type_scale::LABEL)
+                .color(theme::ambient::muted()),
+        );
+    }
+    hint.into()
+}
 
-    let groups = responsive(move |size| {
-        let group = |name: &'static str, actions: &'static [Action]| {
-            let mut content = Column::new().spacing(gap::XS).push(
-                text(name)
-                    .size(type_scale::LABEL)
-                    .color(theme::ambient::text()),
-            );
-            for action in actions {
-                let keys = app.action_shortcuts(*action);
-                let keys = if keys.is_empty() {
-                    "Unbound".to_string()
-                } else {
-                    keys.join("  ·  ")
-                };
-                content = content.push(
-                    row![
-                        text(action.label()).size(type_scale::CAPTION),
-                        space::horizontal(),
-                        text(keys)
-                            .size(type_scale::CAPTION)
-                            .color(theme::ambient::muted()),
-                    ]
-                    .spacing(gap::M),
-                );
-            }
-            container(content).width(Length::Fill).padding(gap::S)
-        };
-        let column_for = |indices: &[usize]| {
-            let mut column = Column::new().spacing(gap::M);
-            for index in indices {
-                column = column.push(group(GROUPS[*index].0, GROUPS[*index].1));
-            }
-            column.width(Length::Fill)
-        };
-        if size.width < 620.0 {
-            column_for(&[0, 1, 2, 3, 4, 5]).into()
-        } else if size.width < 900.0 {
-            row![column_for(&[0, 2, 4]), column_for(&[1, 3, 5])]
+fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
+    Row::new()
+        .spacing(gap::M)
+        .align_y(Alignment::Center)
+        .push(text(action.label()).size(type_scale::BODY))
+        .push(space::horizontal())
+        .push(shortcut_hint(app, action))
+        .wrap()
+        .into()
+}
+
+fn shortcut_group<'a>(
+    app: &'a App,
+    title: &'static str,
+    actions: &'static [Action],
+) -> Element<'a, Message> {
+    let mut content = Column::new().spacing(gap::S).push(
+        text(title)
+            .size(type_scale::HEADING)
+            .color(theme::ambient::text()),
+    );
+    for action in actions {
+        content = content.push(shortcut_entry(app, *action));
+    }
+    container(content)
+        .width(Length::Fill)
+        .padding(gap::S)
+        .into()
+}
+
+/// A mode-neutral welcome surface. Opening a document from here still runs
+/// the ordinary shape-based Reader/Presenter detection.
+fn landing_page(app: &App) -> Element<'_, Message> {
+    use crate::settings::keys::{PRESENTING_ACTIONS, QUICK_START_ACTIONS};
+
+    let guide = responsive(move |size| {
+        let getting_started = shortcut_group(app, "Getting started", &[Action::ShowShortcuts]);
+        let once_open = shortcut_group(app, "Once a PDF is open", &QUICK_START_ACTIONS[..7]);
+        let presenting = shortcut_group(app, "Once presenting", &PRESENTING_ACTIONS);
+        if size.width < 760.0 {
+            column![getting_started, once_open, presenting]
                 .spacing(gap::L)
                 .into()
         } else {
             row![
-                column_for(&[0, 3]),
-                column_for(&[1, 4]),
-                column_for(&[2, 5]),
+                column![getting_started, presenting]
+                    .spacing(gap::L)
+                    .width(Length::Fill),
+                once_open,
+            ]
+            .spacing(gap::XL)
+            .into()
+        }
+    });
+
+    let hero = column![
+        text("Pulpit").size(type_scale::TITLE),
+        text("A calm place to read a PDF or present it on another screen.")
+            .size(type_scale::BODY)
+            .color(theme::ambient::muted()),
+        button(text("Open a PDF    Ctrl+O").size(type_scale::BODY))
+            .padding(iced::Padding::from([gap::M, gap::XL]))
+            .style(theme::ambient::forward_button)
+            .on_press(Message::OpenDialog),
+        text("Acrobat / standard keys  (Vim/Zathura keys)")
+            .size(type_scale::LABEL)
+            .color(theme::ambient::muted()),
+    ]
+    .spacing(gap::M)
+    .align_x(Alignment::Center);
+
+    let website = button(
+        text("vincentarelbundock.github.io/pulpit  ↗")
+            .size(type_scale::BODY)
+            .color(theme::ambient::accent()),
+    )
+    .style(theme::ambient::tool_button)
+    .on_press(Message::OpenDocumentation);
+
+    let content = column![hero, guide, website]
+        .spacing(gap::XL)
+        .align_x(Alignment::Center)
+        .max_width(1000.0);
+    container(scrollable(container(content).padding(gap::XXL)).style(theme::ambient::scrollbar))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(theme::ambient::surface)
+        .into()
+}
+
+/// The complete fixed keymap, grouped by the work each command performs.
+fn shortcuts_overlay(app: &App) -> Element<'_, Message> {
+    use crate::settings::keys::SHORTCUT_GROUPS;
+
+    let groups = responsive(move |size| {
+        let column_for = |indices: &[usize]| {
+            let mut column = Column::new().spacing(gap::M);
+            for index in indices {
+                let group = SHORTCUT_GROUPS[*index];
+                column = column.push(shortcut_group(app, group.title, group.actions));
+            }
+            column.width(Length::Fill)
+        };
+        if size.width < 620.0 {
+            column_for(&[0, 1, 2, 3, 4, 5, 6]).into()
+        } else if size.width < 920.0 {
+            row![column_for(&[0, 2, 4, 5]), column_for(&[1, 3, 6])]
+                .spacing(gap::L)
+                .into()
+        } else {
+            row![
+                column_for(&[0, 1]),
+                column_for(&[2, 3]),
+                column_for(&[4, 5, 6]),
             ]
             .spacing(gap::L)
             .into()
         }
     });
-    let title = if dismissable {
-        "Keyboard shortcuts"
-    } else {
-        "Open a PDF — or start from the keyboard"
-    };
-    let mut header = Row::new()
+    let header = Row::new()
         .align_y(Alignment::Center)
-        .push(text(title).size(type_scale::TITLE));
-    if dismissable {
-        header = header.push(space::horizontal()).push(
+        .push(text("Keyboard shortcuts").size(type_scale::TITLE))
+        .push(space::horizontal())
+        .push(
             button(text("Close"))
                 .style(theme::ambient::tool_button)
                 .on_press(Message::CloseShortcuts),
         );
-    } else {
-        header = header.push(space::horizontal()).push(
-            button(text("Open…"))
-                .style(theme::ambient::forward_button)
-                .on_press(Message::OpenDialog),
-        );
-    }
-    let mut content = Column::new().spacing(gap::M).push(header).push(groups);
-    if dismissable {
-        content = content.push(
-            container(
-                button(text("Customize shortcuts…"))
-                    .style(theme::ambient::tool_button)
-                    .on_press(Message::ShowSettings),
-            )
-            .width(Length::Fill)
-            .align_x(Alignment::End),
-        );
-    }
+    let content = Column::new()
+        .spacing(gap::M)
+        .push(header)
+        .push(
+            text("Acrobat / standard keys are shown first; Vim/Zathura alternatives are in parentheses.")
+                .size(type_scale::BODY)
+                .color(theme::ambient::muted()),
+        )
+        .push(groups);
     let card = container(content)
         .padding(gap::L)
-        .max_width(1100.0)
+        .max_width(1180.0)
         .style(theme::ambient::dialog);
     let layer = container(scrollable(card).style(theme::ambient::scrollbar))
         .width(Length::Fill)
@@ -1347,18 +1344,14 @@ fn shortcuts_overlay(app: &App, dismissable: bool) -> Element<'_, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .padding(gap::L);
-    if dismissable {
-        let backdrop = mouse_area(
-            container(space::vertical())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::ambient::scrim),
-        )
-        .on_press(Message::CloseShortcuts);
-        stack![backdrop, layer].into()
-    } else {
-        layer.into()
-    }
+    let backdrop = mouse_area(
+        container(space::vertical())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::ambient::scrim),
+    )
+    .on_press(Message::CloseShortcuts);
+    stack![backdrop, layer].into()
 }
 
 fn about_overlay() -> Element<'static, Message> {
@@ -2988,56 +2981,6 @@ fn mappings(app: &App) -> Element<'_, Message> {
         );
     }
     buttons.wrap().into()
-}
-
-/// The raw-scancode fallback, surfaced as a prompt.
-fn unbound_key(app: &App) -> Option<Element<'_, Message>> {
-    let (name, code) = app.unbound_key.as_ref()?;
-    let described = match name {
-        Some(name) if name != "unidentified" => format!("“{name}” (scancode {code})"),
-        _ => format!("an unidentified key (scancode {code})"),
-    };
-    let bindable = [
-        Action::Next,
-        Action::Previous,
-        Action::First,
-        Action::Last,
-        Action::Blank,
-        Action::ToggleTimer,
-        Action::CommitPreview,
-    ];
-    let mut buttons =
-        row![text(format!("{described} is not bound. Use it for:")).size(type_scale::LABEL)]
-            .spacing(gap::S)
-            .align_y(Alignment::Center);
-    for action in bindable {
-        buttons = buttons.push(
-            button(text(action.label()).size(type_scale::CAPTION))
-                .padding(gap::XS)
-                .style(theme::ambient::tool_button)
-                .on_press(Message::BindUnboundKey(action)),
-        );
-    }
-    buttons = buttons.push(
-        button(text("ignore").size(type_scale::CAPTION))
-            .padding(gap::XS)
-            .style(theme::ambient::tool_button)
-            .on_press(Message::ForgetUnboundKey),
-    );
-    // On its own panel: a bare row of buttons floating over the layout reads
-    // as part of the layout, and the transparent gaps between them show the
-    // slide through.
-    Some(
-        container(
-            container(buttons.wrap())
-                .padding(gap::S)
-                .style(theme::ambient::dialog),
-        )
-        .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .padding(gap::S)
-        .into(),
-    )
 }
 
 // ----------------------------------------------------------- layout pages

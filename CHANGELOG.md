@@ -14,32 +14,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer block the interface, and large search/outline snapshots are
   shared across view rebuilds.
 
-- **Keyboard shortcuts are vim-first, and modifiers are now real.** Navigation
-  answers to `j`/`l` and `k`/`h` as well as the arrows, space and the paging
-  keys — nothing conventional was taken away, because no presenter remote
-  emits a letter and the person driving the laptop is not always the person
-  who chose the bindings. `G` goes to the last slide.
+- **The landing page and keyboard reference have been reorganised around the
+  work users are doing.** Empty startup is now a mode-neutral welcome page
+  with a prominent Open button, compact getting-started and presenting keys,
+  and a link to the Pulpit website. Opening a PDF still uses first-page shape
+  detection to choose Reader or Presenter.
 
-  Everything that leaves the deck takes the primary modifier the way every
-  other application does: `Ctrl+O` to open, `Ctrl+R` to reload, `Ctrl+Q` to
-  quit, `Ctrl+F` for audience fullscreen. A bare `q` next to `w` was a talk
-  ended by a typo. Undo and redo of a stroke follow the editing convention
-  rather than the vim one — `Ctrl+Z` and `Ctrl+Shift+Z`, with `u` and
-  `Ctrl+Y` alongside — because a stroke is an edit.
+  The complete reference uses seven semantic groups, larger type, and one
+  quiet keycap per action. Acrobat and standard reader keys come first, one
+  Vim/Zathura alternative appears in parentheses, and `PageUp`/`PageDown`
+  remain visible beside the arrows. Hardware aliases for common remotes still
+  work but no longer crowd the keyboard reference.
 
-  Displaced by the navigation keys: the slide overview moves from `j` to
-  **`o`**, and the layout library from `l` to **`Shift+L`**. The timer is `t`
-  and resets with `Shift+T`. Stepping focus through a slide's links loses its
-  default keys — it is rare enough not to earn a bare letter — and stays
-  bindable for anyone whose decks lean on internal navigation.
-
-  Underneath, a binding now carries its modifiers as data instead of gluing
-  them onto the key name as `"ShiftZ"`. That spelling could not express two
-  modifiers at once, and it could not tell a modifier that is load-bearing
-  from one that is incidental: `Shift`+`b` must still blank the screen for a
-  presenter resting a finger on shift, while `Ctrl`+`Q` must never reach a
-  binding written for a bare `q`. Stored keymaps using the old spelling are
-  migrated as they load.
+- **Keyboard shortcuts are a smaller fixed vocabulary for now.** Redundant
+  navigation and editing aliases have been removed; Reader and Presenter use
+  the same page actions. Shortcut customisation and the unknown-scancode
+  binding prompt have been removed, and legacy persisted keymaps are discarded
+  during settings migration so the visible reference always matches input.
 
 ### Fixed
 
@@ -49,11 +40,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means what it says.
 - **`Enter` never committed a previewed slide.** It was bound to advance, and
   the commit was written against `"Return"` — a key name the toolkit does not
-  emit — so both bindings were dead. `Enter` now commits the preview; Next
-  keeps its six other keys.
+  emit — so both bindings were dead. `Enter` now commits the preview; page
+  navigation stays on its dedicated keys.
 - A keymap check now asserts that no key is bound to two different actions,
   and that every default binding resolves to the action it was written for.
   Both bugs above were the same missing guard.
+- The duplicate `Escape` entry for cancelling a preview has been removed.
 
 ### Added
 

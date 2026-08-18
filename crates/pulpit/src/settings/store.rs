@@ -84,13 +84,9 @@ impl SettingsStore {
             });
         }
         migrate(&mut value, schema)?;
-        let mut settings: Settings = value
+        let settings: Settings = value
             .try_into()
             .map_err(|e: toml::de::Error| SettingsError::Parse(e.to_string()))?;
-        // A stored keymap is stored whole, so an action added since the file
-        // was written has no key in it. Anything with nothing bound gets its
-        // default back; anything the user has bound is left exactly as it is.
-        settings.keymap.restore_missing_defaults();
         Ok(settings)
     }
 
@@ -140,6 +136,14 @@ fn migrate(value: &mut toml::Value, from: u32) -> Result<(), SettingsError> {
             // and serde supplies an empty one, so existing files need no
             // value transformation.
             1 => {}
+            // Shortcut customisation is deliberately unavailable for now.
+            // Remove the complete persisted map so old settings cannot
+            // silently override the fixed, documented keyboard vocabulary.
+            2 => {
+                if let Some(table) = value.as_table_mut() {
+                    table.remove("keymap");
+                }
+            }
             other => {
                 return Err(SettingsError::Parse(format!(
                     "no migration from schema {other}"
@@ -298,5 +302,31 @@ mod tests {
         let loaded = store.load();
         assert_eq!(loaded.schema, SCHEMA_VERSION);
         assert!(!loaded.appearance.colors.has_overrides());
+    }
+
+    #[test]
+    fn schema_two_discards_the_persisted_custom_keymap() {
+        let (_dir, store) = store();
+        std::fs::write(
+            store.path(),
+            r#"schema = 2
+
+[keymap]
+bindings = [[{ kind = "named", key = "x" }, "next"]]
+"#,
+        )
+        .unwrap();
+
+        let loaded = store.load();
+        assert_eq!(loaded.schema, SCHEMA_VERSION);
+        assert_eq!(loaded.keymap.resolve(Some("x"), None), None);
+        assert_eq!(
+            loaded.keymap.resolve(Some("Right"), None),
+            Some(crate::settings::Action::Next)
+        );
+
+        store.save(&loaded).unwrap();
+        let saved = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!saved.contains("[keymap]"));
     }
 }

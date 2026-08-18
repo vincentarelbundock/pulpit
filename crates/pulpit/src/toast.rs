@@ -302,12 +302,12 @@ mod tests {
         let mut toasts = Toasts::new();
         toasts.error(
             "Could not open the document",
-            Some("Check the file still exists, then press F5".into()),
+            Some("Check the file still exists, then press Ctrl+R".into()),
             at(0),
         );
         let toast = toasts.iter().next().unwrap();
         assert_eq!(toast.intent, Intent::Error);
-        assert!(toast.action.as_ref().unwrap().contains("F5"));
+        assert!(toast.action.as_ref().unwrap().contains("Ctrl+R"));
     }
 
     fn condition(key: &'static str, message: &str) -> (&'static str, String, Option<String>) {

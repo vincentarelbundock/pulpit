@@ -21,7 +21,7 @@ Application (iced daemon, one update loop)
 ├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
-├── InputRouter              keymap incl. raw scancodes         pulpit::settings
+├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
 └── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
 ```
@@ -1239,9 +1239,10 @@ control, not where on the layout the presenter put it.
 The hamburger remains the one global command menu. It groups file, view,
 presentation, timer and help commands; live controls such as Start and Stop
 remain outside it. Its keyboard-reference command opens a presenter-only
-overlay generated from the active keymap. The no-document surface uses that
-same generated reference as its main content, so the advertised keys cannot
-drift from settings or from the overlay.
+overlay generated from the fixed keymap. The mode-neutral no-document surface
+uses compact subsets of that same model, so advertised keys cannot drift from
+input handling. Hardware aliases from presenter remotes are resolved
+separately and do not become visual clutter in the keyboard reference.
 
 === Media Transport
 
