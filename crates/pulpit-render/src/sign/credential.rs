@@ -122,7 +122,10 @@ pub fn load_pkcs12_impl(
             p12_keystore::KeyStore::from_pkcs12(pkcs12_data, passphrase.as_str(), policy).map_err(
                 |e| {
                     let err_msg = format!("{:?}", e);
-                    // Map MAC/decryption failures to WrongPassphrase
+                    // Map MAC/decryption failures to WrongPassphrase by substring matching on
+                    // the Debug format. This is fragile (§30 LOW finding) but necessary because
+                    // p12_keystore does not expose typed error variants. If the crate's error
+                    // handling changes or adds variants, this list should be updated.
                     if err_msg.contains("MacError")
                         || err_msg.contains("InvalidMac")
                         || err_msg.contains("InvalidPassword")
@@ -324,6 +327,10 @@ fn analyze_private_key(pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), Sign
     let oid_str = pki.algorithm.oid.to_string();
 
     if oid_str == "1.2.840.113549.1.1.1" {
+        // Extract the key size; fallback to 2048 bits if parsing fails.
+        // This should rarely fail for a properly-formatted RSA key, but if it does,
+        // 2048 is a conservative guess that won't disclose more key material than
+        // what the signature already reveals.
         let bits = extract_rsa_bits(pkey_der).unwrap_or(2048);
         return Ok((KeyType::Rsa, PublicKeyInfo::Rsa { bits }));
     }

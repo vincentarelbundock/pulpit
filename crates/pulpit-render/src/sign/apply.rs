@@ -1192,7 +1192,7 @@ fn parse_object_dictionary(
             "object {obj_num} is not a dictionary; this document cannot be signed by pulpit"
         )));
     }
-    let (object, _) = parse_value(&tokens, start)?;
+    let (object, _) = parse_value(&tokens, start, 0)?;
     match object {
         PdfObject::Dictionary(entries) => Ok(entries),
         _ => Err(SignApplyError::Unsupported(format!(
@@ -1213,10 +1213,25 @@ fn tokenize(slice: &[u8]) -> Result<Vec<Vec<u8>>, SignApplyError> {
     Ok(tokens)
 }
 
+/// Maximum nesting depth of a parsed value (FINDING #4: guard against unbounded recursion).
+const MAX_VALUE_DEPTH: usize = 64;
+
 /// Parse one value starting at `index`, returning it and the index just past
 /// it. Streams are not handled: none of the objects this module re-emits —
 /// catalog, AcroForm, page node, field — carries one.
-fn parse_value(tokens: &[Vec<u8>], index: usize) -> Result<(PdfObject, usize), SignApplyError> {
+///
+/// The `depth` parameter guards against pathological nesting (FINDING #4).
+fn parse_value(
+    tokens: &[Vec<u8>],
+    index: usize,
+    depth: usize,
+) -> Result<(PdfObject, usize), SignApplyError> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(SignApplyError::Unsupported(
+            "value nesting too deep".to_string(),
+        ));
+    }
+
     let malformed =
         || SignApplyError::Unsupported("the document's object structure is malformed".to_string());
     let token = tokens.get(index).ok_or_else(malformed)?;
@@ -1234,7 +1249,7 @@ fn parse_value(tokens: &[Vec<u8>], index: usize) -> Result<(PdfObject, usize), S
                 .and_then(|s| s.strip_prefix('/'))
                 .ok_or_else(malformed)?
                 .to_string();
-            let (value, next) = parse_value(tokens, i + 1)?;
+            let (value, next) = parse_value(tokens, i + 1, depth + 1)?;
             entries.push((name, value));
             i = next;
         }
@@ -1248,23 +1263,60 @@ fn parse_value(tokens: &[Vec<u8>], index: usize) -> Result<(PdfObject, usize), S
             if next.as_slice() == b"]" {
                 return Ok((PdfObject::Array(items), i + 1));
             }
-            let (value, after) = parse_value(tokens, i)?;
+            let (value, after) = parse_value(tokens, i, depth + 1)?;
             items.push(value);
             i = after;
         }
     }
 
+    // FINDING #5: Preserve raw bytes for string values instead of lossy UTF-8
+    // conversion. For literal strings (starting with '('), extract the raw bytes
+    // between '(' and ')' without converting to string first.
+    if !token.is_empty() && token[0] == b'(' {
+        // Literal string: extract raw bytes between '(' and ')'
+        let mut string_bytes = Vec::new();
+        let mut i = 1usize;
+        let mut paren_depth = 1usize;
+        while i < token.len() {
+            match token[i] {
+                b'\\' if i + 1 < token.len() => {
+                    // Escape sequence: keep the backslash and the next byte
+                    string_bytes.push(token[i]);
+                    string_bytes.push(token[i + 1]);
+                    i += 2;
+                }
+                b'(' => {
+                    paren_depth += 1;
+                    string_bytes.push(token[i]);
+                    i += 1;
+                }
+                b')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        // End of string
+                        return Ok((
+                            PdfObject::RawString(unescape_bytes(&string_bytes)),
+                            index + 1,
+                        ));
+                    }
+                    string_bytes.push(token[i]);
+                    i += 1;
+                }
+                _ => {
+                    string_bytes.push(token[i]);
+                    i += 1;
+                }
+            }
+        }
+        // Unterminated string: treat the whole token as the string
+        return Ok((PdfObject::String(unescape_bytes(&string_bytes)), index + 1));
+    }
+
+    // For hex strings and other tokens, convert to UTF-8 string as before
     let text = String::from_utf8_lossy(token).to_string();
 
     if let Some(name) = text.strip_prefix('/') {
         return Ok((PdfObject::Name(name.to_string()), index + 1));
-    }
-    if text.starts_with('(') {
-        let inner = text
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .unwrap_or(&text);
-        return Ok((PdfObject::String(unescape(inner)), index + 1));
     }
     if text.starts_with('<') {
         let inner: String = text
@@ -1312,10 +1364,17 @@ fn parse_value(tokens: &[Vec<u8>], index: usize) -> Result<(PdfObject, usize), S
     Err(malformed())
 }
 
+#[allow(dead_code)]
 fn unescape(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len());
+    unescape_bytes(text.as_bytes())
+}
+
+/// Unescape PDF literal string bytes, preserving non-ASCII bytes.
+/// Handles backslash escapes in PDF strings (§7.3.4.2).
+fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
     let mut escaped = false;
-    for byte in text.bytes() {
+    for &byte in bytes {
         if escaped {
             out.push(byte);
             escaped = false;
@@ -1359,13 +1418,98 @@ fn first_page_object(
     ))
 }
 
+/// Decode a PDF text string (PDFDocEncoding or UTF-16BE with FEFF prefix) to a Rust String.
+/// FINDING #5b: PDF text strings must be properly decoded before comparison against UTF-8 user input.
+fn decode_pdf_string(bytes: &[u8]) -> Result<String, SignApplyError> {
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+
+    // UTF-16BE variant: bytes starting with 0xFEFF (FEFF) BOM
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let mut result = String::new();
+        let data = &bytes[2..];
+        let mut i = 0;
+        while i + 1 < data.len() {
+            let hi = data[i] as u32;
+            let lo = data[i + 1] as u32;
+            let code_unit = (hi << 8) | lo;
+            if let Some(ch) = char::from_u32(code_unit) {
+                result.push(ch);
+            } else {
+                return Err(SignApplyError::Unsupported(
+                    "invalid UTF-16BE text string".to_string(),
+                ));
+            }
+            i += 2;
+        }
+        return Ok(result);
+    }
+
+    // PDFDocEncoding (default for text strings without FEFF prefix)
+    // ASCII range (0x00-0x7F) is identical to UTF-8.
+    // For 0x80-0xFF, map according to PDFDocEncoding table (mostly Latin-1 with some exceptions).
+    // Note: The 0x80-0x9F range differs from Latin-1.
+    let mut result = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        if byte < 0x80 {
+            // ASCII (also valid in PDFDocEncoding)
+            result.push(byte as char);
+        } else {
+            // PDFDocEncoding: map 0x80-0xFF to Unicode
+            // These mappings are from the PDF specification (Table D.2).
+            let ch = match byte {
+                0x80 => '\u{2022}', // BULLET
+                0x81 => '\u{2020}', // DAGGER
+                0x82 => '\u{2021}', // DOUBLE DAGGER
+                0x83 => '\u{2026}', // HORIZONTAL ELLIPSIS
+                0x84 => '\u{2014}', // EM DASH
+                0x85 => '\u{2013}', // EN DASH
+                0x86 => '\u{0192}', // LATIN SMALL LETTER F WITH HOOK
+                0x87 => '\u{2044}', // FRACTION SLASH
+                0x88 => '\u{2039}', // SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+                0x89 => '\u{203A}', // SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+                0x8A => '\u{2212}', // MINUS SIGN
+                0x8B => '\u{2030}', // PER MILLE SIGN
+                0x8C => '\u{201E}', // DOUBLE LOW-9 QUOTATION MARK
+                0x8D => '\u{201C}', // LEFT DOUBLE QUOTATION MARK
+                0x8E => '\u{201D}', // RIGHT DOUBLE QUOTATION MARK
+                0x8F => '\u{2018}', // LEFT SINGLE QUOTATION MARK
+                0x90 => '\u{2019}', // RIGHT SINGLE QUOTATION MARK
+                0x91 => '\u{201A}', // SINGLE LOW-9 QUOTATION MARK
+                0x92 => '\u{2122}', // TRADE MARK SIGN
+                0x93 => '\u{FB01}', // LATIN SMALL LIGATURE FI
+                0x94 => '\u{FB02}', // LATIN SMALL LIGATURE FL
+                0x95 => '\u{0141}', // LATIN CAPITAL LETTER L WITH STROKE
+                0x96 => '\u{0152}', // LATIN CAPITAL LIGATURE OE
+                0x97 => '\u{0160}', // LATIN CAPITAL LETTER S WITH CARON
+                0x98 => '\u{0178}', // LATIN CAPITAL LETTER Y WITH DIAERESIS
+                0x99 => '\u{017D}', // LATIN CAPITAL LETTER Z WITH CARON
+                0x9A => '\u{0131}', // LATIN SMALL LETTER DOTLESS I
+                0x9B => '\u{0142}', // LATIN SMALL LETTER L WITH STROKE
+                0x9C => '\u{0153}', // LATIN SMALL LIGATURE OE
+                0x9D => '\u{0161}', // LATIN SMALL LETTER S WITH CARON
+                0x9E => '\u{017E}', // LATIN SMALL LETTER Z WITH CARON
+                0x9F => '\u{FFFD}', // REPLACEMENT CHARACTER (undefined in PDFDocEncoding)
+                // 0xA0-0xFF are identical to Latin-1 (Unicode code point = byte value)
+                _ => char::from_u32(byte as u32).unwrap_or('\u{FFFD}'),
+            };
+            result.push(ch);
+        }
+    }
+    Ok(result)
+}
+
 /// The object number of the field named `name`, if the AcroForm lists it.
 fn find_field_object(bytes: &[u8], name: &str) -> Result<Option<u32>, SignApplyError> {
     let catalog = find_catalog_ref(bytes)?;
     for (obj_num, _) in find_fields_array(bytes, catalog)? {
         let entries = parse_object_dictionary(bytes, obj_num)?;
-        if let Some(PdfObject::String(field_name)) = entry(&entries, "T") {
-            if field_name.as_slice() == name.as_bytes() {
+        if let Some(PdfObject::RawString(field_name)) = entry(&entries, "T") {
+            // FINDING #5b: Decode the PDF text string and compare as strings.
+            // This allows field names with non-ASCII characters to be found.
+            let decoded_field_name = decode_pdf_string(field_name)?;
+            if decoded_field_name == name {
                 return Ok(Some(obj_num));
             }
         }
@@ -1378,8 +1522,14 @@ fn existing_field_names(bytes: &[u8]) -> Result<Vec<String>, SignApplyError> {
     let mut names = Vec::new();
     for (obj_num, _) in find_fields_array(bytes, catalog)? {
         let entries = parse_object_dictionary(bytes, obj_num)?;
-        if let Some(PdfObject::String(field_name)) = entry(&entries, "T") {
-            names.push(String::from_utf8_lossy(field_name).to_string());
+        // `/T` parses to `RawString`: it is document bytes, not our own text.
+        // Matching `String` here silently matched nothing, so this returned an
+        // empty list for every document and both collision checks in
+        // `plan_revision` went dead — an existing name was no longer refused
+        // and the auto-namer always picked `Signature1`, producing two fields
+        // sharing a `/T`. Decode the same way `find_field_object` does.
+        if let Some(PdfObject::RawString(field_name)) = entry(&entries, "T") {
+            names.push(decode_pdf_string(field_name)?);
         }
     }
     Ok(names)
@@ -1437,7 +1587,7 @@ mod tests {
             b"7 0 obj\n<< /Type /Page /Parent 2 0 R /Count 3 /Rect [0 0 612 792] >>\nendobj";
         let tokens = tokenize(source).unwrap();
         let start = tokens.iter().position(|t| t == b"obj").unwrap() + 1;
-        let (object, _) = parse_value(&tokens, start).unwrap();
+        let (object, _) = parse_value(&tokens, start, 0).unwrap();
         let PdfObject::Dictionary(entries) = object else {
             panic!("expected a dictionary");
         };
@@ -1566,5 +1716,151 @@ mod tests {
             error,
             SignApplyError::PostSignVerificationFailed { .. }
         ));
+    }
+
+    // --- Regression tests for HIGH-severity findings ---------------------
+
+    /// FINDING #4: Deeply nested arrays should error cleanly, not overflow stack.
+    #[test]
+    fn deeply_nested_array_errors_cleanly() {
+        // Construct tokens representing deeply nested arrays: [[[[[...
+        let mut tokens = vec![];
+        for _ in 0..MAX_VALUE_DEPTH + 10 {
+            tokens.push(b"[".to_vec());
+        }
+        tokens.push(b"42".to_vec());
+        for _ in 0..MAX_VALUE_DEPTH + 10 {
+            tokens.push(b"]".to_vec());
+        }
+
+        let result = parse_value(&tokens, 0, 0);
+        assert!(
+            result.is_err(),
+            "deeply nested value should error, not overflow"
+        );
+        match result {
+            Err(SignApplyError::Unsupported(msg)) if msg.contains("nesting too deep") => {
+                // Expected
+            }
+            other => panic!("expected nesting depth error, got {:?}", other),
+        }
+    }
+
+    /// FINDING #5: Non-ASCII string bytes should survive parse/re-emit round trip.
+    /// Tests that `(Café)` with raw byte 0xE9 is preserved, not converted to replacement char.
+    #[test]
+    fn non_ascii_string_bytes_preserved_in_parse() {
+        // Create tokens for a literal string containing non-ASCII bytes.
+        // Représent (Café) where é is 0xE9 (PDFDocEncoding).
+        let cafe_bytes = b"(Caf\xE9)".to_vec();
+        let tokens = vec![cafe_bytes];
+
+        let (object, _) = parse_value(&tokens, 0, 0).expect("parse should succeed");
+        match object {
+            PdfObject::RawString(bytes) => {
+                // The string content (without the parentheses) should be [C, a, f, 0xE9]
+                assert_eq!(bytes, b"Caf\xE9", "non-ASCII bytes must be preserved");
+            }
+            other => panic!("expected PdfObject::String, got {:?}", other),
+        }
+    }
+
+    /// A field's `/T` is document bytes, so it parses to `RawString`. Both
+    /// `find_field_object` and `existing_field_names` must match that variant
+    /// and decode it. `existing_field_names` was left matching `String` when
+    /// the variants were split; the arm then matched nothing, it returned an
+    /// empty list for every document, and both signature-field name-collision
+    /// checks in `plan_revision` silently went dead — the auto-namer always
+    /// chose `Signature1` and an explicit duplicate was never refused, so
+    /// pulpit would sign a document carrying two fields with one `/T`.
+    #[test]
+    fn a_field_name_parses_to_the_variant_its_consumers_match() {
+        let tokens: Vec<Vec<u8>> = [
+            &b"<<"[..],
+            &b"/T"[..],
+            &b"(Caf\xE9 Sig)"[..],
+            &b"/FT"[..],
+            &b"/Sig"[..],
+            &b">>"[..],
+        ]
+        .iter()
+        .map(|t| t.to_vec())
+        .collect();
+
+        let (object, _) = parse_value(&tokens, 0, 0).expect("the dictionary parses");
+        let PdfObject::Dictionary(entries) = object else {
+            panic!("expected a dictionary");
+        };
+        match entry(&entries, "T") {
+            Some(PdfObject::RawString(name)) => {
+                assert_eq!(
+                    decode_pdf_string(name).expect("decodes"),
+                    "Café Sig",
+                    "the consumers decode this, so it must round-trip"
+                );
+            }
+            other => panic!("/T must parse to RawString, got {other:?}"),
+        }
+    }
+
+    /// FINDING #5b: Fields with non-ASCII names should be locatable.
+    /// Tests that PDF text string encoding (PDFDocEncoding) is properly decoded.
+    #[test]
+    fn pdf_docencoding_string_decoding() {
+        // PDF text strings are PDFDocEncoded (or UTF-16BE with FEFF prefix).
+        // é in PDFDocEncoding is 0xE9, but in UTF-8 it's 0xC3 0xA9.
+        // The decoder must convert PDFDocEncoding bytes to a Rust String
+        // so it can be compared against user input (which is UTF-8).
+
+        // PDFDocEncoding: "Café" where é is 0xE9
+        let pdf_bytes = b"Caf\xE9".to_vec();
+        let decoded = decode_pdf_string(&pdf_bytes).expect("should decode PDFDocEncoding");
+        assert_eq!(
+            decoded, "Café",
+            "PDFDocEncoding 0xE9 should decode to UTF-8 é"
+        );
+
+        // UTF-16BE variant: same string with BOM prefix
+        let utf16_bytes = b"\xFE\xFF\x00C\x00a\x00f\x00\xE9".to_vec();
+        let decoded_utf16 = decode_pdf_string(&utf16_bytes).expect("should decode UTF-16BE");
+        assert_eq!(
+            decoded_utf16, "Café",
+            "UTF-16BE FEFF variant should also decode to Café"
+        );
+
+        // ASCII (subset of PDFDocEncoding) should work as-is
+        let ascii_bytes = b"Signature1".to_vec();
+        let decoded_ascii = decode_pdf_string(&ascii_bytes).expect("should decode ASCII");
+        assert_eq!(
+            decoded_ascii, "Signature1",
+            "ASCII text should decode unchanged"
+        );
+    }
+
+    /// FINDING #4: Deeply nested dictionaries should also error cleanly.
+    #[test]
+    fn deeply_nested_dictionary_errors_cleanly() {
+        // Construct tokens representing deeply nested dicts: <<</A<<
+        let mut tokens = vec![];
+        for _ in 0..MAX_VALUE_DEPTH + 10 {
+            tokens.push(b"<<".to_vec());
+            tokens.push(b"/A".to_vec());
+        }
+        tokens.push(b"1".to_vec()); // inner value
+        for _ in 0..MAX_VALUE_DEPTH + 10 {
+            tokens.push(b">>".to_vec());
+        }
+
+        let result = parse_value(&tokens, 0, 0);
+        assert!(
+            result.is_err(),
+            "deeply nested dictionary should error, not overflow"
+        );
+        match result {
+            Err(SignApplyError::Unsupported(msg)) if msg.contains("nesting too deep") => {
+                // Expected
+            }
+            other => panic!("expected nesting depth error, got {:?}", other),
+        }
     }
 }

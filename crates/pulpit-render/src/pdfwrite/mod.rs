@@ -209,7 +209,15 @@ pub enum PdfObject {
     Boolean(bool),
     Integer(i64),
     Real(f64),
+    /// Application-generated UTF-8 text. The writer will encode non-ASCII
+    /// as UTF-16BE with a BOM prefix, keeping ASCII as a literal string.
+    /// For FINDING #5b compatibility, use RawString for raw PDF bytes.
     String(Vec<u8>),
+    /// Raw PDF bytes from a parsed document. These are emitted verbatim as
+    /// a hex string to prevent corruption. Used for field names and other
+    /// document values that may contain PDFDocEncoding or other raw bytes
+    /// that must survive round-tripping (FINDING #5b).
+    RawString(Vec<u8>),
     Name(String),
     Array(Vec<PdfObject>),
     /// Dictionary with deterministic order: Vec preserves insertion order
@@ -289,7 +297,37 @@ impl PdfObject {
                     writer.write_all(b">").map_err(PdfWriteError::Io)?;
                 }
             }
-            PdfObject::Name(n) => write!(writer, "/{}", n).map_err(PdfWriteError::Io)?,
+            PdfObject::RawString(s) => {
+                // Raw PDF bytes from a parsed document. Emit as hex string to preserve
+                // bytes exactly as they are, without any transcoding or interpretation.
+                // This prevents corruption of PDFDocEncoding or other raw bytes (FINDING #5b).
+                writer.write_all(b"<").map_err(PdfWriteError::Io)?;
+                for byte in s {
+                    write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
+                }
+                writer.write_all(b">").map_err(PdfWriteError::Io)?;
+            }
+            PdfObject::Name(n) => {
+                writer.write_all(b"/").map_err(PdfWriteError::Io)?;
+                for byte in n.as_bytes() {
+                    // PDF names require escaping for:
+                    // - Whitespace and delimiters: space, tab, newline, carriage return, <, >, [, ], {, }, /, (, )
+                    // - Special character #
+                    // - Non-ASCII bytes
+                    match *byte {
+                        b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'[' | b']' | b'{' | b'}'
+                        | b'/' | b'(' | b')' | b'#' => {
+                            write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
+                        }
+                        0..=0x20 | 0x7F..=0xFF => {
+                            write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
+                        }
+                        _ => {
+                            writer.write_all(&[*byte]).map_err(PdfWriteError::Io)?;
+                        }
+                    }
+                }
+            }
             PdfObject::HexString(h) => {
                 writer.write_all(b"<").map_err(PdfWriteError::Io)?;
                 for byte in h {
@@ -1696,6 +1734,38 @@ mod tests {
             .collect();
         assert_eq!(units[0], 0xFEFF);
         assert_eq!(String::from_utf16(&units[1..]).unwrap(), "Émile");
+    }
+
+    /// FINDING #5: a value parsed OUT of a document must be re-emitted with its
+    /// bytes intact. `RawString` carries PDF bytes whose encoding we do not get
+    /// to reinterpret; `String` carries pulpit's own UTF-8 text and is
+    /// legitimately transcoded. Guessing between the two by testing whether the
+    /// bytes happen to parse as UTF-8 silently rewrote documents: PDFDocEncoded
+    /// `C3 A9` was re-emitted as UTF-16BE `00E9`, changing the text of a
+    /// document that was then signed. These assert on meaning, not on today's
+    /// byte pattern — a test pinned to current output would have passed on the
+    /// bug.
+    #[test]
+    fn raw_document_bytes_are_re_emitted_verbatim() {
+        for raw in [
+            &b"Caf\xE9"[..],     // 0xE9 alone is not valid UTF-8
+            &b"Caf\xC3\xA9"[..], // these ARE valid UTF-8 and must NOT be transcoded
+            &b"Cafe"[..],        // pure ASCII
+        ] {
+            let mut out = Vec::new();
+            PdfObject::RawString(raw.to_vec())
+                .serialize(&mut out)
+                .unwrap();
+            let hex = std::str::from_utf8(&out[1..out.len() - 1]).unwrap();
+            let decoded: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            assert_eq!(
+                decoded, raw,
+                "raw document bytes {raw:?} must survive re-emission unchanged"
+            );
+        }
     }
 
     #[test]

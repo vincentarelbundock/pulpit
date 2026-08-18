@@ -494,6 +494,12 @@ impl FormEnvironment {
 /// `this` must be the pointer PDFium was given in
 /// `FPDFDOC_InitFormFillEnvironment`, which is the address of a
 /// `FormEnvironment`'s first field and therefore of the `FormEnvironment`.
+///
+/// The returned mutable reference must not be alive across a re-entry into
+/// PDFium. No second call to this function may have a lifetime that overlaps
+/// with the first: the returned reference assumes exclusive access to the
+/// environment, and PDFium is allowed to re-enter through a callback, which
+/// would create aliasing violations.
 unsafe fn environment<'a>(this: *mut FPDF_FORMFILLINFO) -> Option<&'a mut FormEnvironment> {
     if this.is_null() {
         return None;

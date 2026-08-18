@@ -126,7 +126,8 @@ pub struct RevisionInfo {
     pub xref_start: u64,
     /// Byte offset just past the end of the xref section/object.
     pub xref_end: u64,
-    /// Total file size at the end of this revision (byte just past %%EOF).
+    /// File size at the time the revisions were last built (end of file).
+    /// Note: For multi-revision PDFs, this is the total file size, not per-revision.
     pub eof: u64,
     /// Set of object numbers defined in this revision's xref.
     pub obj_numbers: std::collections::HashSet<u32>,
@@ -366,11 +367,20 @@ fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
         }
     }
 
-    // Parse trailer dictionary for /Prev
+    // Parse trailer dictionary for /Prev, tracking nesting depth
+    // to handle nested dictionaries correctly
     let mut key: Option<String> = None;
+    let mut dict_depth: i32 = 0;
     while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b">>" {
-            break;
+        // Track nesting depth for << and >>
+        if token == b"<<" {
+            dict_depth += 1;
+        } else if token == b">>" {
+            dict_depth = dict_depth.saturating_sub(1);
+            // Only break when we exit the trailer dictionary (depth becomes 0)
+            if dict_depth == 0 {
+                break;
+            }
         }
 
         if let Ok(token_str) = std::str::from_utf8(&token) {
@@ -409,7 +419,8 @@ fn parse_xref_entries(bytes: &[u8], startxref: u64) -> Result<std::collections::
 
     if first_token.as_deref() == Some(b"xref") {
         // Classic xref table: parse subsection headers and entries
-        parse_classic_xref_entries(&mut tokenizer)
+        // Pass the slice length so we can bound count by remaining file capacity
+        parse_classic_xref_entries(&mut tokenizer, xref_slice.len())
     } else {
         // Xref stream: parse /Index and /W, then decode entries
         parse_xref_stream_entries(xref_slice)
@@ -417,10 +428,18 @@ fn parse_xref_entries(bytes: &[u8], startxref: u64) -> Result<std::collections::
 }
 
 /// Parse classic xref table entries: subsection headers (first count) + 20-byte entries.
+/// `slice_len`: total length of the xref slice, used to bound count by remaining capacity.
 fn parse_classic_xref_entries(
     tokenizer: &mut PdfTokenizer,
+    slice_len: usize,
 ) -> Result<std::collections::HashSet<u32>> {
     let mut obj_numbers = std::collections::HashSet::new();
+
+    // Calculate the maximum count based on file size: a classic xref entry is 20 bytes.
+    // This prevents malicious huge-count values from causing exhaustion.
+    // We use the slice length as a conservative bound; the real limit depends on
+    // tokenizer position, but we can't access that, so use slice length.
+    let max_reasonable_count = (slice_len / 20).max(1024) as u32;
 
     while let Ok(Some(token)) = tokenizer.next_token() {
         if token == b"trailer" {
@@ -433,8 +452,24 @@ fn parse_classic_xref_entries(
                 if let Ok(Some(count_token)) = tokenizer.next_token() {
                     if let Ok(count_str) = std::str::from_utf8(&count_token) {
                         if let Ok(count) = count_str.parse::<u32>() {
+                            // Bound count by what the remaining file can contain.
+                            // If count exceeds reasonable bounds for the file size,
+                            // skip this subsection rather than erroring the entire parse.
+                            if count > max_reasonable_count {
+                                continue;
+                            }
+
+                            // Check for overflow: first + count might wrap around
+                            let end = match first.checked_add(count) {
+                                Some(e) => e,
+                                None => {
+                                    // Overflow detected; skip this subsection
+                                    continue;
+                                }
+                            };
+
                             // Skip the next `count` tokens (20-byte entries)
-                            for obj_num in first..(first + count) {
+                            for obj_num in first..end {
                                 obj_numbers.insert(obj_num);
                                 // Skip the 20-byte entry (offset, gen, type)
                                 let _ = tokenizer.next_token();
@@ -524,9 +559,25 @@ fn parse_xref_stream_entries(xref_slice: &[u8]) -> Result<std::collections::Hash
     }
 
     // Process each (first, count) pair
+    // The same bound the classic table gets, and for the same reason: `count`
+    // comes from /Index in the file and is not checked against how many rows
+    // actually follow, so an /Index of [0 4000000000] otherwise spins for
+    // billions of iterations while the HashSet grows without limit. A stream
+    // row is sum(/W) bytes, so the stream cannot describe more entries than it
+    // has bytes to encode them in. Bounding the classic path alone left this
+    // one — reached for every PDF 1.5+ cross-reference stream — wide open.
+    let row_bytes = _w_widths.iter().sum::<usize>().max(1);
+    let max_reasonable_count = (xref_slice.len() / row_bytes).max(1024) as u32;
+
     for (first, count) in index_pairs {
+        if count > max_reasonable_count {
+            continue;
+        }
         for i in 0..count {
-            obj_numbers.insert(first + i);
+            // Check for overflow when adding i to first
+            if let Some(obj_num) = first.checked_add(i) {
+                obj_numbers.insert(obj_num);
+            }
         }
     }
 
@@ -643,8 +694,53 @@ pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<
 
     // Enumerate fields in document order
     for field in &fields {
-        if let Ok(Some(sig_report)) = extract_signature_field(bytes, field, revisions) {
-            reports.push(sig_report);
+        match extract_signature_field(bytes, field, revisions) {
+            Ok(Some(sig_report)) => {
+                reports.push(sig_report);
+            }
+            Ok(None) => {
+                // Not a signature field, skip it
+            }
+            // A field that is definitively some other kind — a text box, a
+            // button, a choice — must not surface as a broken signature just
+            // because its object is malformed: an unsigned document would
+            // display a signature warning it never earned. `None` is NOT
+            // excluded here, because a field whose object could not be read
+            // has an undetermined `/FT`, and silently dropping it is exactly
+            // the vanishing-signature hole this arm exists to close.
+            Err(_)
+                if field
+                    .field_type
+                    .as_deref()
+                    .is_some_and(|kind| kind != "Sig") => {}
+            Err(_) => {
+                // A signature field was present but could not be fully decoded.
+                // Report it as broken rather than dropping it silently.
+                // This prevents tampered signatures from appearing as unsigned.
+                let field_name = field
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| format!("Field_{}", field.obj.0));
+                reports.push(StructuralReport {
+                    field_name,
+                    coverage: SignatureCoverage::Unclear,
+                    later_revisions: false,
+                    contents_extent: ContentsExtent {
+                        c_start: 0,
+                        c_end: 0,
+                    },
+                    byte_range: ByteRange {
+                        z: 0,
+                        len1: 0,
+                        start2: 0,
+                        len2: 0,
+                    },
+                    sig_dict_revision: revisions.last_changed_revision(field.obj.0).unwrap_or(0),
+                    declared_docmdp: None,
+                    sub_filter: None,
+                    mod_date: None,
+                });
+            }
         }
     }
 
@@ -951,14 +1047,14 @@ fn extract_signature_field(
 
     let field_obj_slice = find_object(bytes, field_ref.0)?;
     if field_obj_slice.is_empty() {
-        return Ok(None);
+        // Field object exists but is empty: this is a broken /Sig field that should
+        // be reported, not dropped. Return error to trigger broken-report path.
+        return Err(VerifyError::MalformedPdf(
+            "signature field object is empty".to_string(),
+        ));
     }
 
     let mut tokenizer = PdfTokenizer::new(field_obj_slice);
-
-    let mut contents_extent: Option<ContentsExtent> = None;
-    let mut byte_range: Option<ByteRange> = None;
-    let mut declared_docmdp: Option<MdpPerm> = None;
 
     let mut key: Option<String> = None;
 
@@ -1014,8 +1110,15 @@ fn extract_signature_field(
         }
     }
 
-    // Only process if it's a /Sig field with non-null /V
-    if field_type.as_deref() != Some("Sig") || sig_dict_ref.is_none() {
+    // Check if this is actually a signature field.
+    // If /FT is not /Sig, this is a non-signature field: skip it (return Ok(None)).
+    if field_type.as_deref() != Some("Sig") {
+        return Ok(None);
+    }
+
+    // At this point, the field IS /Sig but may have no /V (never signed).
+    // An empty signature field is legal PDF and should be skipped.
+    if sig_dict_ref.is_none() {
         return Ok(None);
     }
 
@@ -1025,36 +1128,35 @@ fn extract_signature_field(
     // Extract signature dictionary
     let sig_dict_slice = find_object(bytes, sig_dict_ref.0)?;
     let (sub_filter, mod_date) = extract_subfilter_and_mod_date(sig_dict_slice);
-    if !sig_dict_slice.is_empty() {
-        // Find the absolute position of sig_dict_slice in bytes
-        let sig_dict_offset = find_object_offset(bytes, sig_dict_ref.0)?;
-        if let Ok((br, ce, mdp)) = extract_sig_dict_info(sig_dict_slice, sig_dict_offset) {
-            byte_range = Some(br);
-            contents_extent = Some(ce);
-            declared_docmdp = mdp;
-        }
+    if sig_dict_slice.is_empty() {
+        // Signature dictionary exists but is empty: broken signature.
+        return Err(VerifyError::MalformedPdf(
+            "signature dictionary object is empty".to_string(),
+        ));
     }
 
-    if let (Some(br), Some(ce)) = (byte_range, contents_extent) {
-        let sig_dict_rev = revisions.last_changed_revision(sig_dict_ref.0).unwrap_or(0);
+    // Find the absolute position of sig_dict_slice in bytes
+    let sig_dict_offset = find_object_offset(bytes, sig_dict_ref.0)?;
+    // If extraction fails, propagate the error instead of silently skipping.
+    // This ensures tampered signatures are reported as broken, not dropped.
+    let (br, ce, mdp) = extract_sig_dict_info(sig_dict_slice, sig_dict_offset)?;
 
-        let (coverage, later_revisions) =
-            classify_coverage(&br, &ce, bytes.len() as u64, sig_dict_rev, revisions)?;
+    let sig_dict_rev = revisions.last_changed_revision(sig_dict_ref.0).unwrap_or(0);
 
-        return Ok(Some(StructuralReport {
-            field_name,
-            coverage,
-            later_revisions,
-            contents_extent: ce,
-            byte_range: br,
-            sig_dict_revision: sig_dict_rev,
-            declared_docmdp,
-            sub_filter,
-            mod_date,
-        }));
-    }
+    let (coverage, later_revisions) =
+        classify_coverage(&br, &ce, bytes.len() as u64, sig_dict_rev, revisions)?;
 
-    Ok(None)
+    Ok(Some(StructuralReport {
+        field_name,
+        coverage,
+        later_revisions,
+        contents_extent: ce,
+        byte_range: br,
+        sig_dict_revision: sig_dict_rev,
+        declared_docmdp: mdp,
+        sub_filter,
+        mod_date,
+    }))
 }
 
 /// Extract the signature dictionary's `/SubFilter` name (without its leading
@@ -1117,8 +1219,6 @@ fn extract_sig_dict_info(
     let mut in_byte_range = false;
     let mut in_reference = false;
 
-    let start_pos = tokenizer.position();
-
     while let Ok(Some(token)) = tokenizer.next_token() {
         if token == b"endobj" {
             break;
@@ -1136,13 +1236,14 @@ fn extract_sig_dict_info(
                     }
                     "Contents" => {
                         if token.starts_with(b"<") && token.ends_with(b">") {
-                            // Record the exact byte extent
-                            // Find this token's position in the original bytes (relative to slice start)
-                            if let Some(contents_start_rel) =
-                                find_token_in_slice(sig_dict_slice, start_pos, &token)
-                            {
+                            // Record the exact byte extent using the tokenizer's position.
+                            // The tokenizer's position() is the byte offset after reading the token,
+                            // so the token starts at (position - token.len()).
+                            let token_end_pos = tokenizer.position();
+                            if token_end_pos >= token.len() {
+                                let contents_start_rel = token_end_pos - token.len();
                                 // Convert to absolute file position
-                                let contents_start = sig_dict_offset + contents_start_rel;
+                                let contents_start = sig_dict_offset + contents_start_rel as u64;
                                 let contents_end = contents_start + token.len() as u64;
                                 contents_extent = Some(ContentsExtent {
                                     c_start: contents_start,
@@ -1192,14 +1293,6 @@ fn extract_sig_dict_info(
         byte_range_values.len(),
         contents_extent.is_some()
     )))
-}
-
-/// Find a token's position in slice, accounting for start position.
-fn find_token_in_slice(slice: &[u8], start_pos: usize, token: &[u8]) -> Option<u64> {
-    slice[start_pos..]
-        .windows(token.len())
-        .position(|w| w == token)
-        .map(|pos| (start_pos + pos) as u64)
 }
 
 /// Extract DocMDP level from /Reference array.
@@ -2193,5 +2286,136 @@ mod tests {
     fn an_unencrypted_document_is_not_flagged() {
         let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
         assert!(!is_encrypted(&pdf));
+    }
+
+    // Regression tests for security findings
+
+    #[test]
+    fn huge_xref_count_does_not_hang() {
+        // Malicious PDF with subsection header "0 4294967290" (huge count).
+        // This should not hang or exhaust memory, but return quickly.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+
+        // Malicious xref with huge count: "0 4294967290"
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n");
+        pdf.extend_from_slice(b"0 4294967290\n"); // Huge subsection header
+                                                  // Don't bother adding 4B entries; the parser should handle this without hanging
+
+        // Minimal trailer
+        pdf.extend_from_slice(b"trailer\n<</Size 1 /Root 1 0 R>>\n");
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
+        pdf.extend_from_slice(b"%%EOF");
+
+        // This should return quickly, not hang or panic
+        let start = std::time::Instant::now();
+        let result = RevisionMap::build(&pdf);
+        let elapsed = start.elapsed();
+
+        // Should complete in well under 1 second (malicious file hangs for 90+ seconds)
+        assert!(
+            elapsed.as_secs() < 1,
+            "parsing should return quickly, but took {:?}",
+            elapsed
+        );
+
+        // May succeed or error, but should not hang
+        let _ = result;
+    }
+
+    /// The classic table and the cross-reference stream are two parsers for
+    /// one job, and bounding only the first left this one — reached by every
+    /// PDF 1.5+ — able to spin for billions of iterations on an /Index the
+    /// file simply asserts. A ~180 byte document hung for minutes.
+    #[test]
+    fn huge_xref_stream_index_count_does_not_hang() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.5\n1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let xref_at = pdf.len();
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /XRef /Index [0 4000000000] /W [1 4 2] \
+              /Root 1 0 R /Size 1 >>\nstream\n\nendstream\nendobj\n",
+        );
+        pdf.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF\n").as_bytes());
+
+        let started = std::time::Instant::now();
+        let _ = RevisionMap::build(&pdf);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "an /Index count the file cannot back with bytes must be refused, \
+             not walked: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn trailer_with_nested_dict_before_prev_is_parsed_correctly() {
+        // A PDF where the trailer has a nested dictionary before the /Prev entry.
+        // This tests that nesting depth is tracked correctly and doesn't truncate
+        // the revision chain on the nested dict's closing >>.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+
+        // First revision
+        let xref1_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n");
+        pdf.extend_from_slice(b"trailer\n");
+        pdf.extend_from_slice(b"<< /Size 2 /Root 1 0 R ");
+        // Nested dictionary before /Prev
+        pdf.extend_from_slice(b"/Info << /Producer (Test) >> ");
+        pdf.extend_from_slice(b">>\n");
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{}\n", xref1_offset).as_bytes());
+        pdf.extend_from_slice(b"%%EOF");
+
+        // This should parse without truncating at the nested dict's closing >>
+        let result = RevisionMap::build(&pdf);
+        assert!(
+            result.is_ok(),
+            "parsing PDF with nested trailer dict should succeed"
+        );
+
+        let revisions = result.unwrap();
+        assert_eq!(revisions.all_revisions().len(), 1);
+    }
+
+    #[test]
+    fn broken_signature_field_is_reported_not_dropped() {
+        // A PDF with a signature field that has a malformed /ByteRange
+        // (wrong number of elements). This should be reported as broken,
+        // not silently dropped.
+        let pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog /AcroForm 2 0 R>>"),
+                obj(2, 0, b"<</Fields [3 0 R]>>"),
+                obj(3, 0, b"<</FT /Sig /T (Sig1) /V 4 0 R>>"),
+                // Malformed signature dict with /ByteRange having only 3 elements
+                obj(
+                    4,
+                    0,
+                    b"<</Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 100 200] /Contents <0102>>>",
+                ),
+            ],
+            "",
+        );
+
+        let revisions = RevisionMap::build(&pdf).expect("build revision map");
+        let signatures = discover_signatures(&pdf, &revisions).expect("discover signatures");
+
+        // The signature should be reported (not dropped)
+        assert_eq!(
+            signatures.len(),
+            1,
+            "malformed signature field should be reported"
+        );
+
+        // It should be marked as broken/unclear coverage
+        let sig = &signatures[0];
+        assert_eq!(sig.field_name, "Sig1");
+        assert_eq!(sig.coverage, SignatureCoverage::Unclear);
     }
 }
