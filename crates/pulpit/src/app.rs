@@ -2192,6 +2192,18 @@ impl App {
                     }
                     return Task::none();
                 }
+                // The overview is a grid, so while it is open the arrow keys
+                // move about that grid: left and right along a row, up and
+                // down between rows. Its scrollable may capture the vertical
+                // arrows before this global subscription sees them, but the
+                // grid still owns navigation while it covers the presenter.
+                // Keys it does not recognise continue to the captured-widget
+                // check and the ordinary keymap.
+                if self.overview {
+                    if let Some(task) = self.overview_key(key.as_deref()) {
+                        return task;
+                    }
+                }
                 // A widget that captured the event owns the keyboard. The
                 // two sidebar selectors are the narrow exception: Ctrl-B in
                 // Search must still reach Outline, and the Search binding
@@ -2311,15 +2323,6 @@ impl App {
                 }
                 if self.page != crate::designer::Page::Presenter {
                     return self.editor_key(key, shift, control);
-                }
-                // The overview is a grid, so while it is open the arrow keys
-                // move about a grid: left and right along a row, up and down
-                // between rows. Anything else — including the key that opened
-                // it — still means what it always means.
-                if self.overview {
-                    if let Some(task) = self.overview_key(key.as_deref()) {
-                        return task;
-                    }
                 }
                 // A focused overlay owns every key. Escape is interpreted by
                 // the overlay router as releasing focus; no press falls
