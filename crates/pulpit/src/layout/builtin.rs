@@ -188,9 +188,10 @@ pub fn presenter_default() -> Layout {
     let controls = b.split(
         "Navigation and tools",
         Direction::Horizontal,
-        // The slider is the elastic control; navigation keeps a dependable
-        // centre target, and the tool cluster hugs the smaller trailing area.
-        &[0.52, 0.32, 0.16],
+        // The slider and navigation each have ample room at a quarter of the
+        // band. The palette gets the other half so its tools remain on the
+        // row instead of collapsing behind overflow at ordinary widths.
+        &[0.25, 0.25, 0.50],
         control_children,
     );
 
@@ -510,7 +511,7 @@ mod tests {
 
         assert_eq!(
             root.children[1].as_split().unwrap().sizes,
-            vec![0.52, 0.32, 0.16]
+            vec![0.25, 0.25, 0.50]
         );
 
         let kinds: Vec<WidgetKind> = default.widgets().iter().map(|w| w.kind()).collect();

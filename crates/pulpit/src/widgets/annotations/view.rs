@@ -188,14 +188,7 @@ fn palette<Message: Clone + 'static>(
     // side by side. That is what lets the cell be short without the icons
     // becoming unreachable, and tall without them floating in a void.
     responsive(move |area| {
-        let count = slots.len() as f32;
-        let width = (area.width - theme::space::XS * (count - 1.0)) / count;
-        // A tool control carries a narrow arrow gutter beside its button.
-        let size = area
-            .height
-            .min(width / (1.0 + ARROW_FRACTION))
-            .clamp(theme::target::MINIMUM * 0.75, 96.0);
-        let shown = fitting(&slots, area.width, size);
+        let (size, shown) = palette_layout(&slots, area);
 
         let mut items = Row::new()
             .spacing(theme::space::XS)
@@ -301,6 +294,18 @@ fn fitting(slots: &[Slot], available: f32, size: f32) -> usize {
 
 /// How much width the options arrow adds beside a tool button.
 const ARROW_FRACTION: f32 = 0.5;
+
+/// Button size and visible-slot count for one palette pane.
+fn palette_layout(slots: &[Slot], area: Size) -> (f32, usize) {
+    let count = slots.len() as f32;
+    let width = (area.width - theme::space::XS * (count - 1.0)) / count;
+    // A tool control carries a narrow arrow gutter beside its button.
+    let size = area
+        .height
+        .min(width / (1.0 + ARROW_FRACTION))
+        .clamp(theme::target::MINIMUM * 0.75, 96.0);
+    (size, fitting(slots, area.width, size))
+}
 
 /// The "…" button, and the menu of everything that did not fit.
 ///
@@ -1588,6 +1593,20 @@ mod tests {
             + size
             + gap * shown as f32;
         assert!(drawn <= full - size - gap, "the row itself overflows");
+    }
+
+    #[test]
+    fn the_presenter_palettes_half_band_keeps_every_control_on_the_row() {
+        // Five tools plus the hand and five document commands is the complete
+        // live palette. These are the usable cell dimensions in a 1280×720
+        // Presenter window after the split gaps and cell padding.
+        let slots = a_palette_of(5, 6);
+        let (_, shown) = palette_layout(&slots, Size::new(624.0, 53.0));
+        assert_eq!(shown, slots.len());
+
+        // The former 16% pane is why the palette always collapsed.
+        let (_, formerly_shown) = palette_layout(&slots, Size::new(196.0, 53.0));
+        assert!(formerly_shown < slots.len());
     }
 
     #[test]

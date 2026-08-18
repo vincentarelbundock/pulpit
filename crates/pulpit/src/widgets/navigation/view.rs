@@ -90,11 +90,11 @@ fn buttons<Message: Clone + 'static>(
         } else {
             row![theme::icon::icon(Icon::ChevronLeft, label_size)]
         };
-        let mut back = button(content.align_y(iced::Alignment::Center))
+        let mut back = button(container(content).center(Length::Fill))
             .height(Length::Fixed(height))
             .padding(Padding::from([0.0, 8.0]))
             .width(Length::FillPortion(1))
-            .style(theme::ambient::back_button);
+            .style(theme::controls::filled_tonal(theme::ambient::palette()));
         if mode.interactive() {
             back = back.on_press(on(WidgetEvent::Previous));
         }
@@ -109,11 +109,11 @@ fn buttons<Message: Clone + 'static>(
         } else {
             row![theme::icon::icon(Icon::ChevronRight, label_size)]
         };
-        let mut forward = button(content.align_y(iced::Alignment::Center))
+        let mut forward = button(container(content).center(Length::Fill))
             .height(Length::Fixed(height))
             .padding(Padding::from([0.0, 8.0]))
             .width(Length::FillPortion(1))
-            .style(theme::ambient::forward_button);
+            .style(theme::controls::filled_tonal(theme::ambient::palette()));
         if mode.interactive() {
             forward = forward.on_press(on(WidgetEvent::Next));
         }
