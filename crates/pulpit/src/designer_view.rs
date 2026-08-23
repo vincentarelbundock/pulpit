@@ -172,9 +172,7 @@ fn layout_card<'a>(
             text(layout.name.clone())
                 .size(type_scale::HEADING)
                 .color(theme::ambient::text()),
-            text(if built_in { "Read-only" } else { "Custom" })
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
+            theme::typography::caption(if built_in { "Read-only" } else { "Custom" }),
             space::vertical(),
             actions,
         ]
@@ -519,15 +517,11 @@ pub fn editor<'a>(
 
     let mut page = column![header(designer)].spacing(gap::M).padding(gap::M);
     if designer.is_editable() {
-        page = page.push(
-            text(
-                "Select a widget in the left pane and left click on the region where you want \
+        page = page.push(theme::typography::note(
+            "Select a widget in the left pane and left click on the region where you want \
                  to insert it. Drag the separators to resize region splits. Right click on a \
                  widget, on an empty cell, or on a split to remove it.",
-            )
-            .size(type_scale::LABEL)
-            .color(theme::ambient::muted()),
-        );
+        ));
     }
     let page = page.push(body).width(Length::Fill).height(Length::Fill);
 
@@ -612,7 +606,7 @@ fn header<'a>(designer: &'a Designer) -> Element<'a, Message> {
         tooltip(
             button(
                 row![
-                    text(layout.name.clone()).size(type_scale::HEADING),
+                    theme::typography::title(layout.name.clone()),
                     theme::icon::muted(theme::Icon::Pencil, type_scale::LABEL),
                 ]
                 .spacing(gap::S)
@@ -628,7 +622,7 @@ fn header<'a>(designer: &'a Designer) -> Element<'a, Message> {
         )
         .into()
     } else {
-        text(layout.name.clone()).size(type_scale::HEADING).into()
+        theme::typography::title(layout.name.clone()).into()
     };
 
     let mut bar = column![row![
@@ -675,7 +669,7 @@ fn header<'a>(designer: &'a Designer) -> Element<'a, Message> {
 // --------------------------------------------------------- widget library
 
 fn widget_library<'a>(designer: &'a Designer) -> Element<'a, Message> {
-    let mut content = column![text("Widgets").size(type_scale::HEADING)]
+    let mut content = column![theme::typography::title("Widgets")]
         .spacing(gap::M)
         .padding(gap::XS);
 
@@ -696,11 +690,7 @@ fn widget_library<'a>(designer: &'a Designer) -> Element<'a, Message> {
     };
 
     for group in WidgetGroup::ALL {
-        content = content.push(
-            text(group.label())
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        );
+        content = content.push(theme::typography::note(group.label()));
         for kind in WidgetKind::ALL
             .into_iter()
             // Search is application chrome now. Keep the legacy kind readable
@@ -796,22 +786,18 @@ fn canvas_region<'a>(
         .center_y(Length::Fill);
 
     let hint = row![
-        text(format!(
+        theme::typography::caption(format!(
             "Designed at {} · previewing {}",
             designer.layout().design_ratio.label(),
             designer.canvas_ratio.label()
-        ))
-        .size(type_scale::CAPTION)
-        .color(theme::ambient::muted()),
+        )),
         space::horizontal(),
         checkbox(designer.snap)
             .label("Snap dividers")
             .size(type_scale::BODY)
             .text_size(11)
             .on_toggle(|value| msg(Msg::ToggleSnap(value))),
-        text(format!("{ratio:.2}:1"))
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+        theme::typography::caption(format!("{ratio:.2}:1")),
     ]
     .spacing(gap::M)
     .align_y(Alignment::Center);
@@ -830,11 +816,7 @@ fn canvas_region<'a>(
 /// recommendations are a list to read, and adopting one is a press of its own.
 fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     let mut ratios = Row::new().spacing(gap::S).align_y(Alignment::Center);
-    ratios = ratios.push(
-        text("Deck shape")
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
-    );
+    ratios = ratios.push(theme::typography::caption("Deck shape"));
     for ratio in AspectRatio::PRESETS {
         let chosen = designer.slide_ratio == ratio;
         ratios = ratios.push(
@@ -869,11 +851,7 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     // right is where the presenter keeps their notes.
     let built_ins = crate::layout::builtin::built_in_layouts();
     let mut suggestions = Row::new().spacing(gap::S).align_y(Alignment::Center);
-    suggestions = suggestions.push(
-        text("Built-ins for this deck")
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
-    );
+    suggestions = suggestions.push(theme::typography::caption("Built-ins for this deck"));
     for recommendation in designer.recommendations().into_iter().take(3) {
         let Some(layout) = built_ins
             .iter()
@@ -936,12 +914,10 @@ fn recommendation_preview<'a>(designer: &Designer, layout: &Layout) -> Element<'
                 .width(Length::Fixed(170.0)),
             column![
                 text(layout.name.clone()).size(type_scale::BODY),
-                text(format!(
+                theme::typography::caption(format!(
                     "{empty}% of its slide panes would be empty for a {} deck.",
                     designer.slide_ratio.label()
-                ))
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
+                )),
                 row![
                     button(text("Use this layout").size(type_scale::CAPTION))
                         .padding(gap::XS)
@@ -1084,15 +1060,11 @@ fn canvas_cell<'a>(
     // works, which is the only question the editor exists to answer.
     let inner: Element<'a, Message> = match &cell.widget {
         Some(widget) => crate::layout_renderer::widget(widget, context, None, |_| Message::Ignore),
-        None => container(
-            text("Drop a widget here")
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(theme::ambient::empty_cell)
-        .into(),
+        None => container(theme::typography::note("Drop a widget here"))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(theme::ambient::empty_cell)
+            .into(),
     };
 
     // A pane holding a slide shows where the slide actually lands and the
@@ -1161,10 +1133,8 @@ fn add_pane_row<'a>(cell: NodeId) -> Element<'a, Message> {
         row = row.push(tooltip(
             button(
                 column![
-                    text(edge.glyph()).size(type_scale::HEADING),
-                    text(edge.add_label())
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
+                    theme::typography::title(edge.glyph()),
+                    theme::typography::caption(edge.add_label()),
                 ]
                 .spacing(2)
                 .align_x(Alignment::Center),
@@ -1257,17 +1227,15 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
             }
             choices = choices.push(dialog_button("Cancel", Msg::ResolveDrop(Cancel), false));
             column![
-                text("That cell is occupied").size(type_scale::HEADING),
-                text(format!("It currently holds {name}."))
-                    .size(type_scale::LABEL)
-                    .color(theme::ambient::muted()),
+                theme::typography::title("That cell is occupied"),
+                theme::typography::note(format!("It currently holds {name}.")),
                 choices,
             ]
             .spacing(gap::M)
             .into()
         }
         Dialog::NameLayout { name, .. } => column![
-            text("Name this layout").size(type_scale::HEADING),
+            theme::typography::title("Name this layout"),
             text_input("Conference Layout", name)
                 .size(type_scale::BODY)
                 .padding(gap::S)
@@ -1283,7 +1251,7 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
         .spacing(gap::M)
         .into(),
         Dialog::RenameLayout { name } => column![
-            text("Rename this layout").size(type_scale::HEADING),
+            theme::typography::title("Rename this layout"),
             text_input("Conference Layout", name)
                 .size(type_scale::BODY)
                 .padding(gap::S)
@@ -1299,10 +1267,8 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
         .spacing(gap::M)
         .into(),
         Dialog::UnsavedChanges => column![
-            text("Save your changes?").size(type_scale::HEADING),
-            text("This layout has unsaved changes.")
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
+            theme::typography::title("Save your changes?"),
+            theme::typography::note("This layout has unsaved changes."),
             row![
                 dialog_button("Save", Msg::SaveAndLeave, true),
                 dialog_button("Discard", Msg::ForceBack, false),
@@ -1317,20 +1283,18 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
             for issue in issues {
                 list = list.push(
                     column![
-                        text(issue.message.clone()).size(type_scale::LABEL).color(
+                        theme::typography::body(issue.message.clone()).color(
                             match issue.severity {
                                 Severity::Blocking | Severity::Warning => theme::ambient::alert(),
-                            }
+                            },
                         ),
-                        text(issue.consequence.clone())
-                            .size(type_scale::CAPTION)
-                            .color(theme::ambient::muted()),
+                        theme::typography::caption(issue.consequence.clone()),
                     ]
                     .spacing(2),
                 );
             }
             column![
-                text(format!("“{name}” cannot be saved")).size(type_scale::HEADING),
+                theme::typography::title(format!("“{name}” cannot be saved")),
                 list,
                 dialog_button("Close", Msg::CloseDialog, false),
             ]
@@ -1354,7 +1318,7 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
 }
 
 fn dialog_button<'a>(label: &'a str, message: Msg, primary: bool) -> Element<'a, Message> {
-    button(text(label).size(type_scale::BODY))
+    button(theme::typography::label(label))
         .padding(gap::S)
         .style(if primary {
             theme::ambient::selected_button

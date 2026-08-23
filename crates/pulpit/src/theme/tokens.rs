@@ -327,16 +327,26 @@ pub mod radius {
 
 /// Type scale, in logical pixels.
 ///
+/// Five steps, each with one job. `theme::typography` turns them into text,
+/// and views should ask it for a role rather than reach for a number here;
+/// what is left for the constants is sizing something that is not text, such
+/// as an icon meant to match the line beside it.
+///
 /// Chrome only. A widget's own readings — the timer, the clock, the slide
 /// counter, the title — are sized to the pane they are given, so a fixed
 /// "timer size" would be a number nobody could honour.
 pub mod type_scale {
+    /// Subordinate metadata: fingerprints, hints under a field, timestamps.
     pub const CAPTION: f32 = 11.0;
-    pub const BODY: f32 = 14.0;
+    /// Text that is part of a control: buttons, field labels, chips.
     pub const LABEL: f32 = 12.0;
-    /// Section headers within a page: clearly a level above body text,
-    /// clearly below the page title.
+    /// Prose. Everything a person reads rather than operates, and the size a
+    /// dialog's own sentences are set in.
+    pub const BODY: f32 = 14.0;
+    /// A section within a surface: clearly a level above body text, clearly
+    /// below the surface's own name. Never a dialog title.
     pub const HEADING: f32 = 17.0;
+    /// The name of a dialog, overlay or page. One per surface.
     pub const TITLE: f32 = 22.0;
 }
 
@@ -346,6 +356,13 @@ pub mod type_scale {
 /// without imposing a branded face on the rest of the interface.
 pub mod font {
     pub const READOUT: iced::Font = iced::Font::with_name("DejaVu Sans Mono");
+    /// The same platform face, one weight up. Titles and section headings
+    /// take it so a header reads as a header at a glance, rather than as
+    /// body text that happens to be three points larger.
+    pub const EMPHASIS: iced::Font = iced::Font {
+        weight: iced::font::Weight::Semibold,
+        ..iced::Font::DEFAULT
+    };
 }
 
 /// Hit-target sizes, in logical pixels.
@@ -514,5 +531,47 @@ mod tests {
         const { assert!(target::MINIMUM >= 32.0) };
         const { assert!(target::PRIMARY >= target::MINIMUM) };
         const { assert!(target::PRIMARY >= 40.0) };
+    }
+}
+
+#[cfg(test)]
+mod type_scale_tests {
+    use super::{font, type_scale};
+
+    /// The ladder is what stops a dialog from setting a header smaller than
+    /// its own body. Each step has one job, and the jobs are ordered; a new
+    /// step that is not strictly larger than the one below it would give two
+    /// roles the same voice and put the choice between them back into the
+    /// views.
+    #[test]
+    fn every_step_is_larger_than_the_one_below_it() {
+        let ladder = [
+            ("caption", type_scale::CAPTION),
+            ("label", type_scale::LABEL),
+            ("body", type_scale::BODY),
+            ("heading", type_scale::HEADING),
+            ("title", type_scale::TITLE),
+        ];
+        for pair in ladder.windows(2) {
+            let (below, above) = (pair[0], pair[1]);
+            assert!(
+                above.1 > below.1,
+                "{} ({}) must be larger than {} ({})",
+                above.0,
+                above.1,
+                below.0,
+                below.1,
+            );
+        }
+    }
+
+    /// Headers carry weight as well as size: seventeen points beside fourteen
+    /// is a difference a reader measures rather than sees, and the emphasis
+    /// face is what makes a heading read as one at a glance.
+    #[test]
+    fn the_emphasis_face_is_the_platform_face_one_weight_up() {
+        assert_eq!(font::EMPHASIS.family, iced::Font::DEFAULT.family);
+        assert_ne!(font::EMPHASIS.weight, iced::Font::DEFAULT.weight);
+        assert_eq!(font::EMPHASIS.weight, iced::font::Weight::Semibold);
     }
 }

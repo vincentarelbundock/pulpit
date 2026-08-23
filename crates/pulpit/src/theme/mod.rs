@@ -11,6 +11,7 @@
 pub mod controls;
 pub mod icon;
 pub mod tokens;
+pub mod typography;
 
 pub use icon::Icon;
 

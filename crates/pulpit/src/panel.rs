@@ -36,10 +36,15 @@ pub fn panel<'a, Message: Clone + 'a>(
         // space holding one glyph.
         layers.push(
             container(
-                button(theme::icon::icon(theme::Icon::Close, 16.0))
-                    .padding(theme::space::XS)
-                    .style(theme::ambient::tool_button)
-                    .on_press(dismiss),
+                // The same glyph size every other dismissal in the application
+                // uses, rather than a number of this dialog frame's own.
+                button(theme::icon::icon(
+                    theme::Icon::Close,
+                    theme::type_scale::BODY,
+                ))
+                .padding(theme::space::XS)
+                .style(theme::ambient::tool_button)
+                .on_press(dismiss),
             )
             .width(Length::Fill)
             .align_x(Alignment::End)

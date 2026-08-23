@@ -513,9 +513,7 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
                         .width(Length::Fixed(width))
                 )
                 .style(theme::ambient::canvas),
-                text(label.clone())
-                    .size(type_scale::BODY)
-                    .color(theme::ambient::text()),
+                theme::typography::body(label.clone()).color(theme::ambient::text()),
             ]
             .spacing(gap::S)
             .align_x(Alignment::Center),
@@ -661,20 +659,14 @@ fn overview(app: &App) -> Element<'_, Message> {
     // How far along the warming is, but only while there is something to
     // say: a bare count of pages is noise once they have all arrived.
     let progress: Element<'_, Message> = if ready < count {
-        text(format!("{ready} of {count} pages ready"))
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted())
-            .into()
+        theme::typography::caption(format!("{ready} of {count} pages ready")).into()
     } else {
-        text(format!("{count} pages"))
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted())
-            .into()
+        theme::typography::caption(format!("{count} pages")).into()
     };
 
     let body = column![
         row![
-            text("Page overview").size(type_scale::TITLE),
+            theme::typography::title("Page overview"),
             space::horizontal(),
             progress,
             button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
@@ -719,15 +711,11 @@ fn thumbnail_cell<'a>(
         // Not rendered yet. A numbered blank of the same size keeps the
         // grid's shape, so pages do not jump about under the pointer as the
         // pictures arrive.
-        None => container(
-            text(format!("{}", slide + 1))
-                .size(type_scale::BODY)
-                .color(theme::ambient::muted()),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fixed(plan.picture_height))
-        .style(theme::ambient::canvas)
-        .into(),
+        None => container(theme::typography::note(format!("{}", slide + 1)))
+            .center_x(Length::Fill)
+            .center_y(Length::Fixed(plan.picture_height))
+            .style(theme::ambient::canvas)
+            .into(),
     };
 
     button(
@@ -1022,7 +1010,7 @@ fn audience_start_menu(app: &App) -> Element<'_, Message> {
     const PANEL_WIDTH: f32 = 320.0;
     let palette = app.theme.palette;
     let option = |label: String, selected: bool, message| {
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .width(Length::Fill)
             .height(Length::Fixed(theme::controls::MENU_ITEM_HEIGHT))
             .padding(iced::Padding::from([0.0, gap::L]))
@@ -1032,11 +1020,7 @@ fn audience_start_menu(app: &App) -> Element<'_, Message> {
     let mut items = Column::new()
         .spacing(gap::XS)
         .width(Length::Fixed(PANEL_WIDTH))
-        .push(
-            text("Start audience on")
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        );
+        .push(theme::typography::label("Start audience on").color(theme::ambient::muted()));
 
     let automatic = matches!(
         app.coordinator.roles.target(Role::Audience),
@@ -1120,13 +1104,11 @@ fn menu(app: &App) -> Element<'_, Message> {
         let mut row = Row::new()
             .spacing(gap::M)
             .align_y(Alignment::Center)
-            .push(text(label).size(type_scale::BODY));
+            .push(theme::typography::body(label));
         if let Some(shortcut) = shortcut {
-            row = row.push(space::horizontal()).push(
-                text(shortcut)
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-            );
+            row = row
+                .push(space::horizontal())
+                .push(theme::typography::caption(shortcut));
         }
         button(container(row).center_y(Length::Fill))
             .width(Length::Fill)
@@ -1139,12 +1121,7 @@ fn menu(app: &App) -> Element<'_, Message> {
     // the menu and a moved default cannot leave a stale key behind.
     let shortcut = |action: Action| app.action_shortcut(action);
     let heading = |label: &'static str| {
-        container(
-            text(label)
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
-        )
-        .padding(iced::Padding {
+        container(theme::typography::caption(label)).padding(iced::Padding {
             top: gap::S,
             left: gap::S,
             ..iced::Padding::from(0.0)
@@ -1154,9 +1131,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         let label = recent_menu_label(path).into_owned();
         let control = button(
             container(
-                text(label.clone())
-                    .size(type_scale::BODY)
-                    .wrapping(iced::widget::text::Wrapping::None),
+                theme::typography::body(label.clone()).wrapping(iced::widget::text::Wrapping::None),
             )
             .width(Length::Fill)
             .center_y(Length::Fill)
@@ -1182,19 +1157,15 @@ fn menu(app: &App) -> Element<'_, Message> {
         .spacing(gap::XS)
         .width(Length::Fixed(MENU_WIDTH));
     items = items.push(
-        container(
-            text("pulpit")
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
-        )
-        .height(Length::Fixed(MENU_HEADER)),
+        container(theme::typography::label("pulpit").color(theme::ambient::muted()))
+            .height(Length::Fixed(MENU_HEADER)),
     );
     if app.recent_menu_open {
         let recent_back = button(
             container(
                 row![
                     theme::icon::icon(theme::Icon::ArrowLeft, type_scale::LABEL),
-                    text("Open recent").size(type_scale::BODY),
+                    theme::typography::body("Open recent"),
                 ]
                 .spacing(gap::S)
                 .align_y(Alignment::Center),
@@ -1209,13 +1180,9 @@ fn menu(app: &App) -> Element<'_, Message> {
         items = items.push(recent_back);
         if app.settings.recent.is_empty() {
             items = items.push(
-                container(
-                    text("No recent files")
-                        .size(type_scale::BODY)
-                        .color(theme::ambient::muted()),
-                )
-                .height(Length::Fixed(MENU_ROW))
-                .padding(iced::Padding::from([gap::S, gap::S])),
+                container(theme::typography::note("No recent files"))
+                    .height(Length::Fixed(MENU_ROW))
+                    .padding(iced::Padding::from([gap::S, gap::S])),
             );
         } else {
             for path in recent_menu_documents(&app.settings.recent) {
@@ -1232,7 +1199,7 @@ fn menu(app: &App) -> Element<'_, Message> {
         let recent_toggle = button(
             container(
                 row![
-                    text("Open recent…").size(type_scale::BODY),
+                    theme::typography::body("Open recent…"),
                     space::horizontal(),
                     theme::icon::icon(theme::Icon::ChevronRight, type_scale::LABEL),
                 ]
@@ -1420,7 +1387,7 @@ fn fullscreen_action_label(
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
     container(
         row![
-            container(text(action.label()).size(type_scale::LABEL)).width(Length::FillPortion(2)),
+            container(theme::typography::label(action.label())).width(Length::FillPortion(2)),
             container(shortcut_hint(app, action))
                 .width(Length::FillPortion(3))
                 .align_x(Alignment::Start),
@@ -1438,14 +1405,10 @@ fn shortcut_group<'a>(
     actions: &'static [Action],
 ) -> Element<'a, Message> {
     let mut content = Column::new().spacing(0).push(
-        container(
-            text(title)
-                .size(type_scale::LABEL)
-                .color(theme::ambient::accent()),
-        )
-        .width(Length::Fill)
-        .padding(iced::Padding::from([gap::XS, gap::S]))
-        .style(theme::ambient::empty_cell),
+        container(theme::typography::label(title).color(theme::ambient::accent()))
+            .width(Length::Fill)
+            .padding(iced::Padding::from([gap::XS, gap::S]))
+            .style(theme::ambient::empty_cell),
     );
     for action in actions {
         content = content.push(shortcut_entry(app, *action));
@@ -1528,15 +1491,12 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
         }
     });
 
-    let documentation = button(
-        text(DOCUMENTATION_URL)
-            .size(type_scale::LABEL)
-            .color(theme::ambient::accent()),
-    )
-    .style(theme::ambient::tool_button)
-    .on_press(Message::OpenDocumentation);
+    let documentation =
+        button(theme::typography::label(DOCUMENTATION_URL).color(theme::ambient::accent()))
+            .style(theme::ambient::tool_button)
+            .on_press(Message::OpenDocumentation);
     let brand = container(
-        column![text("Pulpit").size(type_scale::TITLE), documentation]
+        column![theme::typography::title("Pulpit"), documentation]
             .spacing(2.0)
             .align_x(Alignment::Center),
     )
@@ -1584,12 +1544,12 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
 fn about_overlay() -> Element<'static, Message> {
     let card = container(
         column![
-            text("Pulpit").size(type_scale::TITLE),
-            text(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(type_scale::BODY),
-            text("A PDF presenter built for unreliable, changing display topologies.")
-                .size(type_scale::BODY)
-                .color(theme::ambient::muted()),
-            button(text("Close"))
+            theme::typography::title("Pulpit"),
+            theme::typography::body(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+            theme::typography::note(
+                "A PDF presenter built for unreliable, changing display topologies.",
+            ),
+            button(theme::typography::label("Close"))
                 .style(theme::ambient::tool_button)
                 .on_press(Message::CloseAbout),
         ]
@@ -1648,11 +1608,10 @@ fn toasts(app: &App) -> Option<Element<'_, Message>> {
                         .height(Length::Fixed(8.0))
                 )
                 .style(theme::ambient::dot(intent)),
-                text(toast.intent.label())
-                    .size(type_scale::CAPTION)
-                    .color(intent),
+                theme::typography::tag(toast.intent.label(), intent),
                 space::horizontal(),
-                button(theme::icon::icon(theme::Icon::Close, type_scale::CAPTION))
+                // Sized to the tag beside it, not to the caption below.
+                button(theme::icon::icon(theme::Icon::Close, type_scale::LABEL))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::DismissToast(toast.id)),
@@ -1662,13 +1621,9 @@ fn toasts(app: &App) -> Option<Element<'_, Message>> {
         );
         // Borrowed, not cloned: the element already lives no longer than
         // `app`, and a toast redraws twenty times a second while shown.
-        body = body.push(text(toast.message.as_str()).size(type_scale::LABEL));
+        body = body.push(theme::typography::body(toast.message.as_str()));
         if let Some(action) = &toast.action {
-            body = body.push(
-                text(action.as_str())
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-            );
+            body = body.push(theme::typography::caption(action.as_str()));
         }
         stack_of_toasts = stack_of_toasts.push(
             container(body)
@@ -1687,7 +1642,7 @@ fn toasts(app: &App) -> Option<Element<'_, Message>> {
             many => format!("Dismiss all ({many} need attention)"),
         };
         stack_of_toasts = stack_of_toasts.push(
-            button(text(label).size(type_scale::CAPTION))
+            button(theme::typography::label(label))
                 .padding(gap::XS)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::DismissAllToasts),
@@ -1762,7 +1717,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     // Full-window secondary pages use the same top-right dismissal as the
     // shortcut reference and the document sidebar.
     let header = row![
-        text("Settings").size(type_scale::TITLE),
+        theme::typography::title("Settings"),
         space::horizontal(),
         button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
             .padding(gap::XS)
@@ -1783,7 +1738,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     for (index, appearance) in Appearance::ALL.into_iter().enumerate() {
         let selected = app.settings.appearance.appearance == appearance;
         appearances = appearances.push(
-            button(text(appearance.label()).size(type_scale::LABEL).center())
+            button(theme::typography::label(appearance.label()).center())
                 .height(Length::Fixed(theme::controls::BUTTON_HEIGHT))
                 .padding(iced::Padding::from([0.0, gap::L]))
                 .style(theme::controls::segment(
@@ -1801,11 +1756,9 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     let mut theme_section = Column::new().spacing(gap::M).push(appearances);
     // Only a system that cannot answer the question needs a word about it.
     if app.theme.fell_back {
-        theme_section = theme_section.push(
-            text("This system does not expose a light/dark preference, so the dark palette is in use.")
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
-        );
+        theme_section = theme_section.push(theme::typography::caption(
+            "This system does not expose a light/dark preference, so the dark palette is in use.",
+        ));
     }
     body = body.push(section("Theme", theme_section.into()));
 
@@ -1818,7 +1771,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     for setting in crate::platform::MotionSetting::ALL {
         motions = motions.push(
             selectable(
-                button(text(setting.label()).size(type_scale::LABEL)),
+                button(theme::typography::label(setting.label())),
                 app.settings.appearance.motion == setting,
             )
             .on_press(Message::SetMotion(setting)),
@@ -1828,7 +1781,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         "Motion",
         column![
             motions,
-            text(format!(
+            theme::typography::caption(format!(
                 "Currently {}. Reducing motion stops animated slide content \
                  from starting on its own; it can still be played from the \
                  presenter controls.",
@@ -1837,9 +1790,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
                 } else {
                     "unrestricted"
                 }
-            ))
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+            )),
         ]
         .spacing(gap::S)
         .into(),
@@ -1852,7 +1803,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     for color in crate::settings::BlankColor::ALL {
         blank_colors = blank_colors.push(
             selectable(
-                button(text(color.label()).size(type_scale::LABEL)),
+                button(theme::typography::label(color.label())),
                 app.settings.display.blank_color == color,
             )
             .on_press(Message::SetBlankColor(color)),
@@ -1862,12 +1813,10 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         "Blank screen",
         column![
             blank_colors,
-            text(
+            theme::typography::caption(
                 "What the blank key turns the audience screen into. \
                  Both colours stay available as separate shortcuts."
-            )
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+            ),
         ]
         .spacing(gap::S)
         .into(),
@@ -1879,11 +1828,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     // What this desktop can and cannot do.
     let mut limitations = Column::new().spacing(gap::XS);
     for line in app.platform.capabilities.report() {
-        limitations = limitations.push(
-            text(line)
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
-        );
+        limitations = limitations.push(theme::typography::caption(line));
     }
     body = body.push(section("This session", limitations.into()));
 
@@ -1900,7 +1845,7 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     // text, not the container, so there is no dead strip beside the bar — and
     // the copy button sits in the corner of the box rather than above it.
     let copy = container(
-        button(text("Copy").size(type_scale::CAPTION))
+        button(theme::typography::label("Copy"))
             .padding(gap::XS)
             .style(theme::ambient::tool_button)
             .on_press(Message::CopyDiagnostics),
@@ -1938,11 +1883,9 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
 
     let mut profiles = Column::new().spacing(gap::S);
     if app.settings.signatures.profiles.is_empty() {
-        profiles = profiles.push(
-            text("No signature profiles have been created.")
-                .size(type_scale::BODY)
-                .color(theme::ambient::muted()),
-        );
+        profiles = profiles.push(theme::typography::note(
+            "No signature profiles have been created.",
+        ));
     }
     for profile in &app.settings.signatures.profiles {
         let is_default =
@@ -1953,14 +1896,10 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
         };
         let mut actions = Row::new().spacing(gap::S).align_y(Alignment::Center);
         if is_default {
-            actions = actions.push(
-                text("Default")
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-            );
+            actions = actions.push(theme::typography::caption("Default"));
         } else {
             actions = actions.push(
-                button(text("Make default").size(type_scale::CAPTION))
+                button(theme::typography::label("Make default"))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::SignatureProfile(ProfileMsg::SetDefault(
@@ -1970,7 +1909,7 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
         }
         actions = actions
             .push(
-                button(text("Edit").size(type_scale::CAPTION))
+                button(theme::typography::label("Edit"))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::SignatureProfile(ProfileMsg::StartEdit(
@@ -1978,7 +1917,7 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
                     ))),
             )
             .push(
-                button(text("Remove…").size(type_scale::CAPTION))
+                button(theme::typography::label("Remove…"))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::SignatureProfile(ProfileMsg::AskRemove(
@@ -2000,18 +1939,14 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
             container(
                 row![
                     column![
-                        text(profile.name.clone()).size(type_scale::BODY),
-                        text(format!(
+                        theme::typography::body(profile.name.clone()),
+                        theme::typography::caption(format!(
                             "{} · {} · {}",
                             crate::signature_profiles::common_name(&profile.identity.subject),
                             profile.identity.key_algorithm,
                             short_fingerprint
-                        ))
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                        text(credential_kind)
-                            .size(type_scale::CAPTION)
-                            .color(theme::ambient::muted()),
+                        )),
+                        theme::typography::caption(credential_kind),
                     ]
                     .spacing(gap::XS)
                     .width(Length::Fill),
@@ -2027,11 +1962,11 @@ fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
     }
 
     column![
-        text("Signing identities and their visible appearances. Passphrases are never stored.")
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+        theme::typography::caption(
+            "Signing identities and their visible appearances. Passphrases are never stored."
+        ),
         profiles,
-        button(text("Add signature profile…").size(type_scale::LABEL))
+        button(theme::typography::label("Add signature profile…"))
             .padding(gap::S)
             .style(theme::ambient::selected_button)
             .on_press(Message::SignatureProfile(ProfileMsg::StartAdd)),
@@ -2054,7 +1989,7 @@ fn signature_profile_editor<'a>(
     };
     let mut body = Column::new()
         .spacing(gap::M)
-        .push(text(title).size(type_scale::TITLE))
+        .push(theme::typography::title(title))
         .push(dialog_section(
             "Profile name",
             text_input("Personal, Work…", &editor.name)
@@ -2068,19 +2003,13 @@ fn signature_profile_editor<'a>(
             body = body.push(dialog_section(
                 "Signing identity",
                 column![
-                    text(identity.subject.clone()).size(type_scale::BODY),
-                    text(format!(
+                    theme::typography::body(identity.subject.clone()),
+                    theme::typography::caption(format!(
                         "{} · valid {} — {}",
                         identity.key_algorithm, identity.not_before, identity.not_after
-                    ))
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                    text(format!("SHA-256 {}", identity.sha256_fingerprint))
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                    text("Changing the certificate creates a new profile.")
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
+                    )),
+                    theme::typography::caption(format!("SHA-256 {}", identity.sha256_fingerprint)),
+                    theme::typography::caption("Changing the certificate creates a new profile."),
                 ]
                 .spacing(gap::XS),
             ));
@@ -2090,7 +2019,7 @@ fn signature_profile_editor<'a>(
         for source in ProfileSource::ALL {
             sources = sources.push(
                 selectable(
-                    button(text(source.label()).size(type_scale::LABEL)),
+                    button(theme::typography::label(source.label())),
                     editor.source == source,
                 )
                 .on_press(Message::SignatureProfile(ProfileMsg::SourceChanged(source))),
@@ -2129,11 +2058,9 @@ fn signature_profile_editor<'a>(
                             .padding(gap::S),
                     ))
                     .push(
-                        text(
+                        theme::typography::caption(
                             "Pulpit will create an encrypted, self-signed ECDSA P-256 credential. Its signatures prove integrity, but other software will not automatically trust the identity.",
-                        )
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
+                        ),
                     );
             }
             ProfileSource::Existing => {
@@ -2144,8 +2071,8 @@ fn signature_profile_editor<'a>(
                 body = body.push(dialog_section(
                     "Credential file",
                     column![
-                        text(path).size(type_scale::CAPTION),
-                        button(text("Choose .p12 or .pfx…").size(type_scale::LABEL))
+                        theme::typography::caption(path),
+                        button(theme::typography::label("Choose .p12 or .pfx…"))
                             .padding(gap::S)
                             .style(theme::ambient::tool_button)
                             .on_press(Message::SignatureProfile(ProfileMsg::ChooseExternal)),
@@ -2172,11 +2099,9 @@ fn signature_profile_editor<'a>(
                     .padding(gap::S),
             );
         }
-        passphrases = passphrases.push(
-            text("The passphrase cannot be recovered and is never stored by Pulpit.")
-                .size(type_scale::CAPTION)
-                .color(theme::ambient::muted()),
-        );
+        passphrases = passphrases.push(theme::typography::caption(
+            "The passphrase cannot be recovered and is never stored by Pulpit.",
+        ));
         body = body.push(dialog_section("Passphrase", passphrases));
     }
 
@@ -2184,7 +2109,7 @@ fn signature_profile_editor<'a>(
     for content in StoredSignatureContent::ALL {
         content_choices = content_choices.push(
             selectable(
-                button(text(content.label()).size(type_scale::CAPTION)),
+                button(theme::typography::label(content.label())),
                 editor.appearance.content == content,
             )
             .on_press(Message::SignatureProfile(ProfileMsg::ContentChanged(
@@ -2208,7 +2133,7 @@ fn signature_profile_editor<'a>(
                 container(pad)
                     .width(Length::Fill)
                     .style(theme::ambient::canvas),
-                button(text("Clear ink").size(type_scale::CAPTION))
+                button(theme::typography::label("Clear ink"))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press_maybe(
@@ -2222,12 +2147,12 @@ fn signature_profile_editor<'a>(
 
     let visible = row![
         selectable(
-            button(text("Visible").size(type_scale::CAPTION)),
+            button(theme::typography::label("Visible")),
             editor.appearance.visible,
         )
         .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(true))),
         selectable(
-            button(text("Invisible").size(type_scale::CAPTION)),
+            button(theme::typography::label("Invisible")),
             !editor.appearance.visible,
         )
         .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(false))),
@@ -2240,7 +2165,7 @@ fn signature_profile_editor<'a>(
         for position in StoredSignaturePosition::ALL {
             positions = positions.push(
                 selectable(
-                    button(text(position.label()).size(type_scale::CAPTION)),
+                    button(theme::typography::label(position.label())),
                     editor.appearance.position == position,
                 )
                 .on_press(Message::SignatureProfile(ProfileMsg::PositionChanged(
@@ -2252,7 +2177,7 @@ fn signature_profile_editor<'a>(
         for size in StoredSignatureSize::ALL {
             sizes = sizes.push(
                 selectable(
-                    button(text(size.label()).size(type_scale::CAPTION)),
+                    button(theme::typography::label(size.label())),
                     editor.appearance.size == size,
                 )
                 .on_press(Message::SignatureProfile(ProfileMsg::SizeChanged(size))),
@@ -2264,11 +2189,7 @@ fn signature_profile_editor<'a>(
     }
 
     if let Some(error) = editor.error.as_ref() {
-        body = body.push(
-            text(error.clone())
-                .size(type_scale::BODY)
-                .color(theme::ambient::alert()),
-        );
+        body = body.push(theme::typography::body(error.clone()).color(theme::ambient::alert()));
     }
     let primary_label = if editor.busy {
         "Creating credential…"
@@ -2279,13 +2200,13 @@ fn signature_profile_editor<'a>(
     };
     body = body.push(
         row![
-            button(text("Cancel").size(type_scale::LABEL))
+            button(theme::typography::label("Cancel"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press_maybe(
                     (!editor.busy).then_some(Message::SignatureProfile(ProfileMsg::CancelEdit,))
                 ),
-            button(text(primary_label).size(type_scale::LABEL))
+            button(theme::typography::label(primary_label))
                 .padding(gap::S)
                 .style(theme::ambient::selected_button)
                 .on_press_maybe(
@@ -2315,11 +2236,11 @@ fn signature_profile_removal<'a>(
     };
     let managed = matches!(profile.credential, StoredCredential::Managed);
     let mut actions = row![
-        button(text("Cancel").size(type_scale::LABEL))
+        button(theme::typography::label("Cancel"))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::SignatureProfile(ProfileMsg::CancelRemove)),
-        button(text("Remove profile only").size(type_scale::LABEL))
+        button(theme::typography::label("Remove profile only"))
             .padding(gap::S)
             .style(if managed {
                 theme::ambient::tool_button
@@ -2333,7 +2254,7 @@ fn signature_profile_removal<'a>(
     .spacing(gap::S);
     if managed {
         actions = actions.push(
-            button(text("Remove and delete credential").size(type_scale::LABEL))
+            button(theme::typography::label("Remove and delete credential"))
                 .padding(gap::S)
                 .style(theme::ambient::alert_button)
                 .on_press(Message::SignatureProfile(ProfileMsg::ConfirmRemove {
@@ -2342,22 +2263,17 @@ fn signature_profile_removal<'a>(
         );
     }
     let mut body = column![
-        text(format!("Remove “{}”?", profile.name)).size(type_scale::TITLE),
-        text(if managed {
+        theme::typography::title(format!("Remove “{}”?", profile.name)),
+        theme::typography::body(if managed {
             "Removing the profile can leave its encrypted credential file in place, or delete both. Documents already signed with it are unaffected."
         } else {
             "Pulpit will forget this profile. The external credential file will not be deleted."
-        })
-        .size(type_scale::BODY),
+        }),
         actions,
     ]
     .spacing(gap::M);
     if let Some(error) = removal.error.as_ref() {
-        body = body.push(
-            text(error.clone())
-                .size(type_scale::BODY)
-                .color(theme::ambient::alert()),
-        );
+        body = body.push(theme::typography::body(error.clone()).color(theme::ambient::alert()));
     }
     panel(
         body,
@@ -2372,7 +2288,7 @@ fn color_editor(app: &App) -> Element<'_, Message> {
 
     // An ordinary control, drawn like the ordinary controls around it: the
     // press only opens a question, and the red belongs on the answer to it.
-    let reset = button(text("Reset to Pulpit defaults…").size(type_scale::CAPTION))
+    let reset = button(theme::typography::label("Reset to Pulpit defaults…"))
         .padding(gap::S)
         .style(theme::ambient::tool_button)
         .on_press_maybe(
@@ -2395,10 +2311,8 @@ fn color_editor(app: &App) -> Element<'_, Message> {
             .width(Length::Fixed(124.0));
         let mut role_row = column![
             column![
-                text(role.label()).size(type_scale::BODY),
-                text(role.description())
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
+                theme::typography::body(role.label()),
+                theme::typography::caption(role.description()),
             ]
             .spacing(gap::XS)
             .width(Length::Fill),
@@ -2414,23 +2328,19 @@ fn color_editor(app: &App) -> Element<'_, Message> {
         .spacing(gap::XS);
         if parsed.is_none() {
             role_row = role_row.push(
-                text("Use a six-digit HEX color such as #C9CCD4.")
-                    .size(type_scale::CAPTION)
+                theme::typography::caption("Use a six-digit HEX color such as #C9CCD4.")
                     .color(theme::ambient::alert()),
             );
         } else if let Some(warning) = contrast_warning(palette, role) {
-            role_row = role_row.push(
-                text(warning)
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::alert()),
-            );
+            role_row =
+                role_row.push(theme::typography::caption(warning).color(theme::ambient::alert()));
         }
         roles = roles.push(role_row);
     }
 
     column![
         column![
-            text("Edit palette").size(type_scale::LABEL),
+            theme::typography::field("Edit palette"),
             row![
                 pick_list(
                     crate::settings::ColorScheme::ALL,
@@ -2446,9 +2356,7 @@ fn color_editor(app: &App) -> Element<'_, Message> {
             .align_y(Alignment::Center),
         ]
         .spacing(gap::S),
-        text("Every view and widget inherits these roles. High contrast remains controlled by the system.")
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+        theme::typography::caption("Every view and widget inherits these roles. High contrast remains controlled by the system."),
         roles,
     ]
     .spacing(gap::M)
@@ -2531,7 +2439,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
     let options = crate::widgets::ClockOptions::default();
 
     let from_now = |label: &'static str, minutes: u32| {
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::Alarm(AlarmCommand::DraftFromNow(minutes * 60)))
@@ -2540,18 +2448,13 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
     // What is already set, each with the way to take it off again.
     let mut list = column![].spacing(gap::S);
     if controls.alarms.is_empty() {
-        list = list.push(
-            text("No alarms set.")
-                .size(type_scale::BODY)
-                .color(theme::ambient::muted()),
-        );
+        list = list.push(theme::typography::note("No alarms set."));
     }
     for alarm in &controls.alarms {
         let passed = alarm.at < crate::view::seconds_of_day();
         list = list.push(
             row![
-                text(options.format_alarm(alarm.at))
-                    .size(type_scale::BODY)
+                theme::typography::body(options.format_alarm(alarm.at))
                     // A cue that has gone by is dimmed rather than removed:
                     // seeing that 14:20 has passed is worth a line.
                     .color(if passed {
@@ -2560,7 +2463,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
                         theme::ambient::text()
                     }),
                 space::horizontal(),
-                button(text("Remove").size(type_scale::LABEL))
+                button(theme::typography::label("Remove"))
                     .padding(gap::S)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::Alarm(AlarmCommand::Remove(alarm.at))),
@@ -2571,7 +2474,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
     }
 
     let entered = controls.entered();
-    let mut add = button(text("Add").size(type_scale::LABEL))
+    let mut add = button(theme::typography::label("Add"))
         .padding(gap::S)
         // Not the alert style: adding a cue is the ordinary thing this panel
         // is for, and red is kept for the cue that is going off.
@@ -2596,7 +2499,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
     let ambiguous = controls.hour_is_ambiguous();
     let half = |label: &'static str, afternoon: bool| {
         let chosen = ambiguous && controls.afternoon == afternoon;
-        let mut control = button(text(label).size(type_scale::LABEL).color(if ambiguous {
+        let mut control = button(theme::typography::label(label).color(if ambiguous {
             theme::ambient::text()
         } else {
             theme::ambient::muted()
@@ -2626,17 +2529,14 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
     .spacing(gap::S);
     let typing = !controls.entry.left.is_empty() || !controls.entry.right.is_empty();
     if entered.is_none() && typing {
-        entry_row = entry_row.push(
-            text("not a time")
-                .size(type_scale::BODY)
-                .color(theme::ambient::alert()),
-        );
+        entry_row =
+            entry_row.push(theme::typography::body("not a time").color(theme::ambient::alert()));
     }
 
     // Three questions, in the order they are asked: set one, see what is set,
     // say what happens when one goes off.
     let body = column![
-        text("Alarms").size(type_scale::TITLE),
+        theme::typography::title("Alarms"),
         dialog_section(
             "New alarm",
             column![
@@ -2662,13 +2562,11 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
                 Message::Alarm(AlarmCommand::NudgeSnooze(1)),
             ),
         ),
-        text(if controls.is_full() {
+        theme::typography::caption(if controls.is_full() {
             "That is as many alarms as pulpit will hold."
         } else {
             "Escape or a press outside closes this. A cue that goes off is dismissed with Escape too."
-        })
-        .size(type_scale::CAPTION)
-        .color(theme::ambient::muted()),
+        }),
     ]
     .spacing(gap::M);
 
@@ -2681,18 +2579,20 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
 /// themselves which row answers which question. A quiet caption over each
 /// group does that work instead, and costs a line of small muted text: the
 /// controls stay exactly where they were, they are simply told apart.
+/// One labelled group inside a dialog: a field name, then the control or
+/// controls it names.
+///
+/// The page-level counterpart is [`section`], whose header is set in
+/// `HEADING` because it introduces a whole region of a page. A dialog group
+/// names one field, so it takes the field role instead — which is still a
+/// weight above, and never a size below, the controls it governs.
 fn dialog_section<'a>(
     title: &'static str,
     body: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    column![
-        text(title)
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
-        body.into(),
-    ]
-    .spacing(gap::S)
-    .into()
+    column![theme::typography::field(title), body.into()]
+        .spacing(gap::S)
+        .into()
 }
 
 /// The halves of the two time pickers, named so the typing can be moved from
@@ -2776,15 +2676,13 @@ fn dialog_footer<'a>(action: impl Into<Element<'a, Message>>) -> Element<'a, Mes
 /// same "give me five more minutes".
 fn snooze_row<'a>(minutes: u32, less: Message, more: Message) -> Element<'a, Message> {
     let step = |label: &'static str, message: Message| {
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(message)
     };
     row![
-        text(format!("Snooze for {minutes}m"))
-            .size(type_scale::BODY)
-            .color(theme::ambient::muted()),
+        theme::typography::note(format!("Snooze for {minutes}m")),
         space::horizontal(),
         step("−1m", less),
         step("+1m", more),
@@ -2804,7 +2702,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
 
     let direction = |label: &'static str, count_down: bool| {
         let chosen = controls.count_down == count_down;
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(if chosen {
                 theme::ambient::selected_button
@@ -2814,13 +2712,13 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
             .on_press(Message::Timer(TimerCommand::SetCountDown(count_down)))
     };
     let step = |label: &'static str, delta: i32| {
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::Timer(TimerCommand::NudgeTarget(delta)))
     };
     let preset = |label: &'static str, minutes: u32| {
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::Timer(TimerCommand::SetTarget(minutes * 60)))
@@ -2837,7 +2735,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
         Message::Timer(TimerCommand::CommitLength),
     );
     let typed = controls.entered();
-    let mut set = button(text("Set").size(type_scale::LABEL))
+    let mut set = button(theme::typography::label("Set"))
         .padding(gap::S)
         .style(theme::ambient::selected_button);
     if typed.is_some() && typed != controls.target_seconds {
@@ -2855,7 +2753,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
     // The clock's three questions, in the same shape: which way it runs, how
     // long the talk is, and what happens at the end of it.
     let body = column![
-        text("Timer").size(type_scale::TITLE),
+        theme::typography::title("Timer"),
         dialog_section(
             "Direction",
             row![
@@ -2874,9 +2772,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
                     .align_y(iced::Alignment::Center)
                     .spacing(gap::S),
                 row![
-                    text(length)
-                        .size(type_scale::BODY)
-                        .color(theme::ambient::muted()),
+                    theme::typography::note(length),
                     space::horizontal(),
                     step("−5m", -5),
                     step("−1m", -1),
@@ -2907,12 +2803,10 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
                 Message::Timer(TimerCommand::NudgeSnooze(1)),
             ),
         ),
-        text("A countdown needs a length to count to; asking for one without a target sets 20 minutes.")
-            .size(type_scale::CAPTION)
-            .color(theme::ambient::muted()),
+        theme::typography::caption("A countdown needs a length to count to; asking for one without a target sets 20 minutes."),
         // Clearing the target is the one press here that is not a way out.
         dialog_footer(
-            button(text("No target").size(type_scale::LABEL))
+            button(theme::typography::label("No target"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::Timer(TimerCommand::ClearTarget)),
@@ -2925,15 +2819,16 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
 
 fn reset_colors_dialog() -> Element<'static, Message> {
     let body = column![
-        text("Reset colors?").size(type_scale::TITLE),
-        text("This will replace your custom Light and Dark colors with the default Pulpit theme.")
-            .size(type_scale::BODY),
+        theme::typography::title("Reset colors?"),
+        theme::typography::body(
+            "This will replace your custom Light and Dark colors with the default Pulpit theme."
+        ),
         row![
-            button(text("Cancel").size(type_scale::LABEL))
+            button(theme::typography::label("Cancel"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::CancelResetColors),
-            button(text("Reset colors").size(type_scale::LABEL))
+            button(theme::typography::label("Reset colors"))
                 .padding(gap::S)
                 .style(theme::ambient::alert_button)
                 .on_press(Message::ResetColors),
@@ -2954,15 +2849,15 @@ fn reset_colors_dialog() -> Element<'static, Message> {
 /// mail, print and submit.
 fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'static, Message> {
     let body = column![
-        text("Follow this document's request?").size(type_scale::TITLE),
-        text(format!("This form asked to {}.", request.what)).size(type_scale::BODY),
-        text("Nothing moves until you choose.").size(type_scale::LABEL),
+        theme::typography::title("Follow this document's request?"),
+        theme::typography::body(format!("This form asked to {}.", request.what)),
+        theme::typography::note("Nothing moves until you choose."),
         row![
-            button(text("Stay here").size(type_scale::LABEL))
+            button(theme::typography::label("Stay here"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::DeclineFormNavigation),
-            button(text("Go").size(type_scale::LABEL))
+            button(theme::typography::label("Go"))
                 .padding(gap::S)
                 .style(theme::ambient::alert_button)
                 .on_press(Message::FollowFormNavigation),
@@ -2985,13 +2880,13 @@ fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'stat
 /// possible.
 fn save_review_dialog(review: &crate::app::SaveReview) -> Element<'static, Message> {
     let mut body = column![
-        text("Save with required fields empty?").size(type_scale::TITLE),
-        text(review.headline()).size(type_scale::BODY),
-        text(review.listing()).size(type_scale::BODY),
+        theme::typography::title("Save with required fields empty?"),
+        theme::typography::body(review.headline()),
+        theme::typography::body(review.listing()),
     ]
     .spacing(gap::M);
 
-    let mut actions = row![button(text("Cancel").size(type_scale::LABEL))
+    let mut actions = row![button(theme::typography::label("Cancel"))
         .padding(gap::S)
         .style(theme::ambient::tool_button)
         .on_press(Message::CancelSaveReview),]
@@ -3001,14 +2896,14 @@ fn save_review_dialog(review: &crate::app::SaveReview) -> Element<'static, Messa
     // no button.
     if review.first_named().is_some() {
         actions = actions.push(
-            button(text("Review").size(type_scale::LABEL))
+            button(theme::typography::label("Review"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::ReviewRequiredFields),
         );
     }
     actions = actions.push(
-        button(text("Save anyway").size(type_scale::LABEL))
+        button(theme::typography::label("Save anyway"))
             .padding(gap::S)
             .style(theme::ambient::alert_button)
             .on_press(Message::SaveWithoutFilling),
@@ -3029,7 +2924,7 @@ fn signature_panel_toggle(app: &App) -> Element<'_, Message> {
         format!("{count} signatures")
     };
     container(
-        button(text(label).size(type_scale::LABEL))
+        button(theme::typography::label(label))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::ToggleSignaturePanel),
@@ -3045,19 +2940,18 @@ fn signature_panel_toggle(app: &App) -> Element<'_, Message> {
 /// The signature panel (§31.4): every discovered signature's status line,
 /// with an expandable detail view and two copy actions each.
 fn signature_panel(app: &App) -> Element<'_, Message> {
-    let mut body = column![row![
-        text("Signatures").size(type_scale::TITLE),
-        space::horizontal(),
+    let mut body = column![
+        row![theme::typography::title("Signatures"), space::horizontal(),]
+            .align_y(Alignment::Center),
     ]
-    .align_y(Alignment::Center),]
     .spacing(gap::M);
 
     for (index, entry) in app.document_signatures.iter().enumerate() {
         let line = crate::signing::signature_line_for_verification(entry);
         let mut row_body = column![row![
-            text(line.summary_text()).size(type_scale::BODY),
+            theme::typography::body(line.summary_text()),
             space::horizontal(),
-            button(text("Details").size(type_scale::LABEL))
+            button(theme::typography::label("Details"))
                 .padding(gap::XS)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::ToggleSignatureDetail(index)),
@@ -3070,34 +2964,38 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
             if let pulpit_render::verify::SignatureVerification::Checked(status) = entry {
                 row_body = row_body.push(
                     column![
-                        text(format!("Field: {}", status.field_name)).size(type_scale::CAPTION),
-                        text(format!("Subject: {}", status.signer_cert.subject))
-                            .size(type_scale::CAPTION),
-                        text(format!("Issuer: {}", status.signer_cert.issuer))
-                            .size(type_scale::CAPTION),
-                        text(format!("Serial: {}", status.signer_cert.serial))
-                            .size(type_scale::CAPTION),
-                        text(format!(
+                        theme::typography::caption(format!("Field: {}", status.field_name)),
+                        theme::typography::caption(format!(
+                            "Subject: {}",
+                            status.signer_cert.subject
+                        )),
+                        theme::typography::caption(format!(
+                            "Issuer: {}",
+                            status.signer_cert.issuer
+                        )),
+                        theme::typography::caption(format!(
+                            "Serial: {}",
+                            status.signer_cert.serial
+                        )),
+                        theme::typography::caption(format!(
                             "Fingerprint (SHA-256): {}",
                             status.signer_cert.sha256_fingerprint
-                        ))
-                        .size(type_scale::CAPTION),
-                        text("Certificate chain: embedded, not validated (§20.3)")
-                            .size(type_scale::CAPTION),
-                        text(format!("Coverage: {:?}", status.coverage)).size(type_scale::CAPTION),
-                        text(format!(
+                        )),
+                        theme::typography::caption(
+                            "Certificate chain: embedded, not validated (§20.3)"
+                        ),
+                        theme::typography::caption(format!("Coverage: {:?}", status.coverage)),
+                        theme::typography::caption(format!(
                             "Signing time (claimed, not attested): {}",
                             status
                                 .claimed_time
                                 .map(|t| t.to_string())
                                 .unwrap_or_else(|| "not stated".to_string())
-                        ))
-                        .size(type_scale::CAPTION),
-                        text(format!(
+                        )),
+                        theme::typography::caption(format!(
                             "Digest: {}; signature: {}",
                             status.digest_algorithm, status.signature_algorithm
-                        ))
-                        .size(type_scale::CAPTION),
+                        )),
                     ]
                     .spacing(gap::XS)
                     .padding(gap::S),
@@ -3105,11 +3003,11 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
             }
             row_body = row_body.push(
                 row![
-                    button(text("Copy fingerprint").size(type_scale::LABEL))
+                    button(theme::typography::label("Copy fingerprint"))
                         .padding(gap::XS)
                         .style(theme::ambient::tool_button)
                         .on_press(Message::CopySignatureFingerprint(index)),
-                    button(text("Copy report").size(type_scale::LABEL))
+                    button(theme::typography::label("Copy report"))
                         .padding(gap::XS)
                         .style(theme::ambient::tool_button)
                         .on_press(Message::CopySignatureReport(index)),
@@ -3128,14 +3026,14 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
 /// already carries a signature is opened, before anything can mutate it.
 fn append_only_offer_dialog() -> Element<'static, Message> {
     let body = column![
-        text("Keep this document append-only?").size(type_scale::TITLE),
-        text(crate::signing::APPEND_ONLY_OFFER).size(type_scale::BODY),
+        theme::typography::title("Keep this document append-only?"),
+        theme::typography::body(crate::signing::APPEND_ONLY_OFFER),
         row![
-            button(text("Edit anyway").size(type_scale::LABEL))
+            button(theme::typography::label("Edit anyway"))
                 .padding(gap::S)
                 .style(theme::ambient::alert_button)
                 .on_press(Message::EditAnyway),
-            button(text("Append-only mode").size(type_scale::LABEL))
+            button(theme::typography::label("Append-only mode"))
                 .padding(gap::S)
                 .style(theme::ambient::selected_button)
                 .on_press(Message::AcceptAppendOnly),
@@ -3155,7 +3053,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
     use pulpit_render::sign::SigningProfile;
 
     let cancel = || {
-        button(text("Cancel").size(type_scale::LABEL))
+        button(theme::typography::label("Cancel"))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
             .on_press(Message::Sign(crate::signing::SignMsg::Cancel))
@@ -3164,32 +3062,27 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
     match flow {
         SigningFlow::SavingFirst => {
             let mut body = column![
-                text("Sign").size(type_scale::TITLE),
-                text("Saving your edits before signing…").size(type_scale::BODY),
+                theme::typography::title("Sign"),
+                theme::typography::body("Saving your edits before signing…"),
             ]
             .spacing(gap::M);
             if !app.document_signatures.is_empty() {
                 // This is a full rewrite, not an append (§28.4): it does
                 // not carry the document's existing signatures forward.
-                body = body.push(
-                    text(
-                        "This save rewrites the document; its existing signatures will not \
+                body = body.push(theme::typography::caption(
+                    "This save rewrites the document; its existing signatures will not \
                          carry over.",
-                    )
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                );
+                ));
             }
             body = body.push(cancel());
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::ChooseCredential => {
             let body = column![
-                text("Sign").size(type_scale::TITLE),
-                text("Choose the PKCS#12 (.p12/.pfx) credential to sign with.")
-                    .size(type_scale::BODY),
+                theme::typography::title("Sign"),
+                theme::typography::body("Choose the PKCS#12 (.p12/.pfx) credential to sign with."),
                 dialog_footer(
-                    button(text("Choose file…").size(type_scale::LABEL))
+                    button(theme::typography::label("Choose file…"))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
                         .on_press(Message::Sign(crate::signing::SignMsg::ChooseCredentialFile)),
@@ -3219,8 +3112,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                         .unwrap_or_else(|| credential_path.display().to_string())
                 });
             let mut body = column![
-                text("Sign").size(type_scale::TITLE),
-                text(format!("Enter the passphrase for {unlocking}.")).size(type_scale::BODY),
+                theme::typography::title("Sign"),
+                theme::typography::body(format!("Enter the passphrase for {unlocking}.")),
                 text_input("Passphrase", passphrase)
                     .secure(true)
                     .on_input(|typed| {
@@ -3232,16 +3125,13 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             ]
             .spacing(gap::M);
             if let Some(error) = error {
-                body = body.push(
-                    text(error.clone())
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::alert()),
-                );
+                body = body
+                    .push(theme::typography::caption(error.clone()).color(theme::ambient::alert()));
             }
             body = body.push(
                 row![
                     cancel(),
-                    button(text("Continue").size(type_scale::LABEL))
+                    button(theme::typography::label("Continue"))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
                         .on_press(Message::Sign(crate::signing::SignMsg::PassphraseSubmit)),
@@ -3252,8 +3142,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
         }
         SigningFlow::LoadingCredential { .. } => {
             let body = column![
-                text("Sign").size(type_scale::TITLE),
-                text("Reading the credential…").size(type_scale::BODY),
+                theme::typography::title("Sign"),
+                theme::typography::body("Reading the credential…"),
             ]
             .spacing(gap::M);
             panel(body, None)
@@ -3289,34 +3179,25 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 None => summary.key_algorithm.clone(),
             };
 
-            let mut identity = column![text(who).size(type_scale::BODY)].spacing(gap::XS);
+            let mut identity = column![theme::typography::body(who)].spacing(gap::XS);
             // The fingerprint is what a recipient checks this signature
             // against, so it is shown whole — never truncated — just quietly.
             identity = identity
-                .push(
-                    text(format!(
-                        "{key} · signature profile {}",
-                        match SigningProfile::AdbePkcs7Detached {
-                            SigningProfile::AdbePkcs7Detached => "B-B",
-                            SigningProfile::EtsiCadesDetached => "B-B (PAdES)",
-                        }
-                    ))
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                )
-                .push(
-                    text(format!("SHA-256 {}", summary.sha256_fingerprint))
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                )
-                .push(
-                    text(format!(
-                        "Valid {} — {}",
-                        summary.not_before, summary.not_after
-                    ))
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                );
+                .push(theme::typography::caption(format!(
+                    "{key} · signature profile {}",
+                    match SigningProfile::AdbePkcs7Detached {
+                        SigningProfile::AdbePkcs7Detached => "B-B",
+                        SigningProfile::EtsiCadesDetached => "B-B (PAdES)",
+                    }
+                )))
+                .push(theme::typography::caption(format!(
+                    "SHA-256 {}",
+                    summary.sha256_fingerprint
+                )))
+                .push(theme::typography::caption(format!(
+                    "Valid {} — {}",
+                    summary.not_before, summary.not_after
+                )));
 
             // More than one saved profile: switching is a row of buttons
             // here rather than a dialog of its own. A locked profile drops
@@ -3326,7 +3207,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 for profile in &app.settings.signatures.profiles {
                     let selected = app.signing_profile.as_deref() == Some(profile.id.as_str());
                     switcher = switcher.push(
-                        button(text(profile.name.clone()).size(type_scale::CAPTION))
+                        button(theme::typography::label(profile.name.clone()))
                             .padding(gap::XS)
                             .style(if selected {
                                 theme::ambient::selected_button
@@ -3338,7 +3219,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 }
             }
             switcher = switcher.push(
-                button(text("Use another .p12/.pfx…").size(type_scale::CAPTION))
+                button(theme::typography::label("Use another .p12/.pfx…"))
                     .padding(gap::XS)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::Sign(SignMsg::UseAnotherCredential)),
@@ -3346,7 +3227,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             identity = identity.push(switcher);
 
             let mut body = column![
-                text("Sign").size(type_scale::TITLE),
+                theme::typography::title("Sign"),
                 dialog_section("Signing as", identity),
             ]
             .spacing(gap::M);
@@ -3361,14 +3242,10 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 } else {
                     "This certificate is not yet valid."
                 };
-                body = body.push(
-                    text(warning)
-                        .size(type_scale::BODY)
-                        .color(theme::ambient::alert()),
-                );
+                body = body.push(theme::typography::body(warning).color(theme::ambient::alert()));
                 if !info.override_validity {
                     body = body.push(
-                        button(text("Sign anyway").size(type_scale::LABEL))
+                        button(theme::typography::label("Sign anyway"))
                             .padding(gap::S)
                             .style(theme::ambient::alert_button)
                             .on_press(Message::Sign(SignMsg::OverrideValidity)),
@@ -3382,15 +3259,15 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             // never pointed at, with nothing saying so.
             if let Some(clicked) = options.prefill_missed.as_deref() {
                 body = body.push(
-                    text(crate::signing::prefill_missed_line(clicked))
-                        .size(type_scale::BODY)
+                    theme::typography::body(crate::signing::prefill_missed_line(clicked))
                         .color(theme::ambient::alert()),
                 );
             }
 
-            let mut target_section =
-                column![text(crate::signing::confirm_target_line(options)).size(type_scale::BODY)]
-                    .spacing(gap::S);
+            let mut target_section = column![theme::typography::body(
+                crate::signing::confirm_target_line(options)
+            )]
+            .spacing(gap::S);
             // The picker earns its place when there is a real choice to make:
             // several candidate fields, or nothing preselected because the
             // clicked field was not on offer.
@@ -3405,7 +3282,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                     };
                     let selected = options.target.as_ref() == Some(candidate);
                     picker = picker.push(
-                        button(text(label).size(type_scale::LABEL))
+                        button(theme::typography::label(label))
                             .padding(gap::S)
                             .style(if selected {
                                 theme::ambient::selected_button
@@ -3430,7 +3307,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             // showing when they chose Visible — see `crate::signing`'s module
             // doc comment for why presets rather than a drawn box.
             let mut appearance_section = column![row![
-                button(text("Invisible").size(type_scale::LABEL))
+                button(theme::typography::label("Invisible"))
                     .padding(gap::S)
                     .style(if options.visible_requested {
                         theme::ambient::tool_button
@@ -3438,7 +3315,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                         theme::ambient::selected_button
                     })
                     .on_press(Message::Sign(SignMsg::VisibleChanged(false))),
-                button(text("Visible").size(type_scale::LABEL))
+                button(theme::typography::label("Visible"))
                     .padding(gap::S)
                     .style(if options.visible_requested {
                         theme::ambient::selected_button
@@ -3455,14 +3332,10 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 // The sender already drew the rectangle, so there is nothing
                 // to place: say where it is instead of offering presets that
                 // would not be honoured.
-                appearance_section = appearance_section.push(
-                    text(format!(
-                        "Drawn inside “{field}”’s box on page {}.",
-                        page_index + 1
-                    ))
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                );
+                appearance_section = appearance_section.push(theme::typography::caption(format!(
+                    "Drawn inside “{field}”’s box on page {}.",
+                    page_index + 1
+                )));
             }
             if let Some(crate::signing::AppearancePlan::Preset {
                 page_index,
@@ -3474,7 +3347,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 for position in PlacementPosition::ALL {
                     let selected = placement.position == position;
                     positions = positions.push(
-                        button(text(position.label()).size(type_scale::CAPTION))
+                        button(theme::typography::label(position.label()))
                             .padding(gap::XS)
                             .style(if selected {
                                 theme::ambient::selected_button
@@ -3488,7 +3361,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 for size in PlacementSize::ALL {
                     let selected = placement.size == size;
                     sizes = sizes.push(
-                        button(text(size.label()).size(type_scale::CAPTION))
+                        button(theme::typography::label(size.label()))
                             .padding(gap::XS)
                             .style(if selected {
                                 theme::ambient::selected_button
@@ -3503,11 +3376,10 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                     .push(dialog_section("Size", sizes))
                     // The page was captured when Visible was pressed, so say
                     // which one: the reader may scroll before confirming.
-                    .push(
-                        text(format!("Placed on page {}.", page_index + 1))
-                            .size(type_scale::CAPTION)
-                            .color(theme::ambient::muted()),
-                    );
+                    .push(theme::typography::caption(format!(
+                        "Placed on page {}.",
+                        page_index + 1
+                    )));
             }
             body = body.push(dialog_section("Appearance", appearance_section));
 
@@ -3516,14 +3388,11 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             // most of what made the old Options step read as work, so they
             // are folded away until asked for.
             body = body.push(
-                button(
-                    text(if *details_expanded {
-                        "Hide details"
-                    } else {
-                        "Details…"
-                    })
-                    .size(type_scale::LABEL),
-                )
+                button(theme::typography::label(if *details_expanded {
+                    "Hide details"
+                } else {
+                    "Details…"
+                }))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::Sign(SignMsg::ToggleDetails)),
@@ -3557,17 +3426,13 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 );
             }
 
-            body = body.push(
-                text(crate::signing::IDENTITY_DISCLOSURE)
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-            );
+            body = body.push(theme::typography::caption(
+                crate::signing::IDENTITY_DISCLOSURE,
+            ));
             if options.countersigning {
-                body = body.push(
-                    text(crate::signing::COUNTERSIGN_DISCLOSURE)
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                );
+                body = body.push(theme::typography::caption(
+                    crate::signing::COUNTERSIGN_DISCLOSURE,
+                ));
             }
 
             // Where Sign will write, in full and before it is pressed. The
@@ -3577,10 +3442,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             body = body.push(dialog_section(
                 "Save the signed copy as",
                 column![
-                    text(destination.display().to_string())
-                        .size(type_scale::CAPTION)
-                        .color(theme::ambient::muted()),
-                    button(text("Change…").size(type_scale::LABEL))
+                    theme::typography::caption(destination.display().to_string()),
+                    button(theme::typography::label("Change…"))
                         .padding(gap::S)
                         .style(theme::ambient::tool_button)
                         .on_press(Message::Sign(SignMsg::ChooseDestination)),
@@ -3594,18 +3457,17 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 // signature and has no empty field left to countersign into
                 // (every other preflight outcome keeps "new field" on offer).
                 body = body.push(
-                    text(
+                    theme::typography::body(
                         "No signature field is available to sign into: the document has no \
                          empty signature field to countersign, and already carries one if it \
                          is not offering a new field.",
                     )
-                    .size(type_scale::BODY)
                     .color(theme::ambient::alert()),
                 );
             }
             if info.may_proceed() && options.target.is_some() {
                 actions = actions.push(
-                    button(text("Sign").size(type_scale::LABEL))
+                    button(theme::typography::label("Sign"))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
                         .on_press(Message::Sign(SignMsg::Confirm)),
@@ -3619,8 +3481,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
         }
         SigningFlow::Signing { destination, .. } => {
             let body = column![
-                text("Sign").size(type_scale::TITLE),
-                text(format!("Signing to {}…", destination.display())).size(type_scale::BODY),
+                theme::typography::title("Sign"),
+                theme::typography::body(format!("Signing to {}…", destination.display())),
             ]
             .spacing(gap::M);
             panel(body, None)
@@ -3631,30 +3493,29 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             verification,
         } => {
             let mut body = column![
-                text("Signed").size(type_scale::TITLE),
-                text(format!(
+                theme::typography::title("Signed"),
+                theme::typography::body(format!(
                     "Wrote {} ({} signature{} now present).",
                     destination.display(),
                     report.signature_count,
                     if report.signature_count == 1 { "" } else { "s" }
-                ))
-                .size(type_scale::BODY),
+                )),
             ]
             .spacing(gap::M);
             for entry in verification {
                 let line = crate::signing::signature_line_for_verification(entry);
-                body = body.push(text(line.summary_text()).size(type_scale::BODY));
+                body = body.push(theme::typography::body(line.summary_text()));
             }
             // Opening the copy is the primary action: the reader on screen
             // still shows the unsigned source, and a signature that exists
             // only in a file nobody opened reads as one that never appeared.
             body = body.push(
                 row![
-                    button(text("Done").size(type_scale::LABEL))
+                    button(theme::typography::label("Done"))
                         .padding(gap::S)
                         .style(theme::ambient::tool_button)
                         .on_press(Message::Sign(crate::signing::SignMsg::Done)),
-                    button(text("Open the signed copy").size(type_scale::LABEL))
+                    button(theme::typography::label("Open the signed copy"))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
                         .on_press(Message::Sign(crate::signing::SignMsg::OpenSignedCopy)),
@@ -3665,14 +3526,10 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
         }
         SigningFlow::Failed { detail } => {
             let body = column![
-                text("Signing failed").size(type_scale::TITLE),
-                text(detail.clone())
-                    .size(type_scale::BODY)
-                    .color(theme::ambient::alert()),
-                text("The source document is unchanged.")
-                    .size(type_scale::CAPTION)
-                    .color(theme::ambient::muted()),
-                button(text("Close").size(type_scale::LABEL))
+                theme::typography::title("Signing failed"),
+                theme::typography::body(detail.clone()).color(theme::ambient::alert()),
+                theme::typography::caption("The source document is unchanged."),
+                button(theme::typography::label("Close"))
                     .padding(gap::S)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::Sign(crate::signing::SignMsg::Done)),
@@ -3693,24 +3550,22 @@ fn restore_edits_dialog(
     journal: &crate::reader_journal::RecoveredJournal,
 ) -> Element<'static, Message> {
     let body = column![
-        text("Put back the unsaved edits?").size(type_scale::TITLE),
-        text(
+        theme::typography::title("Put back the unsaved edits?"),
+        theme::typography::body(
             "Pulpit did not shut down cleanly, and this document had edits that had \
               not been saved to a copy."
-        )
-        .size(type_scale::BODY),
-        text(journal.summary()).size(type_scale::BODY),
-        text(
+        ),
+        theme::typography::body(journal.summary()),
+        theme::typography::note(
             "They are applied to the document as it is now. If you already saved a \
               copy with them, start fresh."
-        )
-        .size(type_scale::LABEL),
+        ),
         row![
-            button(text("Start fresh").size(type_scale::LABEL))
+            button(theme::typography::label("Start fresh"))
                 .padding(gap::S)
                 .style(theme::ambient::tool_button)
                 .on_press(Message::DiscardReaderEdits),
-            button(text("Put them back").size(type_scale::LABEL))
+            button(theme::typography::label("Put them back"))
                 .padding(gap::S)
                 .style(theme::ambient::alert_button)
                 .on_press(Message::RestoreReaderEdits),
@@ -3725,15 +3580,10 @@ fn restore_edits_dialog(
 fn section<'a>(title: &'a str, content: Element<'a, Message>) -> Element<'a, Message> {
     // No box: the page is a document. A panel inside a panel inside a page is
     // three borders saying nothing.
-    column![
-        text(title)
-            .size(type_scale::HEADING)
-            .color(theme::ambient::text()),
-        content,
-    ]
-    .spacing(gap::S)
-    .width(Length::Fill)
-    .into()
+    column![theme::typography::heading(title), content,]
+        .spacing(gap::S)
+        .width(Length::Fill)
+        .into()
 }
 
 fn mappings(app: &App) -> Element<'_, Message> {
@@ -3751,21 +3601,22 @@ fn mappings(app: &App) -> Element<'_, Message> {
             NotesMapping::PairedPages(PairedRule::TwoRanges { notes_first: false }),
         ),
     ];
-    let mut buttons = row![text("Notes mapping:").size(type_scale::LABEL)].spacing(gap::XS);
+    let mut buttons = row![theme::typography::field("Notes mapping:")].spacing(gap::XS);
     for (label, mapping) in options {
         let selected = app.state.mapping() == &mapping;
         buttons = buttons.push(
-            selectable(button(text(label).size(type_scale::CAPTION)), selected)
+            selectable(button(theme::typography::label(label)), selected)
                 .on_press(Message::SetMapping(mapping)),
         );
     }
     let current = app.state.mapping();
     if let NotesMapping::SplitPage { slide, .. } = current {
         let notes_side = if slide.x > 0.0 { "left" } else { "right" };
-        buttons =
-            buttons.push(text(format!("split page, notes {notes_side}")).size(type_scale::CAPTION));
+        buttons = buttons.push(theme::typography::caption(format!(
+            "split page, notes {notes_side}"
+        )));
         buttons = buttons.push(
-            button(text("Swap halves").size(type_scale::CAPTION))
+            button(theme::typography::label("Swap halves"))
                 .on_press(Message::SetMapping(current.swapped())),
         );
     }
@@ -3789,16 +3640,14 @@ fn library_page(app: &App) -> Element<'_, Message> {
 fn layout_dialog(dialog: &LayoutDialog) -> Element<'_, Message> {
     let body: Element<'_, Message> = match dialog {
         LayoutDialog::ConfirmDelete { name, .. } => column![
-            text(format!("Delete “{name}”?")).size(type_scale::HEADING),
-            text("This cannot be undone.")
-                .size(type_scale::LABEL)
-                .color(theme::ambient::muted()),
+            theme::typography::title(format!("Delete “{name}”?")),
+            theme::typography::note("This cannot be undone."),
             row![
-                button(text("Delete").size(type_scale::BODY))
+                button(theme::typography::label("Delete"))
                     .padding(gap::S)
                     .style(theme::ambient::alert_button)
                     .on_press(Message::ConfirmLayoutDialog),
-                button(text("Cancel").size(type_scale::BODY))
+                button(theme::typography::label("Cancel"))
                     .padding(gap::S)
                     .style(theme::ambient::tool_button)
                     .on_press(Message::CancelLayoutDialog),

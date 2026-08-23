@@ -284,6 +284,18 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   readouts use the bundled DejaVu Sans Mono role so changing digits do not
   shift or vary between machines. A display face is not part of the interface
   vocabulary.
++ *Five type roles, and a view picks a role rather than a size.* Title (22) for
+  the name of a dialog, overlay or page, one per surface; heading (17) for a
+  section within one; body (14) for prose; label (12) for the text inside a
+  control and for the field labels above them; caption (11) for subordinate
+  metadata. `theme::typography` hands out the role already carrying its size,
+  weight and colour, and views MUST ask it rather than call `.size()` with a
+  token; what is left for the constants is sizing something that is not text.
+  Title and heading also take the platform face one weight up, because three
+  points is a difference a reader measures rather than sees. The ladder is
+  strictly increasing and tested as such: a header MUST NOT be set smaller
+  than the text beneath it. A field label is the exception that proves it —
+  it is a weight above, and never a size below, the control it names.
 + *Geometry follows function.* Controls and fields use a 4-pixel radius,
   panels 8, and dialogs 12. Pills are reserved for genuine segmented choices;
   passive surfaces do not accumulate nested cards. Shadows are reserved for
@@ -938,6 +950,16 @@ Views read the palette through `theme::ambient`, which is set once per view
 pass. The explicit, palette-taking style builders underneath are what the
 tests exercise; the ambient layer only spares every widget from threading the
 palette by hand.
+
+Text works the same way. `theme::typography` turns the five steps of the type
+scale into the roles a view actually wants — a title, a heading, prose, a
+field label, a control label, a caption — each already carrying its size,
+weight and colour. Sizing text by hand is how a dialog acquires a header
+smaller than its own body, or three sizes doing one job across four dialogs,
+so the numbers are chosen there and nowhere else. A control label sets no
+colour: the button owns its foreground across hover, pressed and disabled,
+and a label that painted itself would freeze one of those states over the
+other three.
 
 Editable fields share one recipe: surface fill, a quiet one-pixel edge,
 4-pixel corners, and a two-pixel accent focus edge. Scrollbars keep a
