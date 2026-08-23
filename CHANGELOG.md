@@ -49,6 +49,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A fullscreen Reader layout.** A third built-in, alongside Presenter and
+  Reader: the Reader's own tree — the control band, the outline rail, the page
+  — mounted with the chrome hidden and the whole page in view rather than
+  fitted to the width. `f` and `Escape` both bring the band and the rail back
+  without leaving the layout, so returning to fullscreen is one key away.
+  Layouts can now carry what mounting them asks of the reading surface, which
+  means a copy of this layout opens the way the original does.
+
 - The foundation of document mode: pulpit can open an ordinary PDF, mark it
   with **native PDF annotations** and write the result out through Save As.
   A completed ink gesture becomes an `/Ink` annotation in the open document —

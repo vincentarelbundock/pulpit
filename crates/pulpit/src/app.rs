@@ -2614,6 +2614,21 @@ impl App {
                 {
                     return task;
                 }
+                // The last rung of the Escape ladder: leaving fullscreen.
+                // Fullscreen takes the band away, and the way back to the
+                // menu goes with it, so the reader who does not know `f` has
+                // only the `?` reference to find it in — and Escape is the
+                // key they will try first. Last rather than first because
+                // everything above wanted it more: a marquee, an open panel,
+                // a focused overlay, a choice list in a form. It leaves the
+                // layout mounted, exactly as `f` does; the tree behind
+                // fullscreen is the Reader's own, so this reveals the band
+                // and the rail rather than switching layouts underneath
+                // somebody.
+                if key.as_deref() == Some("Escape") && self.reader_fullscreen {
+                    self.reader_fullscreen = false;
+                    return Task::none();
+                }
                 let mods = crate::settings::Mods::new(control, shift, alt);
                 match self
                     .settings
@@ -3515,7 +3530,11 @@ impl App {
     /// Mount a layout and remember it for its mode, without claiming the user
     /// asked for it on this particular document.
     fn mount_layout(&mut self, layout: Layout) {
-        self.reader_fullscreen = false;
+        // A layout that asks to open fullscreen carries the reader's chrome
+        // state as part of its identity; every other layout mounts windowed,
+        // so leaving one is enough to get the band and the rail back.
+        self.reader_fullscreen = layout.on_mount.fullscreen
+            && crate::layout::PrimaryViewer::of(&layout) == crate::layout::PrimaryViewer::Document;
         self.diagnostics
             .note(format!("presenter layout: {}", layout.name));
         // Each mode remembers its own (§2.3): choosing a presenter variant
@@ -3529,6 +3548,17 @@ impl App {
             }
         }
         self.active_layout = layout;
+        // The fit is fitted to the surface the new tree gives the page, which
+        // is a different size from the one the old tree gave it — full window
+        // in fullscreen, the page cell otherwise. Size the surface first, or
+        // "fit page" resolves against the layout we just left.
+        if let Some(zoom) = self.active_layout.on_mount.zoom {
+            if let Some(cell) = self.page_surface_size() {
+                self.reader.set_cell(cell.0, cell.1);
+            }
+            self.reader
+                .apply(&crate::widgets::event::ReadCommand::SetZoom(zoom));
+        }
         self.annotation_controls =
             crate::widgets::AnnotationControls::new(annotation_options_in(&self.active_layout));
         self.persist();

@@ -4,7 +4,7 @@
 //! a good presenter screen looks like: strong hierarchy, readable at a
 //! glance, large controls, restrained colour.
 
-use crate::layout::model::{AspectRatio, Layout, LayoutId, Origin, PrimaryViewer};
+use crate::layout::model::{AspectRatio, Layout, LayoutId, OnMount, Origin, PrimaryViewer};
 use crate::layout::tree::{Cell, CellBackground, CellExtent, Direction, Node, NodeId, Split};
 use crate::widgets::{Widget, WidgetKind};
 
@@ -259,18 +259,41 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
     finish("Reader", "reader-default", root, ratio)
 }
 
+/// **Reader (fullscreen)** — the Reader, opened on the whole screen with the
+/// whole page in view.
+///
+/// The same tree as [`reader_default`], deliberately and not by coincidence:
+/// what changes is how it is *mounted*. The chrome is hidden, so the page has
+/// the window to itself on a black surround, and the page is fitted whole
+/// rather than to the width, because a reader who wanted a column of text
+/// would not have asked for the screen. Leaving fullscreen from here reveals
+/// the ordinary Reader's band and rail, since they are the same tree.
+pub fn reader_fullscreen_default(ratio: AspectRatio) -> Layout {
+    let mut layout = reader_default(ratio);
+    layout.id = LayoutId("reader-fullscreen".to_string());
+    layout.name = "Reader (fullscreen)".to_string();
+    layout.on_mount = OnMount {
+        fullscreen: true,
+        zoom: Some(crate::widgets::document::model::Zoom::FitPage),
+    };
+    layout
+}
+
 /// The built-ins in canonical presentation-first order. The layout library's
 /// view may choose a different display order without changing this fallback.
 ///
 /// The list is bimodal (§2.1): **Reader** is what a new PDF opens with and
 /// **Presenter** is the live-presentation view, and neither is a variant of
-/// the other. `built_in_layouts` passes the `SixteenNine` fallback so the list
+/// the other. **Reader (fullscreen)** is a third entry but not a third mode:
+/// it is the Reader's tree with a different way of mounting it.
+/// `built_in_layouts` passes the `SixteenNine` fallback so the list
 /// stays parameterless, display-free and testable; a caller with a live window
 /// builds a Reader at that window's ratio instead.
 pub fn built_in_layouts() -> Vec<Layout> {
     vec![
         presenter_default(),
         reader_default(AspectRatio::SixteenNine),
+        reader_fullscreen_default(AspectRatio::SixteenNine),
     ]
 }
 
@@ -293,16 +316,19 @@ mod tests {
     #[test]
     fn the_built_ins_are_read_only_and_led_by_the_default() {
         let layouts = built_in_layouts();
-        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts.len(), 3);
         for layout in &layouts {
             assert_eq!(layout.origin, Origin::BuiltIn);
             assert!(!layout.is_editable());
             assert!(!layout.name.is_empty());
         }
         let ids: Vec<&str> = layouts.iter().map(|layout| layout.id.0.as_str()).collect();
-        assert_eq!(ids, vec!["presenter-default", "reader-default"]);
+        assert_eq!(
+            ids,
+            vec!["presenter-default", "reader-default", "reader-fullscreen"]
+        );
         let names: Vec<&str> = layouts.iter().map(|layout| layout.name.as_str()).collect();
-        assert_eq!(names, vec!["Presenter", "Reader"]);
+        assert_eq!(names, vec!["Presenter", "Reader", "Reader (fullscreen)"]);
     }
 
     /// The primary viewer is always derived from the widget tree.
@@ -408,6 +434,47 @@ mod tests {
         assert!(
             !kinds.contains(&WidgetKind::Search),
             "search is a transient workspace, not a permanent reader rail"
+        );
+    }
+
+    /// The fullscreen Reader is the Reader: the same tree, mounted
+    /// differently. Anything that drifts between them — a widget added to one
+    /// band and not the other — is a bug, so the trees are compared whole.
+    #[test]
+    fn the_fullscreen_reader_is_the_reader_with_a_different_way_of_mounting_it() {
+        let reader = reader_default(AspectRatio::SixteenNine);
+        let fullscreen = reader_fullscreen_default(AspectRatio::SixteenNine);
+
+        assert_eq!(fullscreen.root, reader.root);
+        assert_eq!(fullscreen.design_ratio, reader.design_ratio);
+        assert_eq!(PrimaryViewer::of(&fullscreen), PrimaryViewer::Document);
+        assert_ne!(fullscreen.id, reader.id);
+
+        assert!(fullscreen.on_mount.fullscreen);
+        assert_eq!(
+            fullscreen.on_mount.zoom,
+            Some(crate::widgets::document::model::Zoom::FitPage),
+            "the whole page, not a column of text"
+        );
+
+        // …and the ordinary Reader asks for neither, so mounting it is what
+        // brings the band and the rail back.
+        assert!(!reader.on_mount.fullscreen);
+        assert_eq!(reader.on_mount.zoom, None);
+        assert!(!presenter_default().on_mount.fullscreen);
+    }
+
+    /// The fullscreen Reader is a variant of the Reader, not a third mode: it
+    /// is not what a PDF opens into unless the user chose it last.
+    #[test]
+    fn the_fullscreen_reader_is_not_the_document_default() {
+        assert_eq!(
+            default_for(PrimaryViewer::Document),
+            reader_default(AspectRatio::SixteenNine).id
+        );
+        assert_ne!(
+            default_for(PrimaryViewer::Document),
+            reader_fullscreen_default(AspectRatio::SixteenNine).id
         );
     }
 
