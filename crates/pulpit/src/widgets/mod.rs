@@ -272,6 +272,20 @@ impl WidgetKind {
         registry::registration(self).minimum_size()
     }
 
+    /// The width a *hugging* cell hands this kind: what its full run wants,
+    /// which is not the same as the compact minimum it can survive on.
+    ///
+    /// Page Navigation is the case that forces the distinction. Its minimum
+    /// is one collapsed row behind an overflow menu; a cell hugging it at
+    /// that width would hide the zoom controls on a band with room to spare,
+    /// so a hugging cell asks for the width the whole run is drawn at.
+    pub fn hug_width(self) -> f32 {
+        match self {
+            WidgetKind::DocumentNav => document::view::NAVIGATION_RUN_WIDTH,
+            _ => self.minimum_size().0,
+        }
+    }
+
     /// This kind's own declared capabilities, not counting any compound
     /// parts. Almost always what [`WidgetKind::capabilities`] should be
     /// called instead — this exists for the table itself and its tests.
@@ -535,11 +549,19 @@ impl Widget {
     /// Effective minimum size, taking the content scale into account.
     pub fn minimum_size(&self) -> (f32, f32) {
         let (width, height) = self.kind.minimum_size();
-        let scale = self
-            .style
+        (width * self.scale(), height * self.scale())
+    }
+
+    /// Effective hug width: what a hugging cell gives this widget, scaled the
+    /// same way its minimum is.
+    pub fn hug_width(&self) -> f32 {
+        self.kind.hug_width() * self.scale()
+    }
+
+    fn scale(&self) -> f32 {
+        self.style
             .scale
-            .clamp(common::SCALE_RANGE.0, common::SCALE_RANGE.1);
-        (width * scale, height * scale)
+            .clamp(common::SCALE_RANGE.0, common::SCALE_RANGE.1)
     }
 
     /// Does this widget, as configured, let the presenter move forward?

@@ -32,6 +32,7 @@
 
 use std::path::PathBuf;
 
+use pulpit_core::page::{PageGeometry, PageRect, PageRotation};
 use pulpit_render::sign::{Credential, CredentialSummary, SignReport, SignTarget};
 use pulpit_render::verify::SignatureVerification;
 
@@ -354,16 +355,25 @@ impl Default for Placement {
 }
 
 impl Placement {
-    /// The widget rect in PDF page coordinates, `[x0, y0, x1, y1]`, for a
-    /// page whose displayed size (`PageGeometry::width`/`height`) is
-    /// `page_width` by `page_height` points. The box is clamped to fit
-    /// inside the margin on pages too small for the chosen preset, rather
-    /// than producing a rect that overhangs the page.
-    pub fn rect(&self, page_width: f64, page_height: f64) -> [f64; 4] {
+    /// The widget box in *canonical page space*: y-down, origin at the top
+    /// left of the page **as displayed**, which is the space the reader's
+    /// choice is made in and the space `PageGeometry::width`/`height`
+    /// measure. The box is clamped to fit inside the margin on pages too
+    /// small for the chosen preset, rather than overhanging the page.
+    ///
+    /// This is deliberately not a PDF `/Rect`: the two differ by the crop
+    /// origin, by `/Rotate`, and by the direction y runs in. Use
+    /// [`Placement::user_space_rect`] for anything that will be written to a
+    /// file.
+    pub fn display_rect(&self, geometry: &PageGeometry) -> PageRect {
+        let page_width = f64::from(geometry.width);
+        let page_height = f64::from(geometry.height);
         let (preset_w, preset_h) = self.size.dims_pt();
         let w = preset_w.min((page_width - 2.0 * PLACEMENT_MARGIN_PT).max(1.0));
         let h = preset_h.min((page_height - 2.0 * PLACEMENT_MARGIN_PT).max(1.0));
-        let (x0, y0) = match self.position {
+        // Chosen against the sheet the way a reader describes it — "bottom
+        // right" is near the bottom edge — and then flipped, once, here.
+        let (left, bottom_up) = match self.position {
             PlacementPosition::TopLeft => {
                 (PLACEMENT_MARGIN_PT, page_height - PLACEMENT_MARGIN_PT - h)
             }
@@ -377,7 +387,37 @@ impl Placement {
             }
             PlacementPosition::Center => ((page_width - w) / 2.0, (page_height - h) / 2.0),
         };
-        [x0, y0, x0 + w, y0 + h]
+        let top = page_height - bottom_up - h;
+        PageRect::new(left as f32, top as f32, (left + w) as f32, (top + h) as f32)
+    }
+
+    /// The widget rect as a PDF `/Rect`: `[x0, y0, x1, y1]` in **user
+    /// space**, which is what a `/Widget` annotation carries and what every
+    /// conformant viewer positions the mark by.
+    ///
+    /// The conversion is not cosmetic. A page whose crop box starts away from
+    /// the user-space origin, or that carries a `/Rotate`, displays at an
+    /// offset and an orientation the reader never sees; a box measured
+    /// on screen and written straight into `/Rect` lands somewhere else. The
+    /// mapping goes corner by corner through
+    /// [`PageGeometry::rect_to_user_space`], which normalises the result —
+    /// a quarter turn permutes the corners, so the smaller coordinate is not
+    /// the one it started as.
+    pub fn user_space_rect(&self, geometry: &PageGeometry) -> [f64; 4] {
+        geometry
+            .rect_to_user_space(self.display_rect(geometry))
+            .map(f64::from)
+    }
+}
+
+/// The engine's name for a page's `/Rotate`, which it cannot read for itself.
+fn appearance_rotation(rotation: PageRotation) -> pulpit_render::sign::AppearanceRotation {
+    use pulpit_render::sign::AppearanceRotation;
+    match rotation {
+        PageRotation::None => AppearanceRotation::None,
+        PageRotation::Clockwise90 => AppearanceRotation::Cw90,
+        PageRotation::Clockwise180 => AppearanceRotation::Cw180,
+        PageRotation::Clockwise270 => AppearanceRotation::Cw270,
     }
 }
 
@@ -414,17 +454,15 @@ pub fn text_appearance_content(
     }
 }
 
-/// Translate a plan into the engine's placement. `page_width`/`page_height`
-/// are the displayed size in points (`PageGeometry::width`/`height`) of the
-/// page [`SigningOptions::appearance_page_index`] names — the caller looks
-/// the geometry up from that index rather than guessing, which is what keeps
-/// the rect sized against the page it will land on. Ignored for
-/// [`AppearancePlan::InFieldBox`], where the engine reads the rect from the
-/// field itself.
+/// Translate a plan into the engine's placement. `geometry` is that of the
+/// page [`SigningOptions::appearance_page_index`] names — the caller looks it
+/// up from that index rather than guessing, which is what keeps the rect
+/// sized against, and expressed in the space of, the page it will land on.
+/// Ignored for [`AppearancePlan::InFieldBox`], where the engine reads the
+/// rect from the field itself.
 fn placement_for(
     plan: &AppearancePlan,
-    page_width: f64,
-    page_height: f64,
+    geometry: &PageGeometry,
 ) -> pulpit_render::sign::AppearancePlacement {
     match plan {
         AppearancePlan::InFieldBox { .. } => pulpit_render::sign::AppearancePlacement::FieldRect,
@@ -433,7 +471,7 @@ fn placement_for(
             placement,
         } => pulpit_render::sign::AppearancePlacement::Rect {
             page_index: *page_index,
-            rect: placement.rect(page_width, page_height),
+            rect: placement.user_space_rect(geometry),
         },
     }
 }
@@ -446,13 +484,13 @@ pub fn appearance_for(
     options: &SigningOptions,
     signer_cn: &str,
     signing_time_label: &str,
-    page_width: f64,
-    page_height: f64,
+    geometry: &PageGeometry,
 ) -> Option<pulpit_render::sign::SignAppearance> {
     let plan = options.placement.as_ref()?;
     Some(pulpit_render::sign::SignAppearance {
-        placement: placement_for(plan, page_width, page_height),
+        placement: placement_for(plan, geometry),
         content: text_appearance_content(signer_cn, signing_time_label),
+        page_rotation: appearance_rotation(geometry.rotation),
     })
 }
 
@@ -517,8 +555,7 @@ pub fn appearance_for_profile(
     profile: Option<&crate::settings::StoredSignatureAppearance>,
     signer_cn: &str,
     signing_time_label: &str,
-    page_width: f64,
-    page_height: f64,
+    geometry: &PageGeometry,
 ) -> Option<pulpit_render::sign::SignAppearance> {
     let plan = options.placement.as_ref()?;
     let text = || text_appearance_content(signer_cn, signing_time_label);
@@ -562,8 +599,9 @@ pub fn appearance_for_profile(
         }
     };
     Some(pulpit_render::sign::SignAppearance {
-        placement: placement_for(plan, page_width, page_height),
+        placement: placement_for(plan, geometry),
         content,
+        page_rotation: appearance_rotation(geometry.rotation),
     })
 }
 
@@ -1225,9 +1263,14 @@ mod tests {
             ..Default::default()
         };
         apply_target_defaults(&mut options, Some(&profile), &field_box_on("Sig1", 1));
-        let appearance =
-            appearance_for_profile(&options, Some(&profile), "Jane Doe", "now", 612.0, 792.0)
-                .expect("a located field is visible by default");
+        let appearance = appearance_for_profile(
+            &options,
+            Some(&profile),
+            "Jane Doe",
+            "now",
+            &PageGeometry::upright(612.0, 792.0),
+        )
+        .expect("a located field is visible by default");
         assert_eq!(
             appearance.placement,
             pulpit_render::sign::AppearancePlacement::FieldRect
@@ -1245,13 +1288,19 @@ mod tests {
             ..Default::default()
         };
         options.set_visible(true, &presets_on(3));
-        let appearance = appearance_for_profile(&options, None, "Jane Doe", "now", 612.0, 792.0)
-            .expect("visible options produce an appearance");
+        let appearance = appearance_for_profile(
+            &options,
+            None,
+            "Jane Doe",
+            "now",
+            &PageGeometry::upright(612.0, 792.0),
+        )
+        .expect("visible options produce an appearance");
         assert_eq!(
             appearance.placement,
             pulpit_render::sign::AppearancePlacement::Rect {
                 page_index: 3,
-                rect: Placement::default().rect(612.0, 792.0),
+                rect: Placement::default().user_space_rect(&PageGeometry::upright(612.0, 792.0)),
             }
         );
     }
@@ -1314,12 +1363,13 @@ mod tests {
     fn placement_rect_sits_inside_the_margin_at_each_corner() {
         let page_w = 612.0;
         let page_h = 792.0;
+        let geometry = PageGeometry::upright(page_w as f32, page_h as f32);
         for position in PlacementPosition::ALL {
             let placement = Placement {
                 position,
                 size: PlacementSize::Medium,
             };
-            let [x0, y0, x1, y1] = placement.rect(page_w, page_h);
+            let [x0, y0, x1, y1] = placement.user_space_rect(&geometry);
             assert!(x0 >= PLACEMENT_MARGIN_PT - 1e-9, "{position:?} x0={x0}");
             assert!(y0 >= PLACEMENT_MARGIN_PT - 1e-9, "{position:?} y0={y0}");
             assert!(
@@ -1335,13 +1385,96 @@ mod tests {
         }
     }
 
+    /// The regression guard for the conversion below: on the page almost
+    /// every document is made of — upright, crop box at the origin — the
+    /// user-space rect must be *exactly* the numbers this flow produced
+    /// before user space was ever mentioned.
+    #[test]
+    fn an_upright_page_at_the_origin_places_the_box_where_it_always_did() {
+        let geometry = PageGeometry::upright(612.0, 792.0);
+        // Bottom right, medium: 200x70 half an inch in from the corner.
+        assert_eq!(
+            Placement::default().user_space_rect(&geometry),
+            [376.0, 36.0, 576.0, 106.0]
+        );
+        assert_eq!(
+            Placement {
+                position: PlacementPosition::TopLeft,
+                size: PlacementSize::Small,
+            }
+            .user_space_rect(&geometry),
+            [36.0, 706.0, 186.0, 756.0]
+        );
+    }
+
+    /// A crop box that does not start at the user-space origin: the reader
+    /// measures against the crop box, `/Rect` is measured against user space,
+    /// and the difference is the crop origin.
+    #[test]
+    fn a_crop_offset_page_places_the_box_in_user_space() {
+        let geometry = PageGeometry::new(50.0, 20.0, 512.0, 692.0, PageRotation::None, 1.0);
+        assert_eq!(geometry.width, 512.0);
+        assert_eq!(geometry.height, 692.0);
+        // Displayed: x from 512-36-200=276 to 476, y from 36 to 106 up from
+        // the crop box's bottom. In user space that is the same box shifted
+        // by the crop origin (50, 20).
+        assert_eq!(
+            Placement::default().user_space_rect(&geometry),
+            [326.0, 56.0, 526.0, 126.0]
+        );
+    }
+
+    /// A quarter-turned page: the box the reader sees at the bottom right of
+    /// a 792x612 landscape display is, on the sheet itself, a *portrait* box
+    /// near the top right — and its width and height are exchanged.
+    #[test]
+    fn a_rotated_page_places_the_box_in_user_space() {
+        let geometry = PageGeometry::new(0.0, 0.0, 612.0, 792.0, PageRotation::Clockwise90, 1.0);
+        assert_eq!((geometry.width, geometry.height), (792.0, 612.0));
+        // Canonical (y-down) box: left 556, top 506, right 756, bottom 576.
+        // Clockwise90: (x, y) -> user (y, crop_height - (crop_height - x)) =
+        // (y, x). So (556, 506) -> (506, 556) and (756, 576) -> (576, 756).
+        assert_eq!(
+            Placement::default().user_space_rect(&geometry),
+            [506.0, 556.0, 576.0, 756.0]
+        );
+        let [x0, y0, x1, y1] = Placement::default().user_space_rect(&geometry);
+        assert_eq!((x1 - x0, y1 - y0), (70.0, 200.0), "the axes exchange");
+        assert!(x1 <= 612.0 && y1 <= 792.0, "the box must be on the sheet");
+    }
+
+    #[test]
+    fn a_rotated_page_carries_its_rotation_to_the_engine() {
+        let mut options = SigningOptions::default();
+        options.set_visible(true, &presets_on(0));
+        let geometry = PageGeometry::new(0.0, 0.0, 612.0, 792.0, PageRotation::Clockwise270, 1.0);
+        let appearance = appearance_for(&options, "Jane Doe", "now", &geometry)
+            .expect("visible options produce an appearance");
+        assert_eq!(
+            appearance.page_rotation,
+            pulpit_render::sign::AppearanceRotation::Cw270
+        );
+        // The field-box path draws on the field's own page, so it needs the
+        // same treatment: the rect is the sender's, the orientation is not.
+        options.retarget(&field_box_on("Sig1", 0));
+        let appearance = appearance_for(&options, "Jane Doe", "now", &geometry).unwrap();
+        assert_eq!(
+            appearance.placement,
+            pulpit_render::sign::AppearancePlacement::FieldRect
+        );
+        assert_eq!(
+            appearance.page_rotation,
+            pulpit_render::sign::AppearanceRotation::Cw270
+        );
+    }
+
     #[test]
     fn placement_rect_clamps_to_a_tiny_page_without_overhanging() {
         let placement = Placement {
             position: PlacementPosition::Center,
             size: PlacementSize::Large,
         };
-        let [x0, y0, x1, y1] = placement.rect(100.0, 100.0);
+        let [x0, y0, x1, y1] = placement.user_space_rect(&PageGeometry::upright(100.0, 100.0));
         assert!(x0 >= 0.0);
         assert!(y0 >= 0.0);
         assert!(x1 <= 100.0);
@@ -1380,20 +1513,34 @@ mod tests {
     #[test]
     fn appearance_for_is_none_without_a_placement() {
         let options = SigningOptions::default();
-        assert!(appearance_for(&options, "Jane Doe", "now", 612.0, 792.0).is_none());
+        assert!(appearance_for(
+            &options,
+            "Jane Doe",
+            "now",
+            &PageGeometry::upright(612.0, 792.0)
+        )
+        .is_none());
     }
 
     #[test]
     fn appearance_for_targets_the_captured_page_with_the_chosen_rect() {
         let mut options = SigningOptions::default();
         options.set_visible(true, &presets_on(1));
-        let appearance = appearance_for(&options, "Jane Doe", "now", 612.0, 792.0)
-            .expect("visible options produce an appearance");
+        let appearance = appearance_for(
+            &options,
+            "Jane Doe",
+            "now",
+            &PageGeometry::upright(612.0, 792.0),
+        )
+        .expect("visible options produce an appearance");
         assert_eq!(
             appearance.placement,
             pulpit_render::sign::AppearancePlacement::Rect {
                 page_index: 1,
-                rect: options.chosen_preset().unwrap().rect(612.0, 792.0),
+                rect: options
+                    .chosen_preset()
+                    .unwrap()
+                    .user_space_rect(&PageGeometry::upright(612.0, 792.0)),
             }
         );
     }
@@ -1420,9 +1567,14 @@ mod tests {
                 size: PlacementSize::Large,
             })
         );
-        let appearance =
-            appearance_for_profile(&options, Some(&profile), "Jane Doe", "now", 612.0, 792.0)
-                .unwrap();
+        let appearance = appearance_for_profile(
+            &options,
+            Some(&profile),
+            "Jane Doe",
+            "now",
+            &PageGeometry::upright(612.0, 792.0),
+        )
+        .unwrap();
         match appearance.content {
             pulpit_render::sign::AppearanceContent::InkAndText {
                 strokes,

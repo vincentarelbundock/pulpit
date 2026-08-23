@@ -117,6 +117,62 @@ pub struct SignAppearance {
     /// Where the appearance is drawn.
     pub placement: AppearancePlacement,
     pub content: AppearanceContent,
+    /// The `/Rotate` of the page the appearance lands on, which the caller
+    /// supplies because it already knows the page's geometry.
+    ///
+    /// This crate does not read the page tree for it: `/Rotate` is
+    /// inheritable, so answering it properly means walking `/Parent` chains,
+    /// and the caller — which measured the page to place the box in the first
+    /// place — has the answer already. Left [`AppearanceRotation::None`], the
+    /// content is drawn straight into the box, which is right for the
+    /// overwhelmingly common upright page and wrong for every other one.
+    pub page_rotation: AppearanceRotation,
+}
+
+/// The rotation of the page an appearance is drawn on, in degrees clockwise
+/// — the sense `/Rotate` uses.
+///
+/// A viewer draws a page's content in user space and then turns the whole
+/// sheet clockwise by `/Rotate` before showing it. Content drawn straight
+/// into a widget's box therefore arrives on screen turned by the same amount:
+/// a signature on a `/Rotate 90` page reads sideways. Naming the rotation
+/// lets the appearance stream carry a `/Matrix` that turns the content the
+/// other way first, so what the reader sees is upright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppearanceRotation {
+    #[default]
+    None,
+    Cw90,
+    Cw180,
+    Cw270,
+}
+
+impl AppearanceRotation {
+    /// Does the page's rotation exchange the box's width and height between
+    /// user space and what the reader sees?
+    fn swaps_axes(self) -> bool {
+        matches!(self, AppearanceRotation::Cw90 | AppearanceRotation::Cw270)
+    }
+
+    /// The form XObject's `/Matrix`, as `[a b c d e f]`, or `None` for an
+    /// upright page, where no matrix is written at all.
+    ///
+    /// The matrix rotates the content counter-clockwise by the page's own
+    /// clockwise rotation, so the two cancel and the mark stands upright on
+    /// screen. Its translation is zero: a viewer maps an appearance stream
+    /// onto `/Rect` by transforming the `/BBox` through `/Matrix`, taking the
+    /// bounding box of the result and scaling *that* onto the rect (PDF 32000
+    /// §12.5.5), so any translation here is absorbed.
+    fn matrix(self) -> Option<[f64; 6]> {
+        match self {
+            AppearanceRotation::None => None,
+            // Rotation by +90°: (x, y) -> (-y, x).
+            AppearanceRotation::Cw90 => Some([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+            AppearanceRotation::Cw180 => Some([-1.0, 0.0, 0.0, -1.0, 0.0, 0.0]),
+            // Rotation by -90°: (x, y) -> (y, -x).
+            AppearanceRotation::Cw270 => Some([0.0, -1.0, 1.0, 0.0, 0.0, 0.0]),
+        }
+    }
 }
 
 /// Which box the appearance is drawn into (§25.5).
@@ -128,9 +184,16 @@ pub struct SignAppearance {
 /// the caller's rect, moving an existing field if that is what the caller
 /// asked for.
 ///
-/// Whichever rect ends up in force is also the appearance XObject's `/BBox`,
-/// so normalized ink coordinates and text scale to the box a viewer actually
-/// renders.
+/// Whichever rect ends up in force sizes the appearance XObject's `/BBox`, so
+/// normalized ink coordinates and text scale to the box a viewer actually
+/// renders. On a rotated page the two are exchanged and a `/Matrix` turns the
+/// content back; see [`SignAppearance::page_rotation`].
+///
+/// The rect is in PDF *user* space, not in the space the reader measures
+/// against. A page with a crop box away from the origin, or a `/Rotate`, puts
+/// those two spaces apart, and a caller that hands over a rect measured on
+/// screen will see the mark land somewhere else in every conformant viewer.
+/// `pulpit_core::page::PageGeometry::rect_to_user_space` is the conversion.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppearancePlacement {
     /// Draw inside the target field's existing `/Rect`, leaving it untouched.
@@ -776,7 +839,12 @@ fn assemble_revision(
         objects.push((
             xobject_num,
             0,
-            PdfObject::Raw(build_appearance_xobject(&appearance.content, width, height)),
+            PdfObject::Raw(build_appearance_xobject(
+                &appearance.content,
+                width,
+                height,
+                appearance.page_rotation,
+            )),
         ));
     }
 
@@ -939,15 +1007,47 @@ fn point_widget_at_appearance(entries: &mut Vec<(String, PdfObject)>, xobject_nu
 /// The caller wraps this with the `N 0 obj` header and `endobj` trailer via
 /// [`PdfObject::Raw`], the same convention `IncrementalWriter::append_objects`
 /// uses for every other appended object.
-fn build_appearance_xobject(content: &AppearanceContent, width: f64, height: f64) -> Vec<u8> {
-    let (content, has_text) = appearance_content_stream(content, width, height);
+///
+/// `width` and `height` are the *rect's* size in user space. On a rotated
+/// page the box the reader sees has those two exchanged, so the content is
+/// drawn against the exchanged pair — an upright box — and `/Matrix` turns
+/// the whole thing back into the rect's own orientation. The transformed
+/// `/BBox` then measures exactly `width` by `height`, so the viewer's fit of
+/// the appearance onto `/Rect` is a translation and the content is neither
+/// squashed nor stretched.
+fn build_appearance_xobject(
+    content: &AppearanceContent,
+    width: f64,
+    height: f64,
+    rotation: AppearanceRotation,
+) -> Vec<u8> {
+    // The box as the reader sees it, which is what the content is composed
+    // against: normalized ink runs left to right on screen, and text reads
+    // along the same axis.
+    let (upright_width, upright_height) = if rotation.swaps_axes() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let (content, has_text) = appearance_content_stream(content, upright_width, upright_height);
 
     let mut dict = Vec::new();
     dict.extend_from_slice(b"<< /Type /XObject /Subtype /Form /BBox [0 0 ");
-    dict.extend_from_slice(fmt_num(width).as_bytes());
+    dict.extend_from_slice(fmt_num(upright_width).as_bytes());
     dict.push(b' ');
-    dict.extend_from_slice(fmt_num(height).as_bytes());
-    dict.extend_from_slice(b"] /Resources <<");
+    dict.extend_from_slice(fmt_num(upright_height).as_bytes());
+    dict.extend_from_slice(b"]");
+    if let Some(matrix) = rotation.matrix() {
+        dict.extend_from_slice(b" /Matrix [");
+        for (index, value) in matrix.iter().enumerate() {
+            if index > 0 {
+                dict.push(b' ');
+            }
+            dict.extend_from_slice(fmt_num(*value).as_bytes());
+        }
+        dict.extend_from_slice(b"]");
+    }
+    dict.extend_from_slice(b" /Resources <<");
     if has_text {
         dict.extend_from_slice(
             b" /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>",

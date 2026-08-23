@@ -573,6 +573,7 @@ fn another_renderer_draws_the_signature_inside_the_senders_box() {
         ..Default::default()
     };
     request.appearance = Some(pulpit_render::sign::SignAppearance {
+        page_rotation: pulpit_render::sign::AppearanceRotation::None,
         placement: pulpit_render::sign::AppearancePlacement::FieldRect,
         content: pulpit_render::sign::AppearanceContent::Ink {
             strokes: vec![
@@ -618,5 +619,97 @@ fn another_renderer_draws_the_signature_inside_the_senders_box() {
         first_before.dark_total(200),
         first_after.dark_total(200),
         "the appearance must not touch a page it was not placed on"
+    );
+}
+
+/// §25.5 on a quarter-turned page, checked where a reader would notice: the
+/// mark has to land in the box *as displayed*, and the ink inside it has to
+/// run the way it was drawn rather than sideways.
+///
+/// PDFium agreeing with itself would establish nothing; MuPDF and Poppler
+/// both apply `/Rotate` themselves, so what they draw is what a reader of the
+/// signed file sees. Without the appearance stream's counter-rotating
+/// `/Matrix` this test fails on the second assertion: the mark is in the
+/// right box and lying on its side.
+#[test]
+fn another_renderer_draws_a_rotated_page_signature_upright() {
+    let engines = Engines::detect();
+    if !engines.can_render("the rotated-page signature appearance") {
+        return;
+    }
+    let Some(credential) = signing_fixture::load_test_credential() else {
+        signing_fixture::skip_message();
+        return;
+    };
+
+    let directory = temp_dir("signature-rotated");
+    let unsigned = directory.join("rotated.pdf");
+    let signed = directory.join("signed.pdf");
+    std::fs::write(
+        &unsigned,
+        signing_fixture::build_unsigned_pdf_pages(
+            &[signing_fixture::FixturePage::rotated(90)],
+            &[],
+        ),
+    )
+    .expect("write the unsigned rotated page");
+
+    // A 612x792 sheet turned a quarter clockwise displays 792x612. This user
+    // rect is 70 wide by 200 tall on the sheet, which is the 200x70 box a
+    // reader sees; `PageGeometry::rect_from_user_space` maps its corners to
+    // the displayed (296, 271) and (496, 341).
+    let mut request = pulpit_render::sign::SignRequest {
+        signing_time: signing_fixture::SIGNING_TIME_UNIX,
+        field: pulpit_render::sign::SignTarget::NewInvisibleField { name: None },
+        id2: [9u8; 16],
+        ..Default::default()
+    };
+    request.appearance = Some(pulpit_render::sign::SignAppearance {
+        placement: pulpit_render::sign::AppearancePlacement::Rect {
+            page_index: 0,
+            rect: [271.0, 296.0, 341.0, 496.0],
+        },
+        content: pulpit_render::sign::AppearanceContent::Ink {
+            strokes: vec![vec![(0.05, 0.5), (0.95, 0.5)]],
+            stroke_width: 6.0,
+        },
+        page_rotation: pulpit_render::sign::AppearanceRotation::Cw90,
+    });
+    pulpit_render::sign::sign_document_file(&unsigned, &signed, &credential, &request)
+        .expect("signing the rotated page succeeds");
+
+    let after = engines
+        .render(&signed, 0, 72)
+        .expect("another renderer draws the signed rotated page");
+    assert_eq!(
+        (after.width, after.height),
+        (792, 612),
+        "the renderer is not applying /Rotate, so this proves nothing"
+    );
+
+    // The box as displayed, in normalized coordinates with y downward.
+    let (left, top, right, bottom) = (296.0 / 792.0, 271.0 / 612.0, 496.0 / 792.0, 341.0 / 612.0);
+    assert!(
+        after.dark_in(left, top, right, bottom, 200) > 0,
+        "the signature is not visible on the rotated page at all"
+    );
+    assert_eq!(
+        after.dark_outside(left, top, right, bottom, 200),
+        0,
+        "the mark must land inside the box the rect names, and nowhere else"
+    );
+
+    // The stroke was drawn straight across the box. Across means across: the
+    // middle third of the box's height holds nearly all of it, and the middle
+    // third of its width holds only the part that crosses there.
+    let third_height = (bottom - top) / 3.0;
+    let third_width = (right - left) / 3.0;
+    let along = after.dark_in(left, top + third_height, right, bottom - third_height, 200);
+    let across = after.dark_in(left + third_width, top, right - third_width, bottom, 200);
+    assert!(
+        along > 2 * across,
+        "the ink is not lying the way it was drawn: {along} dark pixels along the box's \
+         middle band against {across} across it, which is what a signature turned on its \
+         side looks like"
     );
 }

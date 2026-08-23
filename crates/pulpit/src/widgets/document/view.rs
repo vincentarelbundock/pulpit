@@ -1661,8 +1661,13 @@ fn navigation_button<Message: Clone + 'static>(
     hint(control, label)
 }
 
+/// The width the whole navigation run — pages, zoom, spread, rotation — is
+/// drawn at. Below it the band collapses behind an overflow menu, so this is
+/// also the width a hugging cell asks for ([`WidgetKind::hug_width`]).
+pub const NAVIGATION_RUN_WIDTH: f32 = 560.0;
+
 fn navigation_is_compact(width: f32) -> bool {
-    width < 560.0
+    width < NAVIGATION_RUN_WIDTH
 }
 
 fn navigation_overflow<Message: Clone + 'static>(

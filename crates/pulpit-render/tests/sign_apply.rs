@@ -11,12 +11,13 @@ mod signing_fixture;
 
 use pulpit_render::sign::apply::{
     sign_document_file, sign_document_file_with_tamper, AppearanceContent, AppearancePlacement,
-    SignAppearance, SignApplyError, SignRequest, SignTarget,
+    AppearanceRotation, SignAppearance, SignApplyError, SignRequest, SignTarget,
 };
 use pulpit_render::verify::{self, SignatureCoverage, SignatureVerification};
 use signing_fixture::{
     build_pdf_with_fieldmdp_lock, build_unsigned_pdf, build_unsigned_pdf_multipage,
-    load_test_credential, skip_message, FixtureField, SIGNING_TIME_UNIX,
+    build_unsigned_pdf_pages, load_test_credential, skip_message, FixtureField, FixturePage,
+    SIGNING_TIME_UNIX,
 };
 use std::path::{Path, PathBuf};
 
@@ -341,6 +342,7 @@ fn a_visible_ink_signature_carries_a_form_xobject_appearance() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::Rect {
             page_index: 0,
             rect: [72.0, 72.0, 272.0, 132.0],
@@ -399,6 +401,7 @@ fn a_visible_text_signature_carries_the_signer_name() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::Rect {
             page_index: 0,
             rect: [72.0, 72.0, 272.0, 132.0],
@@ -479,6 +482,7 @@ fn a_visible_appearance_lands_on_the_page_it_names() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::Rect {
             page_index: 2,
             rect: [300.0, 60.0, 540.0, 150.0],
@@ -534,6 +538,143 @@ fn a_visible_appearance_lands_on_the_page_it_names() {
         .expect("write the oracle fixture");
 }
 
+/// §25.5 on a quarter-turned page: the box is the caller's, and the content
+/// inside it has to be turned back, or the signature reads sideways.
+///
+/// A viewer draws the page's user space and then rotates the sheet. Content
+/// dropped straight into the widget's box therefore arrives rotated with it.
+/// The appearance stream answers with a `/Matrix` and a `/BBox` measured in
+/// the box's *displayed* orientation — width and height exchanged for a
+/// quarter turn — so the transformed bounding box measures the rect exactly
+/// and the fit onto `/Rect` neither squashes nor stretches the mark.
+#[test]
+fn a_visible_appearance_counter_rotates_on_a_rotated_page() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("rotated.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(
+        &source,
+        build_unsigned_pdf_pages(&[FixturePage::rotated(90)], &[]),
+    )
+    .expect("write the source");
+
+    // 70 wide by 200 tall in user space, which is 200 by 70 as displayed.
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::Cw90,
+        placement: AppearancePlacement::Rect {
+            page_index: 0,
+            rect: [271.0, 296.0, 341.0, 496.0],
+        },
+        content: AppearanceContent::Ink {
+            strokes: vec![vec![(0.05, 0.5), (0.95, 0.5)]],
+            stroke_width: 6.0,
+        },
+    });
+
+    let report = sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing a rotated page succeeds");
+    assert_eq!(report.field_name, "Signature1");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/BBox [0 0 200 70]"),
+        "the BBox must be the box as displayed, 200x70, got: {text}"
+    );
+    assert!(
+        text.contains("/Matrix [0 1 -1 0 0 0]"),
+        "a /Rotate 90 page needs a +90° /Matrix so the mark stands upright, got: {text}"
+    );
+    // The stroke is normalized against the displayed box, so its x runs to
+    // 0.95 * 200 = 190, not to 0.95 * 70.
+    assert!(
+        text.contains("190 35 l"),
+        "the ink must be scaled against the displayed box, got: {text}"
+    );
+
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses[0].intact);
+    assert!(statuses[0].valid);
+    assert_eq!(statuses[0].coverage, SignatureCoverage::EntireFile);
+
+    std::fs::write(
+        oracle_fixture_path("apply-visible-rotated-page.pdf"),
+        &output,
+    )
+    .expect("write the oracle fixture");
+}
+
+/// The other two quarter turns, and the upright page that must stay exactly
+/// as it was: a rotation nobody asked for would change every existing file.
+#[test]
+fn the_appearance_matrix_matches_each_rotation() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let cases = [
+        (AppearanceRotation::None, 0, None, "[0 0 70 200]"),
+        (
+            AppearanceRotation::Cw180,
+            180,
+            Some("/Matrix [-1 0 0 -1 0 0]"),
+            "[0 0 70 200]",
+        ),
+        (
+            AppearanceRotation::Cw270,
+            270,
+            Some("/Matrix [0 -1 1 0 0 0]"),
+            "[0 0 200 70]",
+        ),
+    ];
+    for (rotation, degrees, matrix, bbox) in cases {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = directory.path().join("page.pdf");
+        let destination = directory.path().join("signed.pdf");
+        std::fs::write(
+            &source,
+            build_unsigned_pdf_pages(&[FixturePage::rotated(degrees)], &[]),
+        )
+        .expect("write the source");
+
+        let mut req = request(SignTarget::NewInvisibleField { name: None });
+        req.appearance = Some(SignAppearance {
+            page_rotation: rotation,
+            placement: AppearancePlacement::Rect {
+                page_index: 0,
+                rect: [271.0, 296.0, 341.0, 496.0],
+            },
+            content: AppearanceContent::Ink {
+                strokes: vec![vec![(0.05, 0.5), (0.95, 0.5)]],
+                stroke_width: 6.0,
+            },
+        });
+        sign_document_file(&source, &destination, &credential, &req).expect("signing succeeds");
+        let output = std::fs::read(&destination).expect("read the output");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains(&format!("/BBox {bbox}")),
+            "{rotation:?} wanted /BBox {bbox}, got: {text}"
+        );
+        match matrix {
+            Some(matrix) => assert!(
+                text.contains(matrix),
+                "{rotation:?} wanted {matrix}, got: {text}"
+            ),
+            None => assert!(
+                !text.contains("/Matrix"),
+                "an upright page must carry no /Matrix at all, got: {text}"
+            ),
+        }
+    }
+}
+
 /// A page index the document does not have is a typed refusal naming the real
 /// page count, not a silently wrong page.
 #[test]
@@ -549,6 +690,7 @@ fn an_appearance_on_a_page_the_document_lacks_is_refused() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::Rect {
             page_index: 7,
             rect: [10.0, 10.0, 110.0, 60.0],
@@ -588,6 +730,7 @@ fn a_field_rect_appearance_is_refused_for_a_new_field() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::FieldRect,
         content: AppearanceContent::Text {
             signer_name: "Ada Lovelace".to_string(),
@@ -634,6 +777,7 @@ fn a_field_rect_appearance_keeps_the_fields_own_box() {
 
     let mut req = request(SignTarget::ExistingField("Signature".to_string()));
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::FieldRect,
         content: AppearanceContent::InkAndText {
             strokes: vec![vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]],
@@ -733,6 +877,7 @@ fn a_field_rect_countersignature_keeps_the_first_signature_valid() {
 
     let mut req = request(SignTarget::ExistingField("Recipient".to_string()));
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::FieldRect,
         content: AppearanceContent::Ink {
             strokes: vec![vec![(0.1, 0.1), (0.9, 0.9)]],
@@ -796,6 +941,7 @@ fn a_degenerate_field_rect_is_refused_with_the_invisible_fallback_named() {
 
     let mut req = request(SignTarget::ExistingField("Sig1".to_string()));
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::FieldRect,
         content: AppearanceContent::Text {
             signer_name: "Ada Lovelace".to_string(),
@@ -842,6 +988,7 @@ fn an_explicit_rect_still_overwrites_an_existing_fields_box() {
 
     let mut req = request(SignTarget::ExistingField("Sig1".to_string()));
     req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
         placement: AppearancePlacement::Rect {
             page_index: 0,
             rect: [10.0, 20.0, 110.0, 70.0],

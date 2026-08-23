@@ -232,13 +232,19 @@ pub fn reader_default(ratio: AspectRatio) -> Layout {
         // These are icon runs just like the menu button. The ordinary panel
         // inset puts 24 points plus the split gutter between neighbouring
         // runs; the button inset packs the whole band around its icons.
-        b.button(WidgetKind::DocumentNav),
-        b.hug_button(WidgetKind::AnnotationTools),
+        //
+        // The menu and the navigation run take exactly what they draw, so the
+        // tools begin where the zoom controls end instead of across a gap.
+        // The tools then take everything that is left: they draw from their
+        // own left edge, so the band's spare width ends up to their right,
+        // where it reads as room rather than as a hole in the middle.
+        b.hug_button(WidgetKind::DocumentNav),
+        b.button(WidgetKind::AnnotationTools),
     ];
     let band = b.split(
         "Navigation and tools",
         Direction::Horizontal,
-        &[0.05, 0.475, 0.475],
+        &[0.05, 0.45, 0.50],
         band_children,
     );
 
@@ -376,7 +382,7 @@ mod tests {
         assert_eq!(root.sizes, vec![0.07, 0.93]);
         assert_eq!(
             root.children[0].as_split().unwrap().sizes,
-            vec![0.05, 0.475, 0.475]
+            vec![0.05, 0.45, 0.50]
         );
         assert_eq!(root.children[1].as_split().unwrap().sizes, vec![0.24, 0.76]);
         for cell in root.children[0].cells() {
@@ -413,10 +419,20 @@ mod tests {
         let navigation = &band.as_split().unwrap().children[1];
         let annotations = &band.as_split().unwrap().children[2];
         assert_eq!(frame(menu.id()).width, 40.0);
-        assert_eq!(frame(annotations.id()).width, 152.0);
-        assert!(
-            frame(navigation.id()).width > 560.0,
-            "navigation should receive the released toolbar space"
+        // The navigation run hugs the width it is actually drawn at, so the
+        // tools start there rather than at the far end of the band…
+        assert_eq!(frame(navigation.id()).width, 568.0);
+        assert_eq!(
+            frame(annotations.id()).x,
+            frame(navigation.id()).x + frame(navigation.id()).width + band.as_split().unwrap().gap,
+            "the tools should begin where the navigation run ends"
+        );
+        // …and everything the band has left over is theirs, which is space to
+        // the right of the tools rather than between them and the zoom.
+        assert_eq!(
+            frame(annotations.id()).x + frame(annotations.id()).width,
+            frame(band.id()).x + frame(band.id()).width,
+            "the tools should take the rest of the band"
         );
 
         let kinds: Vec<WidgetKind> = reader.widgets().iter().map(|w| w.kind()).collect();

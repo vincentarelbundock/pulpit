@@ -9419,8 +9419,10 @@ impl App {
                 profile_appearance.as_ref(),
                 &signer_cn,
                 &signing_time_label,
-                geometry.width as f64,
-                geometry.height as f64,
+                // The whole geometry, not just its displayed size: the crop
+                // origin and the rotation are what turn the box the reader
+                // chose into the /Rect a viewer honours.
+                geometry,
             )
         });
         let Some(source) = self.signing_source_path() else {

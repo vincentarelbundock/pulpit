@@ -155,12 +155,79 @@ pub struct FixtureField<'a> {
     pub rect: [f64; 4],
 }
 
+/// One page of a fixture: its boxes and its rotation.
+///
+/// The crop box and the rotation are the two things that make PDF *user*
+/// space differ from what a reader sees, which is exactly what a placement
+/// bug hides behind — so a fixture that can express them is what a placement
+/// test needs.
+#[derive(Debug, Clone, Copy)]
+pub struct FixturePage {
+    pub media_box: [f64; 4],
+    /// `None` writes no `/CropBox`, so the media box is the crop box.
+    pub crop_box: Option<[f64; 4]>,
+    /// `/Rotate`, in degrees clockwise: 0, 90, 180 or 270.
+    pub rotate: i32,
+}
+
+impl Default for FixturePage {
+    fn default() -> Self {
+        FixturePage {
+            media_box: [0.0, 0.0, 612.0, 792.0],
+            crop_box: None,
+            rotate: 0,
+        }
+    }
+}
+
+impl FixturePage {
+    pub fn rotated(degrees: i32) -> FixturePage {
+        FixturePage {
+            rotate: degrees,
+            ..FixturePage::default()
+        }
+    }
+
+    /// A page whose crop box is inset from the media box, so that the crop
+    /// origin is not the user-space origin.
+    pub fn cropped(crop_box: [f64; 4]) -> FixturePage {
+        FixturePage {
+            crop_box: Some(crop_box),
+            ..FixturePage::default()
+        }
+    }
+
+    fn dictionary(&self, annots: &[String]) -> String {
+        let [x0, y0, x1, y1] = self.media_box;
+        let mut out = format!("<</Type /Page /Parent 2 0 R /MediaBox [{x0} {y0} {x1} {y1}]");
+        if let Some([cx0, cy0, cx1, cy1]) = self.crop_box {
+            out.push_str(&format!(" /CropBox [{cx0} {cy0} {cx1} {cy1}]"));
+        }
+        if self.rotate != 0 {
+            out.push_str(&format!(" /Rotate {}", self.rotate));
+        }
+        if !annots.is_empty() {
+            out.push_str(&format!(" /Annots [{}]", annots.join(" ")));
+        }
+        out.push_str(">>");
+        out
+    }
+}
+
 /// An unsigned PDF of `page_count` pages carrying `fields` empty `/Sig`
 /// fields, each with its own `/Rect` on its own page.
 ///
 /// This is the shape the "click the sign-here box on the last page" flow
 /// needs: a field that already has a box, on a page that is not page 0.
 pub fn build_unsigned_pdf_multipage(page_count: usize, fields: &[FixtureField]) -> Vec<u8> {
+    let pages = vec![FixturePage::default(); page_count];
+    build_unsigned_pdf_pages(&pages, fields)
+}
+
+/// [`build_unsigned_pdf_multipage`] with each page described in full, so a
+/// test can give a page a crop box or a `/Rotate`.
+pub fn build_unsigned_pdf_pages(pages: &[FixturePage], fields: &[FixtureField]) -> Vec<u8> {
+    let page_count = pages.len();
     assert!(page_count >= 1, "a PDF has at least one page");
     // 1 catalog, 2 page tree, 3..=2+page_count pages, then the AcroForm and
     // the fields.
@@ -189,21 +256,14 @@ pub fn build_unsigned_pdf_multipage(page_count: usize, fields: &[FixtureField]) 
         kids.join(" "),
         page_count
     ));
-    for page in 0..page_count {
+    for (page, description) in pages.iter().enumerate() {
         let annots: Vec<String> = fields
             .iter()
             .enumerate()
             .filter(|(_, f)| f.page == page)
             .map(|(i, _)| field_refs[i].clone())
             .collect();
-        if annots.is_empty() {
-            objects.push("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>".to_string());
-        } else {
-            objects.push(format!(
-                "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}]>>",
-                annots.join(" ")
-            ));
-        }
+        objects.push(description.dictionary(&annots));
     }
     // The AcroForm object is emitted even with no fields so that object
     // numbers do not shift between the two shapes.

@@ -344,10 +344,13 @@ impl Node {
                 if extent != CellExtent::Hug {
                     return None;
                 }
-                let (width, height) = cell.widget.as_ref()?.minimum_size();
+                let widget = cell.widget.as_ref()?;
                 let content = match direction {
-                    Direction::Horizontal => width,
-                    Direction::Vertical => height,
+                    // A hugging cell gives a widget the width its full run
+                    // wants, which for a responsive band is more than the
+                    // compact minimum it can fall back to.
+                    Direction::Horizontal => widget.hug_width(),
+                    Direction::Vertical => widget.minimum_size().1,
                 };
                 Some(content + cell.padding * 2.0)
             }
