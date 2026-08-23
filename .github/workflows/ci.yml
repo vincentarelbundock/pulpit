@@ -90,6 +90,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p pulpit-render -- --nocapture
 
+  # Independent signing oracle. The Rust tests create real signed revisions;
+  # pyHanko then reads those files back without sharing any signing or
+  # verification code with Pulpit.
+  signing-oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libdbus-1-dev pkg-config python3-venv
+      - name: Install the pinned independent oracle
+        run: make sign-oracle-setup
+      - name: Generate disposable signing credentials
+        run: .venv-sign-oracle/bin/python tools/sign-oracle/gen-credentials.py
+      - name: Produce signed PDF fixtures
+        run: cargo test -p pulpit-render --test sign_apply --test sign_spike
+      - name: Verify every fixture independently
+        run: make sign-oracle
+
   # The Nix package: the wrapped binary is what makes pulpit start on a
   # distribution with no global library path.
   nix:

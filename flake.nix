@@ -59,20 +59,20 @@
         # rather than silently wrapping the binary with a foreign libpdfium.
         pdfiumArtifacts = {
           "x86_64-linux" = {
-            artifact = "pdfium-linux-x64.tgz";
-            hash = "sha256-w69YD53w/vlUW0QRW8XqRA8oaVa18jHfafs3O478T2k=";
+            artifact = "pdfium-v8-linux-x64.tgz";
+            hash = "sha256-sQmNBp6bwFuk8sgxVhM8gubu6xyXnW4xTbYKJYIUWZQ=";
           };
           "aarch64-linux" = {
-            artifact = "pdfium-linux-arm64.tgz";
-            hash = "sha256-oZhio24rLaPD+0Pw3u9F+7wzH1jNR5Q3gq5L2dtMZtk=";
+            artifact = "pdfium-v8-linux-arm64.tgz";
+            hash = "sha256-VVLVSoZHuqXv0I80lTqmCVRptfUpayz25PPcm3r7UKE=";
           };
           "aarch64-darwin" = {
-            artifact = "pdfium-mac-arm64.tgz";
-            hash = "sha256-4hTuM/IrIgTap2WlRa7h5CXYhEjmFU2slcagYga3Q38=";
+            artifact = "pdfium-v8-mac-arm64.tgz";
+            hash = "sha256-EA7clte/f5fTge2tZN8zZ4NTO79OAJXZOeQbglwkp34=";
           };
           "x86_64-darwin" = {
-            artifact = "pdfium-mac-x64.tgz";
-            hash = "sha256-S5JNlI0uxIY0NdN1qUVBtAA8WfitwozF5CNrCrgaNV0=";
+            artifact = "pdfium-v8-mac-x64.tgz";
+            hash = "sha256-qGoaKEXlX+egfCAOUff+h0gKeLYhm0voVkm3RnnUIgk=";
           };
         };
 

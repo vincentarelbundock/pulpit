@@ -182,7 +182,7 @@ impl RevisionMap {
             }
 
             // Parse xref entries to get object numbers
-            let obj_numbers = parse_xref_entries(bytes, current_startxref)?;
+            let obj_numbers = objects::xref_section_object_numbers(bytes, current_startxref)?;
 
             let rev_info = RevisionInfo {
                 startxref: current_startxref,
@@ -399,189 +399,6 @@ fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
     }
 
     Ok(None)
-}
-
-/// Parse xref entries and return the set of object numbers defined in that revision.
-/// Handles both classic xref tables (20-byte entries) and xref streams (/W packed).
-fn parse_xref_entries(bytes: &[u8], startxref: u64) -> Result<std::collections::HashSet<u32>> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(VerifyError::TruncatedFile(startxref));
-    }
-
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Check if classic xref table or stream
-    let first_token = tokenizer
-        .next_token()
-        .map_err(|_| VerifyError::XrefParseError("failed to read first token".to_string()))?;
-
-    if first_token.as_deref() == Some(b"xref") {
-        // Classic xref table: parse subsection headers and entries
-        // Pass the slice length so we can bound count by remaining file capacity
-        parse_classic_xref_entries(&mut tokenizer, xref_slice.len())
-    } else {
-        // Xref stream: parse /Index and /W, then decode entries
-        parse_xref_stream_entries(xref_slice)
-    }
-}
-
-/// Parse classic xref table entries: subsection headers (first count) + 20-byte entries.
-/// `slice_len`: total length of the xref slice, used to bound count by remaining capacity.
-fn parse_classic_xref_entries(
-    tokenizer: &mut PdfTokenizer,
-    slice_len: usize,
-) -> Result<std::collections::HashSet<u32>> {
-    let mut obj_numbers = std::collections::HashSet::new();
-
-    // Calculate the maximum count based on file size: a classic xref entry is 20 bytes.
-    // This prevents malicious huge-count values from causing exhaustion.
-    // We use the slice length as a conservative bound; the real limit depends on
-    // tokenizer position, but we can't access that, so use slice length.
-    let max_reasonable_count = (slice_len / 20).max(1024) as u32;
-
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"trailer" {
-            break;
-        }
-
-        // Try to parse as subsection header: "first count"
-        if let Ok(first_str) = std::str::from_utf8(&token) {
-            if let Ok(first) = first_str.parse::<u32>() {
-                if let Ok(Some(count_token)) = tokenizer.next_token() {
-                    if let Ok(count_str) = std::str::from_utf8(&count_token) {
-                        if let Ok(count) = count_str.parse::<u32>() {
-                            // Bound count by what the remaining file can contain.
-                            // If count exceeds reasonable bounds for the file size,
-                            // skip this subsection rather than erroring the entire parse.
-                            if count > max_reasonable_count {
-                                continue;
-                            }
-
-                            // Check for overflow: first + count might wrap around
-                            let end = match first.checked_add(count) {
-                                Some(e) => e,
-                                None => {
-                                    // Overflow detected; skip this subsection
-                                    continue;
-                                }
-                            };
-
-                            // Skip the next `count` tokens (20-byte entries)
-                            for obj_num in first..end {
-                                obj_numbers.insert(obj_num);
-                                // Skip the 20-byte entry (offset, gen, type)
-                                let _ = tokenizer.next_token();
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(obj_numbers)
-}
-
-/// Parse xref stream entries by decoding /W-packed rows over /Index pairs.
-fn parse_xref_stream_entries(xref_slice: &[u8]) -> Result<std::collections::HashSet<u32>> {
-    let mut obj_numbers = std::collections::HashSet::new();
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    let mut index_pairs: Vec<(u32, u32)> = Vec::new(); // (first, count) pairs
-    let mut _w_widths: Vec<usize> = vec![1, 4, 2]; // Default [1 4 2]
-
-    // Parse the xref stream dictionary
-    let mut key: Option<String> = None;
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"stream" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "Index" => {
-                        if token == b"[" {
-                            while let Ok(Some(idx_token)) = tokenizer.next_token() {
-                                if idx_token == b"]" {
-                                    break;
-                                }
-                                if let Ok(num_str) = std::str::from_utf8(&idx_token) {
-                                    if let Ok(num) = num_str.parse::<u32>() {
-                                        if let Ok(Some(count_token)) = tokenizer.next_token() {
-                                            if let Ok(count_str) = std::str::from_utf8(&count_token)
-                                            {
-                                                if let Ok(count) = count_str.parse::<u32>() {
-                                                    index_pairs.push((num, count));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "W" if token == b"[" => {
-                        _w_widths.clear();
-                        while let Ok(Some(w_token)) = tokenizer.next_token() {
-                            if w_token == b"]" {
-                                break;
-                            }
-                            if let Ok(w_str) = std::str::from_utf8(&w_token) {
-                                if let Ok(w) = w_str.parse::<usize>() {
-                                    _w_widths.push(w);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Read the stream data
-    if let Ok(Some(stream_token)) = tokenizer.next_token() {
-        if let Ok(_stream_str) = std::str::from_utf8(&stream_token) {
-            // The tokenizer should have given us the stream content
-            // For now, we just extract the index pairs; full stream decoding is deferred
-        }
-    }
-
-    // If no /Index found, default to [0 size]
-    if index_pairs.is_empty() {
-        index_pairs.push((0, 0)); // Placeholder; real size would be from /Size
-    }
-
-    // Process each (first, count) pair
-    // The same bound the classic table gets, and for the same reason: `count`
-    // comes from /Index in the file and is not checked against how many rows
-    // actually follow, so an /Index of [0 4000000000] otherwise spins for
-    // billions of iterations while the HashSet grows without limit. A stream
-    // row is sum(/W) bytes, so the stream cannot describe more entries than it
-    // has bytes to encode them in. Bounding the classic path alone left this
-    // one — reached for every PDF 1.5+ cross-reference stream — wide open.
-    let row_bytes = _w_widths.iter().sum::<usize>().max(1);
-    let max_reasonable_count = (xref_slice.len() / row_bytes).max(1024) as u32;
-
-    for (first, count) in index_pairs {
-        if count > max_reasonable_count {
-            continue;
-        }
-        for i in 0..count {
-            // Check for overflow when adding i to first
-            if let Some(obj_num) = first.checked_add(i) {
-                obj_numbers.insert(obj_num);
-            }
-        }
-    }
-
-    Ok(obj_numbers)
 }
 
 /// Lexical extent of a /Contents string: [c_start, c_end).
@@ -1830,17 +1647,20 @@ mod tests {
 
         let pdf_v1 = build_signed_fixture();
         let v1_size = pdf_v1.len() as u64;
+        let v1_xref = find_startxref(&pdf_v1).expect("the signed fixture has an xref");
 
-        // Simulate appending a second revision (simplified: just add dummy content)
+        // Append a valid second revision containing a dummy object.
         let mut pdf_v2 = pdf_v1.clone();
-        pdf_v2.extend_from_slice(b"\n2 0 obj\n<</Type /Dummy>>\nendobj\n");
+        pdf_v2.push(b'\n');
+        let obj2_offset = pdf_v2.len();
+        pdf_v2.extend_from_slice(b"2 0 obj\n<</Type /Dummy>>\nendobj\n");
+        let v2_xref_offset = pdf_v2.len();
         pdf_v2.extend_from_slice(b"xref\n");
-        pdf_v2.extend_from_slice(b"0 1\n0000000000 65535 f \ntrailer\n");
+        pdf_v2.extend_from_slice(format!("2 1\n{obj2_offset:010} 00000 n \ntrailer\n").as_bytes());
         pdf_v2.extend_from_slice(
-            format!("<<\n/Size 8\n/Root 1 0 R\n/Prev {}\n>>\n", v1_size).as_bytes(),
+            format!("<<\n/Size 8\n/Root 1 0 R\n/Prev {v1_xref}\n>>\n").as_bytes(),
         );
         pdf_v2.extend_from_slice(b"startxref\n");
-        let v2_xref_offset = v1_size as usize + 20; // Rough estimate
         pdf_v2.extend_from_slice(format!("{}\n", v2_xref_offset).as_bytes());
         pdf_v2.extend_from_slice(b"%%EOF");
 
@@ -2174,6 +1994,22 @@ mod tests {
         buf.extend_from_slice(b"\nendstream\nendobj\n");
         buf.extend_from_slice(format!("startxref\n{obj8}\n%%EOF").as_bytes());
         buf
+    }
+
+    #[test]
+    fn revision_map_decodes_xref_stream_rows() {
+        let pdf = build_objstm_pdf(true);
+        let map = RevisionMap::build(&pdf).expect("xref stream should build a revision map");
+        let revision = map
+            .all_revisions()
+            .into_iter()
+            .next()
+            .expect("the document has one revision");
+
+        assert!(revision.obj_numbers.contains(&6));
+        assert!(revision.obj_numbers.contains(&7));
+        assert!(revision.obj_numbers.contains(&8));
+        assert!(!revision.obj_numbers.contains(&0));
     }
 
     #[test]

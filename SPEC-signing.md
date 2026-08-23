@@ -72,27 +72,22 @@ The full prose specification of the implemented mechanics is in the git history
 
 **Testing (§34)**
 - Unit and integration tests across the above.
-- pyHanko oracle harness: `make sign-oracle-setup`, `make sign-oracle`, with
-  `pyhanko-cli` pinned in `tools/sign-oracle/requirements.txt`.
+- pyHanko oracle harness: `make sign-oracle-setup`, `make sign-oracle`, wired
+  into CI after the Rust integration tests generate signed fixtures. The
+  pyHanko implementation is pinned to source commit
+  `0945f9bc64ef6ef386500943ee2b5941b5f142cd`, and `pyhanko-cli` is pinned in
+  `tools/sign-oracle/requirements.txt`.
 - Fuzz targets for the revision map, CMS, discovery and full verification, with
-  local seed inputs.
+  committed seed inputs outside cargo-fuzz's generated corpus.
 
 ---
 
 ## Still to do
 
 **Milestone S1 remainder**
-- Wire `make sign-oracle` into `.github/workflows/ci.yml`. Acceptance criterion
-  19 ("pyHanko's CLI verifies the signature independently, **in CI**") is not met
-  while the oracle only runs locally.
-- Pin the pyHanko *source commit*, not just the `pyhanko-cli` version, so the
-  `pyhanko: path:line` citations stay resolvable.
 - §34.3 interoperability matrix, and acceptance criterion 20 (Acrobat Reader
   reports the signature and names the signer) — neither is evidenced in the
   repository.
-- Commit the fuzz seed corpus: `crates/pulpit-render/fuzz/.gitignore` excludes
-  `corpus/`, which cargo-fuzz owns, so seeds need a `fuzz/seeds/` directory
-  outside the ignore.
 
 **Milestone S2 — B-T (timestamping)**
 Not started; no TSA code exists.
@@ -105,12 +100,9 @@ Not started; no TSA code exists.
 - CI gains a local TSA (certomancer or pyHanko test tooling).
 
 **Known gaps in shipped code**
-- `parse_xref_stream_entries` never decodes the stream: its count is bounded,
-  but a stream without `/Index` yields an empty object set, so
-  `last_changed_revision` returns `None` for most PDF 1.5+ files and coverage
-  silently degrades.
-- No minimum RSA modulus; SHA-1 is reported as a finding, not refused.
-- RSASSA-PSS signatures are refused outright on the verify side.
+- SHA-1 is reported as a finding, not refused. RSA signing requires at least a
+  2048-bit modulus; verification still checks weaker legacy signatures but
+  reports their key strength as a finding.
 
 ---
 

@@ -249,6 +249,13 @@ mod tests {
     }
 
     #[test]
+    fn signing_refuses_rsa_below_2048_bits() {
+        let key_info = credential::PublicKeyInfo::Rsa { bits: 1024 };
+        let reason = mechanism::select_mechanism(&key_info, None).unwrap_err();
+        assert!(reason.to_string().contains("at least 2048 bits"));
+    }
+
+    #[test]
     fn test_mechanism_rsa_3072_sha384() {
         let key_info = credential::PublicKeyInfo::Rsa { bits: 3072 };
         let mech = mechanism::select_mechanism(&key_info, None).unwrap();

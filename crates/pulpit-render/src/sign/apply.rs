@@ -1253,11 +1253,7 @@ fn parse_value(
             if key.as_slice() == b">>" {
                 return Ok((PdfObject::Dictionary(entries), i + 1));
             }
-            let name = std::str::from_utf8(key)
-                .ok()
-                .and_then(|s| s.strip_prefix('/'))
-                .ok_or_else(malformed)?
-                .to_string();
+            let name = decode_pdf_name(key).ok_or_else(malformed)?;
             let (value, next) = parse_value(tokens, i + 1, depth + 1)?;
             entries.push((name, value));
             i = next;
@@ -1321,12 +1317,15 @@ fn parse_value(
         return Ok((PdfObject::String(unescape_bytes(&string_bytes)), index + 1));
     }
 
-    // For hex strings and other tokens, convert to UTF-8 string as before
-    let text = String::from_utf8_lossy(token).to_string();
-
-    if let Some(name) = text.strip_prefix('/') {
-        return Ok((PdfObject::Name(name.to_string()), index + 1));
+    if token.starts_with(b"/") {
+        let name = decode_pdf_name(token).ok_or_else(malformed)?;
+        return Ok((PdfObject::Name(name), index + 1));
     }
+    // Names and strings have already taken their byte-preserving paths. The
+    // remaining token kinds are ASCII PDF syntax and numbers.
+    let text = std::str::from_utf8(token)
+        .map_err(|_| malformed())?
+        .to_string();
     if text.starts_with('<') {
         let inner: String = text
             .trim_start_matches('<')
@@ -1371,6 +1370,30 @@ fn parse_value(
         return Ok((PdfObject::Real(real), index + 1));
     }
     Err(malformed())
+}
+
+/// Decode one PDF name token, including `#xx` byte escapes.
+///
+/// The writer escapes these bytes again. Decoding here prevents an existing
+/// `/A#20B` from becoming `/A#2320B` when a containing dictionary is signed
+/// and re-emitted. The current object model represents names as UTF-8, so an
+/// arbitrary-byte name is refused instead of silently replaced.
+fn decode_pdf_name(token: &[u8]) -> Option<String> {
+    let bytes = token.strip_prefix(b"/")?;
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'#' {
+            let pair = bytes.get(index + 1..index + 3)?;
+            let hex = std::str::from_utf8(pair).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 #[allow(dead_code)]
@@ -1609,6 +1632,32 @@ mod tests {
             Some(PdfObject::Integer(3))
         ));
         assert!(matches!(entry(&entries, "Rect"), Some(PdfObject::Array(a)) if a.len() == 4));
+    }
+
+    #[test]
+    fn escaped_pdf_names_are_decoded_once_and_reemitted_canonically() {
+        let tokens = vec![
+            b"<<".to_vec(),
+            b"/Key#20With#23Escapes".to_vec(),
+            b"/Value#2FPart".to_vec(),
+            b">>".to_vec(),
+        ];
+        let (object, _) = parse_value(&tokens, 0, 0).expect("dictionary parses");
+        let PdfObject::Dictionary(entries) = &object else {
+            panic!("expected a dictionary");
+        };
+        assert_eq!(entries[0].0, "Key With#Escapes");
+        assert!(matches!(
+            &entries[0].1,
+            PdfObject::Name(name) if name == "Value/Part"
+        ));
+
+        let mut emitted = Vec::new();
+        object.serialize(&mut emitted).expect("dictionary emits");
+        let emitted = String::from_utf8(emitted).expect("PDF syntax is ASCII");
+        assert!(emitted.contains("/Key#20With#23Escapes"), "{emitted}");
+        assert!(emitted.contains("/Value#2FPart"), "{emitted}");
+        assert!(!emitted.contains("#2320"), "{emitted}");
     }
 
     #[test]

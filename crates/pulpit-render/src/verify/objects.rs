@@ -680,6 +680,23 @@ fn parse_xref_section(bytes: &[u8], offset: u64) -> Result<XrefSection> {
     }
 }
 
+/// Return the object numbers defined by exactly one cross-reference section.
+///
+/// Revision accounting needs the membership of each section independently,
+/// rather than the merged newest-wins index built by [`XrefIndex`]. Keeping
+/// that accounting on this parser also means xref streams are decoded with
+/// the same filter support and resource bounds as ordinary object resolution.
+pub(super) fn xref_section_object_numbers(
+    bytes: &[u8],
+    offset: u64,
+) -> Result<std::collections::HashSet<u32>> {
+    Ok(parse_xref_section(bytes, offset)?
+        .entries
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect())
+}
+
 fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
     let mut entries = Vec::new();
     loop {

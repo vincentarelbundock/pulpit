@@ -4,7 +4,8 @@
 # Usage: ./verify-fixtures.sh [FIXTURES_DIR]
 #
 # Exits with status 0 if all signatures validate, nonzero if any validation fails.
-# Skips gracefully if pyHanko is unavailable.
+# Skips gracefully for optional local runs if pyHanko is unavailable. CI
+# treats a missing oracle or fixture as a failed acceptance test.
 
 set -e
 
@@ -15,12 +16,20 @@ SKIPPED=0
 
 # Check if pyHanko is available
 if ! command -v pyhanko &> /dev/null; then
+    if [ "${CI:-}" = "true" ]; then
+        echo "error: pyHanko CLI not found in CI"
+        exit 1
+    fi
     echo "skipped: pyHanko CLI not found (install with: pip install -r requirements.txt)"
     exit 0
 fi
 
 # Check if the fixtures directory exists
 if [ ! -d "$FIXTURES_DIR" ]; then
+    if [ "${CI:-}" = "true" ]; then
+        echo "error: fixtures directory '$FIXTURES_DIR' does not exist in CI"
+        exit 1
+    fi
     echo "skipped: fixtures directory '$FIXTURES_DIR' does not exist"
     exit 0
 fi
@@ -29,6 +38,10 @@ fi
 pdf_files=$(find "$FIXTURES_DIR" -type f -name "*.pdf" 2>/dev/null || true)
 
 if [ -z "$pdf_files" ]; then
+    if [ "${CI:-}" = "true" ]; then
+        echo "error: no *.pdf files found in '$FIXTURES_DIR' in CI"
+        exit 1
+    fi
     echo "skipped: no *.pdf files found in '$FIXTURES_DIR'"
     exit 0
 fi

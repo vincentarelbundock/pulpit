@@ -1396,8 +1396,19 @@ dependency*:
 - Review upstream changes (PDFium version, build flags, third-party notices)
   when bumping.
 
-Currently pinned: `chromium/7999`, `pdfium-linux-x64.tgz`,
-`c3af580f9df0fef9545b44115bc5ea440f286956b5f231df69fb373b8efc4f69`.
+Currently pinned: `chromium/7999`. Every packaged target uses the `pdfium-v8-*`
+flavour so AcroForm formatting, validation and calculation scripts behave the
+same in Nix and in the direct-download bundles. For Linux x86-64 the artifact
+is `pdfium-v8-linux-x64.tgz`, SHA-256
+`b1098d069e9bc05ba4f2c83156133c82e6eeeb1c979d6e314db60a2582145994`.
+The per-target names and hashes live together in `scripts/fetch-pdfium.sh` and
+`flake.nix` and MUST move together.
+
+The V8/XFA upstream flavour contains both engines, but pulpit currently sets
+`xfa_disabled` and does not call `FPDF_LoadXFA`: V8-backed AcroForm JavaScript
+is shipped; XFA field loading remains a separate compatibility decision. This
+keeps the document-worker protocol and the security boundary honest instead
+of silently treating a bundled engine as an implemented document format.
 
 If the service disappears, PDFium can be built from source with `depot_tools`
 and the same GN args the upstream project publishes (`args.gn` ships inside

@@ -6,7 +6,8 @@ the reference implementation of PDF Advanced Electronic Signatures (PAdES).
 
 ## Contents
 
-- `requirements.txt` — pinned Python dependencies (pyHanko, certomancer)
+- `requirements.txt` — pinned Python dependencies; pyHanko itself is pinned
+  to an exact source commit so specification citations remain reproducible
 - `gen-credentials.py` — generates test PKCS#12 credentials
 - `verify-fixtures.sh` — validates signed PDFs with pyHanko CLI
 - `credentials/` — generated test certificates (created by setup)
@@ -55,6 +56,7 @@ Run pyHanko's signature validator against all PDFs in a directory:
 The script:
 - Skips gracefully if pyHanko is unavailable (exit 0)
 - Skips gracefully if the directory does not exist (exit 0)
+- Fails instead of skipping either condition when `CI=true`
 - Exits nonzero if any signature validation fails
 - Runs in CI as part of signing feature integration tests
 

@@ -141,10 +141,10 @@ sign-oracle:  ## Validate all signed PDF fixtures with pyHanko CLI
 fuzz-sign:  ## Run all fuzzing targets for 60 seconds each (development fuzzing)
 	@echo "Running fuzzing targets for PDF signature verification..."
 	cd crates/pulpit-render && \
-	cargo fuzz run fuzz_revision_map -- -max_total_time=60 && \
-	cargo fuzz run fuzz_discover -- -max_total_time=60 && \
-	cargo fuzz run fuzz_verify_full -- -max_total_time=60 && \
-	cargo fuzz run fuzz_cms -- -max_total_time=60
+	cargo fuzz run fuzz_revision_map fuzz/seeds/fuzz_revision_map -- -max_total_time=60 && \
+	cargo fuzz run fuzz_discover fuzz/seeds/fuzz_discover -- -max_total_time=60 && \
+	cargo fuzz run fuzz_verify_full fuzz/seeds/fuzz_verify_full -- -max_total_time=60 && \
+	cargo fuzz run fuzz_cms fuzz/seeds/fuzz_cms -- -max_total_time=60
 	@echo "Fuzzing complete. For longer runs, see crates/pulpit-render/fuzz/README.md"
 
 # ==============================================================================

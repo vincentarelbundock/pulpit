@@ -3,7 +3,9 @@
 
 # pyHanko is the reference implementation of PDF Advanced Electronic Signatures (PAdES)
 # and provides the signature validation oracle used to verify pulpit's signing output
-pyHanko==0.36.2
+# Keep the source commit exact: SPEC-signing cites pyHanko source locations,
+# so a PyPI version alone is not enough to keep those citations resolvable.
+pyHanko @ git+https://github.com/MatthiasValvekens/pyHanko.git@0945f9bc64ef6ef386500943ee2b5941b5f142cd
 
 # pyHanko CLI (distributed separately since 0.26+)
 # Provides the `pyhanko` command-line tool for signature validation

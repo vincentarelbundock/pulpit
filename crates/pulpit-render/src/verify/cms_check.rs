@@ -48,6 +48,7 @@ const OID_SHA384: &str = "2.16.840.1.101.3.4.2.2";
 const OID_SHA512: &str = "2.16.840.1.101.3.4.2.3";
 
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
+const OID_MGF1: &str = "1.2.840.113549.1.1.8";
 const OID_RSASSA_PSS: &str = "1.2.840.113549.1.1.10";
 const OID_SHA1_WITH_RSA: &str = "1.2.840.113549.1.1.5";
 const OID_SHA256_WITH_RSA: &str = "1.2.840.113549.1.1.11";
@@ -108,6 +109,8 @@ pub enum PadesProfile {
 pub enum AlgorithmFinding {
     /// A digest algorithm that is no longer collision resistant was declared.
     WeakDigest { algorithm: String },
+    /// An RSA key below the package's 2048-bit signing floor was used.
+    WeakRsaKey { bits: usize },
 }
 
 /// The full per-signature status of §28.5.
@@ -592,8 +595,44 @@ fn single_value(attr: &Attribute) -> Option<&der::asn1::Any> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SigPrimitive {
     RsaPkcs1v15,
+    RsaPss { salt_len: u8 },
     Ecdsa,
     Ed25519,
+}
+
+fn rsa_pss_parameters(ai: &AlgorithmIdentifierOwned) -> std::result::Result<(Digest, u8), String> {
+    use rsa::pkcs1::RsaPssParams;
+
+    let encoded = ai
+        .parameters
+        .as_ref()
+        .ok_or_else(|| "RSASSA-PSS parameters are required".to_string())?
+        .to_der()
+        .map_err(|e| format!("RSASSA-PSS parameters could not be encoded: {e}"))?;
+    let params = RsaPssParams::from_der(&encoded)
+        .map_err(|e| format!("malformed RSASSA-PSS parameters: {e}"))?;
+    let digest = Digest::from_oid(&params.hash.oid)
+        .ok_or_else(|| format!("unsupported RSASSA-PSS digest {}", params.hash.oid))?;
+    if params.mask_gen.oid.to_string() != OID_MGF1 {
+        return Err(format!(
+            "unsupported RSASSA-PSS mask generation algorithm {}",
+            params.mask_gen.oid
+        ));
+    }
+    let mgf_digest = params
+        .mask_gen
+        .parameters
+        .as_ref()
+        .and_then(|algorithm| Digest::from_oid(&algorithm.oid))
+        .ok_or_else(|| "unsupported RSASSA-PSS MGF1 digest".to_string())?;
+    if mgf_digest != digest {
+        return Err(format!(
+            "RSASSA-PSS uses {} but MGF1 uses {}",
+            digest.name(),
+            mgf_digest.name()
+        ));
+    }
+    Ok((digest, params.salt_len))
 }
 
 /// Decompose `SignerInfo.signatureAlgorithm` into its primitive and, where the
@@ -614,7 +653,8 @@ fn classify_signature_algorithm(
         OID_SHA384_WITH_RSA => Ok((SigPrimitive::RsaPkcs1v15, Some(Digest::Sha384))),
         OID_SHA512_WITH_RSA => Ok((SigPrimitive::RsaPkcs1v15, Some(Digest::Sha512))),
         OID_RSASSA_PSS => {
-            Err("signature algorithm is RSASSA-PSS, which pulpit cannot verify".to_string())
+            let (digest, salt_len) = rsa_pss_parameters(ai)?;
+            Ok((SigPrimitive::RsaPss { salt_len }, Some(digest)))
         }
         OID_ECDSA_WITH_SHA1 => Ok((SigPrimitive::Ecdsa, Some(Digest::Sha1))),
         OID_ECDSA_WITH_SHA256 => Ok((SigPrimitive::Ecdsa, Some(Digest::Sha256))),
@@ -662,6 +702,14 @@ fn resolve_primitive(
         }
     }
     match certificate_primitive(cert) {
+        Some(SigPrimitive::RsaPkcs1v15)
+            if matches!(
+                primitive,
+                SigPrimitive::RsaPkcs1v15 | SigPrimitive::RsaPss { .. }
+            ) =>
+        {
+            Ok(primitive)
+        }
         Some(cert_primitive) if cert_primitive == primitive => Ok(primitive),
         Some(_) => Err(format!(
             "signature algorithm {} does not match the signer certificate's key type {}",
@@ -684,6 +732,7 @@ fn verify_signature(
     let spki = &cert.tbs_certificate.subject_public_key_info;
     match primitive {
         SigPrimitive::RsaPkcs1v15 => verify_rsa(spki, tbs, signature, digest),
+        SigPrimitive::RsaPss { salt_len } => verify_rsa_pss(spki, tbs, signature, digest, salt_len),
         SigPrimitive::Ecdsa => {
             let curve = match spki.algorithm.parameters.as_ref() {
                 Some(p) => match p.decode_as::<ObjectIdentifier>() {
@@ -770,6 +819,46 @@ fn verify_rsa(
         Digest::Sha384 => VerifyingKey::<Sha384>::new(key).verify(tbs, &sig).is_ok(),
         Digest::Sha512 => VerifyingKey::<Sha512>::new(key).verify(tbs, &sig).is_ok(),
     }
+}
+
+fn verify_rsa_pss(
+    spki: &spki::SubjectPublicKeyInfoOwned,
+    tbs: &[u8],
+    signature: &[u8],
+    digest: Digest,
+    salt_len: u8,
+) -> bool {
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::{Pss, RsaPublicKey};
+
+    let spki_der = match spki.to_der() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let key = match RsaPublicKey::from_public_key_der(&spki_der) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let hashed = digest.hash(&[tbs]);
+    let padding = match digest {
+        Digest::Sha1 => Pss::new_with_salt::<sha1::Sha1>(salt_len.into()),
+        Digest::Sha256 => Pss::new_with_salt::<Sha256>(salt_len.into()),
+        Digest::Sha384 => Pss::new_with_salt::<Sha384>(salt_len.into()),
+        Digest::Sha512 => Pss::new_with_salt::<Sha512>(salt_len.into()),
+    };
+    key.verify(padding, &hashed, signature).is_ok()
+}
+
+fn rsa_modulus_bits(spki: &spki::SubjectPublicKeyInfoOwned) -> Option<usize> {
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::traits::PublicKeyParts;
+
+    if spki.algorithm.oid != oid(OID_RSA_ENCRYPTION) {
+        return None;
+    }
+    let encoded = spki.to_der().ok()?;
+    let key = rsa::RsaPublicKey::from_public_key_der(&encoded).ok()?;
+    Some(key.n().bits())
 }
 
 // --- The checks (§28.3) ---------------------------------------------------
@@ -882,6 +971,11 @@ pub fn check_signature(bytes: &[u8], report: &StructuralReport) -> SignatureVeri
         findings.push(AlgorithmFinding::WeakDigest {
             algorithm: digest_alg.name().to_string(),
         });
+    }
+    if let Some(bits) = rsa_modulus_bits(&signer_cert.tbs_certificate.subject_public_key_info) {
+        if bits < 2048 {
+            findings.push(AlgorithmFinding::WeakRsaKey { bits });
+        }
     }
 
     // Step 2: content-type must be id-data.
@@ -1231,6 +1325,74 @@ mod tests {
         assert_eq!(der, vec![0x30, 0x03, 0x01, 0x02, 0x03]);
     }
 
+    #[test]
+    fn rsa_pss_parameters_drive_pss_verification() {
+        use der::asn1::Any;
+        use rsa::pkcs1::RsaPssParams;
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::{Pss, RsaPrivateKey, RsaPublicKey};
+
+        let params = RsaPssParams::new::<Sha256>(32);
+        let algorithm = AlgorithmIdentifierOwned {
+            oid: oid(OID_RSASSA_PSS),
+            parameters: Some(Any::encode_from(&params).unwrap()),
+        };
+        assert_eq!(
+            classify_signature_algorithm(&algorithm).unwrap(),
+            (SigPrimitive::RsaPss { salt_len: 32 }, Some(Digest::Sha256))
+        );
+
+        let mut rng = rand::rngs::OsRng;
+        let private = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public = RsaPublicKey::from(&private);
+        let public_der = public.to_public_key_der().unwrap();
+        let spki = spki::SubjectPublicKeyInfoOwned::from_der(public_der.as_bytes()).unwrap();
+        let message = b"PSS parameters, not the certificate, choose the primitive";
+        let digest = Digest::Sha256.hash(&[message]);
+        let signature = private
+            .sign_with_rng(&mut rng, Pss::new_with_salt::<Sha256>(32), &digest)
+            .unwrap();
+
+        assert!(verify_rsa_pss(
+            &spki,
+            message,
+            &signature,
+            Digest::Sha256,
+            32
+        ));
+        assert!(!verify_rsa(&spki, message, &signature, Digest::Sha256));
+    }
+
+    #[test]
+    fn rsa_pss_requires_the_mgf_digest_to_match() {
+        use der::asn1::Any;
+        use rsa::pkcs1::RsaPssParams;
+
+        let mut params = RsaPssParams::new::<Sha256>(32);
+        params.mask_gen.parameters = RsaPssParams::new::<Sha384>(48).mask_gen.parameters;
+        let algorithm = AlgorithmIdentifierOwned {
+            oid: oid(OID_RSASSA_PSS),
+            parameters: Some(Any::encode_from(&params).unwrap()),
+        };
+        let reason = classify_signature_algorithm(&algorithm).unwrap_err();
+        assert!(
+            reason.contains("MGF1 uses SHA-384"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn rsa_modulus_strength_is_measured_from_the_public_key() {
+        use rsa::pkcs8::EncodePublicKey;
+
+        let mut rng = rand::rngs::OsRng;
+        let private = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let public = rsa::RsaPublicKey::from(&private);
+        let public_der = public.to_public_key_der().unwrap();
+        let spki = spki::SubjectPublicKeyInfoOwned::from_der(public_der.as_bytes()).unwrap();
+        assert_eq!(rsa_modulus_bits(&spki), Some(1024));
+    }
+
     // --- Algorithm-consistency and CMS-shape checks ----------------------
     //
     // These build a minimal signed "file" — a `/Contents` reservation between
@@ -1470,7 +1632,7 @@ mod tests {
         }
 
         #[test]
-        fn rsa_pss_is_refused_rather_than_verified_as_pkcs1_v15() {
+        fn rsa_pss_without_required_parameters_is_refused() {
             let reason = broken_reason(Knobs {
                 signature_alg: OID_RSASSA_PSS,
                 ..Knobs::default()

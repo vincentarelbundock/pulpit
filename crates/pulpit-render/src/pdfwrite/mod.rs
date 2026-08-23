@@ -308,25 +308,7 @@ impl PdfObject {
                 writer.write_all(b">").map_err(PdfWriteError::Io)?;
             }
             PdfObject::Name(n) => {
-                writer.write_all(b"/").map_err(PdfWriteError::Io)?;
-                for byte in n.as_bytes() {
-                    // PDF names require escaping for:
-                    // - Whitespace and delimiters: space, tab, newline, carriage return, <, >, [, ], {, }, /, (, )
-                    // - Special character #
-                    // - Non-ASCII bytes
-                    match *byte {
-                        b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'[' | b']' | b'{' | b'}'
-                        | b'/' | b'(' | b')' | b'#' => {
-                            write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
-                        }
-                        0..=0x20 | 0x7F..=0xFF => {
-                            write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
-                        }
-                        _ => {
-                            writer.write_all(&[*byte]).map_err(PdfWriteError::Io)?;
-                        }
-                    }
-                }
+                serialize_name(writer, n)?;
             }
             PdfObject::HexString(h) => {
                 writer.write_all(b"<").map_err(PdfWriteError::Io)?;
@@ -348,7 +330,7 @@ impl PdfObject {
             PdfObject::Dictionary(entries) => {
                 writer.write_all(b"<<").map_err(PdfWriteError::Io)?;
                 for (key, value) in entries {
-                    write!(writer, "/{}", key).map_err(PdfWriteError::Io)?;
+                    serialize_name(writer, key)?;
                     writer.write_all(b" ").map_err(PdfWriteError::Io)?;
                     value.serialize(writer)?;
                 }
@@ -361,6 +343,32 @@ impl PdfObject {
         }
         Ok(())
     }
+}
+
+fn serialize_name(writer: &mut dyn Write, name: &str) -> Result<()> {
+    writer.write_all(b"/").map_err(PdfWriteError::Io)?;
+    for byte in name.as_bytes() {
+        // PDF 2.0, 7.3.5: whitespace, delimiters, `#`, controls and bytes
+        // outside printable ASCII must use `#xx` escaping.
+        match *byte {
+            b'<'
+            | b'>'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'/'
+            | b'('
+            | b')'
+            | b'#'
+            | 0..=0x20
+            | 0x7F..=0xFF => {
+                write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
+            }
+            _ => writer.write_all(&[*byte]).map_err(PdfWriteError::Io)?,
+        }
+    }
+    Ok(())
 }
 
 /// Simple PDF tokenizer for reading existing PDF structures.

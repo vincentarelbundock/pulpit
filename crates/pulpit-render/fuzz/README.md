@@ -13,10 +13,13 @@ Four targets fuzz the critical paths:
 
 ## Running
 
-Each target has a seeded corpus in `corpus/<target>/`, populated with real signed PDF fixtures. Run a target:
+Each target has a small committed seed corpus in `fuzz/seeds/<target>/`.
+`fuzz/corpus/`
+is cargo-fuzz's generated working set and remains ignored. Pass the committed
+directory explicitly when starting a fresh run:
 
 ```bash
-cargo fuzz run <target> -- -max_total_time=60
+cargo fuzz run <target> fuzz/seeds/<target> -- -max_total_time=60
 ```
 
 Run all targets for 60 seconds each (development, lightweight fuzzing):

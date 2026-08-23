@@ -127,6 +127,11 @@ pub fn select_mechanism(
 ) -> Result<SigningMechanism, SigningError> {
     match pub_key_info {
         PublicKeyInfo::Rsa { bits } => {
+            if *bits < 2048 {
+                return Err(SigningError::UnsupportedKeyAlgorithm {
+                    algorithm: format!("RSA {bits} bits; at least 2048 bits are required"),
+                });
+            }
             let digest = requested_digest
                 .or_else(|| DigestAlgorithm::select_for_rsa_bits(*bits).ok())
                 .ok_or_else(|| SigningError::UnsupportedKeyAlgorithm {

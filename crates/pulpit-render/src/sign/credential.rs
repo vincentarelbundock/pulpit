@@ -327,11 +327,12 @@ fn analyze_private_key(pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), Sign
     let oid_str = pki.algorithm.oid.to_string();
 
     if oid_str == "1.2.840.113549.1.1.1" {
-        // Extract the key size; fallback to 2048 bits if parsing fails.
-        // This should rarely fail for a properly-formatted RSA key, but if it does,
-        // 2048 is a conservative guess that won't disclose more key material than
-        // what the signature already reveals.
-        let bits = extract_rsa_bits(pkey_der).unwrap_or(2048);
+        let bits = extract_rsa_bits(pkey_der).ok_or_else(|| {
+            SigningError::InvalidCertificate(
+                "RSA private key modulus could not be decoded; key strength cannot be checked"
+                    .to_string(),
+            )
+        })?;
         return Ok((KeyType::Rsa, PublicKeyInfo::Rsa { bits }));
     }
 
@@ -473,6 +474,19 @@ mod tests {
         match analyze_private_key(&der) {
             Err(SigningError::UnsupportedKeyAlgorithm { .. }) => {}
             other => panic!("expected unsupported-key error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_rsa_modulus_is_refused_instead_of_reported_as_2048_bits() {
+        // A syntactically valid PKCS#8 envelope declaring rsaEncryption, but
+        // whose private-key OCTET STRING is not a PKCS#1 RSA key.
+        let der = hex::decode("3015020100300d06092a864886f70d0101010500040100").expect("valid hex");
+        match analyze_private_key(&der) {
+            Err(SigningError::InvalidCertificate(reason)) => {
+                assert!(reason.contains("modulus"), "got {reason}");
+            }
+            other => panic!("expected undecodable-modulus error, got {other:?}"),
         }
     }
 
