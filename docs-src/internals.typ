@@ -607,10 +607,23 @@ pulpit leaves null — `FFI_DoURIAction`, `FFI_EmailTo`, `FFI_UploadTo`,
 callbacks are all implemented, because a null one is a crash rather than a
 refusal; each records a `HostRequest` and returns the answer a dismissed dialog
 gives, so the script finishes and the application — the layer with a user in
-front of it — decides what to honour. `FFI_GetLocalTime` returns a fixed value
-rather than the wall clock, for the same reason the Typst compiler is
-closed-world. The tests assert each null is still null, because they are a
-posture and not an omission.
+front of it — decides what to honour. The tests assert each null is still null,
+because they are a posture and not an omission.
+
+The clock is the one thing a script still reaches, and the boundary is narrower
+than it looks. `FFI_GetLocalTime` returns a fixed value rather than the wall
+clock, which closes the *host* clock — the one PDFium asks its embedder for, and
+the one a viewer would answer from the system time. It does not close
+`new Date()`: under the V8 build that is V8's own, on V8's own clock, so a
+calculation script that stamps the date it was filled on gets the real one.
+Measured, not assumed — `a_scripts_own_date_is_the_real_one_and_this_callback_does_not_change_that`
+asserts a plausible current year, so a build that ever did close V8's clock
+fails there and sends the reader back to this paragraph. Closing it would mean
+reaching into V8's time source, which is not reachable through a library loaded
+at run time. What the fixed value buys is that nothing pulpit *hands over* is a
+clock reading, which keeps the callback consistent with the rest of the engine —
+time is passed in, never read — and leaves one fewer path to close if V8's clock
+ever becomes controllable.
 
 Reporting an attempted submission cannot be done as it happens.
 `doc.submitForm` is refused through the null
