@@ -488,12 +488,20 @@ fn sheet<'a, Message: Clone + 'static>(
         // file, and nothing that says what the document *is* may cover what
         // somebody wrote on it.
         if !page.dead_fields.is_empty() {
+            // A tool armed to mark the page, the marquee, or a pan grab
+            // must keep the press even when it starts on a signature
+            // field's rect — the field only answers a click when nothing
+            // else is claiming the pointer (see the cursor precedence rule
+            // below, which this mirrors).
+            let tool_owns_pointer =
+                pointer.marqueeing || pointer.armed.is_some() || pointer.panning;
             layers = layers.push(super::preview::dead_field_layer(
                 page.dead_fields.clone(),
                 theme::ambient::muted(),
                 shown,
                 origin,
                 drawn,
+                (mode.interactive() && !tool_owns_pointer).then_some(on_event),
             ));
         }
         // Search hits go under the marks: they are a way of finding the page,

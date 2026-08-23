@@ -3171,12 +3171,25 @@ fn sign_dialog<'a>(
 
     match flow {
         SigningFlow::SavingFirst => {
-            let body = column![
+            let mut body = column![
                 text("Sign").size(type_scale::TITLE),
                 text("Saving your edits before signing…").size(type_scale::BODY),
             ]
             .spacing(gap::M);
-            panel(body, None)
+            if !app.document_signatures.is_empty() {
+                // This is a full rewrite, not an append (§28.4): it does
+                // not carry the document's existing signatures forward.
+                body = body.push(
+                    text(
+                        "This save rewrites the document; its existing signatures will not \
+                         carry over.",
+                    )
+                    .size(type_scale::CAPTION)
+                    .color(theme::ambient::muted()),
+                );
+            }
+            body = body.push(cancel());
+            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::ChooseProfile => {
             let mut profiles = Column::new().spacing(gap::S);
@@ -3246,11 +3259,28 @@ fn sign_dialog<'a>(
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::EnterPassphrase {
-            passphrase, error, ..
+            credential_path,
+            passphrase,
+            error,
         } => {
+            // Name what is being unlocked: a saved profile by name, since its
+            // credential path is an implementation detail the reader chose
+            // by naming the profile, not the file — otherwise the credential
+            // file itself, the same way Save As already shows a path.
+            let unlocking = app
+                .signing_profile
+                .as_deref()
+                .and_then(|id| app.settings.signatures.profile(id))
+                .map(|profile| format!("profile “{}”", profile.name))
+                .unwrap_or_else(|| {
+                    credential_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| credential_path.display().to_string())
+                });
             let mut body = column![
                 text("Sign").size(type_scale::TITLE),
-                text("Enter the credential's passphrase.").size(type_scale::BODY),
+                text(format!("Enter the passphrase for {unlocking}.")).size(type_scale::BODY),
                 text_input("Passphrase", passphrase)
                     .secure(true)
                     .on_input(|typed| {
@@ -3396,7 +3426,9 @@ fn sign_dialog<'a>(
                 for candidate in candidates {
                     let label = match candidate {
                         TargetChoice::NewField => "New field".to_string(),
-                        TargetChoice::ExistingField(name) => name.clone(),
+                        // Quoted so a raw PDF field name reads as data, not
+                        // as pulpit's own copy.
+                        TargetChoice::ExistingField(name) => format!("“{name}”"),
                     };
                     let selected = options.target.as_ref() == Some(candidate);
                     picker = picker.push(
@@ -3410,10 +3442,10 @@ fn sign_dialog<'a>(
                             .on_press(Message::Sign(SignMsg::TargetChosen(candidate.clone()))),
                     );
                 }
-                body = body.push(dialog_section(
-                    "This document has several empty signature fields — choose one",
-                    picker,
-                ));
+                // This picks which field to sign into, not where the mark
+                // sits on the page — the Appearance section below owns
+                // position and size.
+                body = body.push(dialog_section("Which signature field to sign into", picker));
             }
 
             // §25.5: Visible places a text appearance via position/size
@@ -3491,16 +3523,32 @@ fn sign_dialog<'a>(
             }
             body = body.push(dialog_section("Appearance", appearance_section));
 
-            body = body.push(
-                row![
-                    cancel(),
+            let mut actions = row![cancel()].spacing(gap::S);
+            if candidates.is_empty() {
+                // Only reachable for a document that already carries a
+                // signature and has no empty field left to countersign into
+                // (every other preflight outcome keeps at least "new field"
+                // on offer) — say so here, rather than let the reader fill
+                // in reason/location/contact and discover it only on
+                // Continue.
+                body = body.push(
+                    text(
+                        "No signature field is available to sign into: the document has no \
+                         empty signature field to countersign, and already carries one if it \
+                         is not offering a new field.",
+                    )
+                    .size(type_scale::BODY)
+                    .color(theme::ambient::alert()),
+                );
+            } else {
+                actions = actions.push(
                     button(text("Continue").size(type_scale::LABEL))
                         .padding(gap::S)
                         .style(theme::ambient::selected_button)
                         .on_press(Message::Sign(SignMsg::ContinueToConfirm)),
-                ]
-                .spacing(gap::S),
-            );
+                );
+            }
+            body = body.push(actions);
             panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
         }
         SigningFlow::Confirm { info, options, .. } => {
@@ -3516,17 +3564,31 @@ fn sign_dialog<'a>(
                     }
                 ))
                 .size(type_scale::BODY),
+                text({
+                    let visibility = if options.visible_requested {
+                        "visible"
+                    } else {
+                        "invisible"
+                    };
+                    match options.target.as_ref() {
+                        Some(crate::signing::TargetChoice::ExistingField(name)) => {
+                            format!("Signing into field “{name}”, {visibility}.")
+                        }
+                        Some(crate::signing::TargetChoice::NewField) => {
+                            format!("A new, {visibility} signature field will be created.")
+                        }
+                        // Unreachable: ContinueToConfirm diverts to Failed
+                        // rather than let Confirm build with no target.
+                        None => String::new(),
+                    }
+                })
+                .size(type_scale::BODY),
                 text(crate::signing::IDENTITY_DISCLOSURE)
                     .size(type_scale::CAPTION)
                     .color(theme::ambient::muted()),
             ]
             .spacing(gap::M);
-            if options
-                .target
-                .as_ref()
-                .map(crate::signing::TargetChoice::is_countersign)
-                .unwrap_or(false)
-            {
+            if options.countersigning {
                 body = body.push(
                     text(crate::signing::COUNTERSIGN_DISCLOSURE)
                         .size(type_scale::CAPTION)

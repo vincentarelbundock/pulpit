@@ -325,6 +325,9 @@ pub enum ReadCommand {
     SaveAs,
     /// Open the Sign dialog (SPEC-signing.md §31.1).
     Sign,
+    /// A signature dead-field on the page was clicked: open the Sign dialog
+    /// with this field pre-selected as the target (SPEC-signing.md §31.1).
+    SignField(String),
 }
 
 /// What the timer's menu can ask for.

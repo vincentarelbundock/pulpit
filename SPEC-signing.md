@@ -68,7 +68,10 @@ The full prose specification of the implemented mechanics is in the git history
   refuses to promote on any failure.
 - Signing flow, §31.2 identity disclosure, signature panel.
 - Append-only mode for signed documents, including countersigning into an
-  existing empty field (§31.3).
+  existing empty field (§31.3). An existing empty `/Sig` field is offered as
+  a target on signed and unsigned documents alike, ordered ahead of "new
+  field", and reachable either from the toolbar or by clicking the field on
+  the page.
 
 **Testing (§34)**
 - Unit and integration tests across the above.

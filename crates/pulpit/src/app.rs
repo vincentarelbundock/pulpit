@@ -939,6 +939,13 @@ pub struct App {
     /// Saved copy to sign when the flow first had to write unsaved edits.
     /// Otherwise the active document remains the source.
     signing_source: Option<PathBuf>,
+    /// The signature field a page-surface click asked to sign into
+    /// (`SignMsg::StartInField`, SPEC-signing.md §31.1), consulted once by
+    /// `ContinueToOptions` to preselect it among `sign_target_candidates`.
+    /// Cleared when the flow starts, cancels or finishes — not when the
+    /// credential changes mid-flow, since switching credentials does not
+    /// change which field was clicked.
+    signing_prefill_field: Option<String>,
     /// Whether the document open right now is being kept append-only
     /// (SPEC-signing.md §31.3), because it was found to already carry a
     /// signature. `None` when the question has not been answered yet, or
@@ -1436,6 +1443,16 @@ fn non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// [`App::sign_target_candidates`]'s result: the Options step's target
+/// picker, plus whether the document already carries a signature — the
+/// §31.3 countersign disclosure gates on the latter, not on the shape of
+/// whichever target ends up chosen (an existing empty field is now also
+/// offered on unsigned documents, so the two are no longer equivalent).
+struct SignTargetCandidates {
+    candidates: Vec<crate::signing::TargetChoice>,
+    countersigning: bool,
+}
+
 impl App {
     pub fn new(
         initial: Option<PathBuf>,
@@ -1610,6 +1627,7 @@ impl App {
             signing: None,
             signing_profile: None,
             signing_source: None,
+            signing_prefill_field: None,
             append_only: None,
             pending_append_only_offer: false,
             document_signatures: Vec::new(),
@@ -2465,6 +2483,7 @@ impl App {
                 // reason: writing no file leaves everything as it was.
                 if key.as_deref() == Some("Escape") && self.pending_save_review.is_some() {
                     self.pending_save_review = None;
+                    self.cancel_signing_if_saving_first();
                     return Task::none();
                 }
                 // A cue going off is acknowledged by Escape as well as by the
@@ -2845,11 +2864,7 @@ impl App {
             Message::DiscardReaderEdits => self.discard_reader_edits(),
             Message::SaveDocumentTo(Some(path)) => self.save_document_to(path),
             Message::SaveDocumentTo(None) => {
-                if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
-                    self.signing = None;
-                    self.signing_profile = None;
-                    self.signing_source = None;
-                }
+                self.cancel_signing_if_saving_first();
                 Task::none()
             }
             Message::Sign(msg) => self.handle_sign(msg),
@@ -3326,6 +3341,11 @@ impl App {
                 self.pick_where_to_save_document()
             }
             Message::ReviewRequiredFields => {
+                // The user is being sent back into the document to fill a
+                // field, not resumed toward signing — any SavingFirst modal
+                // in flight does not survive that (see
+                // `cancel_signing_if_saving_first`'s doc comment).
+                self.cancel_signing_if_saving_first();
                 let Some(review) = self.pending_save_review.take() else {
                     return Task::none();
                 };
@@ -3355,6 +3375,7 @@ impl App {
             }
             Message::CancelSaveReview => {
                 self.pending_save_review = None;
+                self.cancel_signing_if_saving_first();
                 Task::none()
             }
             Message::ResetColors => {
@@ -5216,6 +5237,7 @@ impl App {
         self.pending_append_only_offer = false;
         self.signing = None;
         self.document_signatures.clear();
+        self.reader.set_signed_fields(Vec::new());
         self.signature_panel_open = false;
         self.signature_panel_expanded = None;
         // Slide 7 of one deck has nothing to do with slide 7 of another, so
@@ -5317,6 +5339,23 @@ impl App {
         self.pending_reader_recovery = prepared.recovery.take();
         self.document_signatures = prepared.signatures;
         self.pending_append_only_offer = !self.document_signatures.is_empty();
+        // Every entry here names a `/Sig` field that already carries a
+        // value, `Broken` included (§28.2/§28.3: broken is still signed,
+        // just not verifiably so) — the set `dead_fields_on` uses to keep
+        // click-to-sign off a field that already has a `/V` (§31.3).
+        self.reader.set_signed_fields(
+            self.document_signatures
+                .iter()
+                .map(|verification| match verification {
+                    pulpit_render::verify::SignatureVerification::Checked(status) => {
+                        status.field_name.clone()
+                    }
+                    pulpit_render::verify::SignatureVerification::Broken { field_name, .. } => {
+                        field_name.clone()
+                    }
+                })
+                .collect(),
+        );
         match prepared.watcher {
             Ok(mut watcher) => {
                 self.file_wakeup = watcher.take_wakeup();
@@ -5750,6 +5789,16 @@ impl App {
                     }
                 }
                 crate::reader_link::Told::Failed { message, fatal } => {
+                    // A Sign flow parked at SavingFirst is waiting on an
+                    // answer that will now never come (§31.1 step 3), and its
+                    // modal would keep promising a save that already failed.
+                    // Resolved to the flow's own Failed step, which states
+                    // that the source document is unchanged.
+                    if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
+                        self.signing = Some(crate::signing::SigningFlow::Failed {
+                            detail: message.clone(),
+                        });
+                    }
                     // A refusal is reported and the reader carries on; a lost
                     // worker closes document mode, because nothing more will
                     // be answered and a mutation in flight must not be
@@ -7489,6 +7538,9 @@ impl App {
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
             ReadCommand::Sign => self.handle_sign(crate::signing::SignMsg::Start),
+            ReadCommand::SignField(name) => {
+                self.handle_sign(crate::signing::SignMsg::StartInField(name.clone()))
+            }
             // Writing a mark on the page is the same four steps the dialog
             // used to be, minus the dialog (§8.5).
             ReadCommand::ComposeMark(action) => {
@@ -8249,6 +8301,7 @@ impl App {
     /// review above.
     fn pick_where_to_save_document(&mut self) -> Task<Message> {
         let Some(document) = self.documents.active() else {
+            self.cancel_signing_if_saving_first();
             return Task::none();
         };
         let source = document.path.clone();
@@ -8270,6 +8323,7 @@ impl App {
                      another name."
                         .to_string(),
                 );
+                self.cancel_signing_if_saving_first();
                 return Task::none();
             }
         }
@@ -8280,7 +8334,10 @@ impl App {
                     options: pulpit_render::document::SaveOptions::verified(),
                 });
             }
-            None => self.notify("There is no document open to save.".to_string()),
+            None => {
+                self.notify("There is no document open to save.".to_string());
+                self.cancel_signing_if_saving_first();
+            }
         }
         Task::none()
     }
@@ -8615,23 +8672,20 @@ impl App {
             SignMsg::Start => {
                 self.signing_profile = None;
                 self.signing_source = None;
-                // §31.1 step 3: unsaved edits are saved first, and the
-                // signature is applied to the saved bytes. A document kept
-                // append-only by construction has no unsaved edits, so this
-                // only ever fires the ordinary Save As path.
-                if self.reader.unfilled_required_fields().is_empty() && self.has_unsaved_edits() {
-                    self.signing = Some(SigningFlow::SavingFirst);
-                    return self.ask_where_to_save_document();
-                }
-                self.signing = Some(SigningFlow::start(
-                    !self.settings.signatures.profiles.is_empty(),
-                ));
-                Task::none()
+                self.signing_prefill_field = None;
+                self.start_sign_flow()
+            }
+            SignMsg::StartInField(name) => {
+                self.signing_profile = None;
+                self.signing_source = None;
+                self.signing_prefill_field = Some(name);
+                self.start_sign_flow()
             }
             SignMsg::Cancel => {
                 self.signing = None;
                 self.signing_profile = None;
                 self.signing_source = None;
+                self.signing_prefill_field = None;
                 Task::none()
             }
             SignMsg::ProfileChosen(id) => {
@@ -8790,10 +8844,17 @@ impl App {
                     });
                     return Task::none();
                 }
-                let candidates = self.sign_target_candidates();
-                let target = candidates.first().cloned();
+                let SignTargetCandidates {
+                    candidates,
+                    countersigning,
+                } = self.sign_target_candidates();
+                let target = crate::signing::pick_signing_target(
+                    &candidates,
+                    self.signing_prefill_field.as_deref(),
+                );
                 let mut options = crate::signing::SigningOptions {
                     target,
+                    countersigning,
                     ..Default::default()
                 };
                 let on_page_zero = self
@@ -8940,18 +9001,48 @@ impl App {
                 self.signing = None;
                 self.signing_profile = None;
                 self.signing_source = None;
+                self.signing_prefill_field = None;
                 Task::none()
             }
         }
+    }
+
+    /// The body shared by `SignMsg::Start` and `SignMsg::StartInField`: §31.1
+    /// step 3's save-first check, then landing on the flow's first step.
+    /// Callers are responsible for setting up `signing_prefill_field` (or
+    /// clearing it) before calling this — it is not touched here, since it
+    /// must survive the save-first resume at `Told::Saved`, which rebuilds
+    /// `self.signing` with `SigningFlow::start` the same way this does.
+    fn start_sign_flow(&mut self) -> Task<Message> {
+        use crate::signing::SigningFlow;
+
+        // §31.1 step 3: unsaved edits are saved first, and the signature is
+        // applied to the saved bytes. Whether required fields are still
+        // empty is a question for the save path itself —
+        // `ask_where_to_save_document` runs the "Save anyway?" review
+        // (`pending_save_review`) over that — and must not decide here
+        // whether the save happens at all: skipping the save on an unfilled
+        // required field would sign the stale on-disk copy and silently
+        // lose the edits.
+        if self.has_unsaved_edits() {
+            self.signing = Some(SigningFlow::SavingFirst);
+            return self.ask_where_to_save_document();
+        }
+        self.signing = Some(SigningFlow::start(
+            !self.settings.signatures.profiles.is_empty(),
+        ));
+        Task::none()
     }
 
     /// §31.3's forbidden list, in terms of the commands the toolbar and the
     /// page surface actually send: arming a drawing tool, placing or editing
     /// a mark, filling any form control, and Save As (which routes through
     /// PDFium's full rewriting save and would flatten signature history).
-    /// `Sign` is deliberately not here — countersigning is the one addition
-    /// append-only mode exists to permit, and `sign_execute`'s own preflight
-    /// pass enforces the rest of §25.4 no matter what this check misses.
+    /// `Sign` and `SignField` are deliberately not here — countersigning is
+    /// the one addition append-only mode exists to permit (whether started
+    /// from the toolbar or by clicking the field itself), and
+    /// `sign_execute`'s own preflight pass enforces the rest of §25.4 no
+    /// matter what this check misses.
     fn read_command_mutates(command: &crate::widgets::event::ReadCommand) -> bool {
         use crate::widgets::event::ReadCommand;
         matches!(
@@ -8985,13 +9076,49 @@ impl App {
         })
     }
 
+    /// Clear a Sign flow parked at `SavingFirst` when the save it is
+    /// waiting on is declined instead of completed.
+    ///
+    /// `SigningFlow::SavingFirst` is only ever left by the save either
+    /// finishing (resumed at `Told::Saved`) or being declined or refused.
+    /// Every place that can happen — the file picker returning nothing, the
+    /// "Save anyway?" review being cancelled or Escaped, the user being sent
+    /// back to fill a required field instead, or the save itself being
+    /// refused (no active document, no reader, or the chosen destination is
+    /// the open document) — must call this, or the modal is a soft-lock
+    /// nothing in the UI can dismiss. Its own Cancel button (view.rs's
+    /// `sign_dialog`) is defense in depth for whichever of those a future
+    /// change forgets.
+    fn cancel_signing_if_saving_first(&mut self) {
+        if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
+            self.signing = None;
+            self.signing_profile = None;
+            self.signing_source = None;
+            self.signing_prefill_field = None;
+        }
+    }
+
     /// §31.1 step 5's target field candidates, computed from a cheap
     /// preflight pass over the document as it stands on disk.
     ///
-    /// Empty when countersigning is required (the document already carries a
-    /// signature, per append-only mode) but no empty field is left to sign
-    /// into — the caller reports that the same way a `None` target already
-    /// does.
+    /// Bytes are read and preflighted unconditionally — even for a document
+    /// `append_only` has never touched — because an *unsigned* document can
+    /// carry an empty `/Sig` field a sender left for the recipient to fill,
+    /// and that field should be offered (ahead of `NewField`) rather than
+    /// silently ignored. `append_only` itself is consulted only as the
+    /// fallback for when the source cannot be read at all: `AppendOnly` or
+    /// `EditAnyway` means a signature was found on open, so the safe
+    /// fallback is "no candidates" rather than a `NewField` the engine would
+    /// refuse; `None` means the document was never seen carrying one, so
+    /// `NewField` is always a safe fallback.
+    ///
+    /// Whether the document on disk right now actually carries a signature
+    /// is decided from what preflight reports about the bytes at
+    /// `signing_source_path()`, not from `append_only` directly:
+    /// `EditAnyway` overrides the *mutation* refusal, but a document it was
+    /// set on can still carry a signature (and the engine refuses
+    /// `NewInvisibleField` outright once it does), or can have lost every
+    /// signature to a save-first rewrite in between.
     ///
     /// `preflight_sign` returns exactly one target when there is an
     /// unambiguous empty field, which is the overwhelmingly common shape (a
@@ -8999,26 +9126,95 @@ impl App {
     /// several empty fields reports `AmbiguousSignatureField`, whose
     /// `candidates` all come back here for the Options step's target picker
     /// to offer, rather than silently picking the first one.
-    fn sign_target_candidates(&self) -> Vec<crate::signing::TargetChoice> {
+    fn sign_target_candidates(&self) -> SignTargetCandidates {
         use crate::signing::{AppendOnlyMode, TargetChoice};
-        use pulpit_render::verify::preflight::{preflight_sign, PreflightRefusal};
+        use pulpit_render::verify::preflight::{preflight_certify, preflight_sign};
 
-        if self.append_only != Some(AppendOnlyMode::AppendOnly) {
-            return vec![TargetChoice::NewField];
-        }
+        let signed_at_open = matches!(
+            self.append_only,
+            Some(AppendOnlyMode::AppendOnly) | Some(AppendOnlyMode::EditAnyway)
+        );
+        // The source could not be read to preflight: this function is `&self`
+        // and has no way to tell the user why, so it degrades silently to
+        // the best guess `append_only` supports. The engine restates the
+        // real failure (unreadable file, encrypted document, …) at Sign
+        // time, when there is a place to show it.
+        let unreadable_fallback = if signed_at_open {
+            SignTargetCandidates {
+                candidates: Vec::new(),
+                countersigning: true,
+            }
+        } else {
+            SignTargetCandidates {
+                candidates: vec![TargetChoice::NewField],
+                countersigning: false,
+            }
+        };
         let Some(path) = self.signing_source_path() else {
-            return Vec::new();
+            return unreadable_fallback;
         };
         let Ok(bytes) = std::fs::read(&path) else {
-            return Vec::new();
+            return unreadable_fallback;
         };
-        match preflight_sign(&bytes, None) {
+        // A save-first step ahead of this one can go through PDFium's full
+        // rewrite, which drops every existing signature (§31.1 step 3) — so
+        // the saved copy may in fact be unsigned even when `append_only` was
+        // set. Ask the bytes, not the enum: `preflight_certify` is cheap (it
+        // is the engine's own "is this document unsigned" check) and its
+        // refusal already counts the signatures it found.
+        Self::sign_target_candidates_from_signals(
+            preflight_certify(&bytes),
+            preflight_sign(&bytes, None),
+        )
+    }
+
+    /// The pure half of [`Self::sign_target_candidates`]: what to offer
+    /// given what preflight reports on the bytes, independent of how those
+    /// bytes were read. `certify` is `preflight_certify`'s result and
+    /// `sign_preflight` is `preflight_sign(bytes, None)`'s result, the
+    /// auto-detected empty field or the reason none was found.
+    ///
+    /// `NewField` is suppressed only when the document is known to already
+    /// carry a signature — `certify` refusing specifically with
+    /// `CertificationNotAllowed`, the one refusal that counts existing
+    /// `/Sig` values — because the engine refuses `NewInvisibleField`
+    /// outright once any `/Sig` has a `/V`. Every other `certify` refusal
+    /// (an encrypted or unparseable document, say) is not evidence of an
+    /// existing signature, so it degrades to the unsigned case: `NewField`
+    /// stays offered, and the engine's own preflight names the true reason
+    /// if signing is in fact impossible. Any empty field the document
+    /// already carries is always offered first — so it is the default
+    /// `pick_signing_target` falls back to without a prefill — with
+    /// `NewField` appended last as the fallback that is available whenever
+    /// the document is not already signed.
+    fn sign_target_candidates_from_signals(
+        certify: std::result::Result<(), pulpit_render::verify::preflight::PreflightRefusal>,
+        sign_preflight: std::result::Result<
+            pulpit_render::verify::preflight::PreflightOk,
+            pulpit_render::verify::preflight::PreflightRefusal,
+        >,
+    ) -> SignTargetCandidates {
+        use crate::signing::TargetChoice;
+        use pulpit_render::verify::preflight::PreflightRefusal;
+
+        let countersigning = matches!(
+            certify,
+            Err(PreflightRefusal::CertificationNotAllowed { .. })
+        );
+        let mut candidates: Vec<TargetChoice> = match sign_preflight {
             Ok(ok) => vec![TargetChoice::ExistingField(ok.target_field)],
             Err(PreflightRefusal::AmbiguousSignatureField { candidates }) => candidates
                 .into_iter()
                 .map(TargetChoice::ExistingField)
                 .collect(),
             Err(_) => Vec::new(),
+        };
+        if !countersigning {
+            candidates.push(TargetChoice::NewField);
+        }
+        SignTargetCandidates {
+            candidates,
+            countersigning,
         }
     }
 
@@ -14291,5 +14487,151 @@ mod grid_navigation_tests {
     fn one_column_behaves_like_a_list() {
         assert_eq!(grid_target("Down", 3, COUNT, 1, PAGE_ROWS), Some(Some(4)));
         assert_eq!(grid_target("Up", 3, COUNT, 1, PAGE_ROWS), Some(Some(2)));
+    }
+}
+
+#[cfg(test)]
+mod sign_target_candidate_tests {
+    // §31.1 step 5's target field decision, factored out of
+    // `App::sign_target_candidates` as `App::sign_target_candidates_from_signals`
+    // so it can be exercised against synthesized preflight outcomes rather
+    // than PDF bytes — the engine's own preflight tests already cover which
+    // outcome a given document produces.
+    use super::App;
+    use crate::signing::TargetChoice;
+    use pulpit_render::verify::preflight::{PreflightOk, PreflightRefusal};
+
+    fn ok(target_field: &str) -> PreflightOk {
+        PreflightOk {
+            target_field: target_field.to_string(),
+            seed_value_ignored: false,
+        }
+    }
+
+    #[test]
+    fn an_unsigned_document_offers_its_own_empty_field_first_then_new_field() {
+        // preflight_certify's Ok(()) means no /Sig field carries a value
+        // yet. The sender's own empty field is offered first — so it is the
+        // default the Options step selects — with NewField kept last as the
+        // fallback that is always available.
+        let result = App::sign_target_candidates_from_signals(Ok(()), Ok(ok("Sig1")));
+        assert_eq!(
+            result.candidates,
+            vec![
+                TargetChoice::ExistingField("Sig1".to_string()),
+                TargetChoice::NewField,
+            ]
+        );
+        assert!(!result.countersigning);
+    }
+
+    #[test]
+    fn an_unsigned_document_with_no_field_at_all_offers_only_new_field() {
+        // No empty /Sig field was found on an otherwise unsigned document —
+        // NewField is the only sensible offer.
+        let result = App::sign_target_candidates_from_signals(
+            Ok(()),
+            Err(PreflightRefusal::NoEmptySignatureField),
+        );
+        assert_eq!(result.candidates, vec![TargetChoice::NewField]);
+        assert!(!result.countersigning);
+    }
+
+    #[test]
+    fn an_unsigned_document_with_several_empty_fields_offers_all_of_them_then_new_field() {
+        let result = App::sign_target_candidates_from_signals(
+            Ok(()),
+            Err(PreflightRefusal::AmbiguousSignatureField {
+                candidates: vec!["Sig1".to_string(), "Sig2".to_string()],
+            }),
+        );
+        assert_eq!(
+            result.candidates,
+            vec![
+                TargetChoice::ExistingField("Sig1".to_string()),
+                TargetChoice::ExistingField("Sig2".to_string()),
+                TargetChoice::NewField,
+            ]
+        );
+        assert!(!result.countersigning);
+    }
+
+    #[test]
+    fn a_signed_document_offers_the_unambiguous_empty_field_and_never_new_field() {
+        // A document already carrying a signature (certify refuses with
+        // CertificationNotAllowed) must never offer NewField, because the
+        // engine refuses NewInvisibleField outright once any /Sig has a /V.
+        let result = App::sign_target_candidates_from_signals(
+            Err(PreflightRefusal::CertificationNotAllowed {
+                existing_signatures: 1,
+            }),
+            Ok(ok("Sig2")),
+        );
+        assert_eq!(
+            result.candidates,
+            vec![TargetChoice::ExistingField("Sig2".to_string())]
+        );
+        assert!(result.countersigning);
+    }
+
+    #[test]
+    fn a_signed_document_with_several_empty_fields_offers_all_of_them() {
+        let result = App::sign_target_candidates_from_signals(
+            Err(PreflightRefusal::CertificationNotAllowed {
+                existing_signatures: 1,
+            }),
+            Err(PreflightRefusal::AmbiguousSignatureField {
+                candidates: vec!["Sig2".to_string(), "Sig3".to_string()],
+            }),
+        );
+        assert_eq!(
+            result.candidates,
+            vec![
+                TargetChoice::ExistingField("Sig2".to_string()),
+                TargetChoice::ExistingField("Sig3".to_string()),
+            ]
+        );
+        assert!(result.countersigning);
+    }
+
+    #[test]
+    fn a_signed_document_with_no_empty_field_left_offers_nothing() {
+        // The caller reports this the same way a `None` target already
+        // does (see `sign_target_candidates`'s doc comment) — not NewField,
+        // which the engine would refuse anyway.
+        let result = App::sign_target_candidates_from_signals(
+            Err(PreflightRefusal::CertificationNotAllowed {
+                existing_signatures: 1,
+            }),
+            Err(PreflightRefusal::NoEmptySignatureField),
+        );
+        assert!(result.candidates.is_empty());
+        assert!(result.countersigning);
+    }
+
+    #[test]
+    fn an_encrypted_document_still_offers_new_field_rather_than_nothing() {
+        // preflight_certify refuses an encrypted document with
+        // EncryptedDocument, not CertificationNotAllowed — that is not
+        // evidence of an existing signature, so the candidates must not
+        // silently go empty. The engine's own preflight names the real
+        // reason ("cannot sign an encrypted document") when Sign is
+        // actually attempted.
+        let result = App::sign_target_candidates_from_signals(
+            Err(PreflightRefusal::EncryptedDocument),
+            Err(PreflightRefusal::EncryptedDocument),
+        );
+        assert_eq!(result.candidates, vec![TargetChoice::NewField]);
+        assert!(!result.countersigning);
+    }
+
+    #[test]
+    fn an_unparseable_document_still_offers_new_field_rather_than_nothing() {
+        let result = App::sign_target_candidates_from_signals(
+            Err(PreflightRefusal::InvalidState("truncated xref".to_string())),
+            Err(PreflightRefusal::InvalidState("truncated xref".to_string())),
+        );
+        assert_eq!(result.candidates, vec![TargetChoice::NewField]);
+        assert!(!result.countersigning);
     }
 }

@@ -323,6 +323,15 @@ pub struct ReaderSession {
     /// list arrives, so nothing here can disagree with PDFium for longer than
     /// the round trip after a commit.
     fields: std::sync::Arc<Vec<pulpit_render::document::FormField>>,
+    /// Names of signature fields that already carry a signature, as most
+    /// recently reported by `App::document_signatures` — a `FormField`'s
+    /// own `value` is not a reliable signal for a signed `/Sig` field (the
+    /// engine does not populate it the way a text field's is), so this is
+    /// plumbed in separately rather than read off `fields`. Consulted by
+    /// `dead_fields_on` so a signed field is never offered as a click-to-sign
+    /// target (§31.3 forbids re-signing a field that already has a `/V`).
+    /// Cleared with everything else on `opened()`.
+    signed_fields: std::collections::HashSet<String>,
     /// Whether a field currently holds the caret, as the *worker* last said.
     ///
     /// Never guessed here. PDFium owns the caret — it decides whether a click
@@ -569,13 +578,31 @@ impl ReaderSession {
         self.repair_outline_focus();
     }
 
+    /// Record which signature fields already carry a signature, from the
+    /// most recent `document_signatures` (each `Checked`/`Broken` entry may
+    /// carry the field name it belongs to). See `signed_fields`'s doc
+    /// comment for why this is plumbed in rather than read off `FormField`.
+    pub fn set_signed_fields(&mut self, names: Vec<String>) {
+        self.signed_fields = names.into_iter().collect();
+    }
+
     /// The widgets on `page` that are drawn but can never be filled (§6.4).
     ///
     /// Signature fields and file-selection fields are the two the worker
     /// refuses outright, so they are the two a reader would otherwise click at
     /// and get nothing from. Everything else is either fillable or read-only,
     /// and a read-only field that looks like a printed value is not a fault.
-    fn dead_fields_on(&self, page: PageIndex) -> Vec<crate::widgets::context::DeadField> {
+    ///
+    /// `interactive` is whether a click on the page surface is actually
+    /// routed anywhere (`Mode::Live` — see `crate::widgets::document::view`,
+    /// which only wires `on_event` in that mode): the "click to sign" label
+    /// and the field name that arms it are withheld outside Live, where a
+    /// click would do nothing.
+    fn dead_fields_on(
+        &self,
+        page: PageIndex,
+        interactive: bool,
+    ) -> Vec<crate::widgets::context::DeadField> {
         use pulpit_render::document::FieldKind;
 
         if !self.has_form {
@@ -584,15 +611,27 @@ impl ReaderSession {
         self.fields
             .iter()
             .filter_map(|field| {
-                let label = if field.kind == FieldKind::Signature {
+                let (label, signature_field) = if field.kind == FieldKind::Signature {
                     // §20.2: a signature field is not a form field pulpit can
-                    // fill, but it is not "unsupported" either — Sign (the
-                    // toolbar action) reaches it. This label is read-only
-                    // form-field text, not a signature status; the
-                    // signature panel is where status language lives.
-                    "signature field — sign from the toolbar, not by typing"
+                    // fill, but it is not "unsupported" either — clicking an
+                    // *empty* one starts the Sign flow (SPEC-signing.md
+                    // §31.1), same as the toolbar's Sign button. A field
+                    // that already carries a signature must never be
+                    // offered as a click target (§31.3 forbids re-signing a
+                    // field with a /V), and this label is read-only
+                    // form-field text either way, never signature status —
+                    // the signature panel is where status language lives.
+                    let already_signed = self.signed_fields.contains(&field.name);
+                    let clickable = interactive && !already_signed;
+                    let label = if clickable {
+                        "signature field — click to sign"
+                    } else {
+                        "signature field"
+                    };
+                    let signature_field = clickable.then(|| field.name.clone());
+                    (label, signature_field)
                 } else if field.file_select {
-                    "file field — not fillable"
+                    ("file field — not fillable", None)
                 } else {
                     return None;
                 };
@@ -604,6 +643,7 @@ impl ReaderSession {
                         .map(move |widget| crate::widgets::context::DeadField {
                             bounds: widget.bounds,
                             label,
+                            signature_field: signature_field.clone(),
                         }),
                 )
             })
@@ -3385,8 +3425,10 @@ impl ReaderSession {
             | ReadCommand::Redo
             | ReadCommand::SaveAs
             // The Sign flow is the application's own dialog (§31.1); the
-            // reader session has nothing to lay out for it.
+            // reader session has nothing to lay out for it. A field click
+            // that starts it is the same story.
             | ReadCommand::Sign
+            | ReadCommand::SignField(_)
             // Back and forward are resolved against the application's
             // navigation history and arrive here, if at all, as the
             // `GoToPage` they turned into.
@@ -3703,7 +3745,7 @@ impl ReaderSession {
                         // The widgets pulpit shows and refuses to fill, turned
                         // with the page like every other rectangle here.
                         dead_fields: self
-                            .dead_fields_on(placed.page)
+                            .dead_fields_on(placed.page, live)
                             .into_iter()
                             .map(|mut field| {
                                 field.bounds = rotation.rotate_rect(field.bounds, width, height);
@@ -3932,7 +3974,7 @@ mod tests {
         let session = form(2);
 
         let first: Vec<&str> = session
-            .dead_fields_on(PageIndex(0))
+            .dead_fields_on(PageIndex(0), true)
             .iter()
             .map(|field| field.label)
             .collect();
@@ -3943,19 +3985,59 @@ mod tests {
         );
 
         let second: Vec<&str> = session
-            .dead_fields_on(PageIndex(1))
+            .dead_fields_on(PageIndex(1), true)
             .iter()
             .map(|field| field.label)
             .collect();
-        assert_eq!(
-            second,
-            vec!["signature field — sign from the toolbar, not by typing"]
-        );
+        assert_eq!(second, vec!["signature field — click to sign"]);
+
+        let signature_fields: Vec<Option<String>> = session
+            .dead_fields_on(PageIndex(1), true)
+            .iter()
+            .map(|field| field.signature_field.clone())
+            .collect();
+        assert_eq!(signature_fields, vec![Some("sign here".to_string())]);
+
+        // The file field carries no signature-field name: a click on it has
+        // nothing to do.
+        let file_field_names: Vec<Option<String>> = session
+            .dead_fields_on(PageIndex(0), true)
+            .iter()
+            .map(|field| field.signature_field.clone())
+            .collect();
+        assert_eq!(file_field_names, vec![None]);
+    }
+
+    #[test]
+    fn a_signed_field_is_badged_but_never_offered_as_a_click_target() {
+        // §31.3 forbids re-signing a field that already has a /V, so a
+        // signed field must never carry `signature_field: Some(_)` — that
+        // is what arms `SignMsg::StartInField` — and its label drops the
+        // "click to sign" instruction, which would be false.
+        let mut session = form(2);
+        session.set_signed_fields(vec!["sign here".to_string()]);
+
+        let badges = session.dead_fields_on(PageIndex(1), true);
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[0].label, "signature field");
+        assert_eq!(badges[0].signature_field, None);
+    }
+
+    #[test]
+    fn an_empty_signature_field_offers_no_click_target_outside_live_mode() {
+        // A designer/preview surface never wires a page-surface click to
+        // anything (`Mode::interactive`), so the label must not promise one.
+        let session = form(2);
+
+        let badges = session.dead_fields_on(PageIndex(1), false);
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[0].label, "signature field");
+        assert_eq!(badges[0].signature_field, None);
     }
 
     #[test]
     fn a_document_with_no_form_badges_nothing() {
-        assert!(open(2).dead_fields_on(PageIndex(0)).is_empty());
+        assert!(open(2).dead_fields_on(PageIndex(0), true).is_empty());
     }
 
     /// A required field, filled or not, of whatever kind, for the review's

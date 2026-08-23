@@ -15,9 +15,10 @@
 //! * it is never painted over a frame that already contains the same mark,
 //!   because by then the gesture is gone.
 
+use iced::mouse;
 use iced::widget::canvas as canvas_widget;
 use iced::widget::canvas::{self, Path, Stroke};
-use iced::{Color, Element, Length, Point, Renderer, Size, Theme};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use pulpit_core::page::{PagePoint, PageRect};
 
@@ -154,6 +155,11 @@ pub fn dead_field_layer<'a, Message: 'a>(
     canonical: (f32, f32),
     origin: (f32, f32),
     drawn: (f32, f32),
+    // `None` in every mode but Live (`Mode::interactive`): a badge is still
+    // chrome worth drawing in a preview, but a click that started a modal
+    // Sign flow over inert editor controls would be a click the rest of the
+    // surface cannot act on.
+    on_event: Option<fn(crate::widgets::WidgetEvent) -> Message>,
 ) -> Element<'a, Message> {
     canvas_widget::Canvas::new(DeadFieldPainter {
         fields,
@@ -161,6 +167,7 @@ pub fn dead_field_layer<'a, Message: 'a>(
         canonical,
         origin,
         drawn,
+        on_event,
     })
     .width(Length::Fixed(drawn.0))
     .height(Length::Fixed(drawn.1))
@@ -171,27 +178,21 @@ pub fn dead_field_layer<'a, Message: 'a>(
 /// chrome: this is a footnote on the page, not a label in the interface.
 const BADGE_TEXT: f32 = 9.0;
 
-struct DeadFieldPainter {
+struct DeadFieldPainter<Message> {
     fields: Vec<crate::widgets::context::DeadField>,
     muted: Color,
     canonical: (f32, f32),
     /// As [`SelectionPainter::origin`].
     origin: (f32, f32),
     drawn: (f32, f32),
+    on_event: Option<fn(crate::widgets::WidgetEvent) -> Message>,
 }
 
-impl<Message> canvas::Program<Message> for DeadFieldPainter {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+impl<Message> DeadFieldPainter<Message> {
+    /// The screen-space rect one field's badge and hit area occupy — the
+    /// same conversion `draw` and `update` must agree on, or a click would
+    /// land somewhere other than where the badge is drawn.
+    fn scale(&self) -> (f32, f32) {
         let scale_x = if self.canonical.0 > 0.0 {
             self.drawn.0 / self.canonical.0
         } else {
@@ -202,16 +203,108 @@ impl<Message> canvas::Program<Message> for DeadFieldPainter {
         } else {
             1.0
         };
+        (scale_x, scale_y)
+    }
+
+    fn field_rect(&self, field: &crate::widgets::context::DeadField) -> (Point, Size) {
+        let (scale_x, scale_y) = self.scale();
+        let rect = field.bounds;
+        let top_left = Point::new(
+            (rect.left - self.origin.0) * scale_x,
+            (rect.top - self.origin.1) * scale_y,
+        );
+        let size = Size::new(
+            (rect.width() * scale_x).max(1.0),
+            (rect.height() * scale_y).max(1.0),
+        );
+        (top_left, size)
+    }
+}
+
+impl<Message> canvas::Program<Message> for DeadFieldPainter<Message> {
+    // Whether this layer captured the press it is currently waiting on a
+    // matching release for. Without this, capturing a press with no
+    // corresponding release capture leaves `mouse_area` seeing a
+    // `PageReleased` with no `PagePressed` before it — an orphan release
+    // the page surface was never designed to receive on its own.
+    type State = bool;
+
+    fn update(
+        &self,
+        pressed: &mut bool,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        use iced::widget::Action;
+
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let on_event = self.on_event?;
+                let position = cursor.position_in(bounds)?;
+                // Only a signature field answers a click (§31.1) — a
+                // file-select dead field has nothing pulpit can do with
+                // one, so the press falls through to the page surface
+                // underneath, exactly as if there were no badge here at
+                // all.
+                let name = self.fields.iter().find_map(|field| {
+                    let (top_left, size) = self.field_rect(field);
+                    let hit = Rectangle::new(top_left, size).contains(position);
+                    hit.then(|| field.signature_field.clone()).flatten()
+                })?;
+                *pressed = true;
+                Some(
+                    Action::publish(on_event(crate::widgets::WidgetEvent::Read(
+                        crate::widgets::event::ReadCommand::SignField(name),
+                    )))
+                    .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if *pressed => {
+                // Pair with the press this layer captured above, rather
+                // than let it reach `mouse_area` as an orphan.
+                *pressed = false;
+                Some(Action::capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        let Some(position) = cursor.position_in(bounds) else {
+            return mouse::Interaction::None;
+        };
+        let clickable = self.on_event.is_some()
+            && self.fields.iter().any(|field| {
+                if field.signature_field.is_none() {
+                    return false;
+                }
+                let (top_left, size) = self.field_rect(field);
+                Rectangle::new(top_left, size).contains(position)
+            });
+        if clickable {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::None
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
         for field in &self.fields {
-            let rect = field.bounds;
-            let top_left = Point::new(
-                (rect.left - self.origin.0) * scale_x,
-                (rect.top - self.origin.1) * scale_y,
-            );
-            let size = Size::new(
-                (rect.width() * scale_x).max(1.0),
-                (rect.height() * scale_y).max(1.0),
-            );
+            let (top_left, size) = self.field_rect(field);
             // A hairline round the widget and a light wash inside: enough to
             // say "this box is not the same as the ones you can type in",
             // without covering whatever the producer drew in it.

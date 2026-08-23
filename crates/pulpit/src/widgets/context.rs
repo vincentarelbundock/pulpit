@@ -331,6 +331,11 @@ pub struct DeadField {
     pub bounds: pulpit_core::page::PageRect,
     /// What to say about it, in the fewest words that are still true.
     pub label: &'static str,
+    /// The field's own name, for a signature field a click can start the
+    /// Sign flow on (SPEC-signing.md §31.1). `None` for a file-selection
+    /// dead field, which stays inert — there is nothing pulpit can do with
+    /// a click on it.
+    pub signature_field: Option<String>,
 }
 
 /// The selected annotation, as the page surface draws it.

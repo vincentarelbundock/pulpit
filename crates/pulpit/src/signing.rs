@@ -36,8 +36,10 @@ use pulpit_render::verify::SignatureVerification;
 pub const IDENTITY_DISCLOSURE: &str = "pulpit verifies that a signature is intact and that it matches the certificate embedded in it. It does not check whether that certificate is genuine. Other software may or may not accept this signature.";
 
 /// §31.3's required disclosure, shown in addition to
-/// [`IDENTITY_DISCLOSURE`] when the target is an existing signature field
-/// (countersigning a document that already carries a signature).
+/// [`IDENTITY_DISCLOSURE`] when the document already carries a signature
+/// (`SigningOptions::countersigning`) — not merely when the target is an
+/// existing field, since an existing empty `/Sig` field is now also offered
+/// on unsigned documents, where this disclosure would be false.
 pub const COUNTERSIGN_DISCLOSURE: &str = "This document already contains a signature. Adding yours will cause some software — including pulpit — to report that the document changed after the earlier signature was made. This is expected. Software that analyses the change in detail, such as Acrobat, will report both signatures correctly.";
 
 /// §31.3's append-only offer, shown when a document already carrying a
@@ -82,12 +84,27 @@ impl From<&TargetChoice> for SignTarget {
     }
 }
 
-impl TargetChoice {
-    /// Whether confirming this target requires §31.3's countersign
-    /// disclosure in addition to the identity disclosure.
-    pub fn is_countersign(&self) -> bool {
-        matches!(self, TargetChoice::ExistingField(_))
-    }
+/// §31.1 step 5's target selection: the field a page-surface click asked to
+/// sign into (`SignMsg::StartInField`), if it still names one of
+/// `candidates`, otherwise the first candidate — the candidate order makes
+/// this the document's own empty field when it has one, since an existing
+/// empty field is always ordered ahead of `NewField` (see
+/// `App::sign_target_candidates_from_signals`).
+///
+/// A mismatch (the clicked field got signed by someone else meanwhile, or
+/// preflight no longer offers it) falls back silently rather than erroring:
+/// the Options/Confirm steps show whatever was actually selected, so nothing
+/// is hidden from the reader.
+pub fn pick_signing_target(
+    candidates: &[TargetChoice],
+    prefill: Option<&str>,
+) -> Option<TargetChoice> {
+    let prefilled = prefill.and_then(|name| {
+        candidates.iter().find(
+            |candidate| matches!(candidate, TargetChoice::ExistingField(field) if field == name),
+        )
+    });
+    prefilled.or_else(|| candidates.first()).cloned()
 }
 
 /// Reason, location and contact — the free-text half of §31.1 step 5.
@@ -97,6 +114,13 @@ pub struct SigningOptions {
     pub location: String,
     pub contact: String,
     pub target: Option<TargetChoice>,
+    /// Whether the document already carries a signature — set once at
+    /// `ContinueToOptions` from the same preflight pass that computed the
+    /// candidates, not derived from `target`: an existing empty field is now
+    /// offered on unsigned documents too, so "the target is an existing
+    /// field" no longer implies "the document is already signed" (§31.3's
+    /// countersign disclosure gates on this, not on the target's shape).
+    pub countersigning: bool,
     /// `true` once the user has chosen Visible over the default Invisible.
     /// Only meaningful together with `placement`, which is `Some` exactly
     /// when this is `true` (see [`SigningOptions::set_visible`]).
@@ -521,8 +545,12 @@ impl SigningFlow {
 /// `ReadCommand` already group their own popups' messages.
 #[derive(Debug, Clone)]
 pub enum SignMsg {
-    /// The toolbar's Sign button, or the panel's "sign into this field".
+    /// The toolbar's Sign button.
     Start,
+    /// The page surface's signature dead-field was clicked (§31.1, with the
+    /// field pre-selected in step 5's target picker — see
+    /// `pick_signing_target`'s prefill handling).
+    StartInField(String),
     /// Cancel at any step. Always safe (§33): nothing has been written yet,
     /// or the write was to a temporary file that is now discarded.
     Cancel,
@@ -681,9 +709,17 @@ mod tests {
     }
 
     #[test]
-    fn target_choice_selects_a_countersign_disclosure() {
-        assert!(!TargetChoice::NewField.is_countersign());
-        assert!(TargetChoice::ExistingField("Sig1".into()).is_countersign());
+    fn an_existing_field_target_alone_does_not_imply_the_countersign_disclosure() {
+        // `countersigning` is set only from the preflight pass that computed
+        // the candidates (`App::sign_target_candidates_from_signals`, whose
+        // tests pin when it is true) — never derived from the target's
+        // shape: an existing empty field is offered on unsigned documents
+        // too, where §31.3's countersign disclosure would be false.
+        let options = SigningOptions {
+            target: Some(TargetChoice::ExistingField("Sig1".into())),
+            ..Default::default()
+        };
+        assert!(!options.countersigning);
     }
 
     #[test]
@@ -696,6 +732,48 @@ mod tests {
             SignTarget::from(&TargetChoice::ExistingField("Sig1".into())),
             SignTarget::ExistingField("Sig1".into())
         );
+    }
+
+    #[test]
+    fn pick_signing_target_prefers_a_matching_prefill() {
+        let candidates = vec![
+            TargetChoice::ExistingField("Sig1".to_string()),
+            TargetChoice::ExistingField("Sig2".to_string()),
+            TargetChoice::NewField,
+        ];
+        assert_eq!(
+            pick_signing_target(&candidates, Some("Sig2")),
+            Some(TargetChoice::ExistingField("Sig2".to_string()))
+        );
+    }
+
+    #[test]
+    fn pick_signing_target_falls_back_to_the_first_candidate_without_a_prefill() {
+        let candidates = vec![
+            TargetChoice::ExistingField("Sig1".to_string()),
+            TargetChoice::NewField,
+        ];
+        assert_eq!(
+            pick_signing_target(&candidates, None),
+            Some(TargetChoice::ExistingField("Sig1".to_string()))
+        );
+    }
+
+    #[test]
+    fn pick_signing_target_falls_back_when_the_prefill_no_longer_matches() {
+        let candidates = vec![
+            TargetChoice::ExistingField("Sig1".to_string()),
+            TargetChoice::NewField,
+        ];
+        assert_eq!(
+            pick_signing_target(&candidates, Some("Sig9")),
+            Some(TargetChoice::ExistingField("Sig1".to_string()))
+        );
+    }
+
+    #[test]
+    fn pick_signing_target_is_none_with_no_candidates() {
+        assert_eq!(pick_signing_target(&[], Some("Sig1")), None);
     }
 
     #[test]
