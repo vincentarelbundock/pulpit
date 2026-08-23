@@ -4924,7 +4924,7 @@ checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
 name = "pulpit"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "blake3",
  "bytes",
@@ -4962,7 +4962,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "regex",
  "serde",
@@ -4972,7 +4972,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-display"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "serde",
  "smithay-client-toolkit 0.21.1",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-media"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "bincode",
  "getrandom 0.2.17",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-render"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "bincode",
  "cms 0.2.3",
@@ -5049,7 +5049,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-testkit"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "tempfile",
 ]

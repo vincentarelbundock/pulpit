@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.6] — 2026-08-23
 
 ### Changed
 
@@ -37,6 +37,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   during settings migration so the visible reference always matches input.
 
 ### Fixed
+
+- **A 116-byte PDF could hold the application for minutes on open.** The
+  cross-reference subsection count and the xref stream `/Index` count were
+  both taken from the file and never checked against how many entries could
+  actually follow, so a tiny document drove the parser while a set grew
+  without bound. Verification runs on every document open, in the main
+  process, so this was reachable by sending someone a deck. Both counts are
+  now bounded by what the remaining bytes can encode, and value parsing
+  carries a depth limit so nested arrays cannot overflow the stack.
+
+- **A tampered document could read as unsigned.** A signature field that
+  failed to decode vanished from the report instead of reading as broken.
+  Both failure paths now produce an unclear report, which the interface
+  already renders as broken, while fields definitively typed as something
+  other than `/Sig` are excluded so a malformed text box raises no false
+  alarm. The revision chain also survives a nested trailer dictionary, and
+  the signature container's extent comes from the tokenizer rather than a
+  byte search a decoy could mislead.
+
+- **Signing quietly rewrote non-ASCII text before certifying it.** Values
+  parsed out of a document were laundered through a lossy UTF-8 conversion.
+  Document bytes now travel verbatim, kept separate from pulpit's own UTF-8
+  text, which is still legitimately transcoded, and field names are compared
+  after decoding, so a field named Café can be found and signed.
+
+- Rendered slides were world-readable in `/dev/shm` under predictable names
+  that would be adopted rather than refused, and they leaked — 2 GB had
+  accumulated over four days. Regions are now created exclusively, mode 0600,
+  under unguessable names, and each process sweeps regions belonging to dead
+  pids once at startup.
 
 - **A crash lost every form field you had filled in.** Values typed into a
   form went into the undo history and moved the document's revision, but were
@@ -87,6 +117,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The duplicate `Escape` entry for cancelling a preview has been removed.
 
 ### Added
+
+- **Documents can be signed, and existing signatures verified.** Pulpit signs
+  a PDF as an incremental revision using a credential from a reusable
+  signature profile; the passphrase is typed once and the unlocked credential
+  is remembered for the session. An unsigned document's own empty signature
+  fields are offered as targets ahead of a new invisible field, and clicking
+  a signature field on the page starts the flow with that field selected. A
+  visible signature is drawn inside the field's own box, on whatever page the
+  document puts it, with correct coordinates on cropped and rotated pages.
+  Signing saves unsaved edits first, and the signed copy can be opened from
+  the result step.
+
+  Signing, verification and countersignature work on documents built with
+  cross-reference streams and object streams — what LaTeX, Chrome and
+  "optimized" PDFs produce — and on the merged field/widget dictionaries and
+  UTF-16BE field names Acrobat writes. Every signed shape validates under the
+  pyHanko oracle.
 
 - **A fullscreen Reader layout.** A third built-in, alongside Presenter and
   Reader: the Reader's own tree — the control band, the outline rail, the page
