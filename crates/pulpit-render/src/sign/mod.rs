@@ -15,8 +15,8 @@ mod generate;
 mod mechanism;
 
 pub use apply::{
-    sign_document_file, AppearanceContent, SignAppearance, SignApplyError, SignReport, SignRequest,
-    SignTarget,
+    sign_document_file, AppearanceContent, AppearancePlacement, SignAppearance, SignApplyError,
+    SignReport, SignRequest, SignTarget,
 };
 pub use credential::{Credential, CredentialSummary};
 pub use errors::SigningError;

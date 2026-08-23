@@ -673,6 +673,23 @@ impl ReaderSession {
             .collect()
     }
 
+    /// Where a named field's first widget is: its page and its box in page
+    /// coordinates.
+    ///
+    /// The first widget, not all of them, for the same reason
+    /// [`pulpit_render::document::FormField::anchor_on`] takes one: a field
+    /// drawn more than once is a radio group's options or mirrored copies of
+    /// one value, and a caller that wants *the* box wants the first.
+    /// `None` for a field this document does not have, or one the producer
+    /// placed nowhere.
+    pub fn field_widget_box(&self, name: &str) -> Option<(PageIndex, pulpit_core::page::PageRect)> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .and_then(|field| field.widgets.first())
+            .map(|widget| (widget.page, widget.bounds))
+    }
+
     /// Where a named field is drawn, for the jump the navigator makes.
     /// `None` for a field the producer placed nowhere.
     pub fn field_page(&self, name: &str) -> Option<PageIndex> {

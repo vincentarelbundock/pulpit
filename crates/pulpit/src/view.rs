@@ -81,10 +81,6 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
     .fold(None::<f32>, |strongest, alpha| {
         Some(strongest.map_or(alpha, |current: f32| current.max(alpha)))
     });
-    let on_page_zero = app
-        .reader
-        .current_page()
-        .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
     // Every layer below is always present in the stack, blank when its own
     // condition is false — never mounted-and-unmounted with it. See `blank`
     // and the scrub layer's note in `presenter` for why: a layer that came
@@ -141,7 +137,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever
         // step it is on.
         match app.signing.as_ref() {
-            Some(flow) => sign_dialog(app, flow, on_page_zero),
+            Some(flow) => sign_dialog(app, flow),
             None => blank(),
         },
         match app.pending_save_review.as_ref() {
@@ -3154,11 +3150,7 @@ fn append_only_offer_dialog() -> Element<'static, Message> {
 }
 
 /// The Sign flow (SPEC-signing.md §31.1), one dialog per step.
-fn sign_dialog<'a>(
-    app: &'a App,
-    flow: &'a crate::signing::SigningFlow,
-    on_page_zero: bool,
-) -> Element<'a, Message> {
+fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Element<'a, Message> {
     use crate::signing::SigningFlow;
     use pulpit_render::sign::SigningProfile;
 
@@ -3205,10 +3197,19 @@ fn sign_dialog<'a>(
                     button(
                         column![
                             text(label).size(type_scale::LABEL),
+                            // "unlocked" is the passphrase step this choice
+                            // will skip, not a claim about the signature it
+                            // will produce (§20.2 keeps signature status in
+                            // the signature panel).
                             text(format!(
-                                "{} · {}",
+                                "{} · {}{}",
                                 crate::signature_profiles::common_name(&profile.identity.subject),
                                 profile.identity.key_algorithm,
+                                if app.is_profile_unlocked(&profile.id) {
+                                    " · unlocked"
+                                } else {
+                                    ""
+                                },
                             ))
                             .size(type_scale::CAPTION)
                             .color(theme::ambient::muted()),
@@ -3448,12 +3449,11 @@ fn sign_dialog<'a>(
                 body = body.push(dialog_section("Which signature field to sign into", picker));
             }
 
-            // §25.5: Visible places a text appearance via position/size
-            // presets on page 0 (the only page_index pulpit-render accepts);
-            // see `crate::signing`'s module doc comment for why placement is
-            // a preset picker rather than a drawn box in v1. Off page 0 the
-            // choice is disabled with the reason shown, rather than letting
-            // the user build a placement Sign would then refuse.
+            // §25.5. Where the mark goes depends on what is being signed:
+            // inside the field's own box when the sender drew one, and
+            // otherwise at a position/size preset on the page the reader was
+            // showing when they chose Visible — see `crate::signing`'s module
+            // doc comment for why presets rather than a drawn box.
             let mut appearance_section = column![row![
                 button(text("Invisible").size(type_scale::LABEL))
                     .padding(gap::S)
@@ -3463,32 +3463,38 @@ fn sign_dialog<'a>(
                         theme::ambient::selected_button
                     })
                     .on_press(Message::Sign(SignMsg::VisibleChanged(false))),
-                if on_page_zero {
-                    button(text("Visible").size(type_scale::LABEL))
-                        .padding(gap::S)
-                        .style(if options.visible_requested {
-                            theme::ambient::selected_button
-                        } else {
-                            theme::ambient::tool_button
-                        })
-                        .on_press(Message::Sign(SignMsg::VisibleChanged(true)))
-                } else {
-                    button(text("Visible").size(type_scale::LABEL)).padding(gap::S)
-                },
+                button(text("Visible").size(type_scale::LABEL))
+                    .padding(gap::S)
+                    .style(if options.visible_requested {
+                        theme::ambient::selected_button
+                    } else {
+                        theme::ambient::tool_button
+                    })
+                    .on_press(Message::Sign(SignMsg::VisibleChanged(true))),
             ]
             .spacing(gap::S)]
             .spacing(gap::S);
-            if !on_page_zero {
+            if let Some(crate::signing::AppearancePlan::InFieldBox { field, page_index }) =
+                options.placement.as_ref()
+            {
+                // The sender already drew the rectangle, so there is nothing
+                // to place: say where it is instead of offering presets that
+                // would not be honoured.
                 appearance_section = appearance_section.push(
-                    text(
-                        "Visible signatures can only be placed on the first page in this \
-                         build; go to page 1 to place one.",
-                    )
+                    text(format!(
+                        "Drawn inside “{field}”’s box on page {}.",
+                        page_index + 1
+                    ))
                     .size(type_scale::CAPTION)
                     .color(theme::ambient::muted()),
                 );
             }
-            if let Some(placement) = options.placement {
+            if let Some(crate::signing::AppearancePlan::Preset {
+                page_index,
+                placement,
+            }) = options.placement.as_ref()
+            {
+                let placement = *placement;
                 let mut positions = row![].spacing(gap::S);
                 for position in PlacementPosition::ALL {
                     let selected = placement.position == position;
@@ -3519,7 +3525,14 @@ fn sign_dialog<'a>(
                 }
                 appearance_section = appearance_section
                     .push(dialog_section("Position", positions))
-                    .push(dialog_section("Size", sizes));
+                    .push(dialog_section("Size", sizes))
+                    // The page was captured when Visible was pressed, so say
+                    // which one: the reader may scroll before confirming.
+                    .push(
+                        text(format!("Placed on page {}.", page_index + 1))
+                            .size(type_scale::CAPTION)
+                            .color(theme::ambient::muted()),
+                    );
             }
             body = body.push(dialog_section("Appearance", appearance_section));
 
@@ -3564,25 +3577,7 @@ fn sign_dialog<'a>(
                     }
                 ))
                 .size(type_scale::BODY),
-                text({
-                    let visibility = if options.visible_requested {
-                        "visible"
-                    } else {
-                        "invisible"
-                    };
-                    match options.target.as_ref() {
-                        Some(crate::signing::TargetChoice::ExistingField(name)) => {
-                            format!("Signing into field “{name}”, {visibility}.")
-                        }
-                        Some(crate::signing::TargetChoice::NewField) => {
-                            format!("A new, {visibility} signature field will be created.")
-                        }
-                        // Unreachable: ContinueToConfirm diverts to Failed
-                        // rather than let Confirm build with no target.
-                        None => String::new(),
-                    }
-                })
-                .size(type_scale::BODY),
+                text(crate::signing::confirm_target_line(options)).size(type_scale::BODY),
                 text(crate::signing::IDENTITY_DISCLOSURE)
                     .size(type_scale::CAPTION)
                     .color(theme::ambient::muted()),

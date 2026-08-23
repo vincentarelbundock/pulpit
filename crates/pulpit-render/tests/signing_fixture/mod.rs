@@ -144,6 +144,87 @@ pub fn build_unsigned_pdf(fields: &[&str]) -> Vec<u8> {
     assemble_single_revision(&objects)
 }
 
+/// One empty signature field in a multi-page fixture: which page carries its
+/// widget, and the box the document's author drew for it.
+pub struct FixtureField<'a> {
+    pub name: &'a str,
+    /// Zero-based page index.
+    pub page: usize,
+    /// `[x0, y0, x1, y1]`; `[0.0; 4]` is the degenerate placeholder shape a
+    /// sender's tool writes for an invisible field.
+    pub rect: [f64; 4],
+}
+
+/// An unsigned PDF of `page_count` pages carrying `fields` empty `/Sig`
+/// fields, each with its own `/Rect` on its own page.
+///
+/// This is the shape the "click the sign-here box on the last page" flow
+/// needs: a field that already has a box, on a page that is not page 0.
+pub fn build_unsigned_pdf_multipage(page_count: usize, fields: &[FixtureField]) -> Vec<u8> {
+    assert!(page_count >= 1, "a PDF has at least one page");
+    // 1 catalog, 2 page tree, 3..=2+page_count pages, then the AcroForm and
+    // the fields.
+    let first_page = 3u32;
+    let acroform = first_page + page_count as u32;
+    let first_field = acroform + 1;
+    let page_object = |page: usize| first_page + page as u32;
+
+    let kids: Vec<String> = (0..page_count)
+        .map(|p| format!("{} 0 R", page_object(p)))
+        .collect();
+    let field_refs: Vec<String> = (0..fields.len())
+        .map(|i| format!("{} 0 R", first_field + i as u32))
+        .collect();
+
+    let mut objects = Vec::new();
+    if fields.is_empty() {
+        objects.push("<</Type /Catalog /Pages 2 0 R>>".to_string());
+    } else {
+        objects.push(format!(
+            "<</Type /Catalog /Pages 2 0 R /AcroForm {acroform} 0 R>>"
+        ));
+    }
+    objects.push(format!(
+        "<</Type /Pages /Kids [{}] /Count {}>>",
+        kids.join(" "),
+        page_count
+    ));
+    for page in 0..page_count {
+        let annots: Vec<String> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.page == page)
+            .map(|(i, _)| field_refs[i].clone())
+            .collect();
+        if annots.is_empty() {
+            objects.push("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>".to_string());
+        } else {
+            objects.push(format!(
+                "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}]>>",
+                annots.join(" ")
+            ));
+        }
+    }
+    // The AcroForm object is emitted even with no fields so that object
+    // numbers do not shift between the two shapes.
+    objects.push(format!(
+        "<</Fields [{}] /SigFlags 3>>",
+        field_refs.join(" ")
+    ));
+    for field in fields {
+        objects.push(format!(
+            "<</FT /Sig /T ({}) /Type /Annot /Subtype /Widget /Rect [{} {} {} {}] /F 132 /P {} 0 R>>",
+            field.name,
+            field.rect[0],
+            field.rect[1],
+            field.rect[2],
+            field.rect[3],
+            page_object(field.page)
+        ));
+    }
+    assemble_single_revision(&objects)
+}
+
 /// An unsigned two-field PDF in which `Sig1` carries a signature dictionary
 /// whose FieldMDP transform locks `Sig2`.
 ///

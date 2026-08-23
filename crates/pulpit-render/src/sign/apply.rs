@@ -114,13 +114,45 @@ impl Default for SignRequest {
 /// asserted; it only changes what a viewer renders inside the widget rect.
 #[derive(Debug, Clone)]
 pub struct SignAppearance {
-    /// The widget's rect in PDF page coordinates: `[x0, y0, x1, y1]`.
-    pub rect: [f64; 4],
-    /// Which page carries the widget. Only `0` is currently supported;
-    /// anything else is a typed [`SignApplyError::Unsupported`], never a
-    /// silently wrong page.
-    pub page_index: usize,
+    /// Where the appearance is drawn.
+    pub placement: AppearancePlacement,
     pub content: AppearanceContent,
+}
+
+/// Which box the appearance is drawn into (§25.5).
+///
+/// The two modes answer two different questions. `FieldRect` is "draw inside
+/// the box the document's author already drew", which is the sign-here flow:
+/// the widget keeps its own `/Rect` and nothing moves. `Rect` is "put a box
+/// here", which is the preset-placement flow: the widget's `/Rect` is set to
+/// the caller's rect, moving an existing field if that is what the caller
+/// asked for.
+///
+/// Whichever rect ends up in force is also the appearance XObject's `/BBox`,
+/// so normalized ink coordinates and text scale to the box a viewer actually
+/// renders.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppearancePlacement {
+    /// Draw inside the target field's existing `/Rect`, leaving it untouched.
+    ///
+    /// Only meaningful for [`SignTarget::ExistingField`] — a field that does
+    /// not exist yet has no rect to draw inside, and asking for this on
+    /// [`SignTarget::NewInvisibleField`] is a typed refusal. A field whose
+    /// `/Rect` is missing or zero-area is refused too, rather than being
+    /// silently given an appearance stream no viewer can show.
+    FieldRect,
+    /// Draw into an explicit rect, and set the widget's `/Rect` to it.
+    ///
+    /// For a new field, `page_index` also decides which page's `/Annots` the
+    /// widget joins. For an existing field the widget stays on the page it is
+    /// already on — the index is still checked against the document's page
+    /// count, so an out-of-range request is refused rather than ignored.
+    Rect {
+        /// Zero-based page index.
+        page_index: usize,
+        /// The rect in PDF page coordinates: `[x0, y0, x1, y1]`.
+        rect: [f64; 4],
+    },
 }
 
 /// What is drawn inside the appearance's bounding box.
@@ -201,6 +233,11 @@ pub enum SignApplyError {
 
     #[error("the document cannot be signed: {0}")]
     Unsupported(String),
+
+    /// The requested visible appearance cannot be placed (§25.5). Nothing is
+    /// written: the source is unchanged and no candidate reaches the gate.
+    #[error("the signature appearance cannot be placed: {0}")]
+    AppearancePlacement(String),
 
     #[error("I/O error on {path}: {source}")]
     Io {
@@ -546,13 +583,19 @@ fn assemble_revision(
         n
     };
 
+    // A placement mode that does not fit the target is caller misuse, and it
+    // is refused before a byte is assembled rather than quietly reinterpreted.
     if let Some(appearance) = &request.appearance {
-        if appearance.page_index != 0 {
-            return Err(SignApplyError::Unsupported(format!(
-                "signature appearance requested on page_index {}, but only page_index 0 \
-                 is currently supported for visible signature appearances",
-                appearance.page_index
-            )));
+        if matches!(appearance.placement, AppearancePlacement::FieldRect)
+            && plan.existing_field.is_none()
+        {
+            return Err(SignApplyError::AppearancePlacement(
+                "FieldRect draws inside the rect a field already has, but this request creates \
+                 a new signature field, which has none yet; the source is unchanged — either \
+                 target an existing field, or place the new field's appearance with \
+                 AppearancePlacement::Rect { page_index, rect }"
+                    .to_string(),
+            ));
         }
     }
 
@@ -562,6 +605,9 @@ fn assemble_revision(
         .as_ref()
         .map(|_| allocate(&mut next_object));
     let mut objects: Vec<(u32, u16, PdfObject)> = Vec::new();
+    // The box the appearance stream is drawn in, decided per branch below and
+    // used verbatim as the XObject's /BBox.
+    let mut appearance_size: Option<(f64, f64)> = None;
 
     match plan.existing_field {
         Some(field_object) => {
@@ -578,14 +624,44 @@ fn assemble_revision(
             );
             if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object)
             {
-                apply_appearance_to_widget(&mut entries, appearance, xobject_num);
+                let rect = match &appearance.placement {
+                    // The sender drew the box; signing draws inside it and
+                    // leaves /Rect exactly as it was.
+                    AppearancePlacement::FieldRect => {
+                        existing_widget_rect(&entries, &plan.field_name)?
+                    }
+                    AppearancePlacement::Rect { page_index, rect } => {
+                        // The widget stays on its own page — only the box
+                        // moves — but a page the document does not have is
+                        // still a mistake worth naming.
+                        check_page_index(source, *page_index)?;
+                        set_entry(
+                            &mut entries,
+                            "Rect",
+                            PdfObject::Array(rect.iter().map(|v| PdfObject::Real(*v)).collect()),
+                        );
+                        *rect
+                    }
+                };
+                appearance_size = Some(rect_size(rect));
+                point_widget_at_appearance(&mut entries, xobject_num);
             }
             objects.push((field_object, 0, PdfObject::Dictionary(entries)));
         }
         None => {
             let catalog = find_catalog_ref(source)?;
             let mut catalog_entries = parse_object_dictionary(source, catalog.0)?;
-            let page_object = first_page_object(source, &catalog_entries)?;
+            // The widget joins the /Annots of the page the appearance names.
+            // Without an appearance the field is invisible and page 0 is as
+            // good a home as any, which is where it has always gone.
+            let target_page = match &request.appearance {
+                Some(SignAppearance {
+                    placement: AppearancePlacement::Rect { page_index, .. },
+                    ..
+                }) => *page_index,
+                _ => 0,
+            };
+            let page_object = page_object_at(source, &catalog_entries, target_page)?;
             let field_object = allocate(&mut next_object);
 
             // AcroForm: reuse the existing one when it is indirect, promote a
@@ -673,7 +749,18 @@ fn assemble_revision(
             ];
             if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object)
             {
-                apply_appearance_to_widget(&mut field_entries, appearance, xobject_num);
+                // `FieldRect` was refused above, so this is always an
+                // explicit rect, on the page whose /Annots the widget joined.
+                let AppearancePlacement::Rect { rect, .. } = &appearance.placement else {
+                    unreachable!("FieldRect is refused for a new field before assembly");
+                };
+                set_entry(
+                    &mut field_entries,
+                    "Rect",
+                    PdfObject::Array(rect.iter().map(|v| PdfObject::Real(*v)).collect()),
+                );
+                appearance_size = Some(rect_size(*rect));
+                point_widget_at_appearance(&mut field_entries, xobject_num);
             }
 
             objects.push((catalog.0, 0, PdfObject::Dictionary(catalog_entries)));
@@ -683,11 +770,13 @@ fn assemble_revision(
         }
     }
 
-    if let (Some(appearance), Some(xobject_num)) = (&request.appearance, appearance_object) {
+    if let (Some(appearance), Some(xobject_num), Some((width, height))) =
+        (&request.appearance, appearance_object, appearance_size)
+    {
         objects.push((
             xobject_num,
             0,
-            PdfObject::Raw(build_appearance_xobject(appearance)),
+            PdfObject::Raw(build_appearance_xobject(&appearance.content, width, height)),
         ));
     }
 
@@ -763,25 +852,75 @@ fn signature_dictionary(request: &SignRequest, bytes_reserved: usize) -> PdfObje
 
 // --- Appearances (§25.5) ---------------------------------------------------
 
-/// Set `/Rect` to the appearance's rect, point `/AP /N` at the freshly
-/// appended form XObject, and delete `/AS` if present — required whenever a
-/// widget carries an appearance stream (§25.5).
-fn apply_appearance_to_widget(
-    entries: &mut Vec<(String, PdfObject)>,
-    appearance: &SignAppearance,
-    xobject_num: u32,
-) {
-    set_entry(
-        entries,
-        "Rect",
-        PdfObject::Array(
-            appearance
-                .rect
-                .iter()
-                .map(|v| PdfObject::Real(*v))
-                .collect(),
-        ),
-    );
+/// The width and height of a rect, whichever corner order it was written in.
+fn rect_size(rect: [f64; 4]) -> (f64, f64) {
+    ((rect[2] - rect[0]).abs(), (rect[3] - rect[1]).abs())
+}
+
+/// The `/Rect` a widget already carries, for [`AppearancePlacement::FieldRect`].
+///
+/// A missing or degenerate rect is refused rather than drawn into: an
+/// appearance stream with a zero-area `/BBox` renders as nothing, and a
+/// signature that silently shows nothing is worse than one the caller was
+/// told to make invisible on purpose.
+fn existing_widget_rect(
+    entries: &[(String, PdfObject)],
+    field_name: &str,
+) -> Result<[f64; 4], SignApplyError> {
+    let refuse = |detail: String| SignApplyError::AppearancePlacement(detail);
+
+    let Some(PdfObject::Array(items)) = entry(entries, "Rect") else {
+        return Err(refuse(format!(
+            "the appearance was to be drawn inside field '{field_name}', but that field carries \
+             no /Rect array; the source is unchanged — sign it without an appearance (an \
+             invisible signature), or supply AppearancePlacement::Rect with an explicit box"
+        )));
+    };
+    if items.len() != 4 {
+        return Err(refuse(format!(
+            "field '{field_name}' has a /Rect of {} element(s) rather than 4; the source is \
+             unchanged — sign it without an appearance, or supply AppearancePlacement::Rect \
+             with an explicit box",
+            items.len()
+        )));
+    }
+    let mut rect = [0.0f64; 4];
+    for (slot, item) in rect.iter_mut().zip(items) {
+        *slot = match item {
+            PdfObject::Integer(v) => *v as f64,
+            PdfObject::Real(v) => *v,
+            other => {
+                return Err(refuse(format!(
+                    "field '{field_name}' has a /Rect whose entries are not all numbers \
+                     ({other:?}); the source is unchanged — sign it without an appearance, or \
+                     supply AppearancePlacement::Rect with an explicit box"
+                )))
+            }
+        };
+    }
+
+    let (width, height) = rect_size(rect);
+    if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return Err(refuse(format!(
+            "field '{field_name}' has a zero-area /Rect [{} {} {} {}], so an appearance drawn \
+             inside it would render as nothing; the source is unchanged — sign this field \
+             without an appearance (an invisible signature is what this field was built for), \
+             or supply AppearancePlacement::Rect with an explicit box",
+            fmt_num(rect[0]),
+            fmt_num(rect[1]),
+            fmt_num(rect[2]),
+            fmt_num(rect[3])
+        )));
+    }
+    Ok(rect)
+}
+
+/// Point `/AP /N` at the freshly appended form XObject and delete `/AS` if
+/// present — required whenever a widget carries an appearance stream (§25.5).
+///
+/// `/Rect` is the caller's business: `FieldRect` keeps the widget's own, and
+/// `Rect` overwrites it before this runs.
+fn point_widget_at_appearance(entries: &mut Vec<(String, PdfObject)>, xobject_num: u32) {
     set_entry(
         entries,
         "AP",
@@ -800,10 +939,8 @@ fn apply_appearance_to_widget(
 /// The caller wraps this with the `N 0 obj` header and `endobj` trailer via
 /// [`PdfObject::Raw`], the same convention `IncrementalWriter::append_objects`
 /// uses for every other appended object.
-fn build_appearance_xobject(appearance: &SignAppearance) -> Vec<u8> {
-    let width = appearance.rect[2] - appearance.rect[0];
-    let height = appearance.rect[3] - appearance.rect[1];
-    let (content, has_text) = appearance_content_stream(&appearance.content, width, height);
+fn build_appearance_xobject(content: &AppearanceContent, width: f64, height: f64) -> Vec<u8> {
+    let (content, has_text) = appearance_content_stream(content, width, height);
 
     let mut dict = Vec::new();
     dict.extend_from_slice(b"<< /Type /XObject /Subtype /Form /BBox [0 0 ");
@@ -1419,12 +1556,22 @@ fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The object number of the document's first page.
-fn first_page_object(
+/// Maximum depth of the `/Kids` walk, and the number of nodes it may visit.
+/// Both are guards against a malformed or hostile page tree, not real limits.
+const MAX_PAGE_TREE_DEPTH: usize = 64;
+const MAX_PAGE_TREE_NODES: usize = 50_000;
+
+/// The object numbers of the document's page leaves, in document order.
+///
+/// A leaf is a node with no `/Kids` array; `/Type` is not trusted, because a
+/// producer that omits it still expects the node to be a page. The walk is
+/// bounded in depth and node count and refuses to revisit a node, so a cycle
+/// is a refusal rather than a hang.
+fn page_objects(
     bytes: &[u8],
     catalog_entries: &[(String, PdfObject)],
-) -> Result<u32, SignApplyError> {
-    let mut node = match entry(catalog_entries, "Pages") {
+) -> Result<Vec<u32>, SignApplyError> {
+    let root = match entry(catalog_entries, "Pages") {
         Some(PdfObject::IndirectRef { obj_num, .. }) => *obj_num,
         _ => {
             return Err(SignApplyError::Unsupported(
@@ -1432,21 +1579,83 @@ fn first_page_object(
             ))
         }
     };
-    // Descend the leftmost spine. The depth bound is a guard against a cycle,
-    // not a real limit: page trees this deep do not occur.
-    for _ in 0..64 {
+
+    let mut pages = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![(root, 0usize)];
+    let mut budget = MAX_PAGE_TREE_NODES;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_PAGE_TREE_DEPTH {
+            return Err(SignApplyError::Unsupported(format!(
+                "the page tree is deeper than {MAX_PAGE_TREE_DEPTH} levels"
+            )));
+        }
+        if budget == 0 {
+            return Err(SignApplyError::Unsupported(format!(
+                "the page tree has more than {MAX_PAGE_TREE_NODES} nodes"
+            )));
+        }
+        budget -= 1;
+        if !visited.insert(node) {
+            // A node reachable twice is a cycle or a shared subtree; either
+            // way it has already contributed its pages.
+            continue;
+        }
         let entries = parse_object_dictionary(bytes, node)?;
-        let kids = match entry(&entries, "Kids") {
-            Some(PdfObject::Array(kids)) => kids.clone(),
-            _ => return Ok(node),
-        };
-        match kids.first() {
-            Some(PdfObject::IndirectRef { obj_num, .. }) => node = *obj_num,
-            _ => return Ok(node),
+        match entry(&entries, "Kids") {
+            Some(PdfObject::Array(kids)) => {
+                for kid in kids.iter().rev() {
+                    if let PdfObject::IndirectRef { obj_num, .. } = kid {
+                        stack.push((*obj_num, depth + 1));
+                    }
+                }
+            }
+            _ => pages.push(node),
         }
     }
-    Err(SignApplyError::Unsupported(
-        "the page tree is deeper than 64 levels or contains a cycle".into(),
+    Ok(pages)
+}
+
+/// The object number of page `index`, zero-based.
+fn page_object_at(
+    bytes: &[u8],
+    catalog_entries: &[(String, PdfObject)],
+    index: usize,
+) -> Result<u32, SignApplyError> {
+    let pages = page_objects(bytes, catalog_entries)?;
+    pages
+        .get(index)
+        .copied()
+        .ok_or_else(|| out_of_range(index, pages.len()))
+}
+
+/// Check that `index` names a page this document has, without caring which
+/// object it is — the existing-field path needs the refusal, not the page.
+fn check_page_index(bytes: &[u8], index: usize) -> Result<(), SignApplyError> {
+    let catalog = find_catalog_ref(bytes)?;
+    let catalog_entries = parse_object_dictionary(bytes, catalog.0)?;
+    let pages = page_objects(bytes, &catalog_entries)?;
+    if index >= pages.len() {
+        return Err(out_of_range(index, pages.len()));
+    }
+    Ok(())
+}
+
+fn out_of_range(index: usize, page_count: usize) -> SignApplyError {
+    let advice = if page_count == 0 {
+        "the source is unchanged — this document has no pages at all, so it cannot carry a \
+         visible signature; sign it without an appearance"
+            .to_string()
+    } else {
+        format!(
+            "the source is unchanged — use a page index between 0 and {}, or sign without an \
+             appearance",
+            page_count - 1
+        )
+    };
+    SignApplyError::AppearancePlacement(format!(
+        "the appearance was requested on page index {index}, but the document has {page_count} \
+         page(s); {advice}"
     ))
 }
 

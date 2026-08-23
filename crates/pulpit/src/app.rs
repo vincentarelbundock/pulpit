@@ -946,6 +946,26 @@ pub struct App {
     /// credential changes mid-flow, since switching credentials does not
     /// change which field was clicked.
     signing_prefill_field: Option<String>,
+    /// Credentials unlocked this session, by profile id, so a reader signing
+    /// several documents — or several fields — types a passphrase once
+    /// instead of once per signature.
+    ///
+    /// The tradeoff is deliberate and worth naming: key material now lives in
+    /// memory for as long as the application runs, rather than only for the
+    /// span of one Sign flow. That is the point of the cache, not a lapse.
+    /// §30.2 still holds around it — the key never leaves this process, never
+    /// crosses `reader_link` to a worker, is never written anywhere, and each
+    /// [`pulpit_render::sign::Credential`] zeroizes its key material when the
+    /// last `Arc` to it drops, which at the latest is process exit. Entries
+    /// are keyed by profile id and evicted when that profile is edited or
+    /// removed; nothing else clears the map, because "until the user quits"
+    /// is exactly the lifetime asked for.
+    ///
+    /// Ad-hoc credentials chosen through the file picker are never cached:
+    /// they have no stable identity to key on, and picking one is an explicit
+    /// one-off.
+    unlocked_credentials:
+        std::collections::HashMap<String, std::sync::Arc<pulpit_render::sign::Credential>>,
     /// Whether the document open right now is being kept append-only
     /// (SPEC-signing.md §31.3), because it was found to already carry a
     /// signature. `None` when the question has not been answered yet, or
@@ -1628,6 +1648,7 @@ impl App {
             signing_profile: None,
             signing_source: None,
             signing_prefill_field: None,
+            unlocked_credentials: std::collections::HashMap::new(),
             append_only: None,
             pending_append_only_offer: false,
             document_signatures: Vec::new(),
@@ -8492,6 +8513,10 @@ impl App {
                         profile.name = editor.name.trim().to_string();
                         profile.appearance = editor.appearance.clone();
                     }
+                    // The edited profile may now point somewhere else, so the
+                    // credential unlocked under this id is no longer known to
+                    // be the right one: drop it and ask again next time.
+                    self.unlocked_credentials.remove(&id);
                     self.signature_profile_editor = None;
                     self.persist();
                     return Task::none();
@@ -8637,11 +8662,29 @@ impl App {
                     }
                 }
                 self.settings.signatures.remove(&id);
+                // The profile is gone; so is any right to keep its key
+                // material around. Dropping the last `Arc` zeroizes it.
+                self.unlocked_credentials.remove(&id);
                 self.signature_profile_removal = None;
                 self.persist();
                 Task::none()
             }
         }
+    }
+
+    /// Wall-clock seconds since the epoch, or 0 if the clock is before it.
+    /// Only ever used to age a certificate's validity window against now.
+    fn unix_now(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Whether this profile's credential is already unlocked for the session,
+    /// so the profile picker can say which ones will not ask for a passphrase.
+    pub fn is_profile_unlocked(&self, id: &str) -> bool {
+        self.unlocked_credentials.contains_key(id)
     }
 
     pub fn signature_profile_credential_path(
@@ -8711,7 +8754,32 @@ impl App {
                     });
                     return Task::none();
                 }
-                self.signing_profile = Some(id);
+                self.signing_profile = Some(id.clone());
+                // Already unlocked this session: skip the passphrase step and
+                // land where it would have led. The summary is rebuilt
+                // against the current time rather than reused, so an expiry
+                // that has since passed is still warned about.
+                if let Some(credential) = self.unlocked_credentials.get(&id).cloned() {
+                    match credential.summary() {
+                        Ok(summary) => {
+                            let info = crate::signing::CredentialInfo::from_summary(
+                                summary,
+                                self.unix_now(),
+                            );
+                            self.signing = Some(SigningFlow::CredentialSummary {
+                                credential_path,
+                                credential,
+                                info,
+                            });
+                            return Task::none();
+                        }
+                        Err(_) => {
+                            // A cached credential that can no longer describe
+                            // itself is of no use: drop it and ask again.
+                            self.unlocked_credentials.remove(&id);
+                        }
+                    }
+                }
                 self.signing = Some(SigningFlow::EnterPassphrase {
                     credential_path,
                     passphrase: String::new(),
@@ -8797,11 +8865,13 @@ impl App {
                         return Task::none();
                     }
                 };
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let info = crate::signing::CredentialInfo::from_summary(summary, now);
+                let info = crate::signing::CredentialInfo::from_summary(summary, self.unix_now());
+                // Remember it for the rest of the session, but only when it
+                // came from a saved profile: an ad-hoc file has no stable id
+                // to key on. See `unlocked_credentials` for the tradeoff.
+                if let Some(id) = self.signing_profile.clone() {
+                    self.unlocked_credentials.insert(id, credential.clone());
+                }
                 self.signing = Some(SigningFlow::CredentialSummary {
                     credential_path,
                     credential,
@@ -8857,18 +8927,17 @@ impl App {
                     countersigning,
                     ..Default::default()
                 };
-                let on_page_zero = self
-                    .reader
-                    .current_page()
-                    .is_some_and(|page| page == pulpit_core::page::PageIndex(0));
-                if let Some(appearance) = self
+                let context = self.placement_context(options.target.as_ref());
+                let profile_appearance = self
                     .signing_profile
                     .as_deref()
                     .and_then(|id| self.settings.signatures.profile(id))
-                    .map(|profile| &profile.appearance)
-                {
-                    crate::signing::apply_profile_defaults(&mut options, appearance, on_page_zero);
-                }
+                    .map(|profile| profile.appearance.clone());
+                crate::signing::apply_target_defaults(
+                    &mut options,
+                    profile_appearance.as_ref(),
+                    &context,
+                );
                 self.signing = Some(SigningFlow::Options {
                     credential,
                     info,
@@ -8896,33 +8965,37 @@ impl App {
                 Task::none()
             }
             SignMsg::TargetChosen(choice) => {
+                // A different target is a different destination for the mark:
+                // one field's own box, another's, or the presets a new field
+                // falls back to. The visible/invisible answer is the reader's
+                // and carries across; where it lands is re-resolved here.
+                let context = self.placement_context(Some(&choice));
                 if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
                     options.target = Some(choice);
+                    options.retarget(&context);
                 }
                 Task::none()
             }
             SignMsg::VisibleChanged(requested) => {
+                // The page the reader is showing *now* is what a preset is
+                // measured against, captured here rather than read again at
+                // Sign time: what the reader saw when they chose is what gets
+                // signed, however far they scroll before confirming.
+                let target = match self.signing.as_ref() {
+                    Some(SigningFlow::Options { options, .. }) => options.target.clone(),
+                    _ => None,
+                };
+                let context = self.placement_context(target.as_ref());
                 if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
-                    // §25.5's engine constraint is page_index == 0; rather
-                    // than let the user place a box that Sign would then
-                    // refuse, Visible is only ever turned on while page 0 is
-                    // showing (the view also disables the control, so this
-                    // is a second, cheap guard, not the only one).
-                    let on_page_zero = self
-                        .reader
-                        .current_page()
-                        .is_some_and(|p| p == pulpit_core::page::PageIndex(0));
-                    if requested && !on_page_zero {
-                        // Ignored: nothing to undo, nothing was armed.
-                    } else {
-                        options.set_visible(requested);
-                    }
+                    options.set_visible(requested, &context);
                 }
                 Task::none()
             }
             SignMsg::PlacementPositionChosen(position) => {
                 if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
-                    if let Some(placement) = options.placement.as_mut() {
+                    if let Some(crate::signing::AppearancePlan::Preset { placement, .. }) =
+                        options.placement.as_mut()
+                    {
                         placement.position = position;
                     }
                 }
@@ -8930,7 +9003,9 @@ impl App {
             }
             SignMsg::PlacementSizeChosen(size) => {
                 if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
-                    if let Some(placement) = options.placement.as_mut() {
+                    if let Some(crate::signing::AppearancePlan::Preset { placement, .. }) =
+                        options.placement.as_mut()
+                    {
                         placement.size = size;
                     }
                 }
@@ -9218,6 +9293,40 @@ impl App {
         }
     }
 
+    /// Where a visible mark could go for `target`, as the Sign flow's state
+    /// machine wants it (`crate::signing::PlacementContext`).
+    ///
+    /// An existing field the reader can point at was drawn by the sender at a
+    /// definite place on a definite page, so that box is the answer and no
+    /// preset applies. Locating it means finding the field's first widget in
+    /// the reader session's form-field list and checking that its box has an
+    /// area: the engine refuses `FieldRect` for a missing or zero-area
+    /// `/Rect` (it would produce an appearance stream no viewer can show), so
+    /// a field that would be refused falls back here rather than at Sign
+    /// time. Everything else — a new field, an unplaced field, a document
+    /// whose fields were never described — gets presets against the page the
+    /// reader is currently showing.
+    fn placement_context(
+        &self,
+        target: Option<&crate::signing::TargetChoice>,
+    ) -> crate::signing::PlacementContext {
+        use crate::signing::{PlacementContext, TargetChoice};
+
+        if let Some(TargetChoice::ExistingField(name)) = target {
+            if let Some((page, bounds)) = self.reader.field_widget_box(name) {
+                if bounds.right > bounds.left && bounds.bottom > bounds.top {
+                    return PlacementContext::FieldBox {
+                        field: name.clone(),
+                        page_index: page.0,
+                    };
+                }
+            }
+        }
+        PlacementContext::Presets {
+            page_index: self.reader.current_page().map_or(0, |page| page.0),
+        }
+    }
+
     /// §31.1 step 8's destination chooser: `{stem}-signed.pdf` beside the
     /// source, the same shape Save As already uses.
     fn sign_pick_destination(&mut self) -> Task<Message> {
@@ -9249,12 +9358,13 @@ impl App {
             .as_deref()
             .and_then(|id| self.settings.signatures.profile(id))
             .map(|profile| profile.appearance.clone());
-        // §25.5: build a visible appearance when requested. The engine only
-        // accepts page_index 0, and the Options step only lets Visible be
-        // turned on while page 0 is showing (SignMsg::VisibleChanged), so
-        // page 0's geometry is always the right one to size the box against.
-        let appearance = options.placement.and_then(|_| {
-            let geometry = self.reader.page_geometry(pulpit_core::page::PageIndex(0))?;
+        // §25.5: build a visible appearance when requested, against the page
+        // the plan named when the choice was made — not the page showing now,
+        // which the reader may have scrolled away from since.
+        let appearance = options.appearance_page_index().and_then(|page_index| {
+            let geometry = self
+                .reader
+                .page_geometry(pulpit_core::page::PageIndex(page_index))?;
             let signer_cn =
                 crate::signing::subject_common_name(&credential.summary().ok()?.subject)
                     .to_string();

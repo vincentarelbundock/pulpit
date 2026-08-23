@@ -10,13 +10,13 @@
 mod signing_fixture;
 
 use pulpit_render::sign::apply::{
-    sign_document_file, sign_document_file_with_tamper, AppearanceContent, SignAppearance,
-    SignApplyError, SignRequest, SignTarget,
+    sign_document_file, sign_document_file_with_tamper, AppearanceContent, AppearancePlacement,
+    SignAppearance, SignApplyError, SignRequest, SignTarget,
 };
 use pulpit_render::verify::{self, SignatureCoverage, SignatureVerification};
 use signing_fixture::{
-    build_pdf_with_fieldmdp_lock, build_unsigned_pdf, load_test_credential, skip_message,
-    SIGNING_TIME_UNIX,
+    build_pdf_with_fieldmdp_lock, build_unsigned_pdf, build_unsigned_pdf_multipage,
+    load_test_credential, skip_message, FixtureField, SIGNING_TIME_UNIX,
 };
 use std::path::{Path, PathBuf};
 
@@ -341,8 +341,10 @@ fn a_visible_ink_signature_carries_a_form_xobject_appearance() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
-        rect: [72.0, 72.0, 272.0, 132.0],
-        page_index: 0,
+        placement: AppearancePlacement::Rect {
+            page_index: 0,
+            rect: [72.0, 72.0, 272.0, 132.0],
+        },
         content: AppearanceContent::Ink {
             strokes: vec![vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]],
             stroke_width: 1.5,
@@ -397,8 +399,10 @@ fn a_visible_text_signature_carries_the_signer_name() {
 
     let mut req = request(SignTarget::NewInvisibleField { name: None });
     req.appearance = Some(SignAppearance {
-        rect: [72.0, 72.0, 272.0, 132.0],
-        page_index: 0,
+        placement: AppearancePlacement::Rect {
+            page_index: 0,
+            rect: [72.0, 72.0, 272.0, 132.0],
+        },
         content: AppearanceContent::Text {
             signer_name: "Ada Lovelace".to_string(),
             time_label: "2024-08-20 22:00 UTC".to_string(),
@@ -456,5 +460,414 @@ fn the_invisible_path_is_unchanged_without_an_appearance() {
     assert!(
         !text.contains("/Subtype /Form"),
         "an invisible signature must not carry a form XObject appearance"
+    );
+}
+
+/// §25.5: an appearance on a page that is not page 0. The widget must join
+/// *that* page's `/Annots` — the last page of a three-page document — and no
+/// other page may be re-emitted at all.
+#[test]
+fn a_visible_appearance_lands_on_the_page_it_names() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("three-pages.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, build_unsigned_pdf_multipage(3, &[])).expect("write the source");
+
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::Rect {
+            page_index: 2,
+            rect: [300.0, 60.0, 540.0, 150.0],
+        },
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024-08-20 22:00 UTC".to_string(),
+        },
+    });
+
+    let report = sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing on the last page succeeds");
+    assert_eq!(report.field_name, "Signature1");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses[0].intact);
+    assert!(statuses[0].valid);
+    assert_eq!(statuses[0].coverage, SignatureCoverage::EntireFile);
+
+    // The fixture numbers its pages 3, 4, 5 in order, so page index 2 is
+    // object 5. That is the page the widget must have joined, resolved
+    // through the output's own cross-reference chain.
+    let third_page = String::from_utf8_lossy(
+        pulpit_render::verify::find_object(&output, 5).expect("the third page resolves"),
+    )
+    .into_owned();
+    assert!(
+        third_page.contains("/Annots"),
+        "the widget must join the third page's /Annots, got: {third_page}"
+    );
+    let first_page = String::from_utf8_lossy(
+        pulpit_render::verify::find_object(&output, 3).expect("the first page resolves"),
+    )
+    .into_owned();
+    assert!(
+        !first_page.contains("/Annots"),
+        "page 0 must be untouched, got: {first_page}"
+    );
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/P 5 0 R"),
+        "the widget's /P must name the third page"
+    );
+    assert!(
+        text.contains("/BBox [0 0 240 90]"),
+        "the BBox must match the 240x90 rect, got: {text}"
+    );
+
+    std::fs::write(oracle_fixture_path("apply-visible-last-page.pdf"), &output)
+        .expect("write the oracle fixture");
+}
+
+/// A page index the document does not have is a typed refusal naming the real
+/// page count, not a silently wrong page.
+#[test]
+fn an_appearance_on_a_page_the_document_lacks_is_refused() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("two-pages.pdf");
+    let refused = directory.path().join("refused.pdf");
+    std::fs::write(&source, build_unsigned_pdf_multipage(2, &[])).expect("write the source");
+
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::Rect {
+            page_index: 7,
+            rect: [10.0, 10.0, 110.0, 60.0],
+        },
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024".to_string(),
+        },
+    });
+
+    let error = sign_document_file(&source, &refused, &credential, &req)
+        .expect_err("page 7 of a two-page document does not exist");
+    match error {
+        SignApplyError::AppearancePlacement(detail) => {
+            assert!(detail.contains("page index 7"), "{detail}");
+            assert!(detail.contains("2 page(s)"), "{detail}");
+            assert!(detail.contains("between 0 and 1"), "{detail}");
+        }
+        other => panic!("expected an appearance-placement refusal, got {other:?}"),
+    }
+    assert!(!refused.exists(), "nothing may be written on a refusal");
+}
+
+/// `FieldRect` means "inside the box the field already has". A field being
+/// created has none, so asking for it is caller misuse and is refused before
+/// anything is assembled.
+#[test]
+fn a_field_rect_appearance_is_refused_for_a_new_field() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("unsigned.pdf");
+    let refused = directory.path().join("refused.pdf");
+    std::fs::write(&source, build_unsigned_pdf(&[])).expect("write the source");
+
+    let mut req = request(SignTarget::NewInvisibleField { name: None });
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024".to_string(),
+        },
+    });
+
+    let error = sign_document_file(&source, &refused, &credential, &req)
+        .expect_err("a new field has no rect to draw inside");
+    match error {
+        SignApplyError::AppearancePlacement(detail) => {
+            assert!(detail.contains("FieldRect"), "{detail}");
+            assert!(detail.contains("AppearancePlacement::Rect"), "{detail}");
+        }
+        other => panic!("expected an appearance-placement refusal, got {other:?}"),
+    }
+    assert!(!refused.exists());
+}
+
+/// The main sign-here flow: an existing empty field on the last page, with a
+/// box its author drew. The appearance is drawn inside that box and `/Rect`
+/// is left exactly as the sender wrote it — the field does not move.
+#[test]
+fn a_field_rect_appearance_keeps_the_fields_own_box() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("contract.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(
+        &source,
+        build_unsigned_pdf_multipage(
+            3,
+            &[FixtureField {
+                name: "Signature",
+                page: 2,
+                rect: [100.0, 100.0, 340.0, 190.0],
+            }],
+        ),
+    )
+    .expect("write the source");
+
+    let mut req = request(SignTarget::ExistingField("Signature".to_string()));
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::InkAndText {
+            strokes: vec![vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]],
+            stroke_width: 1.5,
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024-08-20 22:00 UTC".to_string(),
+        },
+    });
+
+    let report = sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing into the sender's box succeeds");
+    assert_eq!(report.field_name, "Signature");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses[0].intact);
+    assert!(statuses[0].valid);
+    assert_eq!(statuses[0].coverage, SignatureCoverage::EntireFile);
+
+    // The fixture's field is object 7: 1 catalog, 2 page tree, 3..5 pages,
+    // 6 AcroForm, 7 the field.
+    let field = String::from_utf8_lossy(
+        pulpit_render::verify::find_object(&output, 7).expect("the field resolves"),
+    )
+    .into_owned();
+    assert!(
+        field.contains("/Rect [100 100 340 190]"),
+        "the sender's own rect must survive signing, got: {field}"
+    );
+    assert!(
+        field.contains("/AP <</N "),
+        "the widget must point at the appearance stream, got: {field}"
+    );
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/BBox [0 0 240 90]"),
+        "the BBox must match the field's own 240x90 box, got: {text}"
+    );
+    assert!(
+        text.contains("(Ada Lovelace) Tj"),
+        "expected the signer name inside the appearance"
+    );
+    // The page is not re-emitted at all: the widget is already in its /Annots.
+    let appended =
+        String::from_utf8_lossy(&output[std::fs::metadata(&source).unwrap().len() as usize..]);
+    assert!(
+        !appended.contains("5 0 obj"),
+        "an existing field's page must not be rewritten, got: {appended}"
+    );
+
+    std::fs::write(oracle_fixture_path("apply-field-rect.pdf"), &output)
+        .expect("write the oracle fixture");
+}
+
+/// The same placement on the countersigning path: a second empty field on a
+/// signed document, drawn inside its own box, with the first signature still
+/// intact afterwards.
+#[test]
+fn a_field_rect_countersignature_keeps_the_first_signature_valid() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("contract.pdf");
+    let first_pass = directory.path().join("signed-once.pdf");
+    let second_pass = directory.path().join("signed-twice.pdf");
+    std::fs::write(
+        &source,
+        build_unsigned_pdf_multipage(
+            2,
+            &[
+                FixtureField {
+                    name: "Sender",
+                    page: 0,
+                    rect: [72.0, 600.0, 272.0, 660.0],
+                },
+                FixtureField {
+                    name: "Recipient",
+                    page: 1,
+                    rect: [72.0, 100.0, 312.0, 190.0],
+                },
+            ],
+        ),
+    )
+    .expect("write the source");
+
+    sign_document_file(
+        &source,
+        &first_pass,
+        &credential,
+        &request(SignTarget::ExistingField("Sender".to_string())),
+    )
+    .expect("the first pass signs");
+
+    let mut req = request(SignTarget::ExistingField("Recipient".to_string()));
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::Ink {
+            strokes: vec![vec![(0.1, 0.1), (0.9, 0.9)]],
+            stroke_width: 2.0,
+        },
+    });
+    let second = sign_document_file(&first_pass, &second_pass, &credential, &req)
+        .expect("the countersignature draws into the recipient's box");
+    assert_eq!(second.field_name, "Recipient");
+    assert_eq!(second.signature_count, 2);
+
+    let after_first = std::fs::read(&first_pass).expect("read the first output");
+    let output = std::fs::read(&second_pass).expect("read the second output");
+    assert_eq!(
+        &output[..after_first.len()],
+        &after_first[..],
+        "the countersignature must append byte for byte"
+    );
+
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 2);
+    for status in &statuses {
+        assert!(status.intact, "'{}' is not intact", status.field_name);
+        assert!(status.valid, "'{}' is not valid", status.field_name);
+    }
+    let sender = statuses.iter().find(|s| s.field_name == "Sender").unwrap();
+    let recipient = statuses
+        .iter()
+        .find(|s| s.field_name == "Recipient")
+        .unwrap();
+    assert_eq!(recipient.coverage, SignatureCoverage::EntireFile);
+    assert_eq!(sender.coverage, SignatureCoverage::EntireRevision);
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/BBox [0 0 240 90]"),
+        "the BBox must match the recipient field's own box, got: {text}"
+    );
+
+    std::fs::write(
+        oracle_fixture_path("apply-field-rect-countersigned.pdf"),
+        &output,
+    )
+    .expect("write the oracle fixture");
+}
+
+/// A placeholder `/Rect [0 0 0 0]` would produce an appearance stream nothing
+/// can render. That is refused, with the invisible fallback named, rather
+/// than written out as a signature that shows nothing.
+#[test]
+fn a_degenerate_field_rect_is_refused_with_the_invisible_fallback_named() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("placeholder-field.pdf");
+    let refused = directory.path().join("refused.pdf");
+    // `build_unsigned_pdf` writes the invisible placeholder rect [0 0 0 0].
+    std::fs::write(&source, build_unsigned_pdf(&["Sig1"])).expect("write the source");
+
+    let mut req = request(SignTarget::ExistingField("Sig1".to_string()));
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024".to_string(),
+        },
+    });
+
+    let error = sign_document_file(&source, &refused, &credential, &req)
+        .expect_err("a zero-area rect cannot carry a visible appearance");
+    match error {
+        SignApplyError::AppearancePlacement(detail) => {
+            assert!(detail.contains("Sig1"), "{detail}");
+            assert!(detail.contains("zero-area"), "{detail}");
+            assert!(detail.contains("without an appearance"), "{detail}");
+        }
+        other => panic!("expected an appearance-placement refusal, got {other:?}"),
+    }
+    assert!(!refused.exists(), "nothing may be written on a refusal");
+}
+
+/// `Rect` keeps its old meaning for an existing field: the box moves to where
+/// the caller says, which is what the preset-placement flow relies on.
+#[test]
+fn an_explicit_rect_still_overwrites_an_existing_fields_box() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("contract.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(
+        &source,
+        build_unsigned_pdf_multipage(
+            1,
+            &[FixtureField {
+                name: "Sig1",
+                page: 0,
+                rect: [100.0, 100.0, 340.0, 190.0],
+            }],
+        ),
+    )
+    .expect("write the source");
+
+    let mut req = request(SignTarget::ExistingField("Sig1".to_string()));
+    req.appearance = Some(SignAppearance {
+        placement: AppearancePlacement::Rect {
+            page_index: 0,
+            rect: [10.0, 20.0, 110.0, 70.0],
+        },
+        content: AppearanceContent::Text {
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024".to_string(),
+        },
+    });
+
+    sign_document_file(&source, &destination, &credential, &req).expect("signing succeeds");
+    let output = std::fs::read(&destination).expect("read the output");
+    assert!(statuses(&output)[0].valid);
+
+    // 1 catalog, 2 page tree, 3 page, 4 AcroForm, 5 the field.
+    let field = String::from_utf8_lossy(
+        pulpit_render::verify::find_object(&output, 5).expect("the field resolves"),
+    )
+    .into_owned();
+    assert!(
+        field.contains("/Rect [10 20 110 70]"),
+        "an explicit rect must overwrite the field's box, got: {field}"
+    );
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("/BBox [0 0 100 50]"),
+        "the BBox must match the explicit rect, got: {text}"
     );
 }

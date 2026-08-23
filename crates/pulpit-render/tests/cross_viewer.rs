@@ -33,6 +33,7 @@ use pulpit_render::pdf::synth::write_pdf;
 use pulpit_testkit::Engines;
 
 mod common;
+mod signing_fixture;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-cross-{name}"));
@@ -529,4 +530,93 @@ fn write_rotated_pdf(path: &Path, degrees: i32) -> std::io::Result<()> {
         .as_bytes(),
     );
     std::fs::write(path, bytes)
+}
+
+/// §25.5, checked where it matters: a signature drawn into a field's own box
+/// on a page that is not page 0 has to be *visible*, in an engine that is not
+/// PDFium, on that page and nowhere else.
+///
+/// PDFium agreeing with PDFium about an `/AP /N` stream would establish
+/// nothing here; MuPDF or Poppler drawing ink inside the sender's box is the
+/// claim the flow makes.
+#[test]
+fn another_renderer_draws_the_signature_inside_the_senders_box() {
+    let engines = Engines::detect();
+    if !engines.can_render("the visible signature appearance") {
+        return;
+    }
+    let Some(credential) = signing_fixture::load_test_credential() else {
+        signing_fixture::skip_message();
+        return;
+    };
+
+    let directory = temp_dir("signature-appearance");
+    let unsigned = directory.join("contract.pdf");
+    let signed = directory.join("signed.pdf");
+    std::fs::write(
+        &unsigned,
+        signing_fixture::build_unsigned_pdf_multipage(
+            3,
+            &[signing_fixture::FixtureField {
+                name: "Recipient",
+                page: 2,
+                rect: [100.0, 100.0, 340.0, 250.0],
+            }],
+        ),
+    )
+    .expect("write the unsigned contract");
+
+    let mut request = pulpit_render::sign::SignRequest {
+        signing_time: signing_fixture::SIGNING_TIME_UNIX,
+        field: pulpit_render::sign::SignTarget::ExistingField("Recipient".to_string()),
+        id2: [7u8; 16],
+        ..Default::default()
+    };
+    request.appearance = Some(pulpit_render::sign::SignAppearance {
+        placement: pulpit_render::sign::AppearancePlacement::FieldRect,
+        content: pulpit_render::sign::AppearanceContent::Ink {
+            strokes: vec![
+                vec![(0.05, 0.1), (0.5, 0.9), (0.95, 0.1)],
+                vec![(0.05, 0.5), (0.95, 0.5)],
+            ],
+            stroke_width: 4.0,
+        },
+    });
+    pulpit_render::sign::sign_document_file(&unsigned, &signed, &credential, &request)
+        .expect("signing into the field's own box succeeds");
+
+    let before = engines
+        .render(&unsigned, 2, 72)
+        .expect("another renderer draws the unsigned last page");
+    let after = engines
+        .render(&signed, 2, 72)
+        .expect("another renderer draws the signed last page");
+    // The comparison cannot be "more dark pixels than before": an empty
+    // signature widget is exactly the thing viewers synthesise an appearance
+    // for, and MuPDF draws an empty box in the same rect. What distinguishes
+    // ours is *where* the ink is — the strokes cross the middle of the box,
+    // which a synthesised border never touches.
+    //
+    // The rect is [100 100 340 250] on a 612x792 page; this is its middle
+    // fifth-to-fourth-fifth, in normalized coordinates with y downward.
+    let inner = (0.2418f32, 0.7222f32, 0.4771f32, 0.8359f32);
+    let before_inner = before.ink(inner.0, inner.1, inner.2, inner.3, 200);
+    let after_inner = after.ink(inner.0, inner.1, inner.2, inner.3, 200);
+    assert!(
+        after_inner > before_inner + 0.01,
+        "another renderer drew {after_inner} ink inside the field's box against \
+         {before_inner} before signing; the appearance is not visible outside pulpit"
+    );
+
+    let first_before = engines
+        .render(&unsigned, 0, 72)
+        .expect("another renderer draws the unsigned first page");
+    let first_after = engines
+        .render(&signed, 0, 72)
+        .expect("another renderer draws the signed first page");
+    assert_eq!(
+        first_before.dark_total(200),
+        first_after.dark_total(200),
+        "the appearance must not touch a page it was not placed on"
+    );
 }

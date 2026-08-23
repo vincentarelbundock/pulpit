@@ -12,17 +12,20 @@
 //!
 //! - Visible signatures place either the selected profile's saved ink,
 //!   text, or combined appearance, or §25.5's default text template for an
-//!   ad-hoc credential. Placement uses a small set of presets rather than a
-//!   free-form box-drawing interaction — see [`Placement`]'s doc comment for
-//!   why the annotation system's rubber-band gesture (`SPEC-document.md`
-//!   §8.4) is not reused here. No ink is composited: there is no
-//!   page box-drawing interaction. Profile ink is captured in Settings by a
+//!   ad-hoc credential. Profile ink is captured in Settings by a
 //!   signature-specific pad, distinct from the page annotation ink tool.
-//! - The engine only accepts `page_index == 0` (`pulpit-render`'s
-//!   `SignApplyError::Unsupported`), so v1 offers the Visible choice only
-//!   while the reader is showing the first page; elsewhere it is disabled
-//!   with the reason shown, rather than letting the user place a box that
-//!   would then be refused at Sign time.
+//! - Where the mark goes depends on what is being signed, and both cases are
+//!   named by [`AppearancePlan`]. Signing into an existing field whose box
+//!   the application could locate draws inside that box, on whatever page
+//!   the document already puts it on: the sender drew the rectangle, so
+//!   there is nothing left to place. Everywhere else — a new field, or an
+//!   existing field with no usable `/Rect` — placement uses a small set of
+//!   position and size presets against one captured page, rather than a
+//!   free-form box-drawing interaction; see [`PlacementPosition`]'s doc
+//!   comment for why the annotation system's rubber-band gesture
+//!   (`SPEC-document.md` §8.4) is not reused here. The page is captured when
+//!   the Visible choice is made, so scrolling afterwards cannot move the
+//!   mark out from under the choice the reader saw.
 //! - No certification (`NO_CHANGES`) and no timestamp authority: v1 always
 //!   produces an approval signature with no TSA call, matching
 //!   `pulpit-render`'s current `sign_document_file`.
@@ -125,25 +128,119 @@ pub struct SigningOptions {
     /// Only meaningful together with `placement`, which is `Some` exactly
     /// when this is `true` (see [`SigningOptions::set_visible`]).
     pub visible_requested: bool,
-    /// The page-relative box, set together with `visible_requested`. `None`
+    /// Where the mark goes, set together with `visible_requested`. `None`
     /// for an invisible signature.
-    pub placement: Option<Placement>,
+    pub placement: Option<AppearancePlan>,
 }
 
 impl SigningOptions {
     /// Turn the visible/invisible choice on or off, keeping `placement` in
     /// lock-step so a caller can never observe `visible_requested: true`
-    /// with `placement: None` or vice versa. Turning it on for the first
-    /// time seeds [`Placement::default`]; turning it off drops whatever
-    /// preset was chosen, so re-enabling starts fresh rather than resurfacing
-    /// a stale box.
-    pub fn set_visible(&mut self, visible: bool) {
+    /// with `placement: None` or vice versa. Turning it on resolves
+    /// `context` — what the application knows about the selected target and
+    /// the page the reader is showing — into a plan; turning it off drops it,
+    /// so re-enabling asks the application again rather than resurfacing a
+    /// box captured against a page that is no longer showing.
+    ///
+    /// A preset already chosen survives being re-resolved against the same
+    /// kind of context, so re-selecting a target or re-pressing Visible does
+    /// not reset position and size.
+    pub fn set_visible(&mut self, visible: bool, context: &PlacementContext) {
         self.visible_requested = visible;
-        self.placement = if visible {
-            Some(self.placement.unwrap_or_default())
-        } else {
-            None
-        };
+        self.placement = visible.then(|| context.plan(self.chosen_preset()));
+    }
+
+    /// Re-resolve an already-made visible choice against a new `context`,
+    /// leaving an invisible signature invisible. Selecting a different target
+    /// field changes where the mark would land but not whether the reader
+    /// asked for one, so the visible flag is carried across.
+    pub fn retarget(&mut self, context: &PlacementContext) {
+        if self.visible_requested {
+            self.set_visible(true, context);
+        }
+    }
+
+    /// The preset the reader picked, if the current plan uses presets at all.
+    pub fn chosen_preset(&self) -> Option<Placement> {
+        match self.placement.as_ref() {
+            Some(AppearancePlan::Preset { placement, .. }) => Some(*placement),
+            _ => None,
+        }
+    }
+
+    /// The page the appearance will be drawn on, for the caller that has to
+    /// look up that page's geometry before building the rect. `None` for an
+    /// invisible signature.
+    pub fn appearance_page_index(&self) -> Option<usize> {
+        self.placement.as_ref().map(AppearancePlan::page_index)
+    }
+}
+
+/// Where a visible signature's appearance is drawn.
+///
+/// The two variants are the two `pulpit_render::sign::AppearancePlacement`
+/// cases, carrying the extra context the dialog needs to say where the mark
+/// will land before it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppearancePlan {
+    /// Inside the target field's own box, wherever the document already puts
+    /// it. The engine reads the rect from the field itself
+    /// (`AppearancePlacement::FieldRect`) and never moves it; `field` and
+    /// `page_index` are carried only so the dialog can name the destination.
+    InFieldBox { field: String, page_index: usize },
+    /// A preset box on `page_index` — the page the reader was showing when
+    /// the Visible choice was made, captured then rather than read again at
+    /// Sign time so scrolling in between cannot move the mark.
+    Preset {
+        page_index: usize,
+        placement: Placement,
+    },
+}
+
+impl AppearancePlan {
+    pub fn page_index(&self) -> usize {
+        match self {
+            AppearancePlan::InFieldBox { page_index, .. } => *page_index,
+            AppearancePlan::Preset { page_index, .. } => *page_index,
+        }
+    }
+}
+
+/// What the application knows, at the moment a visible choice is made, about
+/// where the mark could go: the selected target's own box when it has a
+/// usable one, and otherwise the page the reader is looking at.
+///
+/// Computed by the application (only it can see the reader and the document's
+/// fields) and passed in, which is what keeps this module free of both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementContext {
+    /// The selected target is an existing field whose widget the application
+    /// located, with a box big enough to draw in.
+    FieldBox { field: String, page_index: usize },
+    /// No located box: a new field, or an existing field the application
+    /// could not place. Presets apply, against `page_index`.
+    Presets { page_index: usize },
+}
+
+impl PlacementContext {
+    /// Resolve into a plan, keeping `chosen` when presets still apply.
+    fn plan(&self, chosen: Option<Placement>) -> AppearancePlan {
+        match self {
+            PlacementContext::FieldBox { field, page_index } => AppearancePlan::InFieldBox {
+                field: field.clone(),
+                page_index: *page_index,
+            },
+            PlacementContext::Presets { page_index } => AppearancePlan::Preset {
+                page_index: *page_index,
+                placement: chosen.unwrap_or_default(),
+            },
+        }
+    }
+
+    /// Whether the target's own box decides the placement, in which case the
+    /// dialog offers no presets: the sender drew the rectangle.
+    pub fn is_field_box(&self) -> bool {
+        matches!(self, PlacementContext::FieldBox { .. })
     }
 }
 
@@ -187,6 +284,17 @@ impl PlacementPosition {
             PlacementPosition::BottomLeft => "Bottom left",
             PlacementPosition::BottomRight => "Bottom right",
             PlacementPosition::Center => "Center",
+        }
+    }
+
+    /// The same choice mid-sentence: "…at the top left of page 3."
+    pub fn spot_label(self) -> &'static str {
+        match self {
+            PlacementPosition::TopLeft => "top left",
+            PlacementPosition::TopRight => "top right",
+            PlacementPosition::BottomLeft => "bottom left",
+            PlacementPosition::BottomRight => "bottom right",
+            PlacementPosition::Center => "center",
         }
     }
 }
@@ -306,11 +414,33 @@ pub fn text_appearance_content(
     }
 }
 
+/// Translate a plan into the engine's placement. `page_width`/`page_height`
+/// are the displayed size in points (`PageGeometry::width`/`height`) of the
+/// page [`SigningOptions::appearance_page_index`] names — the caller looks
+/// the geometry up from that index rather than guessing, which is what keeps
+/// the rect sized against the page it will land on. Ignored for
+/// [`AppearancePlan::InFieldBox`], where the engine reads the rect from the
+/// field itself.
+fn placement_for(
+    plan: &AppearancePlan,
+    page_width: f64,
+    page_height: f64,
+) -> pulpit_render::sign::AppearancePlacement {
+    match plan {
+        AppearancePlan::InFieldBox { .. } => pulpit_render::sign::AppearancePlacement::FieldRect,
+        AppearancePlan::Preset {
+            page_index,
+            placement,
+        } => pulpit_render::sign::AppearancePlacement::Rect {
+            page_index: *page_index,
+            rect: placement.rect(page_width, page_height),
+        },
+    }
+}
+
 /// Build the `SignAppearance` for `options`, or `None` for an invisible
-/// signature. `page_width`/`page_height` are the current page's displayed
-/// size in points (`PageGeometry::width`/`height`); the caller is
-/// responsible for only calling this when the target page is page 0 — the
-/// only page index `pulpit-render` accepts (§25.5).
+/// signature, with §25.5's default text template as its content. See
+/// [`placement_for`] for which page's geometry to pass.
 #[cfg(test)]
 pub fn appearance_for(
     options: &SigningOptions,
@@ -319,28 +449,49 @@ pub fn appearance_for(
     page_width: f64,
     page_height: f64,
 ) -> Option<pulpit_render::sign::SignAppearance> {
-    let placement = options.placement?;
+    let plan = options.placement.as_ref()?;
     Some(pulpit_render::sign::SignAppearance {
-        rect: placement.rect(page_width, page_height),
-        page_index: 0,
+        placement: placement_for(plan, page_width, page_height),
         content: text_appearance_content(signer_cn, signing_time_label),
     })
 }
 
+/// Seed the per-document options with what the target itself implies, then
+/// with a profile's saved visibility and box presets.
+///
+/// Signing into a field whose box the application located is visible by
+/// default whether or not a profile is in play, and whether or not that
+/// profile saved a visible default: the sender drew a rectangle for a mark,
+/// so leaving it empty would be the surprising answer. Presets never apply
+/// there, so a profile's saved position and size are simply not consulted.
+pub fn apply_target_defaults(
+    options: &mut SigningOptions,
+    profile: Option<&crate::settings::StoredSignatureAppearance>,
+    context: &PlacementContext,
+) {
+    if context.is_field_box() {
+        options.set_visible(true, context);
+        return;
+    }
+    match profile {
+        Some(appearance) => apply_profile_defaults(options, appearance, context),
+        None => options.set_visible(false, context),
+    }
+}
+
 /// Seed the per-document options with a profile's saved visibility and box
-/// presets. A visible default is suppressed away from page zero because the
-/// signing engine cannot currently place appearances on another page.
+/// presets.
 pub fn apply_profile_defaults(
     options: &mut SigningOptions,
     appearance: &crate::settings::StoredSignatureAppearance,
-    on_page_zero: bool,
+    context: &PlacementContext,
 ) {
-    if !appearance.visible || !on_page_zero {
-        options.set_visible(false);
+    if !appearance.visible {
+        options.set_visible(false, context);
         return;
     }
-    options.visible_requested = true;
-    options.placement = Some(Placement {
+    options.set_visible(true, context);
+    let preset = Placement {
         position: match appearance.position {
             crate::settings::StoredSignaturePosition::TopLeft => PlacementPosition::TopLeft,
             crate::settings::StoredSignaturePosition::TopRight => PlacementPosition::TopRight,
@@ -353,7 +504,10 @@ pub fn apply_profile_defaults(
             crate::settings::StoredSignatureSize::Medium => PlacementSize::Medium,
             crate::settings::StoredSignatureSize::Large => PlacementSize::Large,
         },
-    });
+    };
+    if let Some(AppearancePlan::Preset { placement, .. }) = options.placement.as_mut() {
+        *placement = preset;
+    }
 }
 
 /// Build an appearance using a saved profile's content. Passing `None`
@@ -366,7 +520,7 @@ pub fn appearance_for_profile(
     page_width: f64,
     page_height: f64,
 ) -> Option<pulpit_render::sign::SignAppearance> {
-    let placement = options.placement?;
+    let plan = options.placement.as_ref()?;
     let text = || text_appearance_content(signer_cn, signing_time_label);
     let content = match profile {
         None => text(),
@@ -408,10 +562,67 @@ pub fn appearance_for_profile(
         }
     };
     Some(pulpit_render::sign::SignAppearance {
-        rect: placement.rect(page_width, page_height),
-        page_index: 0,
+        placement: placement_for(plan, page_width, page_height),
         content,
     })
+}
+
+/// The confirmation step's target line (§31.1 step 7): what is being signed
+/// into, whether a mark will be visible, and where that mark will land. The
+/// last part is what makes the line honest — "visible" alone does not say
+/// whether the mark lands in the box the sender drew or somewhere this
+/// dialog chose.
+pub fn confirm_target_line(options: &SigningOptions) -> String {
+    // 1-based, the way every page number a reader sees is.
+    let page_no = |index: usize| index + 1;
+    let visibility = if options.visible_requested {
+        "visible"
+    } else {
+        "invisible"
+    };
+    match (options.target.as_ref(), options.placement.as_ref()) {
+        (
+            Some(TargetChoice::ExistingField(name)),
+            Some(AppearancePlan::InFieldBox { page_index, .. }),
+        ) => format!(
+            "Signing into field “{name}”, visible inside its own box on page {}.",
+            page_no(*page_index)
+        ),
+        (
+            Some(TargetChoice::ExistingField(name)),
+            Some(AppearancePlan::Preset {
+                page_index,
+                placement,
+            }),
+        ) => format!(
+            "Signing into field “{name}”, visible at the {} of page {}.",
+            placement.position.spot_label(),
+            page_no(*page_index)
+        ),
+        (Some(TargetChoice::ExistingField(name)), None) => {
+            format!("Signing into field “{name}”, {visibility}.")
+        }
+        (
+            Some(TargetChoice::NewField),
+            Some(AppearancePlan::Preset {
+                page_index,
+                placement,
+            }),
+        ) => format!(
+            "A new, visible signature field will be created at the {} of page {}.",
+            placement.position.spot_label(),
+            page_no(*page_index)
+        ),
+        // A new field has no box of its own to draw inside, so the
+        // application never builds `InFieldBox` for one; say the plain thing
+        // rather than invent a page number this arm cannot vouch for.
+        (Some(TargetChoice::NewField), _) => {
+            format!("A new, {visibility} signature field will be created.")
+        }
+        // Unreachable: `ContinueToConfirm` diverts to `Failed` rather than
+        // let the Confirm step build with no target.
+        (None, _) => String::new(),
+    }
 }
 
 /// Everything the credential step has learned about the loaded PKCS#12.
@@ -571,8 +782,9 @@ pub enum SignMsg {
     /// Sent by the Options view's target picker when more than one
     /// candidate field exists (see `SigningFlow::Options::candidates`).
     TargetChosen(TargetChoice),
-    /// Visible/invisible toggle. Refused by the app when the reader is not
-    /// showing page 0 — see `crate::signing`'s module doc comment.
+    /// Visible/invisible toggle. Turning it on is what captures the
+    /// [`PlacementContext`] — the target's own box, or the page the reader is
+    /// showing — so the answer cannot drift afterwards.
     VisibleChanged(bool),
     PlacementPositionChosen(PlacementPosition),
     PlacementSizeChosen(PlacementSize),
@@ -887,38 +1099,214 @@ mod tests {
         );
     }
 
+    /// Presets against page 3 (0-based), the shape the reader gets on a
+    /// new field while looking at the fourth page.
+    fn presets_on(page_index: usize) -> PlacementContext {
+        PlacementContext::Presets { page_index }
+    }
+
+    fn field_box_on(field: &str, page_index: usize) -> PlacementContext {
+        PlacementContext::FieldBox {
+            field: field.to_string(),
+            page_index,
+        }
+    }
+
     #[test]
     fn set_visible_keeps_placement_in_lock_step() {
+        let context = presets_on(0);
         let mut options = SigningOptions::default();
         assert!(!options.visible_requested);
         assert_eq!(options.placement, None);
 
-        options.set_visible(true);
+        options.set_visible(true, &context);
         assert!(options.visible_requested);
-        assert_eq!(options.placement, Some(Placement::default()));
+        assert_eq!(
+            options.placement,
+            Some(AppearancePlan::Preset {
+                page_index: 0,
+                placement: Placement::default(),
+            })
+        );
 
-        options.set_visible(false);
+        options.set_visible(false, &context);
         assert!(!options.visible_requested);
         assert_eq!(options.placement, None);
     }
 
     #[test]
-    fn set_visible_true_twice_keeps_the_chosen_preset() {
+    fn set_visible_captures_the_page_the_reader_is_showing() {
         let mut options = SigningOptions::default();
-        options.set_visible(true);
-        options.placement = Some(Placement {
-            position: PlacementPosition::TopLeft,
-            size: PlacementSize::Large,
+        options.set_visible(true, &presets_on(4));
+        assert_eq!(options.appearance_page_index(), Some(4));
+    }
+
+    #[test]
+    fn set_visible_true_twice_keeps_the_chosen_preset() {
+        let context = presets_on(2);
+        let mut options = SigningOptions::default();
+        options.set_visible(true, &context);
+        options.placement = Some(AppearancePlan::Preset {
+            page_index: 2,
+            placement: Placement {
+                position: PlacementPosition::TopLeft,
+                size: PlacementSize::Large,
+            },
         });
         // Re-toggling on (a no-op in the view, but exercised here directly)
         // must not reset a preset the user already chose.
-        options.set_visible(true);
+        options.set_visible(true, &context);
         assert_eq!(
-            options.placement,
+            options.chosen_preset(),
             Some(Placement {
                 position: PlacementPosition::TopLeft,
                 size: PlacementSize::Large,
             })
+        );
+    }
+
+    #[test]
+    fn a_located_existing_field_defaults_to_a_visible_mark_in_its_own_box() {
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::ExistingField("Sig1".into())),
+            ..Default::default()
+        };
+        apply_target_defaults(&mut options, None, &field_box_on("Sig1", 2));
+        assert!(options.visible_requested);
+        assert_eq!(
+            options.placement,
+            Some(AppearancePlan::InFieldBox {
+                field: "Sig1".into(),
+                page_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_located_existing_field_is_visible_even_for_a_profile_that_saved_invisible() {
+        let profile = crate::settings::StoredSignatureAppearance {
+            visible: false,
+            ..Default::default()
+        };
+        let mut options = SigningOptions::default();
+        apply_target_defaults(&mut options, Some(&profile), &field_box_on("Sig1", 0));
+        assert!(options.visible_requested);
+        assert!(matches!(
+            options.placement,
+            Some(AppearancePlan::InFieldBox { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unlocatable_field_falls_back_to_the_invisible_default() {
+        // The application could not place the field — no widget, or a
+        // degenerate `/Rect` the engine would refuse — so it hands over a
+        // presets context and nothing turns Visible on by itself.
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::ExistingField("Sig1".into())),
+            ..Default::default()
+        };
+        apply_target_defaults(&mut options, None, &presets_on(3));
+        assert!(!options.visible_requested);
+        assert_eq!(options.placement, None);
+    }
+
+    #[test]
+    fn a_located_field_appearance_draws_inside_the_field_rect_with_the_profile_s_ink() {
+        let profile = crate::settings::StoredSignatureAppearance {
+            content: crate::settings::StoredSignatureContent::Ink,
+            strokes: vec![vec![crate::settings::SignaturePoint { x: 0.1, y: 0.2 }]],
+            stroke_width: 2.0,
+            visible: true,
+            ..Default::default()
+        };
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::ExistingField("Sig1".into())),
+            ..Default::default()
+        };
+        apply_target_defaults(&mut options, Some(&profile), &field_box_on("Sig1", 1));
+        let appearance =
+            appearance_for_profile(&options, Some(&profile), "Jane Doe", "now", 612.0, 792.0)
+                .expect("a located field is visible by default");
+        assert_eq!(
+            appearance.placement,
+            pulpit_render::sign::AppearancePlacement::FieldRect
+        );
+        assert!(matches!(
+            appearance.content,
+            pulpit_render::sign::AppearanceContent::Ink { .. }
+        ));
+    }
+
+    #[test]
+    fn a_preset_appearance_targets_the_captured_page() {
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::NewField),
+            ..Default::default()
+        };
+        options.set_visible(true, &presets_on(3));
+        let appearance = appearance_for_profile(&options, None, "Jane Doe", "now", 612.0, 792.0)
+            .expect("visible options produce an appearance");
+        assert_eq!(
+            appearance.placement,
+            pulpit_render::sign::AppearancePlacement::Rect {
+                page_index: 3,
+                rect: Placement::default().rect(612.0, 792.0),
+            }
+        );
+    }
+
+    #[test]
+    fn retarget_keeps_the_visible_choice_and_moves_the_mark() {
+        let mut options = SigningOptions::default();
+        options.set_visible(true, &presets_on(0));
+        options.retarget(&field_box_on("Sig2", 5));
+        assert!(options.visible_requested);
+        assert_eq!(
+            options.placement,
+            Some(AppearancePlan::InFieldBox {
+                field: "Sig2".into(),
+                page_index: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn retarget_leaves_an_invisible_signature_invisible() {
+        let mut options = SigningOptions::default();
+        options.retarget(&field_box_on("Sig2", 5));
+        assert!(!options.visible_requested);
+        assert_eq!(options.placement, None);
+    }
+
+    #[test]
+    fn the_confirm_line_names_where_the_mark_lands() {
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::ExistingField("Sig1".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            confirm_target_line(&options),
+            "Signing into field “Sig1”, invisible."
+        );
+        options.set_visible(true, &field_box_on("Sig1", 2));
+        assert_eq!(
+            confirm_target_line(&options),
+            "Signing into field “Sig1”, visible inside its own box on page 3."
+        );
+
+        let mut options = SigningOptions {
+            target: Some(TargetChoice::NewField),
+            ..Default::default()
+        };
+        assert_eq!(
+            confirm_target_line(&options),
+            "A new, invisible signature field will be created."
+        );
+        options.set_visible(true, &presets_on(4));
+        assert_eq!(
+            confirm_target_line(&options),
+            "A new, visible signature field will be created at the bottom right of page 5."
         );
     }
 
@@ -996,15 +1384,17 @@ mod tests {
     }
 
     #[test]
-    fn appearance_for_targets_page_zero_with_the_chosen_rect() {
+    fn appearance_for_targets_the_captured_page_with_the_chosen_rect() {
         let mut options = SigningOptions::default();
-        options.set_visible(true);
+        options.set_visible(true, &presets_on(1));
         let appearance = appearance_for(&options, "Jane Doe", "now", 612.0, 792.0)
             .expect("visible options produce an appearance");
-        assert_eq!(appearance.page_index, 0);
         assert_eq!(
-            appearance.rect,
-            options.placement.unwrap().rect(612.0, 792.0)
+            appearance.placement,
+            pulpit_render::sign::AppearancePlacement::Rect {
+                page_index: 1,
+                rect: options.chosen_preset().unwrap().rect(612.0, 792.0),
+            }
         );
     }
 
@@ -1022,9 +1412,9 @@ mod tests {
             size: crate::settings::StoredSignatureSize::Large,
         };
         let mut options = SigningOptions::default();
-        apply_profile_defaults(&mut options, &profile, true);
+        apply_profile_defaults(&mut options, &profile, &presets_on(0));
         assert_eq!(
-            options.placement,
+            options.chosen_preset(),
             Some(Placement {
                 position: PlacementPosition::TopLeft,
                 size: PlacementSize::Large,
@@ -1054,10 +1444,13 @@ mod tests {
     }
 
     #[test]
-    fn a_visible_profile_default_is_safely_suppressed_off_page_zero() {
-        let profile = crate::settings::StoredSignatureAppearance::default();
+    fn a_profile_that_saved_invisible_stays_invisible() {
+        let profile = crate::settings::StoredSignatureAppearance {
+            visible: false,
+            ..Default::default()
+        };
         let mut options = SigningOptions::default();
-        apply_profile_defaults(&mut options, &profile, false);
+        apply_profile_defaults(&mut options, &profile, &presets_on(3));
         assert!(!options.visible_requested);
         assert!(options.placement.is_none());
     }
