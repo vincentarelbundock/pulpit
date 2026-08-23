@@ -820,6 +820,7 @@ impl From<&super::DocumentError> for DocumentFailure {
             | E::Rejected(_)
             | E::Limit(_)
             | E::MutationForbidden
+            | E::FieldReadOnly(_)
             | E::SourceIsDestination => DocumentFailure::Refused(error.to_string()),
             E::Unsupported(what) => DocumentFailure::Unsupported(what.clone()),
             E::Backend(_) | E::Save(_) | E::Io(_) => DocumentFailure::Engine(error.to_string()),
@@ -1128,6 +1129,8 @@ mod tests {
                 password: false,
                 file_select: false,
                 rich_text: false,
+                truncated: false,
+                hidden: false,
                 selected: Vec::new(),
                 widgets: Vec::new(),
             };

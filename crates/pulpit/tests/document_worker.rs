@@ -552,6 +552,7 @@ fn a_date_picked_from_the_calendar_lands_in_the_field_in_its_own_pattern() {
             transaction: DocumentTransaction::one(DocumentCommand::SetField {
                 name: "when".into(),
                 value: value.into(),
+                selected: Vec::new(),
             }),
         })
         .expect("the worker takes the picked date")

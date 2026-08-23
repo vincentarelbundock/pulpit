@@ -489,7 +489,10 @@ pub struct PlannedRender {
 /// Kept as a free function so the rule lives in one place and can be tested
 /// on a field alone, without a session around it.
 fn is_unfilled_required(field: &pulpit_render::document::FormField) -> bool {
-    field.required && field.is_editable() && field.value.is_empty() && field.selected.is_empty()
+    // Reachable, not merely editable: a required field the document hides is
+    // one nobody can fill, and listing it before a save would be asking the
+    // reader to go and type into something that is not on the page.
+    field.required && field.is_reachable() && field.value.is_empty() && field.selected.is_empty()
 }
 
 // A few readers of this state are the recovery path's, which §11 has yet to
@@ -711,7 +714,9 @@ impl ReaderSession {
     /// A field with no widget is left out because there is nowhere to put the
     /// caret, and one that cannot be filled is left out because arriving in it
     /// is arriving nowhere: a signature or file-select field is refused by the
-    /// worker, and a read-only field is a printed value (§6.4).
+    /// worker, and a read-only field is a printed value (§6.4). A field whose
+    /// widget the document hides is left out for the same reason — tabbing to
+    /// it scrolls the page to a rectangle with nothing drawn in it.
     fn fillable_fields(&self) -> Vec<(PageIndex, &str)> {
         if !self.has_form {
             return Vec::new();
@@ -719,7 +724,7 @@ impl ReaderSession {
         let mut ordered: Vec<(PageIndex, pulpit_core::page::PageRect, &str)> = self
             .fields
             .iter()
-            .filter(|field| field.is_editable())
+            .filter(|field| field.is_reachable())
             .filter_map(|field| {
                 let widget = field.widgets.first()?;
                 Some((widget.page, widget.bounds, field.name.as_str()))
@@ -3964,6 +3969,8 @@ mod tests {
             password: false,
             file_select,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             format: Default::default(),
             options: Vec::new(),
             allows_custom_value: false,
@@ -4079,6 +4086,8 @@ mod tests {
             password: false,
             file_select,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             format: Default::default(),
             options: Vec::new(),
             allows_custom_value: false,
@@ -4140,6 +4149,41 @@ mod tests {
             vec!["open".to_string()],
             "a read-only, file or signature field is not something to send the reader to"
         );
+    }
+
+    #[test]
+    fn a_review_leaves_out_a_field_the_document_hides() {
+        use pulpit_render::document::FieldKind;
+
+        // A widget with `/F` Hidden or NoView is drawn by nothing, so a reader
+        // told to go and fill it in would be sent to a blank patch of page.
+        // The document may still mark it required — generators do, for fields
+        // a script is meant to populate — which is why this has to be left out
+        // rather than trusted.
+        let mut session = form(2);
+        let mut concealed =
+            required_field("concealed", FieldKind::Text, "", Vec::new(), false, false);
+        concealed.hidden = true;
+        session.set_fields(vec![
+            concealed,
+            required_field("open", FieldKind::Text, "", Vec::new(), false, false),
+        ]);
+        assert_eq!(session.unfilled_required_fields(), vec!["open".to_string()]);
+    }
+
+    #[test]
+    fn a_review_leaves_out_a_value_only_half_read() {
+        use pulpit_render::document::FieldKind;
+
+        // A value past the read bound comes back as a prefix, flagged. It is
+        // not something to write back — the rest of it would go — so it is not
+        // something to send the reader to either. It is also, plainly, filled
+        // in: the prefix is not empty.
+        let mut session = form(2);
+        let mut long = required_field("essay", FieldKind::Text, "aaaa", Vec::new(), false, false);
+        long.truncated = true;
+        session.set_fields(vec![long]);
+        assert!(session.unfilled_required_fields().is_empty());
     }
 
     #[test]
@@ -5256,6 +5300,8 @@ mod tests {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             widgets: vec![pulpit_render::document::model::FieldWidget {
                 page: PageIndex(page),
                 bounds: pulpit_core::page::PageRect::new(20.0, top, 200.0, top + 20.0),
@@ -5330,12 +5376,23 @@ mod tests {
         file.file_select = true;
         let mut placeless = field("nowhere", FieldKind::Text, 0, 250.0);
         placeless.widgets.clear();
+        // A widget the document hides is the same case with a different cause:
+        // it has a rectangle, and nothing is drawn in it, so arriving there
+        // scrolls the page to a blank patch and types into thin air.
+        let mut concealed = field("concealed", FieldKind::Text, 0, 260.0);
+        concealed.hidden = true;
+        // A value pulpit only half read is not writable, so it is not
+        // somewhere to put the caret either.
+        let mut half_read = field("essay", FieldKind::Text, 0, 270.0);
+        half_read.truncated = true;
         session.set_fields(vec![
             read_only,
             file,
             field("signed", FieldKind::Signature, 0, 300.0),
             field("button", FieldKind::PushButton, 0, 350.0),
             placeless,
+            concealed,
+            half_read,
             field("name", FieldKind::Text, 0, 400.0),
         ]);
 

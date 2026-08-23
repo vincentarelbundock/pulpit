@@ -497,3 +497,88 @@ fn a_calculation_can_rewrite_a_field_on_another_page_without_invalidating_it() {
         }
     });
 }
+
+/// A form that stamps the date it was filled on, the way a real one does.
+///
+/// `when` carries an `/AA /C` calculation script that writes `new Date()` into
+/// itself whenever anything commits, and `trigger` is the field that is typed
+/// into to set that off.
+fn date_stamping_form() -> Vec<u8> {
+    serialise(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R] \
+         /CO [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>"
+            .into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (trigger) /V () /Ff 0 \
+         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>"
+            .into(),
+        // Single quotes in the script: a PDF literal string would otherwise
+        // have to escape the double ones, and the point here is the `Date`.
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (when) /V () /Ff 0 \
+         /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
+         /AA << /C << /S /JavaScript /JS (event.value = \
+         util.printd('yyyy', new Date());) >> >> >>"
+            .into(),
+    ])
+}
+
+/// A script's own `Date` is the real one, and `FFI_GetLocalTime` does not
+/// change that.
+///
+/// The callback pulpit installs answers with a zeroed `FPDF_SYSTEMTIME`, and
+/// that used to be described — and tested, under the name "the clock a document
+/// can read is not the wall clock" — as though it closed the clock to a
+/// document's JavaScript. It does not. Under the V8 build `new Date()` is
+/// V8's, on V8's own clock, and a calculation script that stamps today's date
+/// into a field gets today's date.
+///
+/// This test exists to hold that fact in the open rather than leave it to be
+/// discovered. It asserts what is *true* — the year is a real, current one —
+/// so that a build which ever did close V8's clock would fail here and send
+/// somebody to the comment in `document::form` that says it is open.
+///
+/// Nothing is asserted about the exact day, because that would be a test that
+/// fails at midnight in some timezone; a plausible year is enough to tell the
+/// real clock from a zeroed one, which would produce `0000`.
+#[test]
+fn a_scripts_own_date_is_the_real_one_and_this_callback_does_not_change_that() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
+            eprintln!("no libpdfium; skipping");
+            return;
+        };
+        let backend = &mut *guard;
+        let path = std::env::temp_dir().join("pulpit-form-js-date.pdf");
+        std::fs::write(&path, date_stamping_form()).expect("the fixture is written");
+        let mut document = PdfiumDocument::open(backend, &path).expect("the fixture opens");
+
+        let page = PageIndex(0);
+        let at = PagePoint::new(200.0, 792.0 - 715.0);
+        for event in [
+            FormInputEvent::PointerDown { at },
+            FormInputEvent::PointerUp { at },
+            FormInputEvent::Char { character: 'x' },
+            FormInputEvent::Focus { gained: false },
+        ] {
+            document.form_event(page, event).expect("the event lands");
+        }
+
+        let stamped = document.field_value("when").expect("the field is readable");
+        assert!(
+            !stamped.is_empty(),
+            "the calculation did not run at all; either PDFium was built \
+             without V8 or no JS platform was installed"
+        );
+        let year: i32 = stamped
+            .parse()
+            .unwrap_or_else(|_| panic!("the script wrote {stamped:?}, which is not a year"));
+        assert!(
+            (2024..2100).contains(&year),
+            "a form's script stamped {year}. If this is 0, V8's clock has been \
+             closed and `document::form`'s note about `FFI_GetLocalTime` — which \
+             says it has not been — is now wrong and must be corrected."
+        );
+    });
+}

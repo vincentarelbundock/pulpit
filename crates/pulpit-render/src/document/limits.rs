@@ -81,6 +81,24 @@ pub const MAX_FORM_FIELDS: usize = 8_192;
 /// allocate without bound.
 pub const MAX_FIELD_VALUE_BYTES: usize = 16 * 1024;
 
+/// The most bytes one string read out of PDFium may allocate.
+///
+/// Distinct from [`MAX_FIELD_VALUE_BYTES`], and larger, because the two bound
+/// different things. That one is how much of a value pulpit will *carry*; this
+/// one is how much it will *ask for*, and the difference matters because
+/// PDFium's string getters write nothing at all into a buffer smaller than the
+/// value — they report the length and leave the bytes alone. Reading with a
+/// buffer sized to the carrying limit therefore does not truncate a longer
+/// value, it erases it: the field comes back empty, which reads downstream as
+/// a form nobody filled in.
+///
+/// So the read is made at the value's own size, up to this, and the result is
+/// cut to the carrying limit afterwards where the cut can be *reported*. Past
+/// this, the value cannot be read at all and is reported as truncated with
+/// nothing in it, which is the honest answer for a string no one asked a
+/// document to carry.
+pub const MAX_FIELD_READ_BYTES: usize = 4 << 20;
+
 /// The most options a choice field may offer.
 pub const MAX_FIELD_OPTIONS: usize = 4_096;
 
@@ -123,6 +141,10 @@ const _: () = {
     assert!(MAX_POINTS_PER_TRANSACTION >= MAX_POINTS_PER_INK);
     assert!(MAX_OPERATIONS_PER_TRANSACTION >= 32);
     assert!(MAX_FIELD_VALUE_BYTES >= 1_024);
+    // A read that could not reach the carrying limit would truncate every
+    // value at the buffer rather than at the bound, which is the bug this
+    // constant exists to prevent.
+    assert!(MAX_FIELD_READ_BYTES > 2 * MAX_FIELD_VALUE_BYTES + 2);
     // The gesture refuses a stroke the protocol would refuse anyway; if these
     // ever drift, a user would draw a stroke the UI accepted and the worker
     // rejected, which is the worst of both.

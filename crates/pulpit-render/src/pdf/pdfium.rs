@@ -1372,7 +1372,8 @@ unsafe extern "C" fn need_to_pause_now(this: *mut IFSDK_PAUSE) -> i32 {
     i32::from((*state).cancel.is_cancelled())
 }
 
-/// Draw a page's form field values over the page already in `rgba`.
+/// Draw the live form field values of one loaded page over the bitmap that
+/// page was just rendered into.
 ///
 /// PDFium splits a form's pixels in two, and this is the half the page render
 /// does not do. `FPDF_RenderPageBitmap` draws page *content*; a widget's value
@@ -1382,15 +1383,31 @@ unsafe extern "C" fn need_to_pause_now(this: *mut IFSDK_PAUSE) -> i32 {
 /// that were in the file when it was opened, which is what made this look like
 /// a bug about typing rather than about drawing.
 ///
+/// One function, called from two places — the render pool here and the document
+/// engine in `crate::document::pdfium` — because the two have to agree to the
+/// pixel and used to be two copies that could only be checked by reading them
+/// side by side. Everything that must match the page render is in here: the
+/// placement (the page drawn at `full_size`, or at whatever size brings the
+/// crop out at `width` × `height`, then shifted so the crop's corner lands on
+/// the bitmap's origin) and the byte-order flag that decides what a pixel is.
+///
+/// What is *not* in here is the page's relationship with the form environment,
+/// because that is the one part the two callers genuinely differ on. PDFium
+/// will not draw fields into a page view it has not been told about, and which
+/// view it is matters: a value someone is still typing belongs to the view the
+/// interaction is open on, and a second handle for the same page has an empty
+/// one. So `page` arrives already announced with `FORM_OnAfterLoadPage`, and
+/// saying when it goes is the caller's business too.
+///
 /// Failure is silent by design: a page with no field values is a great deal
 /// better than no page.
 #[allow(
     clippy::too_many_arguments,
     reason = "the destination, its size and the crop it holds are seven \
-              separate facts; grouping them into a struct for one caller would \
-              hide the arithmetic that has to match the page render's"
+              separate facts; grouping them into a struct would hide the \
+              arithmetic that has to match the page render's"
 )]
-fn composite_form_fields(
+pub(crate) fn draw_form_fields(
     bindings: &dyn PdfiumLibraryBindings,
     form: FPDF_FORMHANDLE,
     page: FPDF_PAGE,
@@ -1403,15 +1420,9 @@ fn composite_form_fields(
     if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
         return;
     }
-    // The same placement the page render used, because the two passes have to
-    // agree to the pixel: the page is drawn at whatever size brings the crop
-    // out at `width` × `height`, then shifted so the crop's corner lands on the
-    // bitmap's origin.
     let (start_x, start_y, full_width, full_height) =
         crate::pdf::page_placement(region, width, height, full_size);
 
-    // PDFium will not draw fields into a page it has not been told about.
-    unsafe { bindings.FORM_OnAfterLoadPage(page, form) };
     // The buffer the page was just drawn into, wrapped rather than copied:
     // `FPDF_FFLDraw` composites over what is already there, which is exactly
     // the page under the fields.
@@ -1424,24 +1435,46 @@ fn composite_form_fields(
             width as i32 * 4,
         )
     };
-    if !bitmap.is_null() {
-        unsafe {
-            bindings.FPDF_FFLDraw(
-                form,
-                bitmap,
-                page,
-                start_x,
-                start_y,
-                full_width,
-                full_height,
-                0,
-                // The byte-order flag the page render used. Without it the
-                // field text arrives with red and blue swapped.
-                FPDF_REVERSE_BYTE_ORDER,
-            );
-            bindings.FPDFBitmap_Destroy(bitmap);
-        }
+    if bitmap.is_null() {
+        return;
     }
+    unsafe {
+        bindings.FPDF_FFLDraw(
+            form,
+            bitmap,
+            page,
+            start_x,
+            start_y,
+            full_width,
+            full_height,
+            0,
+            // The byte-order flag the page render used. Without it the field
+            // text arrives with red and blue swapped.
+            FPDF_REVERSE_BYTE_ORDER,
+        );
+        bindings.FPDFBitmap_Destroy(bitmap);
+    }
+}
+
+/// [`draw_form_fields`] for a page the caller loaded itself, announcing it to
+/// the form environment and taking it back out again.
+///
+/// The render pool's case: it loads a page, draws it, and has no interactive
+/// state of its own to preserve.
+#[allow(clippy::too_many_arguments, reason = "it forwards draw_form_fields'")]
+fn composite_form_fields(
+    bindings: &dyn PdfiumLibraryBindings,
+    form: FPDF_FORMHANDLE,
+    page: FPDF_PAGE,
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    region: Region,
+    full_size: Option<(u32, u32)>,
+) {
+    // PDFium will not draw fields into a page it has not been told about.
+    unsafe { bindings.FORM_OnAfterLoadPage(page, form) };
+    draw_form_fields(bindings, form, page, rgba, width, height, region, full_size);
     unsafe { bindings.FORM_OnBeforeClosePage(page, form) };
 }
 

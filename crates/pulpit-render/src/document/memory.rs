@@ -89,6 +89,8 @@ impl MemoryDocument {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 100.0, 400.0, 124.0),
@@ -109,6 +111,8 @@ impl MemoryDocument {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             widgets: vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 160.0, 116.0, 176.0),
@@ -129,6 +133,8 @@ impl MemoryDocument {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             widgets: vec![
                 FieldWidget {
                     page: PageIndex(0),
@@ -156,6 +162,8 @@ impl MemoryDocument {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             widgets: Vec::new(),
         });
         document
@@ -425,7 +433,10 @@ impl DocumentBackend for MemoryDocument {
             .get_mut(name)
             .ok_or_else(|| DocumentError::NoSuchField(name.to_string()))?;
         if field.read_only {
-            return Err(DocumentError::MutationForbidden);
+            // The same refusal PDFium's engine gives, in the same words: a
+            // fixture that answered differently would let a test pass here and
+            // the application behave differently in front of a real document.
+            return Err(DocumentError::FieldReadOnly(name.to_string()));
         }
         // A selection named by index restores exactly the options it names —
         // the case one string cannot carry, and the reason `selected` exists.
@@ -608,9 +619,12 @@ mod tests {
         assert_eq!(document.field_value("agreed").unwrap(), "Yes");
         // A text field takes whatever it is given.
         assert_eq!(document.set_field("name", "Ada", &[]).unwrap(), "Ada");
+        // `FieldReadOnly`, not `MutationForbidden`: the document allows being
+        // changed, this one field does not. The engines used to disagree about
+        // which of the two this is, so the variant is the assertion.
         assert!(matches!(
             document.set_field("locked", "x", &[]),
-            Err(DocumentError::MutationForbidden)
+            Err(DocumentError::FieldReadOnly(name)) if name == "locked"
         ));
     }
 

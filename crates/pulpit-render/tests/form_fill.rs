@@ -1673,3 +1673,316 @@ fn shift_and_an_arrow_extend_the_selection_a_copy_reads() {
         );
     });
 }
+
+/// A one-page form built from field dictionaries, for the cases whose point is
+/// what a field *declares* rather than how it is laid out.
+///
+/// `fields` is one entry per widget, spliced whole so a case can say exactly
+/// what it means — a `/V` longer than the read bound, an `/F` that hides the
+/// widget, an `/FT` that holds no value at all.
+fn form_of(fields: &[String]) -> Vec<u8> {
+    use pulpit_testkit::builder::{Page, Pdf};
+
+    let mut pdf = Pdf::new();
+    let catalog = pdf.reserve();
+    let pages = pdf.reserve();
+    let font = pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    let contents = pdf.add_stream("", b"");
+    let page = pdf.reserve();
+    let numbers: Vec<u32> = fields
+        .iter()
+        .map(|field| pdf.add(field.replace("{page}", &page.to_string())))
+        .collect();
+    let refs = numbers
+        .iter()
+        .map(|number| format!("{number} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    pdf.set(page, Page::default().dictionary(&refs, contents));
+    pdf.set(
+        pages,
+        format!("<< /Type /Pages /Kids [{page} 0 R] /Count 1 >>"),
+    );
+    pdf.set(
+        catalog,
+        format!(
+            "<< /Type /Catalog /Pages {pages} 0 R /AcroForm << /Fields [{refs}] \
+             /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv {font} 0 R >> >> >> >>"
+        ),
+    );
+    pdf.build()
+}
+
+/// One text field, with whatever `/V` and `/F` the case wants.
+fn text_field(name: &str, value: &str, flags: u32) -> String {
+    format!(
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T ({name}) /V ({value}) \
+         /Rect [50 600 500 700] /F {flags} /DA (/Helv 10 Tf 0 g) /P {{page}} 0 R >>"
+    )
+}
+
+/// Put one of these in-memory forms where the engine can open it.
+fn write_form(directory: &std::path::Path, name: &str, bytes: Vec<u8>) -> PathBuf {
+    let path = directory.join(format!("{name}.pdf"));
+    std::fs::write(&path, bytes).expect("the form is written");
+    path
+}
+
+#[test]
+fn a_value_longer_than_pulpit_carries_is_cut_and_says_so_rather_than_vanishing() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // The bug this holds shut: PDFium's string getters write *nothing*
+        // into a buffer smaller than the value they were asked for — they
+        // report the length and leave the bytes alone. Reading with a buffer
+        // capped at the carrying limit therefore did not truncate a longer
+        // value, it erased it: a filled-in comment box came back as the empty
+        // string, indistinguishable from a field nobody had touched. Which
+        // then told the reader, at Save As, that a required field they had
+        // filled in was still empty.
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let long = "a".repeat(40_000);
+        let path = write_form(
+            directory.path(),
+            "long",
+            form_of(&[text_field("big", &long, 4), text_field("small", "here", 4)]),
+        );
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let document = PdfDocument::new(Box::new(engine), 71);
+        let fields = document.fields().expect("the fields are readable");
+        let big = fields.iter().find(|f| f.name == "big").expect("the field");
+
+        assert!(
+            !big.value.is_empty(),
+            "a long value came back empty, which reads as a field nobody filled in"
+        );
+        assert!(
+            big.truncated,
+            "the cut has to be reported, not made silently"
+        );
+        assert!(
+            big.value.len() <= 16 * 1024 && big.value.starts_with("aaa"),
+            "the value is a prefix of the document's, bounded by the carrying limit"
+        );
+        // …and it must not be offered as something to edit, because writing
+        // the prefix back would throw the rest of it away.
+        assert!(
+            !big.is_editable(),
+            "a value pulpit only half read must not be writable"
+        );
+        assert!(
+            document.field_value("big").unwrap().len() > 1_000,
+            "the single-field read has to agree with the listing"
+        );
+
+        // The field beside it is untouched by any of this.
+        let small = fields
+            .iter()
+            .find(|f| f.name == "small")
+            .expect("the field");
+        assert_eq!(small.value, "here");
+        assert!(!small.truncated);
+        assert!(small.is_editable());
+    });
+}
+
+#[test]
+fn a_hidden_widget_is_listed_and_is_not_somewhere_to_put_the_caret() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // `/F` bit 2 is Hidden and bit 6 is NoView; a widget with either set is
+        // one no viewer paints. Listing it is right — a field that exists is a
+        // fact an inspector may want — and offering it as an editing target is
+        // not: tabbing to it scrolls the page to a rectangle with nothing in
+        // it and types into something the reader cannot see.
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = write_form(
+            directory.path(),
+            "hidden",
+            form_of(&[
+                text_field("shown", "", 4),
+                text_field("concealed", "", 2),
+                text_field("noview", "", 32),
+            ]),
+        );
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let document = PdfDocument::new(Box::new(engine), 72);
+        let fields = document.fields().expect("the fields are readable");
+        let of = |name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} was not listed at all"))
+        };
+
+        assert!(!of("shown").hidden);
+        assert!(of("shown").is_reachable());
+        for name in ["concealed", "noview"] {
+            let field = of(name);
+            assert!(
+                field.hidden,
+                "{name} is drawn by nothing and was not marked"
+            );
+            assert!(
+                !field.is_reachable(),
+                "{name} was offered as somewhere to put the caret"
+            );
+            // Still *editable* in the engine's sense: the document may mean it
+            // to be filled, and a `SetField` for it is not refused. What it is
+            // not is reachable on the page.
+            assert!(field.is_editable());
+        }
+    });
+}
+
+#[test]
+fn a_field_that_holds_no_typed_value_refuses_one_instead_of_swallowing_it() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // A push button and a signature field have no value to type into.
+        // `FORM_ReplaceSelection` on one of them edits nothing and reports
+        // nothing, so the old catch-all path answered "written" and read back
+        // the value that was already there — a success for an edit that never
+        // happened, and a revision and an undo entry for it.
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = write_form(
+            directory.path(),
+            "buttons",
+            form_of(&[
+                "<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (press) \
+                 /Rect [50 600 200 640] /F 4 /P {page} 0 R >>"
+                    .to_string(),
+                "<< /Type /Annot /Subtype /Widget /FT /Sig /T (sign) \
+                 /Rect [50 500 200 540] /F 4 /P {page} 0 R >>"
+                    .to_string(),
+                text_field("typed", "", 4),
+            ]),
+        );
+
+        let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+        let mut document = PdfDocument::new(Box::new(engine), 73);
+        for name in ["press", "sign"] {
+            let refusal = document.set_field(name, "anything", &[]);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(pulpit_render::document::DocumentError::Unsupported(_))
+                ),
+                "{name} answered {refusal:?} rather than refusing a value it cannot hold"
+            );
+        }
+        // The ordinary field beside them still takes one.
+        assert_eq!(document.set_field("typed", "Ada", &[]).unwrap(), "Ada");
+    });
+}
+
+#[test]
+fn one_field_read_by_name_says_what_the_whole_listing_says() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // There are two paths to a field now — the listing and the by-name
+        // lookup — and the lookup exists because the listing is a walk of the
+        // whole document. Two paths to one answer is two answers waiting to
+        // happen, and the case that would drift first is a radio group, whose
+        // widgets are gathered across pages and whose chosen option is stated
+        // on the selected kid rather than on the group.
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        // The cases where the two could differ: a group whose widgets are the
+        // options, one field drawn on two pages, a multi-select whose chosen
+        // rows are not in its value, and two fields sharing a name.
+        let interesting = [
+            "radio-group",
+            "same-widget-on-two-pages",
+            "list-box-multi-select",
+            "duplicate-field-names",
+            "combo-box-export-value-pairs",
+        ];
+        let mut compared = 0usize;
+        for name in interesting {
+            let path = corpus_form(directory.path(), name)
+                .unwrap_or_else(|| panic!("the corpus no longer carries {name}"));
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let document = PdfDocument::new(Box::new(engine), 74);
+            let listed = document.fields().expect("the fields are readable");
+            assert!(!listed.is_empty(), "{name} carries no fields to compare");
+            for field in &listed {
+                let looked_up = document
+                    .field(&field.name)
+                    .expect("the lookup answers")
+                    .unwrap_or_else(|| panic!("{}: {} was listed and not found", name, field.name));
+                assert_eq!(
+                    &looked_up, field,
+                    "{name}: the by-name lookup disagrees with the listing about {}",
+                    field.name
+                );
+                compared += 1;
+            }
+            assert!(
+                document.field("no-such-field").unwrap().is_none(),
+                "a field that is not there is None, not an error"
+            );
+        }
+        assert!(
+            compared >= interesting.len(),
+            "only {compared} fields were compared, so this proved less than it looks"
+        );
+    });
+}
+
+#[test]
+fn a_save_made_around_an_open_caret_still_carries_what_was_typed() {
+    pulpit_testkit::on_the_pdfium_thread(|| {
+        // The application drops the focus before Save As and waits for the
+        // commit, which is what keeps the *session* consistent — the field
+        // list and the undo history know about the value before the file is
+        // written. This is the other half: a save reached any other way must
+        // still write the right bytes.
+        //
+        // Uncommitted characters live in the page view PDFium built when the
+        // interaction opened, not in `/V`, so a serialisation made around that
+        // view writes the value the field had before they were typed. The
+        // engine now closes the form page first, which is what commits them.
+        // Deliberately *not* sending the focus-loss event that the application
+        // sends, because that is the path being checked around.
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let Some(path) = plain_form(directory.path()) else {
+            panic!("the corpus no longer carries its control case")
+        };
+
+        let destination = directory.path().join("saved-mid-caret.pdf");
+        {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 75);
+            click_into(&mut document, "name").expect("the field takes the caret");
+            for character in "Ada".chars() {
+                document
+                    .form_event(PageIndex(0), FormInputEvent::Char { character })
+                    .expect("the keystroke goes in");
+            }
+            document
+                .save_as(&destination, SaveOptions::verified())
+                .expect("the copy is written");
+        }
+
+        let engine = PdfiumDocument::open(&mut guard, &destination).expect("the copy opens");
+        let reopened = PdfDocument::new(Box::new(engine), 76);
+        assert_eq!(
+            reopened.field_value("name").unwrap(),
+            "Ada",
+            "the save was made around an open caret and lost what was in it"
+        );
+    });
+}

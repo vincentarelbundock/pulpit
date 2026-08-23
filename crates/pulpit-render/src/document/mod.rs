@@ -59,6 +59,15 @@ pub enum DocumentError {
     NoSuchAnnotation(AnnotationId),
     #[error("no field named {0}")]
     NoSuchField(String),
+    /// The document marks this field read-only.
+    ///
+    /// Its own variant rather than a [`Self::MutationForbidden`] or a
+    /// [`Self::Backend`] string, because the two engines used to answer this
+    /// one question differently — the fixture with `MutationForbidden`, PDFium
+    /// with a formatted `Backend` — and a test written against one would then
+    /// pass against an application that behaves differently under the other.
+    #[error("the field {0} is read-only")]
+    FieldReadOnly(String),
     #[error("{0} cannot be edited without losing what it carries")]
     NotEditable(AnnotationId),
     #[error("the document changed: expected {expected}, the document is at {actual}")]
@@ -134,6 +143,22 @@ pub trait DocumentBackend {
     fn before_image(&self, id: &AnnotationId) -> Result<AnnotationBeforeImage>;
 
     fn fields(&self) -> Result<Vec<FormField>>;
+
+    /// One field by name, or `None` when the document has no such field.
+    ///
+    /// Separate from [`Self::fields`] because the cost is different by a
+    /// factor of the document: listing every field reads every widget on every
+    /// page and builds each one's option list, format script and export
+    /// values, and a lookup by name needs one string per widget to know it is
+    /// looking at the wrong one. Every commit does at least two of these — the
+    /// before-image and the read-back — so on a two-hundred-page form the
+    /// difference is what a keystroke costs.
+    ///
+    /// The default is the honest slow answer, so a backend only overrides it
+    /// when it has a faster one.
+    fn field(&self, name: &str) -> Result<Option<FormField>> {
+        Ok(self.fields()?.into_iter().find(|field| field.name == name))
+    }
 
     /// The bookmark tree. A document without one, or a backend that cannot
     /// read one, reports an empty outline: the rail then has nothing to show,
@@ -372,6 +397,11 @@ impl<'a> PdfDocument<'a> {
         Ok(fields)
     }
 
+    /// One field by name, without reading every other one.
+    pub fn field(&self, name: &str) -> Result<Option<FormField>> {
+        self.backend.field(name)
+    }
+
     /// What one field holds now.
     ///
     /// Read from the engine on every call rather than cached: while a form is
@@ -597,11 +627,18 @@ impl<'a> PdfDocument<'a> {
                     if !self.info().level.allows_form_filling() {
                         return Err(DocumentError::MutationForbidden);
                     }
-                    let fields = self.backend.fields()?;
-                    let field = fields
-                        .iter()
-                        .find(|field| field.name == *name)
+                    let field = self
+                        .backend
+                        .field(name)?
                         .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
+                    if field.truncated {
+                        // Writing back what was read would cut off everything
+                        // past the read bound, which is an edit nobody asked
+                        // for attached to one they did.
+                        return Err(DocumentError::Unsupported(format!(
+                            "change {name}: its value is longer than pulpit can read"
+                        )));
+                    }
                     if !field.is_editable() {
                         return Err(DocumentError::MutationForbidden);
                     }
@@ -652,17 +689,19 @@ impl<'a> PdfDocument<'a> {
                     },
                 })
             }
-            DocumentCommand::SetField { name, value } => {
+            DocumentCommand::SetField {
+                name,
+                value,
+                selected,
+            } => {
                 // The whole before-image, not only the value: a multi-select
                 // list box's state is its selection, and the string alone
                 // restores at most one of three choices.
                 let before = self
                     .backend
-                    .fields()?
-                    .into_iter()
-                    .find(|field| field.name == *name)
+                    .field(name)?
                     .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
-                let taken = self.backend.set_field(name, value, &[])?;
+                let taken = self.backend.set_field(name, value, selected)?;
                 let widget = before.widgets.first().cloned();
                 Ok(Step {
                     page: widget.as_ref().map(|widget| widget.page),
@@ -726,9 +765,7 @@ impl<'a> PdfDocument<'a> {
             } => {
                 let current = self
                     .backend
-                    .fields()?
-                    .into_iter()
-                    .find(|field| field.name == *name)
+                    .field(name)?
                     .ok_or_else(|| DocumentError::NoSuchField(name.clone()))?;
                 let taken = self.backend.set_field(name, value, selected)?;
                 Ok(Step {
@@ -1210,6 +1247,7 @@ mod tests {
                 DocumentTransaction::one(DocumentCommand::SetField {
                     name: "name".into(),
                     value: "Ada".into(),
+                    selected: Vec::new(),
                 }),
             )
             .unwrap();
@@ -1231,6 +1269,95 @@ mod tests {
         assert_eq!(document.fields().unwrap()[0].value, "");
     }
 
+    /// A document whose form carries a list box that takes several rows.
+    ///
+    /// The fixture's own form has no multi-select, and it is the one shape of
+    /// value a string cannot carry — which is exactly what the tests below are
+    /// about.
+    fn document_with_a_multi_select() -> PdfDocument<'static> {
+        let mut memory = MemoryDocument::with_form();
+        memory.add_field(FormField {
+            name: "langues".into(),
+            kind: FieldKind::ListBox,
+            value: "Français".into(),
+            selected: vec![0],
+            read_only: false,
+            format: Default::default(),
+            options: vec![
+                "Français".into(),
+                "English".into(),
+                "Deutsch".into(),
+                "Nederlands".into(),
+            ],
+            allows_custom_value: false,
+            multiple_selection: true,
+            required: false,
+            password: false,
+            file_select: false,
+            rich_text: false,
+            truncated: false,
+            hidden: false,
+            widgets: vec![FieldWidget {
+                page: PageIndex(0),
+                bounds: PageRect::new(100.0, 300.0, 400.0, 380.0),
+                option: None,
+            }],
+        });
+        PdfDocument::new(Box::new(memory), 5)
+    }
+
+    #[test]
+    fn a_transaction_that_fills_a_multi_select_names_every_row_it_chose() {
+        // The command carries `selected` because the value cannot: a list box
+        // holding three choices reports one of them, and a fill recorded as
+        // that string alone replays as one tick where there were three. This
+        // is the path a journal replay takes after a crash.
+        let mut document = document_with_a_multi_select();
+        let filled = document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::one(DocumentCommand::SetField {
+                    name: "langues".into(),
+                    value: "Français".into(),
+                    selected: vec![1, 2, 3],
+                }),
+            )
+            .unwrap();
+
+        let field = document.field("langues").unwrap().expect("the field");
+        assert_eq!(
+            field.selected,
+            vec![1, 2, 3],
+            "the rows the command named were not the rows that were chosen"
+        );
+
+        // …and the undo puts back the one row that was there before, for the
+        // same reason: its before-image carried the selection too.
+        document.undo(document.revision(), filled.undo).unwrap();
+        assert_eq!(
+            document.field("langues").unwrap().unwrap().selected,
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn a_field_looked_up_by_name_is_the_field_the_listing_lists() {
+        // Two paths to one answer. The default implementation of `field` is
+        // the listing filtered, and a backend may override it with something
+        // faster — as the PDFium one does — so the contract worth stating is
+        // that the two agree, including about a field that is not there.
+        let document = document_with_a_multi_select();
+        for field in document.fields().unwrap() {
+            assert_eq!(
+                document.field(&field.name).unwrap().as_ref(),
+                Some(&field),
+                "{} reads differently one at a time",
+                field.name
+            );
+        }
+        assert!(document.field("nowhere").unwrap().is_none());
+    }
+
     #[test]
     fn a_field_that_does_not_exist_refuses_before_anything_is_written() {
         let mut document = PdfDocument::new(Box::new(MemoryDocument::with_form()), 5);
@@ -1240,6 +1367,7 @@ mod tests {
                 DocumentTransaction::one(DocumentCommand::SetField {
                     name: "nowhere".into(),
                     value: "x".into(),
+                    selected: Vec::new(),
                 }),
             )
             .unwrap_err();
@@ -1256,6 +1384,7 @@ mod tests {
                 DocumentTransaction::one(DocumentCommand::SetField {
                     name: "locked".into(),
                     value: "x".into(),
+                    selected: Vec::new(),
                 }),
             )
             .unwrap_err();
@@ -1456,6 +1585,7 @@ mod tests {
                 DocumentTransaction::one(DocumentCommand::SetField {
                     name: "name".into(),
                     value: "Ada".into(),
+                    selected: Vec::new(),
                 }),
             )
             .unwrap();

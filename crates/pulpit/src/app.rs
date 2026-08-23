@@ -6926,6 +6926,15 @@ impl App {
             // has moved, nothing on screen or on disk reflects it yet, and the
             // snapshot the render pool reads from is now stale.
             self.reader.field_committed(committed);
+            // …including the journal, which is the half this used to miss: a
+            // form commit does not come back as an `Applied`, so it never
+            // reached the only place that recorded anything, and a recovery
+            // put back the ink and dropped every field the reader had filled
+            // in. What one is written down as lives in
+            // [`crate::reader_journal::entry_for_committed_field`].
+            if let Some(entry) = crate::reader_journal::entry_for_committed_field(committed) {
+                self.journal(entry);
+            }
             // The navigator's fill marks are only as true as the list they
             // were drawn from, and a commit has just made that list wrong.
             // Re-asked rather than patched here: PDFium is the sole author of
@@ -7249,6 +7258,8 @@ impl App {
             pulpit_render::document::DocumentCommand::SetField {
                 name: picker.field.clone(),
                 value,
+                // A date and a time are single values; nothing to select.
+                selected: Vec::new(),
             },
         );
         // The engine kills the focus as it takes the value — `SetField` runs
@@ -7696,6 +7707,8 @@ impl App {
                     pulpit_render::document::DocumentCommand::SetField {
                         name: picker.field.clone(),
                         value,
+                        // A date and a time are single values; nothing to select.
+                        selected: Vec::new(),
                     },
                 );
                 // The calendar comes down and the caret goes with it, for the

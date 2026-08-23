@@ -41,7 +41,7 @@ use pulpit_core::annotation::InkColor;
 use pulpit_core::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
 
 use crate::pdf::capabilities::{ActionKind, FormType};
-use crate::pdf::pdfium::{PdfiumBackend, FPDF_BITMAP_BGRA, FPDF_REVERSE_BYTE_ORDER};
+use crate::pdf::pdfium::PdfiumBackend;
 use crate::pdf::{BackendDocumentId, PdfBackend, PdfError};
 
 use super::limits;
@@ -493,68 +493,30 @@ impl<'a> PdfiumDocument<'a> {
             .filter(|(open, _)| *open == page.get())
             .map(|(_, handle)| handle);
 
-        // The page is drawn at `full_size`, or at whatever size makes the crop
-        // come out at `width` × `height` when the caller named none, and then
-        // shifted so the crop's corner lands on the bitmap's. The same
-        // placement the page render used, because the two passes have to agree
-        // to the pixel.
-        let (start_x, start_y, full_width, full_height) =
-            crate::pdf::page_placement(region, width, height, full_size);
-
-        let mut draw = |handle: FPDF_PAGE| -> crate::pdf::Result<()> {
-            {
-                // The same buffer the page was just drawn into, wrapped rather
-                // than copied: `FPDF_FFLDraw` composites over what is already
-                // there, which is exactly the page under the fields.
-                let bitmap = unsafe {
-                    bindings.FPDFBitmap_CreateEx(
-                        width as i32,
-                        height as i32,
-                        FPDF_BITMAP_BGRA,
-                        rgba.as_mut_ptr() as *mut std::os::raw::c_void,
-                        width as i32 * 4,
-                    )
-                };
-                if bitmap.is_null() {
-                    // The page is drawn and the fields are not. Better than
-                    // failing the render: a form whose values are missing is
-                    // visibly wrong, and a blank page tells the reader less.
-                    return Ok(());
-                }
-                unsafe {
-                    bindings.FPDF_FFLDraw(
-                        form,
-                        bitmap,
-                        handle,
-                        start_x,
-                        start_y,
-                        full_width,
-                        full_height,
-                        0,
-                        // The same byte-order flag the page render used, so
-                        // the two passes agree about what a pixel is. Without
-                        // it the fields arrive with red and blue swapped.
-                        FPDF_REVERSE_BYTE_ORDER,
-                    );
-                    bindings.FPDFBitmap_Destroy(bitmap);
-                }
-                Ok(())
-            }
-        };
-
+        // The placement and the byte order are the render pool's, literally:
+        // this pass and the page render have to agree to the pixel, and the
+        // way that is kept true is that there is one implementation of it.
         match open {
             // Already being edited: draw through that view, so what is on
-            // screen is what the person typing has typed.
-            Some(handle) => draw(handle).map_err(to_document_error),
+            // screen is what the person typing has typed. PDFium was told
+            // about this page when the interaction opened.
+            Some(handle) => {
+                crate::pdf::pdfium::draw_form_fields(
+                    bindings, form, handle, rgba, width, height, region, full_size,
+                );
+                Ok(())
+            }
             // Not being edited: any view will do, and PDFium needs telling
             // about this one before it will draw fields into it.
             None => self
                 .backend
                 .on_page(self.document, page.get(), |handle| {
                     unsafe { bindings.FORM_OnAfterLoadPage(handle, form) };
-                    let outcome = draw(handle);
+                    crate::pdf::pdfium::draw_form_fields(
+                        bindings, form, handle, rgba, width, height, region, full_size,
+                    );
                     unsafe { bindings.FORM_OnBeforeClosePage(handle, form) };
-                    outcome
+                    Ok(())
                 })
                 .map_err(to_document_error),
         }
@@ -633,6 +595,104 @@ impl<'a> PdfiumDocument<'a> {
         })
     }
 
+    /// Every field in the document, or just the one named, gathered from the
+    /// widget annotations that draw them.
+    ///
+    /// A *field* is a thing with a name and a value; a *widget* is a rectangle
+    /// on a page that shows it. They are not one to one — a radio group has one
+    /// field and several widgets, and a "sign here" field can be mirrored on
+    /// every page — so widgets are collected under the field name they belong
+    /// to rather than listed as if each were its own field (§8.6). That is why
+    /// even a lookup by name walks every page: the answer is not complete until
+    /// the last page has been asked whether it draws the field too.
+    ///
+    /// This is a listing. Nothing here edits anything: it says what a document
+    /// asks for and how much of it is filled. Values are typed on the page, by
+    /// PDFium, and this list is read back afterwards.
+    fn collect_fields(&self, wanted: Option<&str>) -> Result<Vec<FormField>> {
+        let Some(form) = self.form_handle() else {
+            // No environment, so no form, or a form that failed to initialise.
+            // Either way an empty list is the truth rather than a silence.
+            return Ok(Vec::new());
+        };
+        let bindings = self.backend.bindings();
+        let mut fields: Vec<FormField> = Vec::new();
+
+        for page in 0..self.info.page_count {
+            let geometry = self.measure(PageIndex(page))?;
+            let collected = self
+                .backend
+                .on_page(self.document, page, |handle| {
+                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+                    let mut found = Vec::new();
+                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+                        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+                        if annotation.is_null() {
+                            continue;
+                        }
+                        let widget = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
+                            == FPDF_ANNOT_WIDGET;
+                        if widget {
+                            if let Some(field) = read_named_form_field(
+                                bindings,
+                                form,
+                                annotation,
+                                PageIndex(page),
+                                &geometry,
+                                wanted,
+                            ) {
+                                found.push(field);
+                            }
+                        }
+                        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                    }
+                    Ok(found)
+                })
+                .map_err(to_document_error)?;
+
+            for mut found in collected {
+                // Read before the mutable borrow below, which is what makes
+                // the admission check readable at the place it applies.
+                let room = fields.len() < limits::MAX_FORM_FIELDS;
+                match fields.iter_mut().find(|field| field.name == found.name) {
+                    // Another rectangle for a field already seen: a radio
+                    // group's other option, or the same field repeated on
+                    // another page. The widgets join the field that is already
+                    // there; everything else about it is the same field's and
+                    // was read the first time.
+                    Some(field) => {
+                        for widget in found.widgets.drain(..) {
+                            if field.widgets.len() < limits::MAX_FIELD_WIDGETS {
+                                field.widgets.push(widget);
+                            }
+                        }
+                        // …except which option is chosen, which a radio group
+                        // states on the *selected* kid and not on the group.
+                        // Whichever widget knows is the one that is believed.
+                        if field.selected.is_empty() {
+                            field.selected = std::mem::take(&mut found.selected);
+                        }
+                    }
+                    // Bounded per *field*, not per page. Checked here because
+                    // this is where a new one is admitted: at the top of the
+                    // page loop, one page carrying ten thousand fields sails
+                    // past the limit and the caller's own check then refuses
+                    // the whole list.
+                    None if room => fields.push(found),
+                    None => {
+                        tracing::debug!(
+                            "this document declares more than {} form fields; the rest are \
+                             not listed",
+                            limits::MAX_FORM_FIELDS
+                        );
+                        return Ok(fields);
+                    }
+                }
+            }
+        }
+        Ok(fields)
+    }
+
     /// One named field, read from one page's widgets only.
     fn field_on_page(&self, name: &str, page: PageIndex) -> Option<FormField> {
         let form = self.form_handle()?;
@@ -648,9 +708,17 @@ impl<'a> PdfiumDocument<'a> {
                     }
                     let field = (unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
                         == FPDF_ANNOT_WIDGET)
-                        .then(|| read_form_field(bindings, form, annotation, page, &geometry))
-                        .flatten()
-                        .filter(|field| field.name == name);
+                        .then(|| {
+                            read_named_form_field(
+                                bindings,
+                                form,
+                                annotation,
+                                page,
+                                &geometry,
+                                Some(name),
+                            )
+                        })
+                        .flatten();
                     unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
                     if field.is_some() {
                         return Ok(field);
@@ -758,8 +826,8 @@ impl<'a> PdfiumDocument<'a> {
                 continue;
             }
             let matches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) } == FPDF_ANNOT_WIDGET
-                && read_form_field(bindings, form, annotation, page, &geometry)
-                    .is_some_and(|found| found.name == name);
+                && read_named_form_field(bindings, form, annotation, page, &geometry, Some(name))
+                    .is_some();
             if matches {
                 focused = unsafe { bindings.FORM_SetFocusedAnnot(form, annotation) } != 0;
                 unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
@@ -2507,6 +2575,17 @@ const FORMFLAG_TEXT_RICH_TEXT: u32 = 1 << 25;
 const FPDF_FORMFLAG_CHOICE_EDIT: u32 = 262_144;
 const FPDF_FORMFLAG_CHOICE_MULTI_SELECT: u32 = 2_097_152;
 
+/// The annotation `/F` flags that mean "do not show this on screen", from
+/// PDF 12.5.3 and `fpdf_annot.h`.
+///
+/// Not the same word as `/Ff`, and not the same field: `/Ff` says what kind of
+/// control a field is, `/F` says whether its widget is drawn. A widget with
+/// either of these set is one no viewer paints and no reader can click, which
+/// is what makes offering to type into it an offer to fill in something that
+/// is not there.
+const FPDF_ANNOT_FLAG_HIDDEN: std::os::raw::c_int = 2;
+const FPDF_ANNOT_FLAG_NOVIEW: std::os::raw::c_int = 32;
+
 /// The ASCII control code a key is, for the keys PDFium's form-fill
 /// environment handles as characters rather than as key events.
 ///
@@ -2584,12 +2663,33 @@ fn read_form_field(
     page: PageIndex,
     geometry: &PageGeometry,
 ) -> Option<FormField> {
+    read_named_form_field(bindings, form, annotation, page, geometry, None)
+}
+
+/// [`read_form_field`], for a caller that is looking for one field by name.
+///
+/// The name is the first thing PDFium is asked for, so a `wanted` that does not
+/// match costs one string read and nothing else — no option labels, no format
+/// script, no export values. That is what makes looking one field up across a
+/// two-hundred-page document a different kind of operation from listing every
+/// field on every page, which is what it used to be.
+fn read_named_form_field(
+    bindings: &dyn PdfiumLibraryBindings,
+    form: FPDF_FORMHANDLE,
+    annotation: FPDF_ANNOTATION,
+    page: PageIndex,
+    geometry: &PageGeometry,
+    wanted: Option<&str>,
+) -> Option<FormField> {
     let name = form_string(bindings, |buffer, length| unsafe {
         bindings.FPDFAnnot_GetFormFieldName(form, annotation, buffer, length)
     })?;
     // A field with no name cannot be navigated to, listed or reported on, and
     // is not something a listing can say anything useful about.
     if name.is_empty() {
+        return None;
+    }
+    if wanted.is_some_and(|wanted| wanted != name) {
         return None;
     }
     let kind = match unsafe { bindings.FPDFAnnot_GetFormFieldType(form, annotation) } {
@@ -2604,16 +2704,21 @@ fn read_form_field(
         // annotation with a broken parent reports.
         _ => FieldKind::Unknown,
     };
-    let value = form_string(bindings, |buffer, length| unsafe {
+    let value = form_text(|buffer, length| unsafe {
         bindings.FPDFAnnot_GetFormFieldValue(form, annotation, buffer, length)
-    })
-    .unwrap_or_default();
+    });
+    let truncated = value.truncated;
     // A multiline field's lines are separated by CRLF in the file, which is
     // what PDF says and what PDFium reports. Everything above this module
     // works in LF, and a value that came back with carriage returns in it
     // would compare unequal to the same text typed into it — so the newline is
     // normalised here, at the boundary, rather than in every caller.
-    let value = value.replace("\r\n", "\n").replace('\r', "\n");
+    let value = value.text.replace("\r\n", "\n").replace('\r', "\n");
+    // Whether the widget is drawn at all. `/F`, not `/Ff` — see
+    // [`FPDF_ANNOT_FLAG_HIDDEN`].
+    let annot_flags = unsafe { bindings.FPDFAnnot_GetFlags(annotation) };
+    let hidden =
+        annot_flags > 0 && annot_flags & (FPDF_ANNOT_FLAG_HIDDEN | FPDF_ANNOT_FLAG_NOVIEW) != 0;
     let flags = unsafe { bindings.FPDFAnnot_GetFormFieldFlags(form, annotation) };
     let read_only = flags >= 0 && flags & FORMFLAG_READONLY != 0;
     let required = flags >= 0 && flags & FORMFLAG_REQUIRED != 0;
@@ -2730,6 +2835,8 @@ fn read_form_field(
         password,
         file_select,
         rich_text,
+        truncated,
+        hidden,
         // One widget: this call reads one annotation. The caller collects the
         // widgets that name the same field, because a field can be drawn in
         // several places and each of them is a separate annotation.
@@ -2755,27 +2862,81 @@ fn read_form_field(
     })
 }
 
+/// A string read out of PDFium, and whether it is all of it.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct FormText {
+    text: String,
+    /// True when the value in the document is longer than pulpit carries, so
+    /// [`Self::text`] is a prefix of it — or, past
+    /// [`limits::MAX_FIELD_READ_BYTES`], nothing of it at all.
+    truncated: bool,
+}
+
 /// PDFium's two-call string dance, for the form getters.
 ///
 /// Every one of them returns the length in bytes including a two-byte
 /// terminator, then fills a buffer of that size. A length of two or less is
 /// the terminator alone, which is an absent or empty value rather than an
 /// error.
-fn form_string(
-    _bindings: &dyn PdfiumLibraryBindings,
+///
+/// The buffer is sized to what the *document* holds rather than to what pulpit
+/// carries, and this is the whole point of the function. PDFium's getters
+/// write nothing into a buffer smaller than the value — `Utf16EncodeMaybeCopy`
+/// reports the length and leaves the bytes untouched — so asking with a buffer
+/// capped at [`limits::MAX_FIELD_VALUE_BYTES`] does not truncate a longer
+/// value, it erases it: the zeroed buffer decodes to the empty string, and a
+/// filled-in comment box reads as a field nobody touched. The cut to the
+/// carrying limit is made here, afterwards, on a string that was actually
+/// read, and it is *reported* rather than made silently.
+fn form_text(
     mut call: impl FnMut(*mut FPDF_WCHAR, std::os::raw::c_ulong) -> std::os::raw::c_ulong,
-) -> Option<String> {
+) -> FormText {
     let length = call(std::ptr::null_mut(), 0);
     if length <= 2 {
-        return Some(String::new());
+        return FormText::default();
     }
-    let length = (length as usize).min(limits::MAX_FIELD_VALUE_BYTES * 2 + 2);
+    let length = length as usize;
+    if length > limits::MAX_FIELD_READ_BYTES {
+        // Past what a read may allocate (A8). Nothing can be said about the
+        // contents, and saying so is better than saying "empty" — which is a
+        // claim about the document rather than about the read.
+        return FormText {
+            text: String::new(),
+            truncated: true,
+        };
+    }
     let mut buffer = vec![0u8; length];
     call(
         buffer.as_mut_ptr() as *mut FPDF_WCHAR,
         length as std::os::raw::c_ulong,
     );
-    Some(decode_utf16(&buffer))
+    let text = decode_utf16(&buffer);
+    if text.len() <= limits::MAX_FIELD_VALUE_BYTES {
+        return FormText {
+            text,
+            truncated: false,
+        };
+    }
+    // Cut on a character boundary, never inside one: the bound is in bytes and
+    // the string is UTF-8, so the last whole character that fits is where this
+    // ends.
+    let mut cut = limits::MAX_FIELD_VALUE_BYTES;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    FormText {
+        text: text[..cut].to_string(),
+        truncated: true,
+    }
+}
+
+/// [`form_text`] for the callers that have nothing to do with a truncation but
+/// read the same strings — a name, an option label, an export value.
+fn form_string(
+    _bindings: &dyn PdfiumLibraryBindings,
+    call: impl FnMut(*mut FPDF_WCHAR, std::os::raw::c_ulong) -> std::os::raw::c_ulong,
+) -> Option<String> {
+    Some(form_text(call).text)
 }
 
 fn decode_utf16(bytes: &[u8]) -> String {
@@ -3005,73 +3166,18 @@ impl DocumentBackend for PdfiumDocument<'_> {
     /// asks for and how much of it is filled. Values are typed on the page, by
     /// PDFium, and this list is read back afterwards.
     fn fields(&self) -> Result<Vec<FormField>> {
-        let Some(form) = self.form_handle() else {
-            // No environment, so no form, or a form that failed to initialise.
-            // Either way an empty list is the truth rather than a silence.
-            return Ok(Vec::new());
-        };
-        let bindings = self.backend.bindings();
-        let mut fields: Vec<FormField> = Vec::new();
+        self.collect_fields(None)
+    }
 
-        for page in 0..self.info.page_count {
-            if fields.len() >= limits::MAX_FORM_FIELDS {
-                break;
-            }
-            let geometry = self.measure(PageIndex(page))?;
-            let collected = self
-                .backend
-                .on_page(self.document, page, |handle| {
-                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
-                    let mut found = Vec::new();
-                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-                        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-                        if annotation.is_null() {
-                            continue;
-                        }
-                        let widget = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
-                            == FPDF_ANNOT_WIDGET;
-                        if widget {
-                            if let Some(field) = read_form_field(
-                                bindings,
-                                form,
-                                annotation,
-                                PageIndex(page),
-                                &geometry,
-                            ) {
-                                found.push(field);
-                            }
-                        }
-                        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                    }
-                    Ok(found)
-                })
-                .map_err(to_document_error)?;
-
-            for mut found in collected {
-                match fields.iter_mut().find(|field| field.name == found.name) {
-                    // Another rectangle for a field already seen: a radio
-                    // group's other option, or the same field repeated on
-                    // another page. The widgets join the field that is already
-                    // there; everything else about it is the same field's and
-                    // was read the first time.
-                    Some(field) => {
-                        for widget in found.widgets.drain(..) {
-                            if field.widgets.len() < limits::MAX_FIELD_WIDGETS {
-                                field.widgets.push(widget);
-                            }
-                        }
-                        // …except which option is chosen, which a radio group
-                        // states on the *selected* kid and not on the group.
-                        // Whichever widget knows is the one that is believed.
-                        if field.selected.is_empty() {
-                            field.selected = std::mem::take(&mut found.selected);
-                        }
-                    }
-                    None => fields.push(found),
-                }
-            }
-        }
-        Ok(fields)
+    /// One field, without building every other one on the way past it.
+    ///
+    /// The same walk `fields` makes, told what it is looking for: a widget
+    /// whose name does not match costs one string read, where listing it would
+    /// cost its option labels, its format script and its export value. Every
+    /// commit does two of these, so on a long form this is the difference
+    /// between a keystroke and a pause.
+    fn field(&self, name: &str) -> Result<Option<FormField>> {
+        Ok(self.collect_fields(Some(name))?.into_iter().next())
     }
 
     /// Put a value into a named field — for undo, and through the same editor.
@@ -3106,13 +3212,17 @@ impl DocumentBackend for PdfiumDocument<'_> {
         // focused and so cannot be edited — which is the honest answer for a
         // field that is not on a page rather than a silent success.
         let field = self
-            .fields()?
-            .into_iter()
-            .find(|field| field.name == name)
+            .field(name)?
             .ok_or_else(|| DocumentError::NoSuchField(name.to_string()))?;
         if field.read_only {
-            return Err(DocumentError::Backend(format!(
-                "the field {name} is read-only"
+            return Err(DocumentError::FieldReadOnly(name.to_string()));
+        }
+        if field.truncated {
+            // The value in the document is longer than it was read as, so
+            // `value` is at best a prefix of what is there and writing it
+            // would throw the rest away.
+            return Err(DocumentError::Unsupported(format!(
+                "change {name}: its value is longer than pulpit can read"
             )));
         }
         if field.widgets.is_empty() {
@@ -3126,15 +3236,27 @@ impl DocumentBackend for PdfiumDocument<'_> {
             FieldKind::ComboBox | FieldKind::ListBox => {
                 self.set_choice_field(&field, value, selected)?;
             }
-            _ => self.set_text_field(&field, value)?,
+            FieldKind::Text => self.set_text_field(&field, value)?,
+            // A push button, a signature, or a `/FT` pulpit does not know.
+            // None of them holds a typed value, and the text path is *silent*
+            // about that: `FORM_ReplaceSelection` on a button edits nothing
+            // and reports nothing, so the caller would be told the write
+            // succeeded and read back the value that was already there. The
+            // transaction path refuses these in `precheck`; this is the same
+            // refusal for the callers that do not go through it.
+            kind => {
+                return Err(DocumentError::Unsupported(format!(
+                    "hold a typed value: {name} is a {}",
+                    kind.label().to_lowercase()
+                )))
+            }
         }
         self.field_value(name)
     }
 
+    /// What one field holds, without building every other field to find out.
     fn field_value(&self, name: &str) -> Result<String> {
-        self.fields()?
-            .into_iter()
-            .find(|field| field.name == name)
+        self.field(name)?
             .map(|field| field.value)
             .ok_or_else(|| DocumentError::NoSuchField(name.to_string()))
     }
@@ -3671,6 +3793,22 @@ impl DocumentBackend for PdfiumDocument<'_> {
     fn write_to(&mut self, destination: &Path, options: SaveOptions) -> Result<u64> {
         // What is serialised must not be a document with a page held open
         // behind the writer's back.
+        //
+        // The form page above all. A field that holds the caret holds
+        // characters PDFium has not written into `/V` yet — they live in the
+        // page *view* it built in `FORM_OnAfterLoadPage` — and a save made
+        // around that view writes the value the field had before they were
+        // typed. `release_form_page` calls `FORM_OnBeforeClosePage`, which is
+        // what commits them.
+        //
+        // The application also asks for this, by dropping the focus and
+        // waiting for the commit to come back, so that the field list and the
+        // undo history know about it before the file is written. This is not
+        // that check made twice: that one is about the *session* being
+        // consistent, and this one is about the bytes. A save reached any
+        // other way — a recovery, a signature, a future autosave — passes
+        // here and not there.
+        self.release_form_page();
         self.release_text_page();
         let handle = self
             .backend

@@ -44,6 +44,13 @@
 //! a dismissed dialog gives. The script runs to completion; the application,
 //! which is the layer with a user in front of it, decides what to honour (A8).
 //!
+//! One thing a script *can* still reach is the clock. `FFI_GetLocalTime`
+//! answers with a fixed value, but that is only the time PDFium asks its host
+//! for; `new Date()` inside a field script is V8's own and reads the real one.
+//! A form that stamps the date it was filled on therefore gets the true date.
+//! That is stated here rather than left to be discovered, because the callback
+//! below looks like it settles the question and does not.
+//!
 //! # Two constraints the V8 build imposes
 //!
 //! **The interface version is not a choice.** `FPDFDOC_InitFormFillEnvironment`
@@ -569,10 +576,22 @@ unsafe extern "C" fn kill_timer(_this: *mut FPDF_FORMFILLINFO, _id: c_int) {
 unsafe extern "C" fn get_local_time(_this: *mut FPDF_FORMFILLINFO) -> SystemTime {
     // A fixed, obviously-not-a-real-time value rather than the wall clock.
     //
-    // This is what a document's JavaScript would read to learn when the form
-    // was filled, and a form does not need to know. It is also the closed-world
-    // discipline the Typst compiler follows for the same reason: a build, or a
-    // fill, that depends on the clock is one that cannot be reproduced.
+    // What this closes is the *host* clock: the one PDFium asks its embedder
+    // for, and the one a viewer would answer from the system time.
+    //
+    // It is worth being exact about what that does and does not buy, because
+    // the obvious reading is wrong. It does **not** hide the date from a
+    // document's JavaScript. Under the V8 build, `new Date()` is V8's, built
+    // on its own clock, and a calculation script that stamps today's date into
+    // a field gets today's date — measured, not assumed; see
+    // `a_scripts_own_date_is_the_real_one_and_this_callback_does_not_change_that`.
+    // Closing that would mean reaching into V8's time source, which is not
+    // reachable through the library pulpit loads at run time.
+    //
+    // What it does buy is that nothing pulpit *hands over* is a clock reading,
+    // which keeps this callback consistent with the rest of the engine (time
+    // is passed in, never read) and leaves one fewer path to close if V8's
+    // clock ever becomes controllable.
     //
     // Safety: `FPDF_SYSTEMTIME` is a struct of integers; all-zero is valid.
     unsafe { std::mem::zeroed() }
@@ -1056,8 +1075,14 @@ mod tests {
     }
 
     #[test]
-    fn the_clock_a_document_can_read_is_not_the_wall_clock() {
-        // A form's JavaScript would read this to learn when it was filled.
+    fn the_host_clock_pdfium_is_handed_is_not_the_wall_clock() {
+        // Named for what it actually holds. This is the clock *pulpit* answers
+        // with, not every clock a document can reach: under the V8 build a
+        // script's own `new Date()` is V8's and reads the real time, which
+        // `a_scripts_own_date_is_the_real_one_and_this_callback_does_not_change_that`
+        // in `pdfium_form_javascript.rs` measures rather than assumes. A test
+        // named for the stronger property would have been a green light under
+        // a claim that is not true.
         let time = unsafe { get_local_time(std::ptr::null_mut()) };
         assert_eq!(time, SystemTime::default());
     }

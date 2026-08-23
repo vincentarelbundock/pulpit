@@ -63,6 +63,48 @@ pub enum JournalEntry {
     },
 }
 
+/// How a committed form field is written down, so it survives a crash (§11.5).
+///
+/// A value typed into a field is a revision-incrementing edit like any other,
+/// and every one of those is recorded. This one did not used to be: the
+/// journal's only entry point was the reply to a *transaction*, and a form
+/// commit does not come back as one — it arrives as a `FormEventResult` from
+/// PDFium's own editor. The result was a recovery that offered "N unsaved
+/// edits", put back the ink strokes and silently dropped every field the
+/// reader had filled in, which in a form is the whole of the work.
+///
+/// It is written as the [`DocumentCommand::SetField`] that reproduces it, for
+/// the same reason the date and time pickers commit that way: replay then goes
+/// through PDFium's editor, the field's format script runs over the value and
+/// the appearance is regenerated, so there is no second way of writing a value
+/// that would have to be kept working (§8.6).
+///
+/// `None` for a commit the engine could not name. There is no command that
+/// could put one back — a value needs a field to go in — which is the same
+/// reason no undo entry is recorded for one either.
+///
+/// A free function so the rule lives in one place and can be tested on a
+/// committed field alone, without an application around it.
+pub fn entry_for_committed_field(
+    committed: &pulpit_render::document::protocol::CommittedField,
+) -> Option<JournalEntry> {
+    use pulpit_render::document::{DocumentCommand, DocumentTransaction};
+
+    if committed.name.is_empty() {
+        return None;
+    }
+    Some(JournalEntry::Applied {
+        revision: committed.revision,
+        transaction: DocumentTransaction::one(DocumentCommand::SetField {
+            name: committed.name.clone(),
+            value: committed.value.clone(),
+            // What a multi-select list box chose, which the value alone names
+            // at most one of.
+            selected: committed.selected.clone(),
+        }),
+    })
+}
+
 impl JournalEntry {
     /// The revision this entry produced.
     pub fn revision(&self) -> DocumentRevision {
@@ -518,5 +560,110 @@ mod tests {
 
         let recovered = Journal::recover(&path).unwrap();
         assert_eq!(recovered.entries.len(), 1, "the old session leaked through");
+    }
+
+    fn committed(
+        name: &str,
+        value: &str,
+        selected: Vec<u32>,
+    ) -> pulpit_render::document::protocol::CommittedField {
+        pulpit_render::document::protocol::CommittedField {
+            name: name.to_string(),
+            value: value.to_string(),
+            previous: String::new(),
+            revision: DocumentRevision(7),
+            selected,
+            previous_selected: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_filled_field_is_written_down_like_any_other_edit() {
+        // The bug this holds shut: a value typed into a form field bumped the
+        // revision, went into the undo history and was never journalled, so a
+        // crash lost every field the reader had filled in while the recovery
+        // prompt counted the ink strokes and called them "the unsaved edits".
+        use pulpit_render::document::{DocumentCommand, DocumentTransaction};
+
+        let entry = entry_for_committed_field(&committed("name", "Ada", Vec::new()))
+            .expect("a named commit is recordable");
+        assert_eq!(
+            entry,
+            JournalEntry::Applied {
+                revision: DocumentRevision(7),
+                transaction: DocumentTransaction::one(DocumentCommand::SetField {
+                    name: "name".into(),
+                    value: "Ada".into(),
+                    selected: Vec::new(),
+                }),
+            },
+            "a filled field must replay as the SetField that reproduces it"
+        );
+        assert_eq!(entry.revision(), DocumentRevision(7));
+    }
+
+    #[test]
+    fn a_multi_select_carries_every_row_it_chose_and_not_just_one() {
+        // A list box's value names at most one of three chosen rows. Recording
+        // the string alone would replay a recovery that reinstated one tick
+        // and dropped two, silently.
+        let entry = entry_for_committed_field(&committed("langues", "Français", vec![0, 2, 3]))
+            .expect("a named commit is recordable");
+        let JournalEntry::Applied { transaction, .. } = entry else {
+            panic!("a fill is an applied transaction");
+        };
+        let [pulpit_render::document::DocumentCommand::SetField { selected, .. }] =
+            transaction.0.as_slice()
+        else {
+            panic!("one command, and it sets a field");
+        };
+        assert_eq!(selected, &[0, 2, 3]);
+    }
+
+    #[test]
+    fn a_commit_the_engine_could_not_name_records_nothing() {
+        // There is no command that puts back a value with no field to put it
+        // in, and half an entry replayed is worse than none. The revision
+        // still moved; that is the session's business, not the journal's.
+        assert!(entry_for_committed_field(&committed("", "orphan", Vec::new())).is_none());
+    }
+
+    #[test]
+    fn a_filled_field_survives_the_file_it_is_written_to() {
+        // End to end, because the point of journalling a fill is that it comes
+        // back after a crash — and the line has to parse as well as serialise.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let filled = entry_for_committed_field(&committed("name", "Ada", vec![1])).unwrap();
+        {
+            let mut journal =
+                Journal::start(&path, Path::new("/tmp/paper.pdf"), fingerprint()).unwrap();
+            journal.append(&entry(1, 10.0)).unwrap();
+            journal.append(&filled).unwrap();
+        }
+        let recovered = Journal::recover(&path).unwrap();
+        assert_eq!(recovered.entries.len(), 2, "the fill did not survive");
+        assert!(
+            recovered.entries.contains(&filled),
+            "the fill came back as something else: {:?}",
+            recovered.entries
+        );
+    }
+
+    #[test]
+    fn a_journal_written_before_selections_were_recorded_still_replays() {
+        // `selected` was added to the command after the format existed, so a
+        // line written without it must still parse — as a fill that chose
+        // nothing, which is what every field except a multi-select is.
+        let line = r#"{"applied":{"revision":3,"transaction":[{"set-field":{"name":"name","value":"Ada"}}]}}"#;
+        let parsed: JournalEntry = serde_json::from_str(line).expect("an older line still parses");
+        assert_eq!(
+            parsed,
+            entry_for_committed_field(&pulpit_render::document::protocol::CommittedField {
+                revision: DocumentRevision(3),
+                ..committed("name", "Ada", Vec::new())
+            })
+            .unwrap()
+        );
     }
 }

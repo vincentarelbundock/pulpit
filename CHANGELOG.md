@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Filling a form field costs less on a long document. Reading one field by name
+  no longer builds every other field in the file first, which a commit used to
+  do twice.
+
 - Worker, file-watch, and display-topology results now wake the interface as
   they arrive instead of waiting for a periodic UI-thread poll. Delivery work
   is bounded per event-loop turn, document opening and placement verification
@@ -33,6 +37,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   during settings migration so the visible reference always matches input.
 
 ### Fixed
+
+- **A crash lost every form field you had filled in.** Values typed into a
+  form went into the undo history and moved the document's revision, but were
+  never written to the recovery journal — so a recovery offered "N unsaved
+  edits", put back the ink strokes, and silently dropped the fields. Filling a
+  field is now recorded like any other edit, including which rows a
+  multiple-selection list chose.
+
+- **A field holding more than 16 KB of text read as empty.** A long comment box
+  came back blank, which also meant a required field you *had* filled in was
+  listed as still empty when saving. Long values are now read in full and cut
+  to what pulpit carries, and a cut one is reported as cut rather than shown as
+  a value it is not; a value pulpit only half read is no longer offered for
+  editing, because writing it back would throw away the rest.
+
+- **Saving straight from a field you were still typing in could write the old
+  value.** Uncommitted characters live in the engine's editing view rather than
+  in the document, so anything that saved without first taking the focus off
+  the field wrote what was there before. The engine now closes the field's
+  editor before it serialises, so this holds however the save was reached.
+
+- **Fields the document hides were offered as places to type.** A widget marked
+  Hidden or NoView is drawn by nothing, but Tab still walked to it and the
+  pre-save review still asked you to go and fill it in — scrolling the page to
+  a blank patch. Hidden fields are still listed, and are no longer somewhere
+  the caret can be sent.
+
+- Setting a value on a push button, a signature field or a field of unknown
+  type reported success for a write that did nothing. It is refused, and says
+  why.
+
+- A form's own JavaScript can read the real date, and pulpit's documentation
+  said otherwise. The behaviour is unchanged — closing the browser engine's
+  clock is not reachable from here — but the claim, and the test that appeared
+  to prove it, have been corrected to say what is true.
 
 - **Reader mode had no working key.** `r` was bound to the timer reset *and*
   to reader mode, and since resolution takes the first match, the documented

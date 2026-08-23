@@ -561,6 +561,26 @@ pub struct FormField {
     /// viewer may keep showing the old styled text.
     #[serde(default)]
     pub rich_text: bool,
+    /// The document's value for this field is longer than pulpit carries, so
+    /// [`Self::value`] is a prefix of it.
+    ///
+    /// Reported rather than hidden because the difference is one nothing else
+    /// can recover: writing a prefix back over the field would throw away the
+    /// rest, so [`Self::is_editable`] says no and the inspector can say why.
+    /// PDFium's own editor is unaffected — it holds the whole value, and
+    /// typing into the field on the page still works — this is only about
+    /// what *pulpit* may claim to know.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The widget's `/F` marks it Hidden or NoView: no viewer paints it and no
+    /// pointer can reach it.
+    ///
+    /// Listed anyway, because a field that exists is a fact an inspector may
+    /// want, and refused as an editing target by [`Self::is_editable`],
+    /// because an editor over a widget nobody can see is an editor for a blank
+    /// patch of page.
+    #[serde(default)]
+    pub hidden: bool,
     /// Where the field is drawn. Empty when neither the producer nor the
     /// reader of the document could say — the inspector is still a way in.
     pub widgets: Vec<FieldWidget>,
@@ -592,11 +612,32 @@ impl FormField {
 
     /// Can the user change this one?
     ///
-    /// A file-select field cannot: its value is a path chosen through a file
-    /// picker the worker refuses to open, so offering an editor for it would
-    /// offer an edit that can never take.
+    /// Four ways to be told no, and each of them is an edit that could not
+    /// take rather than a preference:
+    ///
+    /// - a read-only field, which the document says so about;
+    /// - a kind that holds no value — a button, a signature;
+    /// - a file-select field, whose value is a path chosen through a file
+    ///   picker the worker refuses to open;
+    /// - a field whose value is longer than pulpit read, where writing back
+    ///   what was read would cut the rest of it off.
+    ///
+    /// A hidden widget is deliberately *not* on that list. It cannot be
+    /// clicked into, because nothing draws it, but a field list can still walk
+    /// to it and a document can still mean it to be filled; what refuses it is
+    /// [`Self::is_reachable`], which is about where an editor can go.
     pub fn is_editable(&self) -> bool {
-        !self.read_only && self.kind.is_fillable() && !self.file_select
+        !self.read_only && self.kind.is_fillable() && !self.file_select && !self.truncated
+    }
+
+    /// Can the user get to this one on the page?
+    ///
+    /// Editable and drawn. This is what the tab order, the field navigator's
+    /// jump and the focus ring ask, because each of them puts something on the
+    /// page at the widget's rectangle — and a widget the document hid is a
+    /// rectangle with nothing in it.
+    pub fn is_reachable(&self) -> bool {
+        self.is_editable() && !self.hidden
     }
 }
 
@@ -633,7 +674,21 @@ impl TextSelectionResult {
 #[serde(rename_all = "kebab-case")]
 pub enum DocumentCommand {
     Annotation(AnnotationCommand),
-    SetField { name: String, value: String },
+    SetField {
+        name: String,
+        value: String,
+        /// Which options are chosen, by index, for a choice field that takes
+        /// several.
+        ///
+        /// The same fact [`UndoOperation::SetField`] carries and for the same
+        /// reason: one string cannot name three selections, so a transaction
+        /// that fills a multi-select list box has to say so here or lose two
+        /// of them. Empty for every other kind, and absent from journals
+        /// written before it existed — which is why it defaults rather than
+        /// being required.
+        #[serde(default)]
+        selected: Vec<u32>,
+    },
 }
 
 impl DocumentCommand {
@@ -914,6 +969,7 @@ mod tests {
         let transaction = DocumentTransaction::one(DocumentCommand::SetField {
             name: "comments".into(),
             value: "x".repeat(limits::MAX_FIELD_VALUE_BYTES + 1),
+            selected: Vec::new(),
         });
         assert!(transaction.validate().is_err());
     }
@@ -945,6 +1001,8 @@ mod tests {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             selected: Vec::new(),
             widgets: vec![
                 FieldWidget {
@@ -988,6 +1046,8 @@ mod tests {
             password: false,
             file_select: false,
             rich_text: false,
+            truncated: false,
+            hidden: false,
             selected: Vec::new(),
             widgets: Vec::new(),
         };
