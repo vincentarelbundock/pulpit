@@ -9879,7 +9879,11 @@ impl App {
                     self.on_read_command(crate::widgets::event::ReadCommand::SetZoom(zoom));
                 self.reader.restore_position(page, Some(zoom), fraction);
                 self.navigating_history = false;
-                Task::batch([spread_task, zoom_task])
+                // Both commands above worked out a scroll from where the
+                // search left the reader standing, and both were built
+                // before the restore moved it. The restore has the last
+                // word, so it is the last thing the surface hears.
+                Task::batch([spread_task, zoom_task, self.scroll_surface_to_reader()])
             }
             Some(SearchOrigin::Presenter(place)) if !self.uses_document_viewer() => {
                 self.go_to_place(place)

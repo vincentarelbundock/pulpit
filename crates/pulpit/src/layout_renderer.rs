@@ -8,7 +8,7 @@
 //! preview with sample content, and the editor canvas. Having one is what
 //! makes "what you designed is what you present" true rather than aspirational.
 
-use iced::widget::{container, opaque, row, space, stack, Column, Row};
+use iced::widget::{container, opaque, space, Column, Row, Stack};
 use iced::{Element, Length, Padding};
 
 use crate::layout::{Direction, Layout, Node};
@@ -41,20 +41,18 @@ pub fn side_panel<'a, Message: 'a>(
     reveal: f32,
 ) -> Element<'a, Message> {
     let reveal = reveal.clamp(0.0, 1.0);
-    if reveal <= f32::EPSILON {
-        return surface.into();
-    }
-
-    row![
-        container(panel)
+    // The row stands whether or not the panel is showing. Handing the
+    // surface back bare would move it to the root of this position in the
+    // tree and back again, and the widget state it carries — the page's own
+    // scroll position among it — is matched by position.
+    mounted_row(vec![
+        container(panel_contents(panel, reveal))
             .width(Length::Fixed(revealed(width, reveal)))
             .height(Length::Fill)
-            .clip(true),
+            .clip(true)
+            .into(),
         surface.into(),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    ])
 }
 
 /// Float a transient side panel over a working surface.
@@ -70,21 +68,35 @@ pub fn overlay_side_panel<'a, Message: 'a>(
     reveal: f32,
 ) -> Element<'a, Message> {
     let reveal = reveal.clamp(0.0, 1.0);
-    if reveal <= f32::EPSILON {
-        return surface.into();
-    }
-    stack![
+    // Mounted whether or not the drawer is showing, for the reason
+    // `side_panel` gives: the surface must not change position in the tree.
+    // `Stack::from_vec` rather than the macro, which drops a zero-width
+    // layer on the floor and would take the surface's position with it.
+    Stack::from_vec(vec![
         surface.into(),
         opaque(
-            container(panel)
+            container(panel_contents(panel, reveal))
                 .width(Length::Fixed(revealed(width, reveal)))
                 .height(Length::Fill)
                 .clip(true),
         ),
-    ]
+    ])
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// A transient panel's contents, or nothing at all while it is closed. Its
+/// container stays; what it holds does not have to.
+fn panel_contents<'a, Message: 'a>(
+    panel: impl Into<Element<'a, Message>>,
+    reveal: f32,
+) -> Element<'a, Message> {
+    if reveal <= f32::EPSILON {
+        space::horizontal().width(Length::Fixed(0.0)).into()
+    } else {
+        panel.into()
+    }
 }
 
 fn node<'a, Message: Clone + 'static>(
@@ -126,11 +138,15 @@ fn node<'a, Message: Clone + 'static>(
                 .into()
         }
         Node::Split(split) => {
+            // Only structural emptiness removes a child. A pane the reveal
+            // has closed keeps its place in the split and takes no space:
+            // dropping it shifts every sibling after it one position, and
+            // widget state is matched by position, so the page surface would
+            // be handed the state of whatever used to sit beside it — a
+            // fresh scrollable at the top of the document.
             let visible: Vec<usize> = (0..split.children.len())
                 .filter(|index| {
                     !(context.mode.collapse_empty() && is_collapsed(&split.children[*index]))
-                        && pane_reveal(&split.children[*index], context, inside_outline_rail)
-                            > f32::EPSILON
                 })
                 .collect();
             if visible.is_empty() {
@@ -150,66 +166,142 @@ fn node<'a, Message: Clone + 'static>(
 
             match split.direction {
                 Direction::Horizontal => {
-                    let mut content = Row::new();
+                    let mut content = Vec::with_capacity(visible.len() * 2);
+                    let mut previous_closed = false;
                     for (position, index) in visible.into_iter().enumerate() {
-                        if position > 0 {
-                            content = content.push(split_separator(split.direction, split.gap));
-                        }
                         let reveal =
                             pane_reveal(&split.children[index], context, inside_outline_rail);
-                        let width = split.children[index]
-                            .hug_extent(split.direction)
-                            .map_or_else(
-                                || Length::FillPortion(portion(index)),
-                                |extent| Length::Fixed(extent * reveal),
-                            );
-                        content = content.push(
-                            container(self::node(
+                        let closed = reveal <= f32::EPSILON;
+                        if position > 0 {
+                            content.push(split_separator(
+                                split.direction,
+                                split.gap,
+                                !closed && !previous_closed,
+                            ));
+                        }
+                        previous_closed = closed;
+                        let width = if closed {
+                            Length::Fixed(0.0)
+                        } else {
+                            split.children[index]
+                                .hug_extent(split.direction)
+                                .map_or_else(
+                                    || Length::FillPortion(portion(index)),
+                                    |extent| Length::Fixed(extent * reveal),
+                                )
+                        };
+                        content.push(
+                            container(pane(
+                                closed,
                                 &split.children[index],
                                 context,
                                 compose,
                                 on_event,
-                                inside_outline_rail || is_outline_rail(&split.children[index]),
+                                inside_outline_rail,
                             ))
                             .width(width)
                             .height(Length::Fill)
-                            .clip(true),
+                            .clip(true)
+                            .into(),
                         );
                     }
-                    content.width(Length::Fill).height(Length::Fill).into()
+                    mounted_row(content)
                 }
                 Direction::Vertical => {
-                    let mut content = Column::new();
+                    let mut content = Vec::with_capacity(visible.len() * 2);
+                    let mut previous_closed = false;
                     for (position, index) in visible.into_iter().enumerate() {
-                        if position > 0 {
-                            content = content.push(split_separator(split.direction, split.gap));
-                        }
                         let reveal =
                             pane_reveal(&split.children[index], context, inside_outline_rail);
-                        let height = split.children[index]
-                            .hug_extent(split.direction)
-                            .map_or_else(
-                                || Length::FillPortion(portion(index)),
-                                |extent| Length::Fixed(extent * reveal),
-                            );
-                        content = content.push(
-                            container(self::node(
+                        let closed = reveal <= f32::EPSILON;
+                        if position > 0 {
+                            content.push(split_separator(
+                                split.direction,
+                                split.gap,
+                                !closed && !previous_closed,
+                            ));
+                        }
+                        previous_closed = closed;
+                        let height = if closed {
+                            Length::Fixed(0.0)
+                        } else {
+                            split.children[index]
+                                .hug_extent(split.direction)
+                                .map_or_else(
+                                    || Length::FillPortion(portion(index)),
+                                    |extent| Length::Fixed(extent * reveal),
+                                )
+                        };
+                        content.push(
+                            container(pane(
+                                closed,
                                 &split.children[index],
                                 context,
                                 compose,
                                 on_event,
-                                inside_outline_rail || is_outline_rail(&split.children[index]),
+                                inside_outline_rail,
                             ))
                             .width(Length::Fill)
                             .height(height)
-                            .clip(true),
+                            .clip(true)
+                            .into(),
                         );
                     }
-                    content.width(Length::Fill).height(Length::Fill).into()
+                    mounted_column(content)
                 }
             }
         }
     }
+}
+
+/// A row that keeps every child it is given, at the position it was given in.
+///
+/// `Row::push` quietly discards a child whose width or height is a fixed
+/// zero, which is exactly what a closed pane and its retired gutter are. That
+/// would undo the whole point of keeping them: the panes after them would
+/// shift, and iced matches widget state to widgets by position. `from_vec`
+/// does not inspect its children, so the width and height it does not infer
+/// are set here instead.
+fn mounted_row<'a, Message: 'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    Row::from_vec(children)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// The vertical half of [`mounted_row`], with the same reason behind it.
+fn mounted_column<'a, Message: 'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    Column::from_vec(children)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// One child of a split, or a placeholder standing in its position while it
+/// is closed.
+///
+/// A closed pane holds its place so its siblings keep theirs, but its
+/// contents are not built: nothing inside a rail nobody can see is worth
+/// laying out, and its own state is expected to start again when it opens,
+/// exactly as it did when the pane was dropped altogether.
+fn pane<'a, Message: Clone + 'static>(
+    closed: bool,
+    child: &Node,
+    context: &Context<'_>,
+    compose: Option<&'a iced::widget::text_editor::Content>,
+    on_event: fn(WidgetEvent) -> Message,
+    inside_outline_rail: bool,
+) -> Element<'a, Message> {
+    if closed {
+        return space::horizontal().width(Length::Fixed(0.0)).into();
+    }
+    self::node(
+        child,
+        context,
+        compose,
+        on_event,
+        inside_outline_rail || is_outline_rail(child),
+    )
 }
 
 /// The outline is a layout pane, not content folded inside one. Scaling its
@@ -252,7 +344,16 @@ fn contains(node: &Node, kind: crate::widgets::WidgetKind) -> bool {
 /// One muted line between adjacent cells, centred in the space reserved for
 /// their gutter. There is deliberately no corresponding line at the outside
 /// edge of a layout.
-fn split_separator<Message: 'static>(direction: Direction, gap: f32) -> Element<'static, Message> {
+fn split_separator<Message: 'static>(
+    direction: Direction,
+    gap: f32,
+    drawn: bool,
+) -> Element<'static, Message> {
+    // A separator beside a closed pane keeps its position in the split and
+    // gives up its gutter: there is no boundary left to mark.
+    if !drawn {
+        return space::horizontal().width(Length::Fixed(0.0)).into();
+    }
     let width = crate::widgets::tokens::CELL_SEPARATOR_WIDTH;
     let gutter = gap.max(width);
     let line = container(space::horizontal())
@@ -404,6 +505,42 @@ mod tests {
             pane_reveal(rail, &context, false),
             1.0,
             "search reuses and reveals the outline rail"
+        );
+    }
+
+    /// Iced matches widget state to widgets by position among their
+    /// siblings. A rail that leaves the split when it closes therefore hands
+    /// the page surface a stranger's state on the way back in, which is what
+    /// used to drop the reader at the top of the document every time the
+    /// bookmarks or the search panel were opened and closed again.
+    #[test]
+    fn closing_the_outline_rail_leaves_its_siblings_where_they_are() {
+        use iced::advanced::widget::Tree;
+
+        let layout =
+            crate::layout::builtin::reader_default(crate::layout::AspectRatio::SixteenNine);
+        let body = layout
+            .root
+            .as_split()
+            .expect("the reader root is split")
+            .children[1]
+            .clone();
+
+        let shape = |reveal: f32| {
+            let mut context = context(Mode::Live);
+            context.reader.outline_reveal = reveal;
+            context.search_reveal = 0.0;
+            let element: iced::Element<'_, ()> = self::node(&body, &context, None, |_| (), false);
+            let tree = Tree::new(&element);
+            // The row's own children: every pane and every gutter between
+            // them, however little of the window they are taking.
+            tree.children.len()
+        };
+
+        assert_eq!(
+            shape(0.0),
+            shape(1.0),
+            "a closed rail keeps its place in the split"
         );
     }
 }
