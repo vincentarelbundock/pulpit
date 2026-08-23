@@ -35,6 +35,10 @@ pub enum PdfWriteError {
     #[error("failed to parse PDF structure: {0}")]
     ParseError(String),
 
+    /// A document this writer understands but cannot represent.
+    #[error("{0}")]
+    Unsupported(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 }
@@ -646,6 +650,26 @@ pub struct TrailerDict {
     pub has_xref_stm: bool,
 }
 
+/// One past the highest object number in `objects`, refusing rather than
+/// overflowing.
+///
+/// The `+ 1` used to be unchecked. Every input to it is either an object
+/// number this writer allocated from the source document's `/Size` or the
+/// `/Size` itself, so a source that declares `u32::MAX` reached it — panicking
+/// a debug build, and in release wrapping to zero.
+fn one_past_highest(objects: &[(u32, u16, PdfObject)]) -> Result<u32> {
+    let highest = objects.iter().map(|(n, _, _)| *n).max();
+    match highest {
+        None => Ok(1),
+        Some(n) => n.checked_add(1).ok_or_else(|| {
+            PdfWriteError::Unsupported(format!(
+                "object number {n} leaves no room for the cross-reference stream's own \
+                 object number; the source document is unchanged"
+            ))
+        }),
+    }
+}
+
 impl IncrementalWriter {
     /// Open an existing PDF for incremental update.
     pub fn open(bytes: &[u8]) -> Result<Self> {
@@ -658,6 +682,22 @@ impl IncrementalWriter {
         // Check for hybrid xref (XRefStm in trailer)
         if trailer_dict.has_xref_stm {
             return Err(PdfWriteError::HybridXrefRefused);
+        }
+
+        // `/Size` is one past the highest object number, and it comes from the
+        // source document. Every object number this writer allocates is
+        // `/Size` or above, and each of the xref writers computes `n + 1` from
+        // one. A `/Size` of u32::MAX therefore panics a debug build and, in a
+        // release one, wraps a `/Size` to 0 beside an object numbered
+        // 4294967295 — which is a file no reader can open, produced silently.
+        // §7.5.4 also caps the object number at 8388607 in a conforming file,
+        // so nothing legal is anywhere near this.
+        if trailer_dict.size == u32::MAX {
+            return Err(PdfWriteError::Unsupported(format!(
+                "the document's trailer declares /Size {}, which leaves no object number \
+                 free to allocate; the source document is unchanged",
+                trailer_dict.size
+            )));
         }
 
         Ok(IncrementalWriter {
@@ -717,10 +757,8 @@ impl IncrementalWriter {
             }
             XRefKind::Stream => {
                 // Allocate next object number for the xref stream itself
-                let xref_stream_obj_num = std::cmp::max(
-                    self.trailer_dict.size,
-                    objects.iter().map(|(n, _, _)| n + 1).max().unwrap_or(1),
-                );
+                let xref_stream_obj_num =
+                    std::cmp::max(self.trailer_dict.size, one_past_highest(objects)?);
                 self.write_xref_stream(writer, &obj_offsets, xref_stream_obj_num, new_id2)?;
                 // Return early; xref stream writing handles trailer and startxref
                 return Ok(());
@@ -728,10 +766,7 @@ impl IncrementalWriter {
         }
 
         // Write trailer (for classic xref only; xref stream returns above)
-        let new_size = std::cmp::max(
-            self.trailer_dict.size,
-            objects.iter().map(|(n, _, _)| n + 1).max().unwrap_or(1),
-        );
+        let new_size = std::cmp::max(self.trailer_dict.size, one_past_highest(objects)?);
 
         writeln!(writer, "trailer").map_err(PdfWriteError::Io)?;
         writeln!(writer, "<<").map_err(PdfWriteError::Io)?;
@@ -811,7 +846,10 @@ impl IncrementalWriter {
         let mut run_start = entries[0].0;
         let mut run_len = 0u32;
         for (i, (obj_num, _, _, _)) in entries.iter().enumerate() {
-            if i > 0 && *obj_num != entries[i - 1].0 + 1 {
+            // `checked_add` because the previous object number is bounded only
+            // by the source document's `/Size`; the run simply ends when there
+            // is no successor to be consecutive with.
+            if i > 0 && Some(*obj_num) != entries[i - 1].0.checked_add(1) {
                 index_array.push(run_start);
                 index_array.push(run_len);
                 run_start = *obj_num;
@@ -823,21 +861,46 @@ impl IncrementalWriter {
         index_array.push(run_len);
 
         // Rows, in exactly the order the /Index ranges enumerate.
-        // /W [1 4 2] = 7 bytes per entry
+        //
+        // /W [1 4 2] = 7 bytes per entry: one byte of type, four of offset,
+        // two of generation or in-stream index. Four bytes address a 4 GiB
+        // file, which is past anything this signer will meet — but `as u32`
+        // on a larger offset would truncate silently and produce a document
+        // whose cross-reference data points into the middle of itself. A
+        // signature over a file that no reader can open is worse than a
+        // refusal, so the width is checked rather than assumed.
         let mut xref_data = Vec::with_capacity(entries.len() * 7);
-        for (_obj_num, kind, offset, generation) in &entries {
+        for (obj_num, kind, offset, generation) in &entries {
+            let Ok(narrow) = u32::try_from(*offset) else {
+                return Err(PdfWriteError::Unsupported(format!(
+                    "object {obj_num} lies at offset {offset}, past the 4 GiB a /W [1 4 2] \
+                     cross-reference stream can address; the source document is unchanged and \
+                     this file is too large for pulpit to sign"
+                )));
+            };
             xref_data.push(*kind);
-            xref_data.extend_from_slice(&(*offset as u32).to_be_bytes());
+            xref_data.extend_from_slice(&narrow.to_be_bytes());
             xref_data.extend_from_slice(&generation.to_be_bytes());
         }
 
-        // Calculate new size
+        // Calculate new size. `/Size` is one past the highest object number,
+        // so every term here is an increment that a `/Size` of u32::MAX in the
+        // source document would overflow: a debug panic, or a release wrap to
+        // `/Size 0` written beside an object numbered 4294967295. Refuse.
+        let highest = obj_offsets
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(std::iter::once(xref_stream_obj_num))
+            .max()
+            .unwrap_or(0);
         let new_size = std::cmp::max(
             self.trailer_dict.size,
-            std::cmp::max(
-                obj_offsets.iter().map(|(n, _)| n + 1).max().unwrap_or(1),
-                xref_stream_obj_num + 1,
-            ),
+            highest.checked_add(1).ok_or_else(|| {
+                PdfWriteError::Unsupported(format!(
+                    "object number {highest} leaves no room for a /Size one past it; \
+                     the source document is unchanged"
+                ))
+            })?,
         );
 
         // Write the xref stream object
@@ -898,7 +961,7 @@ impl IncrementalWriter {
             let mut subsection_entries = vec![obj_offsets[0]];
 
             for i in 1..obj_offsets.len() {
-                if obj_offsets[i].0 == obj_offsets[i - 1].0 + 1 {
+                if Some(obj_offsets[i].0) == obj_offsets[i - 1].0.checked_add(1) {
                     // Consecutive object number - add to current subsection
                     subsection_entries.push(obj_offsets[i]);
                 } else {
@@ -1001,15 +1064,34 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
         }
     }
 
-    // Parse the trailer dictionary
+    // Parse the trailer dictionary.
+    //
+    // The nesting depth is tracked because a cross-reference stream's
+    // dictionary routinely contains a nested one: `/DecodeParms <</Predictor
+    // 12 /Columns 5>>` is what every producer that deflates its xref stream
+    // writes. Treating the *first* `>>` as the end of the trailer stopped the
+    // scan inside `/DecodeParms`, so every key after it — `/ID` among them —
+    // went unseen. Entries are only read at depth 1, so a nested dictionary's
+    // keys can never be mistaken for the trailer's own.
     let mut key: Option<String> = None;
+    let mut depth = 0usize;
 
     while let Some(token) = tokenizer.next_token()? {
         if token == b"<<" {
+            depth += 1;
             continue;
         }
         if token == b">>" {
-            break;
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                break;
+            }
+            // A nested dictionary just ended; its value is consumed.
+            key = None;
+            continue;
+        }
+        if depth != 1 {
+            continue;
         }
 
         if let Ok(key_str) = std::str::from_utf8(&token) {
@@ -1051,40 +1133,43 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
                             }
                         }
                     }
-                    "ID" => {
-                        // Parse ID array: look for [ followed by hex strings followed by ]
-                        if let Some(arr_token) = tokenizer.next_token()? {
-                            if arr_token == b"[" {
-                                let mut id_array = Vec::new();
-                                while let Some(id_token) = tokenizer.next_token()? {
-                                    if id_token == b"]" {
-                                        break;
-                                    }
-                                    if let Ok(id_str) = std::str::from_utf8(&id_token) {
-                                        if let Some(hex) = id_str
-                                            .strip_prefix('<')
-                                            .and_then(|s| s.strip_suffix('>'))
-                                        {
-                                            // Parse hex string
-                                            let mut bytes = Vec::new();
-                                            for i in (0..hex.len()).step_by(2) {
-                                                if i + 1 < hex.len() {
-                                                    if let Ok(b) =
-                                                        u8::from_str_radix(&hex[i..i + 2], 16)
-                                                    {
-                                                        bytes.push(b);
-                                                    }
+                    // The value token is already in hand: the dispatch above
+                    // only runs for a token that is not a `/Name`, so `token`
+                    // *is* the `[` opening the array. Reading one more token
+                    // and testing that for `[` consumed the first hex string
+                    // and never matched, which is why every revision this
+                    // writer produced dropped the `/ID` of the file it was
+                    // extending.
+                    "ID" if token == b"[" => {
+                        {
+                            let mut id_array = Vec::new();
+                            while let Some(id_token) = tokenizer.next_token()? {
+                                if id_token == b"]" {
+                                    break;
+                                }
+                                if let Ok(id_str) = std::str::from_utf8(&id_token) {
+                                    if let Some(hex) =
+                                        id_str.strip_prefix('<').and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        // Parse hex string
+                                        let mut bytes = Vec::new();
+                                        for i in (0..hex.len()).step_by(2) {
+                                            if i + 1 < hex.len() {
+                                                if let Ok(b) =
+                                                    u8::from_str_radix(&hex[i..i + 2], 16)
+                                                {
+                                                    bytes.push(b);
                                                 }
                                             }
-                                            if !bytes.is_empty() {
-                                                id_array.push(bytes);
-                                            }
+                                        }
+                                        if !bytes.is_empty() {
+                                            id_array.push(bytes);
                                         }
                                     }
                                 }
-                                if !id_array.is_empty() {
-                                    trailer_dict.id = Some(id_array);
-                                }
+                            }
+                            if !id_array.is_empty() {
+                                trailer_dict.id = Some(id_array);
                             }
                         }
                     }
@@ -1317,11 +1402,92 @@ mod tests {
         assert_eq!(spans.second_start, 62 + 1 + 256 + 1);
     }
 
+    /// A hybrid-reference file must be refused *for being hybrid*.
+    ///
+    /// The fixture used to declare `startxref 60` while its `xref` keyword sat
+    /// at 43, so the trailer was never reached, `/XRefStm` was never seen, and
+    /// the bare `is_err()` assertion passed on an unrelated parse failure. The
+    /// offset is computed here, and the refusal is named.
     #[test]
     fn test_incremental_writer_hybrid_xref_refused() {
-        let pdf_bytes = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n60\n%%EOF";
-        let result = IncrementalWriter::open(pdf_bytes);
-        assert!(result.is_err());
+        let head = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n";
+        let xref_at = head.len();
+        let mut pdf_bytes = head.to_vec();
+        pdf_bytes.extend_from_slice(
+            b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+              trailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n",
+        );
+        pdf_bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+        assert_eq!(&pdf_bytes[xref_at..xref_at + 4], b"xref");
+
+        let Err(err) = IncrementalWriter::open(&pdf_bytes) else {
+            panic!("a hybrid-reference file must be refused");
+        };
+        assert!(
+            matches!(err, PdfWriteError::HybridXrefRefused),
+            "the refusal must name the hybrid cross-reference, got: {err}"
+        );
+    }
+
+    /// A behaviour change on the classic path worth pinning: `open` now
+    /// succeeds on a trailer that contains a nested dictionary, and reads the
+    /// keys that follow it. Stopping at the first `>>` used to end the scan
+    /// inside the nested dictionary, so `/Root`, `/Size` and `/ID` written
+    /// after it went unseen — and an appended revision was written with a
+    /// `/Size` of 0 and no `/Root`.
+    #[test]
+    fn a_nested_dictionary_in_a_classic_trailer_does_not_hide_later_keys() {
+        let head = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n";
+        let xref_at = head.len();
+        let mut pdf_bytes = head.to_vec();
+        pdf_bytes
+            .extend_from_slice(b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n");
+        // `/Info` is nested and comes first; everything that matters follows.
+        pdf_bytes.extend_from_slice(
+            b"<</Info <</Producer (Test) /Nested <</Deeper true>>>> \
+              /Size 2 /Root 1 0 R /ID [<0102> <0304>]>>\nstartxref\n",
+        );
+        pdf_bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let writer = IncrementalWriter::open(&pdf_bytes).expect("a nested trailer dict opens");
+        let trailer = writer.trailer();
+        assert_eq!(trailer.root, Some((1, 0)), "/Root follows the nested dict");
+        assert_eq!(trailer.size, 2, "/Size follows the nested dict");
+        assert!(trailer.id.is_some(), "/ID follows the nested dict");
+        assert!(!trailer.has_xref_stm);
+    }
+
+    /// A trailer whose `/Size` is `u32::MAX` leaves no object number free.
+    /// Every xref writer computes `n + 1` from it: unchecked, that panicked a
+    /// debug build and in release wrapped to `/Size 0` beside an object
+    /// numbered 4294967295, a file no reader can open — written silently, and
+    /// past the >4 GiB guard that lives beside it.
+    #[test]
+    fn a_size_that_leaves_no_object_number_free_is_refused() {
+        let head = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n";
+        let xref_at = head.len();
+        let mut pdf_bytes = head.to_vec();
+        pdf_bytes.extend_from_slice(
+            b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+              trailer\n<<\n/Size 4294967295\n/Root 1 0 R\n>>\nstartxref\n",
+        );
+        pdf_bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let Err(err) = IncrementalWriter::open(&pdf_bytes) else {
+            panic!("a /Size of u32::MAX must be refused, not wrapped");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("4294967295") && message.contains("unchanged"),
+            "the refusal must name the /Size and say the source is unchanged, got: {message}"
+        );
+
+        // One below the cap is still accepted, so the refusal is about the
+        // overflow and not about the fixture.
+        let ok = String::from_utf8(pdf_bytes.clone())
+            .unwrap()
+            .replace("/Size 4294967295", "/Size 4294967294");
+        assert!(IncrementalWriter::open(ok.as_bytes()).is_ok());
     }
 
     /// A minimal valid classic-xref PDF, and the offset of its cross-reference

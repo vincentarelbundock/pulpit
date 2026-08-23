@@ -48,8 +48,7 @@ use crate::sign::{
 };
 use crate::verify::preflight::{preflight_sign, PreflightRefusal};
 use crate::verify::{
-    self, find_catalog_ref, find_fields_array, find_object, SignatureCoverage,
-    SignatureVerification, VerifyError,
+    self, find_catalog_ref, SignatureCoverage, SignatureVerification, VerifyError,
 };
 
 /// Which signature field the revision targets.
@@ -81,6 +80,11 @@ pub struct SignRequest {
     pub contact: Option<String>,
     /// The new second element of the trailer's `/ID`. Supplied by the
     /// caller: this crate never draws randomness.
+    ///
+    /// There is no useful default. [`SignRequest::default`] leaves this all
+    /// zero, and signing **refuses** an all-zero value rather than writing a
+    /// constant `/ID` shared by every document signed from a defaulted
+    /// request. Set it to 16 fresh random bytes.
     pub id2: [u8; 16],
     /// Reserve exactly the estimated size instead of the 50% margin (§23.5).
     pub tight_size_estimates: bool,
@@ -638,6 +642,22 @@ fn assemble_revision(
     plan: &RevisionPlan,
     bytes_reserved: usize,
 ) -> Result<Assembled, SignApplyError> {
+    // `/ID` must change with every revision (§14.4): it is what a reader uses
+    // to tell one revision of a document from another, and two revisions that
+    // share one are indistinguishable to anything that keys on it. This crate
+    // never draws randomness, so the caller supplies it — and
+    // `SignRequest::default()` has to put *something* in the field. An
+    // all-zero array is that something, and writing it would be a silent,
+    // constant `/ID` shared by every document signed from a defaulted request.
+    // A caller that forgot to set it is refused rather than obliged.
+    if request.id2 == [0u8; 16] {
+        return Err(SignApplyError::Unsupported(
+            "the new /ID second element is all zero bytes, which is the unset value of \
+             SignRequest::id2; this crate never draws randomness, so the caller must supply \
+             16 fresh random bytes. The source document is unchanged and nothing was written."
+                .to_string(),
+        ));
+    }
     let writer = IncrementalWriter::open(source)?;
     let mut next_object = writer.next_object_number();
     let allocate = |next_object: &mut u32| {
@@ -1425,8 +1445,21 @@ fn parse_object_dictionary(
     bytes: &[u8],
     obj_num: u32,
 ) -> Result<Vec<(String, PdfObject)>, SignApplyError> {
-    let slice = find_object(bytes, obj_num)?;
-    let tokens = tokenize(slice)?;
+    parse_object_dictionary_with(&crate::verify::ObjectResolver::new(bytes), obj_num)
+}
+
+/// [`parse_object_dictionary`], against a resolver the caller already built.
+///
+/// Building an `ObjectResolver` re-parses the whole cross-reference chain, so
+/// a loop over the AcroForm's fields must build one, not one per field.
+fn parse_object_dictionary_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    obj_num: u32,
+) -> Result<Vec<(String, PdfObject)>, SignApplyError> {
+    // Through the resolution layer, so that a dictionary packed into a
+    // /Type /ObjStm reads exactly like one at its own file offset.
+    let (definition, _) = resolver.object_bytes(obj_num)?;
+    let tokens = tokenize(&definition)?;
     // Skip the "N 0 obj" header.
     let start = tokens
         .iter()
@@ -1638,22 +1671,16 @@ fn unescape(text: &str) -> Vec<u8> {
     unescape_bytes(text.as_bytes())
 }
 
-/// Unescape PDF literal string bytes, preserving non-ASCII bytes.
-/// Handles backslash escapes in PDF strings (§7.3.4.2).
+/// Unescape PDF literal string bytes, preserving non-ASCII bytes (§7.3.4.2).
+///
+/// Shared with pre-flight and verification. Dropping the backslash and
+/// keeping the byte after it — which is what this did — is right for `\(`,
+/// `\)` and `\\` and wrong for everything else: `\351` became the three
+/// characters `351` rather than the byte `0xE9`, so a name written with
+/// octal escapes never matched. Acrobat writes UTF-16BE names exactly that
+/// way, since almost every byte of one is unprintable.
 fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut escaped = false;
-    for &byte in bytes {
-        if escaped {
-            out.push(byte);
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else {
-            out.push(byte);
-        }
-    }
-    out
+    crate::pdftext::unescape_literal(bytes)
 }
 
 /// Maximum depth of the `/Kids` walk, and the number of nodes it may visit.
@@ -1684,6 +1711,10 @@ fn page_objects(
     let mut visited = std::collections::HashSet::new();
     let mut stack = vec![(root, 0usize)];
     let mut budget = MAX_PAGE_TREE_NODES;
+    // One resolver for the walk: building one rebuilds the whole
+    // cross-reference chain, and this loop visits up to MAX_PAGE_TREE_NODES
+    // nodes.
+    let resolver = crate::verify::ObjectResolver::new(bytes);
     while let Some((node, depth)) = stack.pop() {
         if depth > MAX_PAGE_TREE_DEPTH {
             return Err(SignApplyError::Unsupported(format!(
@@ -1701,7 +1732,7 @@ fn page_objects(
             // way it has already contributed its pages.
             continue;
         }
-        let entries = parse_object_dictionary(bytes, node)?;
+        let entries = parse_object_dictionary_with(&resolver, node)?;
         match entry(&entries, "Kids") {
             Some(PdfObject::Array(kids)) => {
                 for kid in kids.iter().rev() {
@@ -1759,118 +1790,54 @@ fn out_of_range(index: usize, page_count: usize) -> SignApplyError {
     ))
 }
 
-/// Decode a PDF text string (PDFDocEncoding or UTF-16BE with FEFF prefix) to a Rust String.
-/// FINDING #5b: PDF text strings must be properly decoded before comparison against UTF-8 user input.
-fn decode_pdf_string(bytes: &[u8]) -> Result<String, SignApplyError> {
-    if bytes.is_empty() {
-        return Ok(String::new());
-    }
-
-    // UTF-16BE variant: bytes starting with 0xFEFF (FEFF) BOM
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let mut result = String::new();
-        let data = &bytes[2..];
-        let mut i = 0;
-        while i + 1 < data.len() {
-            let hi = data[i] as u32;
-            let lo = data[i + 1] as u32;
-            let code_unit = (hi << 8) | lo;
-            if let Some(ch) = char::from_u32(code_unit) {
-                result.push(ch);
-            } else {
-                return Err(SignApplyError::Unsupported(
-                    "invalid UTF-16BE text string".to_string(),
-                ));
-            }
-            i += 2;
+/// A field's `/T`, decoded, whichever string variant it parsed to.
+///
+/// `/T` is a text string: PDFDocEncoding, or UTF-16BE behind a byte-order
+/// mark, and a producer may write either as a literal `(…)` or as a hex
+/// `<…>` string. The two spellings parse to different variants here, so
+/// matching only `RawString` missed a hex-written name entirely — including
+/// the UTF-16BE names Acrobat gives any field not named in plain ASCII.
+///
+/// The decode itself is [`crate::pdftext`], shared with pre-flight and
+/// verification: name matching is only meaningful if every path agrees on
+/// what a field is called.
+fn field_name_of(entries: &[(String, PdfObject)]) -> Option<String> {
+    match entry(entries, "T") {
+        Some(PdfObject::RawString(bytes)) | Some(PdfObject::HexString(bytes)) => {
+            Some(crate::pdftext::decode_text_string(bytes))
         }
-        return Ok(result);
+        _ => None,
     }
-
-    // PDFDocEncoding (default for text strings without FEFF prefix)
-    // ASCII range (0x00-0x7F) is identical to UTF-8.
-    // For 0x80-0xFF, map according to PDFDocEncoding table (mostly Latin-1 with some exceptions).
-    // Note: The 0x80-0x9F range differs from Latin-1.
-    let mut result = String::with_capacity(bytes.len());
-    for &byte in bytes {
-        if byte < 0x80 {
-            // ASCII (also valid in PDFDocEncoding)
-            result.push(byte as char);
-        } else {
-            // PDFDocEncoding: map 0x80-0xFF to Unicode
-            // These mappings are from the PDF specification (Table D.2).
-            let ch = match byte {
-                0x80 => '\u{2022}', // BULLET
-                0x81 => '\u{2020}', // DAGGER
-                0x82 => '\u{2021}', // DOUBLE DAGGER
-                0x83 => '\u{2026}', // HORIZONTAL ELLIPSIS
-                0x84 => '\u{2014}', // EM DASH
-                0x85 => '\u{2013}', // EN DASH
-                0x86 => '\u{0192}', // LATIN SMALL LETTER F WITH HOOK
-                0x87 => '\u{2044}', // FRACTION SLASH
-                0x88 => '\u{2039}', // SINGLE LEFT-POINTING ANGLE QUOTATION MARK
-                0x89 => '\u{203A}', // SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
-                0x8A => '\u{2212}', // MINUS SIGN
-                0x8B => '\u{2030}', // PER MILLE SIGN
-                0x8C => '\u{201E}', // DOUBLE LOW-9 QUOTATION MARK
-                0x8D => '\u{201C}', // LEFT DOUBLE QUOTATION MARK
-                0x8E => '\u{201D}', // RIGHT DOUBLE QUOTATION MARK
-                0x8F => '\u{2018}', // LEFT SINGLE QUOTATION MARK
-                0x90 => '\u{2019}', // RIGHT SINGLE QUOTATION MARK
-                0x91 => '\u{201A}', // SINGLE LOW-9 QUOTATION MARK
-                0x92 => '\u{2122}', // TRADE MARK SIGN
-                0x93 => '\u{FB01}', // LATIN SMALL LIGATURE FI
-                0x94 => '\u{FB02}', // LATIN SMALL LIGATURE FL
-                0x95 => '\u{0141}', // LATIN CAPITAL LETTER L WITH STROKE
-                0x96 => '\u{0152}', // LATIN CAPITAL LIGATURE OE
-                0x97 => '\u{0160}', // LATIN CAPITAL LETTER S WITH CARON
-                0x98 => '\u{0178}', // LATIN CAPITAL LETTER Y WITH DIAERESIS
-                0x99 => '\u{017D}', // LATIN CAPITAL LETTER Z WITH CARON
-                0x9A => '\u{0131}', // LATIN SMALL LETTER DOTLESS I
-                0x9B => '\u{0142}', // LATIN SMALL LETTER L WITH STROKE
-                0x9C => '\u{0153}', // LATIN SMALL LIGATURE OE
-                0x9D => '\u{0161}', // LATIN SMALL LETTER S WITH CARON
-                0x9E => '\u{017E}', // LATIN SMALL LETTER Z WITH CARON
-                0x9F => '\u{FFFD}', // REPLACEMENT CHARACTER (undefined in PDFDocEncoding)
-                // 0xA0-0xFF are identical to Latin-1 (Unicode code point = byte value)
-                _ => char::from_u32(byte as u32).unwrap_or('\u{FFFD}'),
-            };
-            result.push(ch);
-        }
-    }
-    Ok(result)
 }
 
 /// The object number of the field named `name`, if the AcroForm lists it.
 fn find_field_object(bytes: &[u8], name: &str) -> Result<Option<u32>, SignApplyError> {
-    let catalog = find_catalog_ref(bytes)?;
-    for (obj_num, _) in find_fields_array(bytes, catalog)? {
-        let entries = parse_object_dictionary(bytes, obj_num)?;
-        if let Some(PdfObject::RawString(field_name)) = entry(&entries, "T") {
-            // FINDING #5b: Decode the PDF text string and compare as strings.
-            // This allows field names with non-ASCII characters to be found.
-            let decoded_field_name = decode_pdf_string(field_name)?;
-            if decoded_field_name == name {
-                return Ok(Some(obj_num));
-            }
+    let resolver = crate::verify::ObjectResolver::new(bytes);
+    let catalog = crate::verify::find_catalog_ref_with(&resolver, bytes)?;
+    for (obj_num, _) in crate::verify::find_fields_array_with(&resolver, catalog)? {
+        let entries = parse_object_dictionary_with(&resolver, obj_num)?;
+        // Compare decoded names: the caller's `name` is UTF-8 from the
+        // application, the document's is not.
+        if field_name_of(&entries).as_deref() == Some(name) {
+            return Ok(Some(obj_num));
         }
     }
     Ok(None)
 }
 
 fn existing_field_names(bytes: &[u8]) -> Result<Vec<String>, SignApplyError> {
-    let catalog = find_catalog_ref(bytes)?;
+    let resolver = crate::verify::ObjectResolver::new(bytes);
+    let catalog = crate::verify::find_catalog_ref_with(&resolver, bytes)?;
     let mut names = Vec::new();
-    for (obj_num, _) in find_fields_array(bytes, catalog)? {
-        let entries = parse_object_dictionary(bytes, obj_num)?;
-        // `/T` parses to `RawString`: it is document bytes, not our own text.
-        // Matching `String` here silently matched nothing, so this returned an
-        // empty list for every document and both collision checks in
-        // `plan_revision` went dead — an existing name was no longer refused
-        // and the auto-namer always picked `Signature1`, producing two fields
-        // sharing a `/T`. Decode the same way `find_field_object` does.
-        if let Some(PdfObject::RawString(field_name)) = entry(&entries, "T") {
-            names.push(decode_pdf_string(field_name)?);
+    for (obj_num, _) in crate::verify::find_fields_array_with(&resolver, catalog)? {
+        let entries = parse_object_dictionary_with(&resolver, obj_num)?;
+        // `/T` is document bytes, not our own text. Matching `String` here
+        // once silently matched nothing, so this returned an empty list for
+        // every document and both collision checks in `plan_revision` went
+        // dead — an existing name was no longer refused and the auto-namer
+        // always picked `Signature1`, producing two fields sharing a `/T`.
+        if let Some(name) = field_name_of(&entries) {
+            names.push(name);
         }
     }
     Ok(names)
@@ -2133,20 +2100,50 @@ mod tests {
         }
     }
 
-    /// A field's `/T` is document bytes, so it parses to `RawString`. Both
-    /// `find_field_object` and `existing_field_names` must match that variant
-    /// and decode it. `existing_field_names` was left matching `String` when
-    /// the variants were split; the arm then matched nothing, it returned an
-    /// empty list for every document, and both signature-field name-collision
-    /// checks in `plan_revision` silently went dead — the auto-namer always
-    /// chose `Signature1` and an explicit duplicate was never refused, so
-    /// pulpit would sign a document carrying two fields with one `/T`.
+    /// The name of the field in `/T` must come out the same however the
+    /// producer spelled the string, because `find_field_object` compares it
+    /// against a UTF-8 name from the application and `existing_field_names`
+    /// uses it for both collision checks in `plan_revision`.
+    ///
+    /// Two ways this went wrong. `existing_field_names` was left matching
+    /// `String` when the string variants were split; the arm matched nothing,
+    /// it returned an empty list for every document, and both collision
+    /// checks silently went dead — the auto-namer always chose `Signature1`
+    /// and an explicit duplicate was never refused, so pulpit would sign a
+    /// document carrying two fields with one `/T`. Later, matching only
+    /// `RawString` missed a name written as a hex string, and unescaping that
+    /// dropped only the backslashes, so `\376\377` — how Acrobat writes the
+    /// UTF-16BE byte-order mark — never became a byte-order mark at all.
     #[test]
-    fn a_field_name_parses_to_the_variant_its_consumers_match() {
+    fn a_field_name_decodes_the_same_from_every_spelling() {
+        // A literal string in PDFDocEncoding.
+        assert_eq!(
+            name_from_token(&b"(Caf\xE9 Sig)"[..]).as_deref(),
+            Some("Café Sig")
+        );
+        // The same name as a UTF-16BE literal written with octal escapes,
+        // which is what Acrobat produces.
+        assert_eq!(
+            name_from_token(
+                &b"(\\376\\377\\000C\\000a\\000f\\000\\351\\000 \\000S\\000i\\000g)"[..]
+            )
+            .as_deref(),
+            Some("Café Sig")
+        );
+        // And as a UTF-16BE hex string.
+        assert_eq!(
+            name_from_token(&b"<FEFF00430061006600E90020005300690067>"[..]).as_deref(),
+            Some("Café Sig")
+        );
+    }
+
+    /// Parse `<< /T token /FT /Sig >>` and read the name back out the way
+    /// `find_field_object` and `existing_field_names` do.
+    fn name_from_token(token: &[u8]) -> Option<String> {
         let tokens: Vec<Vec<u8>> = [
             &b"<<"[..],
             &b"/T"[..],
-            &b"(Caf\xE9 Sig)"[..],
+            token,
             &b"/FT"[..],
             &b"/Sig"[..],
             &b">>"[..],
@@ -2154,55 +2151,11 @@ mod tests {
         .iter()
         .map(|t| t.to_vec())
         .collect();
-
         let (object, _) = parse_value(&tokens, 0, 0).expect("the dictionary parses");
         let PdfObject::Dictionary(entries) = object else {
             panic!("expected a dictionary");
         };
-        match entry(&entries, "T") {
-            Some(PdfObject::RawString(name)) => {
-                assert_eq!(
-                    decode_pdf_string(name).expect("decodes"),
-                    "Café Sig",
-                    "the consumers decode this, so it must round-trip"
-                );
-            }
-            other => panic!("/T must parse to RawString, got {other:?}"),
-        }
-    }
-
-    /// FINDING #5b: Fields with non-ASCII names should be locatable.
-    /// Tests that PDF text string encoding (PDFDocEncoding) is properly decoded.
-    #[test]
-    fn pdf_docencoding_string_decoding() {
-        // PDF text strings are PDFDocEncoded (or UTF-16BE with FEFF prefix).
-        // é in PDFDocEncoding is 0xE9, but in UTF-8 it's 0xC3 0xA9.
-        // The decoder must convert PDFDocEncoding bytes to a Rust String
-        // so it can be compared against user input (which is UTF-8).
-
-        // PDFDocEncoding: "Café" where é is 0xE9
-        let pdf_bytes = b"Caf\xE9".to_vec();
-        let decoded = decode_pdf_string(&pdf_bytes).expect("should decode PDFDocEncoding");
-        assert_eq!(
-            decoded, "Café",
-            "PDFDocEncoding 0xE9 should decode to UTF-8 é"
-        );
-
-        // UTF-16BE variant: same string with BOM prefix
-        let utf16_bytes = b"\xFE\xFF\x00C\x00a\x00f\x00\xE9".to_vec();
-        let decoded_utf16 = decode_pdf_string(&utf16_bytes).expect("should decode UTF-16BE");
-        assert_eq!(
-            decoded_utf16, "Café",
-            "UTF-16BE FEFF variant should also decode to Café"
-        );
-
-        // ASCII (subset of PDFDocEncoding) should work as-is
-        let ascii_bytes = b"Signature1".to_vec();
-        let decoded_ascii = decode_pdf_string(&ascii_bytes).expect("should decode ASCII");
-        assert_eq!(
-            decoded_ascii, "Signature1",
-            "ASCII text should decode unchanged"
-        );
+        field_name_of(&entries)
     }
 
     /// FINDING #4: Deeply nested dictionaries should also error cleanly.

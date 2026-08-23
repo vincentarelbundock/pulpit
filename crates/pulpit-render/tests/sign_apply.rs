@@ -16,8 +16,8 @@ use pulpit_render::sign::apply::{
 use pulpit_render::verify::{self, SignatureCoverage, SignatureVerification};
 use signing_fixture::{
     build_pdf_with_fieldmdp_lock, build_unsigned_pdf, build_unsigned_pdf_multipage,
-    build_unsigned_pdf_pages, load_test_credential, skip_message, FixtureField, FixturePage,
-    SIGNING_TIME_UNIX,
+    build_unsigned_pdf_named, build_unsigned_pdf_pages, load_test_credential, skip_message,
+    FixtureField, FixturePage, NameSpelling, SIGNING_TIME_UNIX,
 };
 use std::path::{Path, PathBuf};
 
@@ -164,6 +164,87 @@ fn countersigning_a_second_field_keeps_the_first_signature_valid() {
     );
 
     std::fs::write(oracle_fixture_path("apply-countersigned.pdf"), &output)
+        .expect("write the oracle fixture");
+}
+
+/// A real form's field names are UTF-16BE, because that is what Acrobat
+/// writes for anything that is not plain ASCII. The application only ever has
+/// the UTF-8 name — that is what PDFium reports and what the operator sees —
+/// so every step from pre-flight through field lookup to the verified report
+/// has to agree that the two are the same name. They did not: the name
+/// decoded to nothing, `SignTarget::ExistingField` found no such field, and a
+/// document like the one this test is modelled on could not be signed at all.
+#[test]
+fn signing_into_a_utf16be_named_field_succeeds_and_verifies() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("accented-fields.pdf");
+    let destination = directory.path().join("signed.pdf");
+    // The same two spellings a producer chooses between, side by side.
+    std::fs::write(
+        &source,
+        build_unsigned_pdf_named(&[
+            ("Président-rapporteur", NameSpelling::Utf16Literal),
+            ("Membre jury", NameSpelling::Utf16Hex),
+        ]),
+    )
+    .expect("write the source");
+
+    let outcome = sign_document_file(
+        &source,
+        &destination,
+        &credential,
+        &request(SignTarget::ExistingField(
+            "Président-rapporteur".to_string(),
+        )),
+    )
+    .expect("an accented field name is targetable");
+    assert_eq!(outcome.field_name, "Président-rapporteur");
+    assert_eq!(outcome.signature_count, 1);
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let first_pass = statuses(&output);
+    assert_eq!(first_pass.len(), 1);
+    assert!(first_pass[0].intact, "the signature is not intact");
+    assert!(first_pass[0].valid, "the signature is not valid");
+    assert_eq!(first_pass[0].coverage, SignatureCoverage::EntireFile);
+    assert_eq!(
+        first_pass[0].field_name, "Président-rapporteur",
+        "the verified report must name the field the way the operator does"
+    );
+
+    // And the field written as a hex string is reachable too, by
+    // countersigning it in the same document.
+    let countersigned = directory.path().join("countersigned.pdf");
+    let second = sign_document_file(
+        &destination,
+        &countersigned,
+        &credential,
+        &request(SignTarget::ExistingField("Membre jury".to_string())),
+    )
+    .expect("a hex-spelled field name is targetable");
+    assert_eq!(second.field_name, "Membre jury");
+    assert_eq!(second.signature_count, 2);
+
+    let output = std::fs::read(&countersigned).expect("read the countersigned output");
+    let mut names: Vec<String> = statuses(&output)
+        .into_iter()
+        .map(|status| {
+            assert!(
+                status.intact && status.valid,
+                "'{}' failed",
+                status.field_name
+            );
+            status.field_name
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Membre jury", "Président-rapporteur"]);
+
+    std::fs::write(oracle_fixture_path("apply-utf16-field-name.pdf"), &output)
         .expect("write the oracle fixture");
 }
 
@@ -1017,4 +1098,41 @@ fn an_explicit_rect_still_overwrites_an_existing_fields_box() {
         text.contains("/BBox [0 0 100 50]"),
         "the BBox must match the explicit rect, got: {text}"
     );
+}
+
+/// `SignRequest::default()` leaves `/ID`'s second element all zero, because
+/// this crate never draws randomness and a `Default` has to put something
+/// there. Writing it would give every document signed from a defaulted request
+/// the same `/ID` — which is what §14.4 uses to tell revisions apart. A caller
+/// that forgot to set it is refused, not obliged.
+#[test]
+fn an_unset_id_second_element_is_refused_rather_than_written() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("unsigned.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, build_unsigned_pdf(&[])).expect("write the source");
+
+    let mut unset = request(SignTarget::NewInvisibleField { name: None });
+    unset.id2 = [0u8; 16];
+
+    let error = sign_document_file(&source, &destination, &credential, &unset)
+        .expect_err("an all-zero /ID second element must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("all zero") && message.contains("unchanged"),
+        "the refusal must name the unset /ID and say the source is unchanged, got: {message}"
+    );
+    assert!(
+        !destination.exists(),
+        "nothing may be written when the request is refused"
+    );
+
+    // The same request with real randomness signs.
+    let set = request(SignTarget::NewInvisibleField { name: None });
+    sign_document_file(&source, &destination, &credential, &set).expect("a set /ID signs");
+    assert!(destination.exists());
 }

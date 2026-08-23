@@ -203,8 +203,9 @@ impl PdfiumBackend {
                 );
             }
             None => tracing::warn!(
-                "this document's form fields cannot be drawn; its pages will \
-                 render with empty fields"
+                "this document's widget annotations cannot be drawn; its pages \
+                 will render with empty fields and without the visible \
+                 appearance of any signature"
             ),
         }
     }
@@ -1376,12 +1377,20 @@ unsafe extern "C" fn need_to_pause_now(this: *mut IFSDK_PAUSE) -> i32 {
 /// page was just rendered into.
 ///
 /// PDFium splits a form's pixels in two, and this is the half the page render
-/// does not do. `FPDF_RenderPageBitmap` draws page *content*; a widget's value
-/// is drawn from the form-fill environment by `FPDF_FFLDraw`. A renderer
-/// without an environment therefore produces a form whose boxes and printed
-/// labels are all there and whose answers are missing — including the answers
-/// that were in the file when it was opened, which is what made this look like
-/// a bug about typing rather than about drawing.
+/// does not do. `FPDF_RenderPageBitmap` draws page *content* and, with
+/// `FPDF_ANNOT`, the page's annotations — except its `/Widget` ones, which it
+/// draws not at all: every widget is left to the form-fill environment and
+/// `FPDF_FFLDraw`, appearance stream and all.
+///
+/// Measured, because the division of labour is not what the flag names suggest:
+/// with this pass suppressed and `FPDF_ANNOT` set, a signed signature's `/AP`
+/// `/N` renders as nothing, and with `FPDF_ANNOT` cleared and this pass left in
+/// it renders in full. So a renderer without an environment produces a form
+/// whose boxes and printed labels are all there and whose answers are missing —
+/// including the answers that were in the file when it was opened, which is what
+/// made this look like a bug about typing rather than about drawing — and a
+/// signed document whose visible signature is missing from the page while every
+/// other viewer draws it.
 ///
 /// One function, called from two places — the render pool here and the document
 /// engine in `crate::document::pdfium` — because the two have to agree to the

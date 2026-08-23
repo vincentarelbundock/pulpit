@@ -408,6 +408,18 @@ impl FormEnvironment {
 
     /// Hand this environment to PDFium and get the form handle back.
     ///
+    /// Version 2 is asked for first and version 1 is the fallback, because the
+    /// version is a property of the *library*, not of the document, and losing
+    /// this coin toss loses more than form filling. `FPDF_RenderPageBitmap`
+    /// draws no `/Widget` annotation at all — not even a static `/AP` `/N`, and
+    /// not even with `FPDF_ANNOT` set; PDFium leaves every widget to
+    /// `FPDF_FFLDraw`, which needs this handle. So an environment that failed to
+    /// attach is not merely a form nobody can type into: it is a page rendered
+    /// with every widget missing, including the visible appearance of a
+    /// signature, which is a well-formed part of the file that every other
+    /// viewer draws. Trying both versions costs one extra call on the one build
+    /// where the first choice is wrong, and never happens twice per document.
+    ///
     /// # Safety
     ///
     /// The returned handle borrows this environment: PDFium keeps the pointer
@@ -419,9 +431,15 @@ impl FormEnvironment {
         bindings: &dyn PdfiumLibraryBindings,
         document: FPDF_DOCUMENT,
     ) -> Option<FPDF_FORMHANDLE> {
-        let info = &mut self.as_mut().info as *mut _;
-        let handle = unsafe { bindings.FPDFDOC_InitFormFillEnvironment(document, info) };
-        (!handle.is_null()).then_some(handle)
+        for version in [Self::INTERFACE_VERSION, 1] {
+            self.as_mut().info.version = version;
+            let info = &mut self.as_mut().info as *mut _;
+            let handle = unsafe { bindings.FPDFDOC_InitFormFillEnvironment(document, info) };
+            if !handle.is_null() {
+                return Some(handle);
+            }
+        }
+        None
     }
 
     /// Take everything PDFium has asked to have redrawn, coalesced.

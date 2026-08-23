@@ -452,12 +452,17 @@ impl<'a> PdfiumDocument<'a> {
     /// Draw the live form field contents over a rendered page.
     ///
     /// This pass is not optional and not an optimisation. `FPDF_RenderPageBitmap`
-    /// draws a page's *content*, which for a form field is the appearance
-    /// stream the file was saved with — so a value someone typed a second ago,
-    /// which PDFium is holding in its form-fill environment and has not yet
-    /// written into an appearance, is simply not in the picture. `FPDF_FFLDraw`
-    /// is what puts it there, and §8.6 requires it over every render of a
+    /// draws a page's *content* and its annotations, but never a `/Widget` one —
+    /// not the value someone typed a second ago, which PDFium is holding in its
+    /// form-fill environment and has not yet written into an appearance, and not
+    /// even the appearance stream the file was saved with. `FPDF_FFLDraw` is
+    /// what puts both there, and §8.6 requires it over every render of a
     /// document that has a form.
+    ///
+    /// The stronger half of that is measurable and worth stating, because a
+    /// signed document depends on it: a signature's visible appearance is a
+    /// widget's `/AP` `/N`, so without this pass a signed page renders with the
+    /// signature missing while every other viewer shows it.
     ///
     /// A document with no form environment returns immediately, which is every
     /// slide deck.

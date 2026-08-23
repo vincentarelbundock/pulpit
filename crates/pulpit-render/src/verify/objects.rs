@@ -46,6 +46,67 @@ pub const MAX_OBJSTM_OBJECTS: usize = 100_000;
 pub const MAX_VALUE_DEPTH: usize = 64;
 /// Maximum number of object streams decoded for one resolver.
 pub const MAX_OBJSTM_DECODED: usize = 4096;
+/// Maximum number of `/Index` subsections in one cross-reference stream.
+///
+/// A subsection is a run of consecutive object numbers. Even a heavily
+/// incrementally-updated document has a few dozen; this leaves four orders of
+/// magnitude of headroom while still bounding a crafted `/Index`.
+pub const MAX_XREF_SUBSECTIONS: usize = 65_536;
+/// Maximum width, in bytes, of one field of a cross-reference stream row.
+///
+/// §7.5.8.2 gives `/W` three entries, each the byte width of one field: the
+/// entry type, an offset or object number, and a generation or index. The
+/// widest thing any of them can hold is a file offset, and eight bytes already
+/// addresses 16 exabytes — so nothing legal exceeds this. The cap is not a
+/// nicety: the row length is the sum of the widths, and a `/W` of
+/// `[i64::MAX i64::MAX 3]` wrapped that sum to a small number, slipped past
+/// both the "row is empty" and the "row runs past the data" guards, and then
+/// indexed the decoded buffer for i64::MAX bytes.
+pub const MAX_XREF_FIELD_WIDTH: u64 = 8;
+/// Maximum number of elements in one parsed array.
+///
+/// A `/W`, an `/Index` or a `/ByteRange` has a handful; a `/Widths` or an
+/// `/Annots` has thousands. This bounds the allocation a declared array can
+/// provoke *while it is being lexed*, so a crafted `/Index` cannot be
+/// materialised into a multi-gigabyte `Vec` before the subsection cap that
+/// governs it is ever consulted.
+pub const MAX_ARRAY_ITEMS: usize = 262_144;
+/// Maximum total decoded cross-reference stream bytes for one pass over a
+/// document's chain.
+///
+/// Each section is separately bounded by [`MAX_STREAM_BYTES`], but a chain of
+/// [`MAX_XREF_CHAIN`] sections that each decode to that cap is gigabytes of
+/// inflate for a file of a few hundred kilobytes. The budget is per pass, so
+/// the work a document can demand is bounded by the document, not by how many
+/// times something is looked up in it.
+pub const MAX_XREF_DECODED_BYTES: usize = 64 * 1024 * 1024;
+
+/// The decompression work one pass over a cross-reference chain may do.
+///
+/// Threaded rather than global: a budget that outlived a call would make the
+/// second verification of the same document behave differently from the first.
+pub(super) struct DecodeBudget {
+    remaining: usize,
+}
+
+impl DecodeBudget {
+    pub(super) fn new() -> Self {
+        DecodeBudget {
+            remaining: MAX_XREF_DECODED_BYTES,
+        }
+    }
+
+    fn spend(&mut self, bytes: usize) -> Result<()> {
+        if bytes > self.remaining {
+            return Err(VerifyError::XrefParseError(format!(
+                "the cross-reference chain decodes to more than {MAX_XREF_DECODED_BYTES} bytes; \
+                 refusing to keep inflating it"
+            )));
+        }
+        self.remaining -= bytes;
+        Ok(())
+    }
+}
 
 /// How an object was located.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +426,15 @@ impl<'a> Lexer<'a> {
                             Err(_) => break,
                         },
                     }
+                    // Bound the allocation, not just the later use of it: an
+                    // `/Index` of millions of elements is refused while it is
+                    // being read rather than after a `Vec` has been grown to
+                    // hold it.
+                    if items.len() > MAX_ARRAY_ITEMS {
+                        return Err(VerifyError::MalformedPdf(format!(
+                            "array declares more than {MAX_ARRAY_ITEMS} elements"
+                        )));
+                    }
                 }
                 Ok(PdfValue::Array(items))
             }
@@ -548,7 +618,7 @@ fn hexval(c: u8) -> Option<u8> {
     }
 }
 
-fn find_bytes_from(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_bytes_from(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     if from >= hay.len() || needle.is_empty() {
         return None;
     }
@@ -600,6 +670,7 @@ impl XrefIndex {
         let mut seen: Vec<u64> = Vec::new();
         let mut queue: Vec<u64> = vec![start];
         let mut sections = 0usize;
+        let mut budget = DecodeBudget::new();
 
         while let Some(offset) = queue.pop() {
             if seen.contains(&offset) {
@@ -612,7 +683,7 @@ impl XrefIndex {
                     "cross-reference chain exceeds cap".into(),
                 ));
             }
-            let section = parse_xref_section(bytes, offset)?;
+            let section = parse_xref_section(bytes, offset, &mut budget)?;
             for (num, entry) in section.entries {
                 if entries.len() >= MAX_XREF_ENTRIES {
                     return Err(VerifyError::XrefParseError(
@@ -666,7 +737,7 @@ fn find_startxref_offset(bytes: &[u8]) -> Result<u64> {
     lex.read_uint().ok_or(VerifyError::StartxrefNotFound)
 }
 
-fn parse_xref_section(bytes: &[u8], offset: u64) -> Result<XrefSection> {
+fn parse_xref_section(bytes: &[u8], offset: u64, budget: &mut DecodeBudget) -> Result<XrefSection> {
     let pos = usize::try_from(offset).map_err(|_| VerifyError::TruncatedFile(offset))?;
     if pos >= bytes.len() {
         return Err(VerifyError::TruncatedFile(offset));
@@ -676,7 +747,7 @@ fn parse_xref_section(bytes: &[u8], offset: u64) -> Result<XrefSection> {
     if bytes[lex.pos..].starts_with(b"xref") {
         parse_classic_section(bytes, lex.pos + 4)
     } else {
-        parse_xref_stream_section(bytes, pos)
+        parse_xref_stream_section(bytes, pos, budget)
     }
 }
 
@@ -689,8 +760,9 @@ fn parse_xref_section(bytes: &[u8], offset: u64) -> Result<XrefSection> {
 pub(super) fn xref_section_object_numbers(
     bytes: &[u8],
     offset: u64,
+    budget: &mut DecodeBudget,
 ) -> Result<std::collections::HashSet<u32>> {
-    Ok(parse_xref_section(bytes, offset)?
+    Ok(parse_xref_section(bytes, offset, budget)?
         .entries
         .into_iter()
         .map(|(number, _)| number)
@@ -773,7 +845,11 @@ fn non_neg(v: i64) -> Option<u64> {
     }
 }
 
-fn parse_xref_stream_section(bytes: &[u8], pos: usize) -> Result<XrefSection> {
+fn parse_xref_stream_section(
+    bytes: &[u8],
+    pos: usize,
+    budget: &mut DecodeBudget,
+) -> Result<XrefSection> {
     let mut lex = Lexer::new(bytes, pos);
     let (_num, _gen, value, _end) = lex.parse_indirect_object()?;
     let PdfValue::Stream {
@@ -786,22 +862,52 @@ fn parse_xref_stream_section(bytes: &[u8], pos: usize) -> Result<XrefSection> {
             "cross-reference stream expected".into(),
         ));
     };
-    let data = decode_stream(&bytes[body_start..body_start + body_len], dict)?;
+    // A truncated file is the ordinary way a `/Length` runs past the end;
+    // slicing on it directly would panic rather than refuse.
+    let body = body_start
+        .checked_add(body_len)
+        .and_then(|end| bytes.get(body_start..end))
+        .ok_or_else(|| {
+            VerifyError::XrefParseError(
+                "the cross-reference stream's /Length runs past the end of the file".into(),
+            )
+        })?;
+    let data = decode_stream(body, dict)?;
+    budget.spend(data.len())?;
 
-    let widths: Vec<usize> = dict
-        .get("W")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_i64())
-                .map(|v| v.max(0) as usize)
-                .collect()
-        })
-        .unwrap_or_default();
+    // §7.5.8.2: `/W` is an array of integers, one byte width per field. Each
+    // element must be a non-negative integer that fits a field — an element
+    // that is neither is a malformed document, and coercing it (dropping it,
+    // or clamping a negative to zero) silently re-phases the row layout and
+    // reads every entry from the wrong bytes.
+    let widths: Vec<usize> = match dict.get("W").and_then(|v| v.as_array()) {
+        Some(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for value in a {
+                let Some(w) = value.as_i64() else {
+                    return Err(VerifyError::XrefParseError(
+                        "a /W element of a cross-reference stream is not an integer".into(),
+                    ));
+                };
+                if !(0..=MAX_XREF_FIELD_WIDTH as i64).contains(&w) {
+                    return Err(VerifyError::XrefParseError(format!(
+                        "a /W element of a cross-reference stream declares a field width of {w}; \
+                         §7.5.8.2 field widths are byte counts and none may exceed \
+                         {MAX_XREF_FIELD_WIDTH}"
+                    )));
+                }
+                out.push(w as usize);
+            }
+            out
+        }
+        None => Vec::new(),
+    };
     if widths.len() < 3 {
         return Err(VerifyError::XrefParseError("/W must have 3 widths".into()));
     }
-    let row = widths.iter().sum::<usize>();
+    // Every width is now at most MAX_XREF_FIELD_WIDTH and the array is bounded
+    // by MAX_ARRAY_ITEMS, so this sum cannot overflow.
+    let row = widths.iter().take(3).sum::<usize>();
     if row == 0 {
         return Err(VerifyError::XrefParseError("/W widths are all zero".into()));
     }
@@ -811,14 +917,43 @@ fn parse_xref_stream_section(bytes: &[u8], pos: usize) -> Result<XrefSection> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0)
         .max(0) as u64;
+    // `/Index` is positional too: a dropped or clamped element shifts every
+    // later pair by one and re-numbers the whole section.
     let index: Vec<u64> = match dict.get("Index").and_then(|v| v.as_array()) {
-        Some(a) => a
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .map(|v| v.max(0) as u64)
-            .collect(),
+        Some(a) => {
+            if a.len() % 2 != 0 {
+                return Err(VerifyError::XrefParseError(
+                    "the /Index of a cross-reference stream has an odd number of elements; \
+                     §7.5.8.2 makes it a sequence of (first, count) pairs"
+                        .into(),
+                ));
+            }
+            let mut out = Vec::with_capacity(a.len());
+            for value in a {
+                match value.as_i64() {
+                    Some(v) if v >= 0 => out.push(v as u64),
+                    _ => {
+                        return Err(VerifyError::XrefParseError(
+                            "an /Index element of a cross-reference stream is not a \
+                             non-negative integer"
+                                .into(),
+                        ))
+                    }
+                }
+            }
+            out
+        }
         None => vec![0, size],
     };
+    // One `/Index` pair per contiguous run of object numbers. A real producer
+    // writes a handful; the cap is generous enough that no honest file meets
+    // it and small enough that a crafted array of millions of empty
+    // subsections cannot make this loop the expensive part of verification.
+    if index.len() / 2 > MAX_XREF_SUBSECTIONS {
+        return Err(VerifyError::XrefParseError(
+            "cross-reference stream declares too many /Index subsections".into(),
+        ));
+    }
 
     let mut entries = Vec::new();
     let mut cursor = 0usize;
@@ -839,7 +974,17 @@ fn parse_xref_stream_section(bytes: &[u8], pos: usize) -> Result<XrefSection> {
             for (fi, w) in widths.iter().take(3).enumerate() {
                 let mut v: u64 = 0;
                 for _ in 0..*w {
-                    v = (v << 8) | data[at] as u64;
+                    // Bounded on the decoded buffer, not on the row arithmetic
+                    // that got us here: the guard above is what should make
+                    // this unreachable, and this is what makes a mistake in it
+                    // a refusal rather than a panic in the process that owns
+                    // the user interface.
+                    let Some(byte) = data.get(at) else {
+                        return Err(VerifyError::XrefParseError(
+                            "a cross-reference stream row runs past the decoded stream".into(),
+                        ));
+                    };
+                    v = (v << 8) | *byte as u64;
                     at += 1;
                 }
                 fields[fi] = v;
@@ -973,8 +1118,18 @@ fn apply_predictor(data: &[u8], parms: &Dict) -> Result<Vec<u8>> {
         .and_then(|v| v.as_i64())
         .unwrap_or(1)
         .max(1) as usize;
-    let bpp = (colors * bpc).div_ceil(8).max(1);
-    let row_len = (colors * bpc * columns).div_ceil(8);
+    // /DecodeParms is attacker-controlled: `colors * bpc * columns` overflowed
+    // on a crafted geometry, which panics in a debug build and in a release
+    // one wraps to a small `row_len` that walks straight past the cap below.
+    let bits_per_pixel = colors.checked_mul(bpc);
+    let row_bits = bits_per_pixel.and_then(|b| b.checked_mul(columns));
+    let (Some(bits_per_pixel), Some(row_bits)) = (bits_per_pixel, row_bits) else {
+        return Err(VerifyError::MalformedPdf(
+            "the predictor geometry in /DecodeParms overflows".into(),
+        ));
+    };
+    let bpp = bits_per_pixel.div_ceil(8).max(1);
+    let row_len = row_bits.div_ceil(8);
     if row_len == 0 || row_len > MAX_STREAM_BYTES {
         return Err(VerifyError::MalformedPdf("bad predictor geometry".into()));
     }
@@ -1108,12 +1263,24 @@ impl<'a> ObjectResolver<'a> {
     /// The byte span `[start, end)` of an in-file object definition, covering
     /// `N G obj … endobj`.
     pub fn object_span(&self, obj_num: u32) -> Option<(usize, usize, Confidence)> {
-        if let Some(XrefEntry::InFile { offset, gen }) =
-            self.index.as_ref().and_then(|i| i.get(obj_num))
-        {
-            if let Some(end) = self.validate_header(offset, obj_num, gen) {
-                return Some((offset as usize, end, Confidence::Resolved));
+        match self.index.as_ref().and_then(|i| i.get(obj_num)) {
+            Some(XrefEntry::InFile { offset, gen }) => {
+                if let Some(end) = self.validate_header(offset, obj_num, gen) {
+                    return Some((offset as usize, end, Confidence::Resolved));
+                }
             }
+            // The cross-reference chain is authoritative, exactly as it is in
+            // `object_bytes`. An object the newest revision places inside an
+            // object stream has no file span at all, and falling through to
+            // the repair scan would hand back a *superseded* in-file copy that
+            // no conforming reader ever sees. The one caller that needs a file
+            // span is the signature dictionary — whose `/Contents` must be a
+            // direct, file-addressable hex string for `/ByteRange` to describe
+            // it, so it cannot legitimately live in an object stream — which
+            // makes "the xref says type-2" a hostile or broken document and
+            // "not found" the only honest answer.
+            Some(XrefEntry::InStream { .. }) => return None,
+            None => {}
         }
         let scan = self.scan();
         let (start, _gen) = *scan.get(&obj_num)?;
@@ -1222,11 +1389,11 @@ impl<'a> ObjectResolver<'a> {
     /// definition. Objects that live in an object stream are re-wrapped so a
     /// caller that tokenises the definition sees the same lexical content.
     pub fn object_bytes(&self, obj_num: u32) -> Result<(Vec<u8>, Confidence)> {
-        if let Some((start, end, conf)) = self.object_span(obj_num) {
-            if end <= self.bytes.len() {
-                return Ok((self.bytes[start..end].to_vec(), conf));
-            }
-        }
+        // The cross-reference chain is authoritative. When it says the object
+        // lives in an object stream, the repair scan must not be consulted:
+        // an object number that is type-2 in the newest revision but also has
+        // a stale in-file definition from an earlier one would otherwise
+        // resolve to the superseded copy.
         if let Some(XrefEntry::InStream { stream, index }) =
             self.index.as_ref().and_then(|i| i.get(obj_num))
         {
@@ -1249,6 +1416,13 @@ impl<'a> ObjectResolver<'a> {
                 }
             }
         }
+        // Either the entry is an in-file one, or the chain has nothing to say
+        // and the repair scan is the last resort.
+        if let Some((start, end, conf)) = self.object_span(obj_num) {
+            if end <= self.bytes.len() {
+                return Ok((self.bytes[start..end].to_vec(), conf));
+            }
+        }
         Err(VerifyError::SignatureObjectNotFound)
     }
 
@@ -1268,9 +1442,20 @@ impl<'a> ObjectResolver<'a> {
     }
 
     fn build_object_stream(&self, stream: u32) -> Result<Option<ObjStm>> {
-        let Some(XrefEntry::InFile { offset, gen }) =
-            self.index.as_ref().and_then(|i| i.get(stream))
-        else {
+        let entry = self.index.as_ref().and_then(|i| i.get(stream));
+        // §7.5.7: "the object stream itself shall not be in an object stream".
+        // Honouring a type-2 container entry would be the one place this
+        // resolver could recurse without a bound, so it is a refusal rather
+        // than a recursion — and a refusal rather than a silent miss, because
+        // reading such a file as "object absent" would let a malformed
+        // document masquerade as one that simply has no such object.
+        if let Some(XrefEntry::InStream { .. }) = entry {
+            return Err(VerifyError::MalformedPdf(format!(
+                "object stream {stream} is itself recorded inside an object stream, which \
+                 ISO 32000-1 §7.5.7 forbids; the cross-reference data is unusable"
+            )));
+        }
+        let Some(XrefEntry::InFile { offset, gen }) = entry else {
             return Ok(None);
         };
         let Some(pos) = usize::try_from(offset)
@@ -1292,7 +1477,17 @@ impl<'a> ObjectResolver<'a> {
         else {
             return Ok(None);
         };
-        let data = decode_stream(&self.bytes[body_start..body_start + body_len], &dict)?;
+        // A `/Length` that runs past the end of the file is the ordinary shape
+        // of a truncated document; slicing on it would panic.
+        let body = body_start
+            .checked_add(body_len)
+            .and_then(|end| self.bytes.get(body_start..end))
+            .ok_or_else(|| {
+                VerifyError::MalformedPdf(format!(
+                    "object stream {stream} declares a /Length that runs past the end of the file"
+                ))
+            })?;
+        let data = decode_stream(body, &dict)?;
 
         let count = dict.get("N").and_then(|v| v.as_i64()).unwrap_or(0);
         let first = dict.get("First").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1456,5 +1651,444 @@ mod tests {
         let src = "[".repeat(MAX_VALUE_DEPTH + 5);
         let mut lex = Lexer::new(src.as_bytes(), 0);
         assert!(lex.parse_value(0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod xref_stream_tests {
+    use super::*;
+
+    /// Build an uncompressed `/W [1 4 2]` cross-reference stream body from
+    /// `(type, second, third)` triples.
+    fn rows(entries: &[(u8, u32, u16)]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(entries.len() * 7);
+        for (kind, second, third) in entries {
+            out.push(*kind);
+            out.extend_from_slice(&second.to_be_bytes());
+            out.extend_from_slice(&third.to_be_bytes());
+        }
+        out
+    }
+
+    /// A one-revision file whose only cross-reference section is a stream.
+    /// `extra_dict` is spliced into the stream dictionary.
+    fn xref_stream_pdf(objects: &[(u32, &str)], extra_dict: &str) -> Vec<u8> {
+        let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
+        let mut entries = vec![(0u8, 0u32, 0xFFFFu16)];
+        let mut max_num = 0;
+        for (num, body) in objects {
+            entries.push((1, out.len() as u32, 0));
+            out.extend_from_slice(format!("{num} 0 obj\n{body}\nendobj\n").as_bytes());
+            max_num = max_num.max(*num);
+        }
+        let xref_num = max_num + 1;
+        let xref_offset = out.len();
+        entries.push((1, xref_offset as u32, 0));
+        let body = rows(&entries);
+        out.extend_from_slice(
+            format!(
+                "{xref_num} 0 obj\n<</Type /XRef /Size {} /W [1 4 2] /Root 1 0 R {extra_dict} \
+                 /Length {}>>\nstream\n",
+                xref_num + 1,
+                body.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&body);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+        out
+    }
+
+    #[test]
+    fn index_defaults_to_zero_through_size() {
+        // No /Index at all: §7.5.8.2 says it defaults to [0 /Size], so the
+        // rows are read as object numbers 0, 1, 2, … in order.
+        let pdf = xref_stream_pdf(&[(1, "<</Type /Catalog>>")], "");
+        let index = XrefIndex::build(&pdf).expect("the chain parses");
+        assert!(matches!(index.get(1), Some(XrefEntry::InFile { .. })));
+        assert!(matches!(index.get(2), Some(XrefEntry::InFile { .. })));
+    }
+
+    #[test]
+    fn an_explicit_index_places_rows_at_its_own_object_numbers() {
+        // Two subsections that are not contiguous: object 0, then 40 and 41.
+        // The rows are positional, so a reader that ignored /Index would put
+        // the last two entries at 1 and 2 instead.
+        let body = rows(&[(0, 0, 0xFFFF), (1, 9, 0), (1, 40, 0)]);
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        let at = pdf.len();
+        pdf.extend_from_slice(
+            format!(
+                "7 0 obj\n<</Type /XRef /Size 42 /W [1 4 2] /Index [0 1 40 2] /Root 40 0 R \
+                 /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+
+        let index = XrefIndex::build(&pdf).expect("the chain parses");
+        assert!(matches!(index.get(40), Some(XrefEntry::InFile { .. })));
+        assert!(matches!(index.get(41), Some(XrefEntry::InFile { .. })));
+        assert!(index.get(1).is_none(), "/Index must not be ignored");
+    }
+
+    #[test]
+    fn a_zero_width_type_field_defaults_the_type_to_one() {
+        // §7.5.8.2: a /W first element of 0 means every entry is type 1.
+        let mut body = Vec::new();
+        for (offset, gen) in [(0u32, 0xFFFFu16), (9, 0)] {
+            body.extend_from_slice(&offset.to_be_bytes());
+            body.extend_from_slice(&gen.to_be_bytes());
+        }
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        let at = pdf.len();
+        pdf.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size 4 /W [0 4 2] /Index [1 2] /Root 1 0 R \
+                 /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+
+        let index = XrefIndex::build(&pdf).expect("the chain parses");
+        assert!(matches!(index.get(1), Some(XrefEntry::InFile { .. })));
+        assert!(matches!(index.get(2), Some(XrefEntry::InFile { .. })));
+    }
+
+    #[test]
+    fn a_type_two_entry_resolves_through_its_object_stream() {
+        // Object 1 lives at index 0 of object stream 2.
+        let inner = "1 0 <</Type /Catalog /Pages 9 0 R>>";
+        let first = 4; // "1 0 " before the body
+        let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
+        let stm_offset = out.len() as u32;
+        out.extend_from_slice(
+            format!(
+                "2 0 obj\n<</Type /ObjStm /N 1 /First {first} /Length {}>>\nstream\n{inner}\n\
+                 endstream\nendobj\n",
+                inner.len()
+            )
+            .as_bytes(),
+        );
+        let body = rows(&[(0, 0, 0xFFFF), (2, 2, 0), (1, stm_offset, 0)]);
+        let at = out.len();
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&body);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+
+        let resolver = ObjectResolver::new(&out);
+        assert!(matches!(
+            resolver.xref().and_then(|i| i.get(1)),
+            Some(XrefEntry::InStream {
+                stream: 2,
+                index: 0
+            })
+        ));
+        let (value, confidence) = resolver.resolve(1).expect("object 1 resolves");
+        assert_eq!(confidence, Confidence::Resolved);
+        assert_eq!(
+            value.as_dict().unwrap().get("Type").unwrap().as_name(),
+            Some("Catalog")
+        );
+
+        // And the same object, re-wrapped as a definition a tokenizer can read.
+        let (definition, _) = resolver.object_bytes(1).expect("object 1 has a definition");
+        let text = String::from_utf8_lossy(&definition);
+        assert!(text.starts_with("1 0 obj"), "got {text}");
+        assert!(text.contains("/Catalog"), "got {text}");
+    }
+
+    #[test]
+    fn an_object_stream_inside_an_object_stream_is_refused() {
+        // §7.5.7 forbids it, and honouring it would be the one unbounded
+        // recursion in the resolver.
+        let body = rows(&[(0, 0, 0xFFFF), (2, 2, 0), (2, 2, 1)]);
+        let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
+        let at = out.len();
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&body);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+
+        let resolver = ObjectResolver::new(&out);
+        let err = resolver.resolve(1).expect_err("must refuse, not recurse");
+        let message = err.to_string();
+        assert!(
+            message.contains("itself recorded inside an object stream"),
+            "the refusal must name what is wrong, got: {message}"
+        );
+    }
+
+    #[test]
+    fn too_many_index_subsections_are_refused() {
+        let mut index = String::new();
+        for i in 0..(MAX_XREF_SUBSECTIONS + 1) {
+            index.push_str(&format!("{} 1 ", i * 2));
+        }
+        let pdf = xref_stream_pdf(&[(1, "<</Type /Catalog>>")], &format!("/Index [{index}]"));
+        let err = XrefIndex::build(&pdf).expect_err("the cap must bite");
+        assert!(err.to_string().contains("/Index subsections"), "{err}");
+    }
+
+    /// A `/Length` that lies is the commonest damage in a real-world PDF.
+    /// The lexer only believes `/Length` when `endstream` actually follows at
+    /// that offset, so a wild value is recovered from rather than propagated —
+    /// which is why the explicit end-of-file guard in
+    /// `parse_xref_stream_section` is defence in depth rather than the thing
+    /// that catches this. Either way it must not panic.
+    #[test]
+    fn a_length_past_the_end_of_the_file_is_recovered_from_not_panicked_on() {
+        let pdf = b"%PDF-1.5\n1 0 obj\n<</Type /XRef /Size 2 /W [1 4 2] /Length 999999>>\n\
+                    stream\n\x01\x00\x00\x00\x09\x00\x00\nendstream\nendobj\n\
+                    startxref\n9\n%%EOF";
+        let index = XrefIndex::build(pdf).expect("the real stream extent is recovered");
+        assert!(matches!(index.get(0), Some(XrefEntry::InFile { .. })));
+    }
+
+    /// The same lie, with no `endstream` anywhere to recover to: the stream
+    /// runs off the end of the file. This must terminate with a refusal.
+    #[test]
+    fn a_stream_that_runs_off_the_end_of_the_file_terminates() {
+        let pdf = b"%PDF-1.5\n1 0 obj\n<</Type /XRef /Size 2 /W [1 4 2] /Length 999999>>\n\
+                    stream\n\x01\x00\x00\x00\x09\x00\x00\nstartxref\n9\n%%EOF";
+        let _ = XrefIndex::build(pdf);
+    }
+
+    #[test]
+    fn a_cyclic_prev_chain_terminates() {
+        // Two xref streams pointing /Prev at each other. The chain must end,
+        // not spin.
+        let a = 9usize;
+        let body = rows(&[(0, 0, 0xFFFF)]);
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        pdf.extend_from_slice(
+            format!(
+                "1 0 obj\n<</Type /XRef /Size 2 /W [1 4 2] /Root 1 0 R /Prev {a} /Length {}>>\n\
+                 stream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{a}\n%%EOF").as_bytes());
+
+        // Whatever the verdict, it is reached in finite time.
+        let _ = XrefIndex::build(&pdf);
+    }
+
+    /// `/W [i64::MAX i64::MAX 3]`.
+    ///
+    /// The row length is the sum of the widths. Summed as `usize`, two
+    /// `i64::MAX` widths wrapped it to a small number, which passed both the
+    /// "the row is empty" and the "the row runs past the decoded data" guards
+    /// — and then the inner loop ran `for _ in 0..i64::MAX` indexing the
+    /// decoded buffer, panicking in the process that owns the user interface.
+    /// A field width is a byte count and none may exceed eight.
+    #[test]
+    fn a_field_width_past_eight_is_refused() {
+        let pdf = b"%PDF-1.5\n1 0 obj\n<</Type /XRef /Size 3 \
+                    /W [9223372036854775807 9223372036854775807 3] /Root 1 0 R /Length 8>>\n\
+                    stream\n\x01\x00\x00\x00\x09\x00\x00\x00\nendstream\nendobj\n\
+                    startxref\n9\n%%EOF";
+        let err = XrefIndex::build(pdf).expect_err("a /W element of i64::MAX must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("field width"),
+            "the refusal must name the field width, got: {message}"
+        );
+
+        // Eight is the widest legal field, and is accepted.
+        let widths = xref_stream_pdf(&[(1, "<</Type /Catalog>>")], "");
+        assert!(XrefIndex::build(&widths).is_ok());
+    }
+
+    /// A `/W` or an `/Index` is positional: dropping an element that is not an
+    /// integer re-phases every element after it, so the section is read at the
+    /// wrong object numbers or with the wrong field layout. Both are refused
+    /// rather than silently re-phased.
+    #[test]
+    fn a_malformed_w_or_index_is_refused_rather_than_rephased() {
+        for extra in [
+            "/W [1 /Bogus 2]",
+            "/W [1 -4 2]",
+            "/Index [0 (three) 4 2]",
+            "/Index [0 -1]",
+            "/Index [0 1 4]",
+        ] {
+            // The fixture writes its own `/W [1 4 2]`, so a `/W` override has
+            // to be built by hand.
+            let pdf = if extra.starts_with("/W") {
+                let body = rows(&[(0, 0, 0xFFFF), (1, 9, 0)]);
+                let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
+                let at = out.len();
+                out.extend_from_slice(
+                    format!(
+                        "1 0 obj\n<</Type /XRef /Size 2 {extra} /Root 1 0 R /Length {}>>\nstream\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                out.extend_from_slice(&body);
+                out.extend_from_slice(b"\nendstream\nendobj\n");
+                out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+                out
+            } else {
+                xref_stream_pdf(&[(1, "<</Type /Catalog>>")], extra)
+            };
+            let result = XrefIndex::build(&pdf);
+            assert!(
+                result.is_err(),
+                "{extra} was accepted rather than refused: {result:?}"
+            );
+        }
+    }
+
+    /// The `/Index` subsection cap used to bite only after the whole array had
+    /// been lexed into a `Vec`, so the allocation a crafted array provokes was
+    /// unbounded even though its *use* was not. The lexer refuses first.
+    #[test]
+    fn an_array_longer_than_the_cap_is_refused_while_it_is_lexed() {
+        let mut src = String::from("[");
+        for _ in 0..(MAX_ARRAY_ITEMS + 1) {
+            src.push_str("0 ");
+        }
+        src.push(']');
+        let mut lex = Lexer::new(src.as_bytes(), 0);
+        let err = lex
+            .parse_value(0)
+            .expect_err("an array past the cap must be refused");
+        assert!(err.to_string().contains("elements"), "{err}");
+    }
+
+    /// `/DecodeParms` is attacker-controlled, and the predictor geometry was
+    /// multiplied out unchecked: a debug panic, or a release wrap to a small
+    /// row length that walks straight past the cap meant to catch it.
+    #[test]
+    fn a_predictor_geometry_that_overflows_is_refused() {
+        let mut dict = Dict::new();
+        dict.insert("Filter".into(), PdfValue::Name("FlateDecode".into()));
+        let mut parms = Dict::new();
+        parms.insert("Predictor".into(), PdfValue::Int(12));
+        parms.insert("Colors".into(), PdfValue::Int(i64::MAX));
+        parms.insert("BitsPerComponent".into(), PdfValue::Int(i64::MAX));
+        parms.insert("Columns".into(), PdfValue::Int(i64::MAX));
+        dict.insert("DecodeParms".into(), PdfValue::Dict(parms));
+
+        let deflated = {
+            use std::io::Write;
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(b"\x02\x00\x00").unwrap();
+            e.finish().unwrap()
+        };
+        let err = decode_stream(&deflated, &dict)
+            .expect_err("a predictor geometry that overflows must be refused");
+        assert!(err.to_string().contains("overflow"), "{err}");
+    }
+
+    /// Each cross-reference stream is bounded on its own, but a chain of them
+    /// is not bounded by any of those bounds. The budget is per pass, so what
+    /// a document can demand is set by the document rather than by how many
+    /// times something is looked up in it.
+    #[test]
+    fn a_chain_that_decodes_past_the_budget_is_refused() {
+        use std::io::Write;
+
+        // Each section decodes to ~14 MiB of type-1 rows; five of them are
+        // past the 64 MiB budget while each is well under the per-stream cap.
+        let rows_per_section = 2_000_000usize;
+        let mut raw = Vec::with_capacity(rows_per_section * 7);
+        for _ in 0..rows_per_section {
+            raw.push(1u8);
+            raw.extend_from_slice(&9u32.to_be_bytes());
+            raw.extend_from_slice(&0u16.to_be_bytes());
+        }
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(&raw).unwrap();
+        let deflated = e.finish().unwrap();
+
+        let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
+        out.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        for i in 0..8 {
+            let at = out.len();
+            offsets.push(at);
+            let prev = match i {
+                0 => String::new(),
+                _ => format!("/Prev {} ", offsets[i - 1]),
+            };
+            out.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<</Type /XRef /Size 2 /W [1 4 2] /Filter /FlateDecode \
+                     /Root 1 0 R {prev}/Length {}>>\nstream\n",
+                    i + 2,
+                    deflated.len()
+                )
+                .as_bytes(),
+            );
+            out.extend_from_slice(&deflated);
+            out.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        out.extend_from_slice(format!("startxref\n{}\n%%EOF", offsets[7]).as_bytes());
+
+        let err = XrefIndex::build(&out).expect_err("the chain must exhaust the decode budget");
+        assert!(
+            err.to_string().contains("inflating"),
+            "the refusal must name the decompression budget, got: {err}"
+        );
+    }
+
+    #[test]
+    fn png_up_predictor_rows_are_undone() {
+        // Encode two 7-byte rows with the PNG `Up` filter and check that
+        // decoding recovers them exactly.
+        let original: [[u8; 7]; 2] = [[1, 0, 0, 0, 9, 0, 0], [1, 0, 0, 0, 40, 0, 0]];
+        let mut encoded = Vec::new();
+        let mut previous = [0u8; 7];
+        for row in original.iter() {
+            encoded.push(2u8); // filter type: Up
+            for (i, b) in row.iter().enumerate() {
+                encoded.push(b.wrapping_sub(previous[i]));
+            }
+            previous = *row;
+        }
+
+        let mut dict = Dict::new();
+        dict.insert("Filter".into(), PdfValue::Name("FlateDecode".into()));
+        let mut parms = Dict::new();
+        parms.insert("Predictor".into(), PdfValue::Int(12));
+        parms.insert("Columns".into(), PdfValue::Int(7));
+        dict.insert("DecodeParms".into(), PdfValue::Dict(parms));
+
+        let deflated = {
+            use std::io::Write;
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(&encoded).unwrap();
+            e.finish().unwrap()
+        };
+
+        let decoded = decode_stream(&deflated, &dict).expect("predictor decoding succeeds");
+        assert_eq!(decoded, original.concat());
     }
 }

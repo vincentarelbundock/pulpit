@@ -107,11 +107,304 @@ pub fn assemble_single_revision(objects: &[String]) -> Vec<u8> {
     output
 }
 
+/// How a fixture's cross-reference section is written.
+///
+/// A PDF 1.4 producer writes a classic `xref` table and keeps every object at
+/// its own file offset. A PDF 1.5+ producer — LaTeX, Chrome's print-to-PDF,
+/// Acrobat's "optimized" save — writes a cross-reference *stream* and packs
+/// every non-stream object into an object stream. Both are ordinary files in
+/// the wild, so a fixture builder that can only write the first shape cannot
+/// exercise the reader on the majority case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum XrefShape {
+    /// `xref` … `trailer` … `startxref`: one offset per object.
+    #[default]
+    ClassicTable,
+    /// A `/Type /XRef` stream, with every object still at its own offset.
+    /// Isolates xref-stream parsing from object-stream extraction.
+    XrefStream,
+    /// A `/Type /XRef` stream plus a `/Type /ObjStm` holding every object,
+    /// both `FlateDecode`d, the xref stream carrying a PNG `Up` predictor.
+    /// This is what `mutool clean -Z` and Acrobat's optimizer produce.
+    ObjectStreams,
+}
+
+/// Deflate `data` the way every real producer does.
+fn deflate(data: &[u8]) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).expect("deflate into a Vec");
+    encoder.finish().expect("finish the deflate stream")
+}
+
+/// Apply the PNG `Up` predictor (filter type 2) to fixed-width `rows`, which
+/// is the encoding side of what a reader has to undo. Every row is prefixed
+/// with its filter tag, as §7.4.4.4 requires.
+fn png_up_encode(rows: &[Vec<u8>], columns: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows.len() * (columns + 1));
+    let mut previous = vec![0u8; columns];
+    for row in rows {
+        assert_eq!(row.len(), columns, "every predictor row has /Columns bytes");
+        out.push(2u8);
+        for (index, byte) in row.iter().enumerate() {
+            out.push(byte.wrapping_sub(previous[index]));
+        }
+        previous.clone_from(row);
+    }
+    out
+}
+
+/// One cross-reference entry, in the three-field form an xref stream stores.
+#[derive(Clone, Copy)]
+enum XrefRow {
+    /// Type 0: free. Fields are the next free object and its generation.
+    Free,
+    /// Type 1: at a byte offset, with a generation.
+    Offset(u64),
+    /// Type 2: object `index` inside object stream `container`.
+    InStream { container: u32, index: u32 },
+}
+
+/// Serialise `rows` (indexed by object number, starting at 0) as the body of a
+/// `/W [1 4 2]` cross-reference stream.
+///
+/// The widths are the ones this fixture and pulpit's own writer both pick: one
+/// byte is enough for a type in 0..=2, four bytes address a 4 GiB file, and two
+/// bytes hold either a generation or an in-stream index.
+fn xref_stream_rows(rows: &[XrefRow]) -> Vec<Vec<u8>> {
+    rows.iter()
+        .map(|row| {
+            let (kind, second, third): (u8, u64, u16) = match *row {
+                XrefRow::Free => (0, 0, 0xFFFF),
+                XrefRow::Offset(offset) => (1, offset, 0),
+                XrefRow::InStream { container, index } => (2, container as u64, index as u16),
+            };
+            let mut bytes = vec![kind];
+            bytes.extend_from_slice(&(second as u32).to_be_bytes());
+            bytes.extend_from_slice(&third.to_be_bytes());
+            bytes
+        })
+        .collect()
+}
+
+/// Assemble a single-revision PDF from object bodies given in order, starting
+/// at object 1, in the cross-reference shape `shape` asks for.
+///
+/// [`assemble_single_revision`] is `ClassicTable`; this is the same document,
+/// byte-for-byte identical in its object bodies, written the way a PDF 1.5+
+/// producer would. A test can therefore assert that a shape change alone does
+/// not change what signing sees.
+pub fn assemble_single_revision_shaped(objects: &[String], shape: XrefShape) -> Vec<u8> {
+    match shape {
+        XrefShape::ClassicTable => assemble_single_revision(objects),
+        XrefShape::XrefStream => assemble_xref_stream(objects),
+        XrefShape::ObjectStreams => assemble_object_streams(objects),
+    }
+}
+
+/// Every object at its own offset, indexed by a `/Type /XRef` stream.
+fn assemble_xref_stream(objects: &[String]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"%PDF-1.5\n");
+
+    let mut rows = vec![XrefRow::Free];
+    for (index, body) in objects.iter().enumerate() {
+        rows.push(XrefRow::Offset(output.len() as u64));
+        output.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
+    }
+
+    // The xref stream is itself an object and must appear in its own table,
+    // so its number and offset are known before its body is serialised.
+    let xref_number = objects.len() as u32 + 1;
+    let xref_offset = output.len() as u64;
+    rows.push(XrefRow::Offset(xref_offset));
+
+    let body: Vec<u8> = xref_stream_rows(&rows).concat();
+    output.extend_from_slice(
+        format!(
+            "{xref_number} 0 obj\n<</Type /XRef /Size {size} /W [1 4 2] /Root 1 0 R \
+             /ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>] \
+             /Length {length}>>\nstream\n",
+            size = xref_number + 1,
+            length = body.len()
+        )
+        .as_bytes(),
+    );
+    output.extend_from_slice(&body);
+    output.extend_from_slice(b"\nendstream\nendobj\n");
+    output.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+    output
+}
+
+/// Every object packed into one `/Type /ObjStm`, indexed by a deflated,
+/// PNG-predicted `/Type /XRef` stream.
+fn assemble_object_streams(objects: &[String]) -> Vec<u8> {
+    // §7.5.7: the object stream's body is a header of `/N` number-offset pairs
+    // followed by the object bodies, with `/First` pointing at the first body.
+    let mut pairs = String::new();
+    let mut bodies = String::new();
+    for (index, body) in objects.iter().enumerate() {
+        pairs.push_str(&format!("{} {} ", index + 1, bodies.len()));
+        bodies.push_str(body);
+        bodies.push(' ');
+    }
+    let first = pairs.len();
+    let objstm_plain = format!("{pairs}{bodies}");
+    let objstm_body = deflate(objstm_plain.as_bytes());
+
+    let mut output = Vec::new();
+    output.extend_from_slice(b"%PDF-1.5\n");
+
+    let container = objects.len() as u32 + 1;
+    let xref_number = container + 1;
+
+    let mut rows = vec![XrefRow::Free];
+    for index in 0..objects.len() {
+        rows.push(XrefRow::InStream {
+            container,
+            index: index as u32,
+        });
+    }
+
+    let container_offset = output.len() as u64;
+    rows.push(XrefRow::Offset(container_offset));
+    output.extend_from_slice(
+        format!(
+            "{container} 0 obj\n<</Type /ObjStm /N {n} /First {first} /Filter /FlateDecode \
+             /Length {length}>>\nstream\n",
+            n = objects.len(),
+            length = objstm_body.len()
+        )
+        .as_bytes(),
+    );
+    output.extend_from_slice(&objstm_body);
+    output.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref_offset = output.len() as u64;
+    rows.push(XrefRow::Offset(xref_offset));
+
+    let columns = 7; // /W [1 4 2]
+    let predicted = png_up_encode(&xref_stream_rows(&rows), columns);
+    let xref_body = deflate(&predicted);
+    output.extend_from_slice(
+        format!(
+            "{xref_number} 0 obj\n<</Type /XRef /Size {size} /W [1 4 2] /Root 1 0 R \
+             /Filter /FlateDecode /DecodeParms <</Predictor 12 /Columns {columns}>> \
+             /ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>] \
+             /Length {length}>>\nstream\n",
+            size = xref_number + 1,
+            length = xref_body.len()
+        )
+        .as_bytes(),
+    );
+    output.extend_from_slice(&xref_body);
+    output.extend_from_slice(b"\nendstream\nendobj\n");
+    output.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+    output
+}
+
+/// [`build_unsigned_pdf`] in a chosen cross-reference shape.
+pub fn build_unsigned_pdf_shaped(fields: &[&str], shape: XrefShape) -> Vec<u8> {
+    let named: Vec<(&str, NameSpelling)> = fields
+        .iter()
+        .map(|name| (*name, NameSpelling::PdfDoc))
+        .collect();
+    assemble_single_revision_shaped(&unsigned_pdf_objects(&named), shape)
+}
+
+/// How a fixture spells a field's `/T`.
+///
+/// A `/T` is a text string (§7.9.2.2), not UTF-8, and a producer picks the
+/// spelling: Acrobat writes plain PDFDocEncoding for an ASCII name and
+/// UTF-16BE behind a byte-order mark for anything else, in a literal string
+/// whose unprintable bytes become octal escapes. A fixture that can only
+/// write the first spelling cannot exercise a real form's field names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NameSpelling {
+    /// `(Name)` — PDFDocEncoding, which for an ASCII name is the name itself.
+    #[default]
+    PdfDoc,
+    /// `(\376\377\000N\000a…)` — UTF-16BE in a literal string, the shape
+    /// Acrobat produces.
+    Utf16Literal,
+    /// `<FEFF004E0061…>` — UTF-16BE in a hex string.
+    Utf16Hex,
+}
+
+/// `name` written as a PDF string token, ready to follow `/T` in a dictionary.
+pub fn pdf_text_string(name: &str, spelling: NameSpelling) -> String {
+    match spelling {
+        NameSpelling::PdfDoc => {
+            let mut out = String::from("(");
+            for byte in name.bytes() {
+                if matches!(byte, b'(' | b')' | b'\\') {
+                    out.push('\\');
+                }
+                out.push(byte as char);
+            }
+            assert!(
+                name.is_ascii(),
+                "a non-ASCII name has no single-byte spelling here; use a UTF-16 one"
+            );
+            out.push(')');
+            out
+        }
+        NameSpelling::Utf16Literal => {
+            let mut out = String::from("(");
+            for byte in utf16be_with_bom(name) {
+                match byte {
+                    b'(' | b')' | b'\\' => {
+                        out.push('\\');
+                        out.push(byte as char);
+                    }
+                    0x20..=0x7E => out.push(byte as char),
+                    other => out.push_str(&format!("\\{other:03o}")),
+                }
+            }
+            out.push(')');
+            out
+        }
+        NameSpelling::Utf16Hex => {
+            let mut out = String::from("<");
+            for byte in utf16be_with_bom(name) {
+                out.push_str(&format!("{byte:02X}"));
+            }
+            out.push('>');
+            out
+        }
+    }
+}
+
+fn utf16be_with_bom(name: &str) -> Vec<u8> {
+    let mut out = vec![0xFEu8, 0xFF];
+    for unit in name.encode_utf16() {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    out
+}
+
 /// An unsigned single-page PDF carrying `fields` empty `/Sig` fields.
 ///
 /// With no field names it has no AcroForm at all, which is the shape the
 /// "create a new invisible field" path has to cope with.
 pub fn build_unsigned_pdf(fields: &[&str]) -> Vec<u8> {
+    let named: Vec<(&str, NameSpelling)> = fields
+        .iter()
+        .map(|name| (*name, NameSpelling::PdfDoc))
+        .collect();
+    build_unsigned_pdf_named(&named)
+}
+
+/// [`build_unsigned_pdf`] with each field's `/T` spelling chosen, so that a
+/// test can build the UTF-16BE names a real form carries.
+pub fn build_unsigned_pdf_named(fields: &[(&str, NameSpelling)]) -> Vec<u8> {
+    assemble_single_revision(&unsigned_pdf_objects(fields))
+}
+
+/// The object bodies of [`build_unsigned_pdf_named`], in order from object 1,
+/// so that every cross-reference shape assembles the same document.
+fn unsigned_pdf_objects(fields: &[(&str, NameSpelling)]) -> Vec<String> {
     let field_first = 5u32;
     let refs: Vec<String> = (0..fields.len())
         .map(|i| format!("{} 0 R", field_first + i as u32))
@@ -134,14 +427,16 @@ pub fn build_unsigned_pdf(fields: &[&str]) -> Vec<u8> {
         // Object 4 is the AcroForm even when unused, so that field object
         // numbers do not shift between the two shapes.
         objects.push(format!("<</Fields [{}] /SigFlags 3>>", refs.join(" ")));
-        for name in fields {
+        // A merged field/widget dictionary, which is what Acrobat writes for
+        // essentially every real form field.
+        for (name, spelling) in fields {
             objects.push(format!(
-                "<</FT /Sig /T ({}) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] /F 132 /P 3 0 R>>",
-                name
+                "<</FT /Sig /T {} /Type /Annot /Subtype /Widget /Rect [0 0 0 0] /F 132 /P 3 0 R>>",
+                pdf_text_string(name, *spelling)
             ));
         }
     }
-    assemble_single_revision(&objects)
+    objects
 }
 
 /// One empty signature field in a multi-page fixture: which page carries its

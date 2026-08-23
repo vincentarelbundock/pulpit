@@ -8,6 +8,26 @@
 //! display (`CLAUDE.md`: "domain crates are pure"; this crate is not a domain
 //! crate, but the same discipline pays for itself here).
 //!
+//! ## Shape of the flow
+//!
+//! §31.1 numbers nine steps, and v1 first shipped them as nine dialogs. That
+//! was wrong in use: one signature meant six or seven sequential popups, each
+//! carrying one question whose answer was already known. The steps are the
+//! same; what changed is that the middle five collapse into one
+//! [`SigningFlow::Review`] dialog that shows all of them at once and signs
+//! from there.
+//!
+//! ```text
+//! Start ─► SavingFirst? ─► ChooseCredential ─► EnterPassphrase ─► LoadingCredential ─┐
+//!                      └───────────────────► EnterPassphrase ─────────────────────►──┤
+//!                      └───────────────────────────────────────────────────────►─ Review
+//!                                                          Review ─► Signing ─► Result
+//! ```
+//!
+//! Nothing is hidden by the collapse: the credential, the target, the
+//! placement, both §31.2/§31.3 disclosures and the destination are all on the
+//! one dialog, and its Sign button is the confirmation §31.1 step 7 asks for.
+//!
 //! ## Scope of this v1
 //!
 //! - Visible signatures place either the selected profile's saved ink,
@@ -70,7 +90,7 @@ impl AppendOnlyMode {
     }
 }
 
-/// One target the Options step can offer, computed from a preflight pass.
+/// One target the Review step can offer, computed from a preflight pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetChoice {
     /// The document carries no signature yet: a fresh invisible field.
@@ -88,6 +108,20 @@ impl From<&TargetChoice> for SignTarget {
     }
 }
 
+/// What the Review step's target picker starts out on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetPick {
+    /// Nothing on offer: the document has no field left to sign into.
+    Nothing,
+    /// A candidate is preselected — the clicked field when it matched, or
+    /// the document's own first candidate when the flow did not start from a
+    /// click.
+    Selected(TargetChoice),
+    /// The flow started from a click on `clicked`, and preflight does not
+    /// offer that field. Nothing is preselected on purpose.
+    Missed { clicked: String },
+}
+
 /// §31.1 step 5's target selection: the field a page-surface click asked to
 /// sign into (`SignMsg::StartInField`), if it still names one of
 /// `candidates`, otherwise the first candidate — the candidate order makes
@@ -95,20 +129,100 @@ impl From<&TargetChoice> for SignTarget {
 /// empty field is always ordered ahead of `NewField` (see
 /// `App::sign_target_candidates_from_signals`).
 ///
-/// A mismatch (the clicked field got signed by someone else meanwhile, or
-/// preflight no longer offers it) falls back silently rather than erroring:
-/// the Options/Confirm steps show whatever was actually selected, so nothing
-/// is hidden from the reader.
-pub fn pick_signing_target(
-    candidates: &[TargetChoice],
-    prefill: Option<&str>,
-) -> Option<TargetChoice> {
-    let prefilled = prefill.and_then(|name| {
-        candidates.iter().find(
+/// A mismatch — the reader clicked a field the engine's detection then failed
+/// to offer — used to fall back silently to the first candidate. In practice
+/// that put the signature somewhere the reader never asked for, at a preset
+/// corner of some other page, with nothing on screen saying so. So a mismatch
+/// is now [`TargetPick::Missed`]: the Review step names the field that was
+/// clicked ([`prefill_missed_line`]) and preselects nothing, which is what
+/// forces the choice to be looked at rather than confirmed by reflex.
+pub fn pick_signing_target(candidates: &[TargetChoice], prefill: Option<&str>) -> TargetPick {
+    if let Some(name) = prefill {
+        let matched = candidates.iter().find(
             |candidate| matches!(candidate, TargetChoice::ExistingField(field) if field == name),
-        )
-    });
-    prefilled.or_else(|| candidates.first()).cloned()
+        );
+        return match matched {
+            Some(candidate) => TargetPick::Selected(candidate.clone()),
+            None => TargetPick::Missed {
+                clicked: name.to_string(),
+            },
+        };
+    }
+    match candidates.first() {
+        Some(candidate) => TargetPick::Selected(candidate.clone()),
+        None => TargetPick::Nothing,
+    }
+}
+
+/// The line the Review step shows when the field a click asked for is not on
+/// offer. Named, quoted, and in the reader's own terms: the point is that the
+/// signature is *not* going where the click pointed.
+pub fn prefill_missed_line(clicked: &str) -> String {
+    format!(
+        "The field you clicked, “{clicked}”, could not be offered for signing here; the choices \
+         below are what the document supports."
+    )
+}
+
+/// Where the flow lands when it starts (§31.1 step 4), given what the
+/// application knows about the profile it would use: `None` for "there is no
+/// saved profile", otherwise whether that profile's credential is already
+/// unlocked for this session.
+///
+/// The dialog train this replaces asked which profile, then for a passphrase,
+/// then showed the credential, then the options, then a confirmation. An
+/// already-unlocked profile now goes straight to the one Review step that
+/// carries all of it, because every one of those questions has an answer the
+/// reader can see and change there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartStep {
+    /// No saved profile: choose a `.p12`/`.pfx` file first.
+    ChooseCredential,
+    /// A saved profile whose credential is still locked.
+    Passphrase,
+    /// A saved profile already unlocked this session.
+    Review,
+}
+
+pub fn start_step(profile_unlocked: Option<bool>) -> StartStep {
+    match profile_unlocked {
+        None => StartStep::ChooseCredential,
+        Some(false) => StartStep::Passphrase,
+        Some(true) => StartStep::Review,
+    }
+}
+
+/// The default destination the Review step offers: `{stem}-signed.pdf` beside
+/// the source, stepping to `-signed-2`, `-signed-3` … while a file already
+/// exists under the name.
+///
+/// Signing writes without asking again, so it must never land on a file that
+/// is already there: overwriting stays reachable only through the explicit
+/// "Change…" picker, which asks for itself. `exists` is passed in rather than
+/// read here, which is what keeps this testable and this module free of I/O.
+pub fn signed_destination(
+    source: &std::path::Path,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> PathBuf {
+    let directory = source
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_string());
+    let mut candidate = directory.join(format!("{stem}-signed.pdf"));
+    // Bounded: a directory holding a thousand of these is a situation the
+    // picker is a better answer to than another loop iteration.
+    for n in 2..1000 {
+        if !exists(&candidate) {
+            return candidate;
+        }
+        candidate = directory.join(format!("{stem}-signed-{n}.pdf"));
+    }
+    candidate
 }
 
 /// Reason, location and contact — the free-text half of §31.1 step 5.
@@ -118,8 +232,8 @@ pub struct SigningOptions {
     pub location: String,
     pub contact: String,
     pub target: Option<TargetChoice>,
-    /// Whether the document already carries a signature — set once at
-    /// `ContinueToOptions` from the same preflight pass that computed the
+    /// Whether the document already carries a signature — set once on entry
+    /// to the Review step, from the same preflight pass that computed the
     /// candidates, not derived from `target`: an existing empty field is now
     /// offered on unsigned documents too, so "the target is an existing
     /// field" no longer implies "the document is already signed" (§31.3's
@@ -132,6 +246,12 @@ pub struct SigningOptions {
     /// Where the mark goes, set together with `visible_requested`. `None`
     /// for an invisible signature.
     pub placement: Option<AppearancePlan>,
+    /// The field a page-surface click asked to sign into, when preflight did
+    /// not offer it ([`TargetPick::Missed`]). Kept for the whole flow so the
+    /// Review step keeps saying so even after a target is picked by hand —
+    /// the reader chose *instead of* the field they clicked, and that is
+    /// worth still seeing at the moment they press Sign.
+    pub prefill_missed: Option<String>,
 }
 
 impl SigningOptions {
@@ -605,7 +725,7 @@ pub fn appearance_for_profile(
     })
 }
 
-/// The confirmation step's target line (§31.1 step 7): what is being signed
+/// The Review step's target line (§31.1 step 7): what is being signed
 /// into, whether a mark will be visible, and where that mark will land. The
 /// last part is what makes the line honest — "visible" alone does not say
 /// whether the mark lands in the box the sender drew or somewhere this
@@ -657,9 +777,10 @@ pub fn confirm_target_line(options: &SigningOptions) -> String {
         (Some(TargetChoice::NewField), _) => {
             format!("A new, {visibility} signature field will be created.")
         }
-        // Unreachable: `ContinueToConfirm` diverts to `Failed` rather than
-        // let the Confirm step build with no target.
-        (None, _) => String::new(),
+        // No target selected: the Review step's Sign button is not offered,
+        // and the picker above this line is what the reader is being asked
+        // to look at.
+        (None, _) => "No signature field is selected yet.".to_string(),
     }
 }
 
@@ -699,7 +820,7 @@ impl CredentialInfo {
 /// [`CredentialSummary`]'s validity fields are formatted strings (RFC 3339 or
 /// similar), not unix seconds; `pulpit-render` does not expose a parsed
 /// variant. Best-effort: an unparseable value is treated as "cannot tell",
-/// which is the same as not warning — the confirmation step still shows the
+/// which is the same as not warning — the Review step still shows the
 /// raw string either way, so nothing is hidden.
 fn parse_unix_ish(value: &str) -> Option<i64> {
     time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
@@ -714,12 +835,11 @@ fn parse_unix_ish(value: &str) -> Option<i64> {
 #[derive(Debug)]
 pub enum SigningFlow {
     /// Step 3: unsaved edits exist, and Save As is running before signing
-    /// can start. The flow resumes at [`SigningFlow::ChooseCredential`] once
+    /// can start. The flow resumes at its first step ([`start_step`]) once
     /// the save completes.
     SavingFirst,
-    /// Step 4 when at least one saved profile is known.
-    ChooseProfile,
-    /// Step 4, before a credential file has been chosen.
+    /// Step 4, before a credential file has been chosen. Reached only when
+    /// no saved profile exists, or when the reader asks for another file.
     ChooseCredential,
     /// Step 4: a `.p12`/`.pfx` was chosen; waiting for a passphrase.
     EnterPassphrase {
@@ -732,16 +852,23 @@ pub enum SigningFlow {
     },
     /// Step 4, in progress: `load_pkcs12` dispatched off the UI thread.
     LoadingCredential { credential_path: PathBuf },
-    /// Step 4 shown: subject, issuer, validity, fingerprint.
-    CredentialSummary {
-        credential_path: PathBuf,
+    /// Steps 4–7 in one: who is signing, what is being signed into, what the
+    /// mark will look like, the disclosures, and where the result will be
+    /// written. Pressing Sign here signs — this step *is* the confirmation,
+    /// so it is non-dismissable except by its own Cancel and Sign buttons.
+    ///
+    /// The five sequential dialogs this replaces (profile, credential
+    /// summary, options, confirmation, destination picker) each asked one
+    /// question and each needed an answer before the next one could be seen.
+    /// Every one of those answers has a default, and showing them together is
+    /// what lets the common case be read at a glance instead of clicked
+    /// through.
+    Review {
         credential: std::sync::Arc<Credential>,
-        info: CredentialInfo,
-    },
-    /// Step 5: reason/location/contact, target field.
-    Options {
-        credential: std::sync::Arc<Credential>,
-        info: CredentialInfo,
+        /// Boxed only for size: the certificate summary is eight owned
+        /// strings, and inlining it here would make every `SigningFlow` —
+        /// including the one-word `SavingFirst` — carry that width.
+        info: Box<CredentialInfo>,
         options: SigningOptions,
         /// Every empty `/Sig` field a preflight pass over the document
         /// found, for the target picker. One entry (`NewField` or a single
@@ -749,14 +876,15 @@ pub enum SigningFlow {
         /// countersigning a document preflight reported
         /// `AmbiguousSignatureField` for.
         candidates: Vec<TargetChoice>,
-    },
-    /// Step 7: the confirmation dialog. Non-dismissable except its own
-    /// Cancel/Sign buttons.
-    Confirm {
-        credential: std::sync::Arc<Credential>,
-        info: CredentialInfo,
-        options: SigningOptions,
-        candidates: Vec<TargetChoice>,
+        /// Where Sign will write, already made unique against the files
+        /// beside the source ([`signed_destination`]) or chosen through the
+        /// "Change…" picker.
+        destination: PathBuf,
+        /// Whether the optional reason/location/contact inputs are unfolded.
+        /// Collapsed by default: they are metadata almost nobody fills, and
+        /// three empty text boxes at the top is most of what made the old
+        /// Options step look like work.
+        details_expanded: bool,
     },
     /// Step 8, in progress. `credential` and `options` are held rather than
     /// dropped so a failed attempt could retry without reloading the
@@ -779,16 +907,6 @@ pub enum SigningFlow {
     Failed { detail: String },
 }
 
-impl SigningFlow {
-    pub fn start(has_profiles: bool) -> Self {
-        if has_profiles {
-            SigningFlow::ChooseProfile
-        } else {
-            SigningFlow::ChooseCredential
-        }
-    }
-}
-
 /// What the Sign dialog can ask `app.rs` to do. Grouped under one
 /// `Message::Sign(SignMsg)` variant, the way `TimerCommand` and
 /// `ReadCommand` already group their own popups' messages.
@@ -797,8 +915,8 @@ pub enum SignMsg {
     /// The toolbar's Sign button.
     Start,
     /// The page surface's signature dead-field was clicked (§31.1, with the
-    /// field pre-selected in step 5's target picker — see
-    /// `pick_signing_target`'s prefill handling).
+    /// field pre-selected in the Review step's target picker, or the miss
+    /// said out loud — see `pick_signing_target`'s prefill handling).
     StartInField(String),
     /// Cancel at any step. Always safe (§33): nothing has been written yet,
     /// or the write was to a temporary file that is now discarded.
@@ -813,12 +931,14 @@ pub enum SignMsg {
     /// that the source is unchanged, what to do next).
     CredentialLoaded(Result<std::sync::Arc<Credential>, String>),
     OverrideValidity,
-    ContinueToOptions,
+    /// Fold the Review step's optional reason/location/contact inputs in or
+    /// out.
+    ToggleDetails,
     ReasonChanged(String),
     LocationChanged(String),
     ContactChanged(String),
-    /// Sent by the Options view's target picker when more than one
-    /// candidate field exists (see `SigningFlow::Options::candidates`).
+    /// Sent by the Review view's target picker (see
+    /// `SigningFlow::Review::candidates`).
     TargetChosen(TargetChoice),
     /// Visible/invisible toggle. Turning it on is what captures the
     /// [`PlacementContext`] — the target's own box, or the page the reader is
@@ -826,17 +946,18 @@ pub enum SignMsg {
     VisibleChanged(bool),
     PlacementPositionChosen(PlacementPosition),
     PlacementSizeChosen(PlacementSize),
-    ContinueToConfirm,
-    BackToOptions,
+    /// The Review step's Sign button: sign, to the destination already shown.
     Confirm,
-    /// Not sent by the shipped dialog — `Confirm` reaches the same
-    /// destination picker directly — but kept as its own message so a
-    /// future "pick a different destination" retry has somewhere to land
-    /// without a new variant.
-    #[allow(dead_code)]
+    /// The Review step's "Change…" button beside the destination.
     ChooseDestination,
+    /// The picker's answer. `None` — cancelled — keeps the shown default.
     DestinationChosen(Option<PathBuf>),
     Completed(Result<SignOutcome, String>),
+    /// The Result step's "Open the signed copy": close the flow and open the
+    /// file it wrote. Without this the reader keeps showing the unsigned
+    /// source, which reads as "the signature did not appear" — the signed
+    /// bytes live in the copy, never in the document on screen.
+    OpenSignedCopy,
     Done,
 }
 
@@ -993,7 +1114,7 @@ mod tests {
         ];
         assert_eq!(
             pick_signing_target(&candidates, Some("Sig2")),
-            Some(TargetChoice::ExistingField("Sig2".to_string()))
+            TargetPick::Selected(TargetChoice::ExistingField("Sig2".to_string()))
         );
     }
 
@@ -1005,37 +1126,125 @@ mod tests {
         ];
         assert_eq!(
             pick_signing_target(&candidates, None),
-            Some(TargetChoice::ExistingField("Sig1".to_string()))
+            TargetPick::Selected(TargetChoice::ExistingField("Sig1".to_string()))
         );
     }
 
+    /// The regression this whole enum exists for: a clicked field preflight
+    /// does not offer must never quietly become some *other* existing field.
     #[test]
-    fn pick_signing_target_falls_back_when_the_prefill_no_longer_matches() {
+    fn a_clicked_field_that_is_not_offered_is_reported_not_swapped() {
         let candidates = vec![
             TargetChoice::ExistingField("Sig1".to_string()),
             TargetChoice::NewField,
         ];
         assert_eq!(
-            pick_signing_target(&candidates, Some("Sig9")),
-            Some(TargetChoice::ExistingField("Sig1".to_string()))
+            pick_signing_target(&candidates, Some("Membre jury")),
+            TargetPick::Missed {
+                clicked: "Membre jury".to_string()
+            }
         );
     }
 
     #[test]
-    fn pick_signing_target_is_none_with_no_candidates() {
-        assert_eq!(pick_signing_target(&[], Some("Sig1")), None);
+    fn a_missed_prefill_selects_nothing_and_says_which_field_was_clicked() {
+        let candidates = vec![TargetChoice::NewField];
+        let pick = pick_signing_target(&candidates, Some("Membre jury"));
+        let TargetPick::Missed { clicked } = pick else {
+            panic!("expected a miss, got {pick:?}");
+        };
+        let mut options = SigningOptions {
+            prefill_missed: Some(clicked.clone()),
+            ..Default::default()
+        };
+        // Nothing preselected: the reader has to look at the choice.
+        assert_eq!(options.target, None);
+        assert_eq!(
+            prefill_missed_line(&clicked),
+            "The field you clicked, “Membre jury”, could not be offered for signing here; the \
+             choices below are what the document supports."
+        );
+        // And picking by hand does not erase the notice.
+        options.target = Some(TargetChoice::NewField);
+        assert_eq!(options.prefill_missed.as_deref(), Some("Membre jury"));
     }
 
     #[test]
-    fn flow_starts_at_choose_credential() {
-        assert!(matches!(
-            SigningFlow::start(false),
-            SigningFlow::ChooseCredential
-        ));
-        assert!(matches!(
-            SigningFlow::start(true),
-            SigningFlow::ChooseProfile
-        ));
+    fn pick_signing_target_is_nothing_with_no_candidates_and_no_prefill() {
+        assert_eq!(pick_signing_target(&[], None), TargetPick::Nothing);
+        assert_eq!(
+            pick_signing_target(&[], Some("Sig1")),
+            TargetPick::Missed {
+                clicked: "Sig1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_first_step_skips_straight_to_review_for_an_unlocked_profile() {
+        assert_eq!(start_step(Some(true)), StartStep::Review);
+        assert_eq!(start_step(Some(false)), StartStep::Passphrase);
+        assert_eq!(start_step(None), StartStep::ChooseCredential);
+    }
+
+    #[test]
+    fn the_default_destination_sits_beside_the_source() {
+        let source = std::path::Path::new("/decks/talk.pdf");
+        assert_eq!(
+            signed_destination(source, &|_| false),
+            PathBuf::from("/decks/talk-signed.pdf")
+        );
+    }
+
+    #[test]
+    fn the_default_destination_steps_aside_rather_than_overwrite() {
+        let taken = |path: &std::path::Path| {
+            matches!(
+                path.to_str(),
+                Some("/decks/talk-signed.pdf") | Some("/decks/talk-signed-2.pdf")
+            )
+        };
+        assert_eq!(
+            signed_destination(std::path::Path::new("/decks/talk.pdf"), &taken),
+            PathBuf::from("/decks/talk-signed-3.pdf")
+        );
+    }
+
+    #[test]
+    fn the_default_destination_handles_a_source_with_no_directory_or_stem() {
+        assert_eq!(
+            signed_destination(std::path::Path::new("talk.pdf"), &|_| false),
+            PathBuf::from("./talk-signed.pdf")
+        );
+    }
+
+    /// The validity gate survived the collapse: an expired credential still
+    /// blocks Sign until the override is pressed, now on the one dialog.
+    #[test]
+    fn the_review_step_will_not_sign_an_expired_credential_without_the_override() {
+        let summary = CredentialSummary {
+            subject: "CN=Test".into(),
+            issuer: "CN=Test CA".into(),
+            serial: "01".into(),
+            not_before: "2000-01-01T00:00:00Z".into(),
+            not_after: "2001-01-01T00:00:00Z".into(),
+            sha256_fingerprint: "aa:bb".into(),
+            key_algorithm: "RSA".into(),
+            key_bits: Some(2048),
+        };
+        let mut info = CredentialInfo::from_summary(summary, 1_700_000_000);
+        let options = SigningOptions {
+            target: Some(TargetChoice::NewField),
+            ..Default::default()
+        };
+        let may_sign = |info: &CredentialInfo, options: &SigningOptions| {
+            info.may_proceed() && options.target.is_some()
+        };
+        assert!(!may_sign(&info, &options));
+        info.override_validity = true;
+        assert!(may_sign(&info, &options));
+        // …and a valid credential still cannot sign into nothing.
+        assert!(!may_sign(&info, &SigningOptions::default()));
     }
 
     #[test]

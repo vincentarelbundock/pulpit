@@ -22,6 +22,29 @@
 //!    runs before any classification.
 //!
 //! # The module MUST NOT depend on the sign module or PDFium.
+//!
+//! # Behaviour changes on the classic-cross-reference path
+//!
+//! Two of the fixes below move real behaviour for plain classic files, not
+//! only for cross-reference streams, and both are pinned by fixtures:
+//!
+//! * **Coverage classification is genuinely stricter.** A classic table's
+//!   `xref_end` is now the *absolute* file offset past its `trailer`
+//!   dictionary. It used to be reported relative to `startxref`, which
+//!   under-reports for every revision but the first, so a signature that
+//!   stopped short of its own cross-reference data could pass as covering its
+//!   whole revision. Documents that classified as `EntireRevision` before may
+//!   now classify as `ContiguousBlockFromStart` — correctly.
+//!   (`a_classic_files_coverage_is_classified_against_its_real_container_end`)
+//!
+//! * **A nested dictionary in a trailer no longer truncates the scan.** Both
+//!   this module's `parse_xref_extent` and `pdfwrite::IncrementalWriter::open`
+//!   count dictionary depth, so `/Root`, `/Size`, `/ID` and `/XRefStm` written
+//!   after an inline `/Info` are seen. `open` therefore now *succeeds* on
+//!   documents it used to open with an empty trailer — and hybrid files it
+//!   used to read as plain classic are now refused as hybrid.
+//!   (`a_nested_dictionary_in_a_classic_trailer_does_not_hide_xrefstm`,
+//!   `a_nested_dictionary_in_a_classic_trailer_does_not_hide_later_keys`)
 
 pub mod cms_check;
 pub mod objects;
@@ -131,6 +154,18 @@ pub struct RevisionInfo {
     pub eof: u64,
     /// Set of object numbers defined in this revision's xref.
     pub obj_numbers: std::collections::HashSet<u32>,
+    /// Position in the `/Prev` chain: `0` is the revision the final
+    /// `startxref` names, and each `/Prev` step is one older.
+    ///
+    /// Revision order used to be proxied by the `startxref` *offset*, on the
+    /// assumption that a later revision is always written further into the
+    /// file. A `/Prev` that points forward — which a linearized document does
+    /// legitimately, and which a crafted one does on purpose — breaks that
+    /// assumption, and a section that sorted as if it were older had its
+    /// `xref_end` filtered out of the coverage loop and never compared against
+    /// the signature's coverage end. Order is now the chain itself, which is
+    /// what "later revision" means.
+    pub chain_position: usize,
 }
 
 /// Revision map: startxref -> RevisionInfo.
@@ -144,7 +179,7 @@ impl RevisionMap {
     /// Build the revision map from PDF bytes.
     ///
     /// Walks the xref chain from the final startxref through /Prev, detecting cycles
-    /// and hybrid xrefs. Caps revisions at 1024.
+    /// and hybrid xrefs. Caps revisions at [`objects::MAX_XREF_CHAIN`].
     pub fn build(bytes: &[u8]) -> Result<Self> {
         let file_size = bytes.len() as u64;
 
@@ -155,13 +190,23 @@ impl RevisionMap {
         let mut revisions = BTreeMap::new();
         let mut current_startxref = find_startxref(bytes)?;
         let mut seen = std::collections::HashSet::new();
-        let max_revisions = 1024;
+        // One cap, shared with the resolver. They used to disagree — 1024 here
+        // against 256 there — so a document with a chain between the two got a
+        // revision map while `ObjectResolver` silently degraded to a repair
+        // scan, and the two halves of verification then described different
+        // documents.
+        let max_revisions = objects::MAX_XREF_CHAIN;
+        // One decompression budget for the whole pass, so a chain of sections
+        // that each decode to the per-stream cap cannot multiply into
+        // gigabytes of inflate.
+        let mut budget = objects::DecodeBudget::new();
+        let mut chain_position = 0usize;
 
         loop {
             if revisions.len() >= max_revisions {
-                return Err(VerifyError::MalformedPdf(
-                    "too many revisions (capped at 1024)".to_string(),
-                ));
+                return Err(VerifyError::MalformedPdf(format!(
+                    "too many revisions (capped at {max_revisions})"
+                )));
             }
 
             if seen.contains(&current_startxref) {
@@ -182,7 +227,8 @@ impl RevisionMap {
             }
 
             // Parse xref entries to get object numbers
-            let obj_numbers = objects::xref_section_object_numbers(bytes, current_startxref)?;
+            let obj_numbers =
+                objects::xref_section_object_numbers(bytes, current_startxref, &mut budget)?;
 
             let rev_info = RevisionInfo {
                 startxref: current_startxref,
@@ -190,13 +236,31 @@ impl RevisionMap {
                 xref_end,
                 eof: file_size,
                 obj_numbers,
+                chain_position,
             };
 
             revisions.insert(current_startxref, rev_info);
 
-            // Look for /Prev in trailer
+            // Look for /Prev in trailer.
+            //
+            // A `/Prev` that points *forward* is not refused, and that is a
+            // deliberate choice rather than an omission. It reads like an
+            // impossibility — an incremental update appends, so the section it
+            // supersedes must lie behind it — but ISO 32000-1 Annex F makes it
+            // ordinary: a linearized document puts its first-page
+            // cross-reference table at the *front* of the file and gives that
+            // table a `/Prev` pointing at the main table near the end.
+            // Refusing a forward `/Prev` would refuse every web-optimised PDF.
+            //
+            // What the defect actually was is order: revision order was
+            // proxied by the `startxref` offset, so a section written earlier
+            // in the file than the one superseding it sorted as if it were
+            // newer and dropped out of the coverage comparison. Order is now
+            // `chain_position`, which is the chain itself. See
+            // `RevisionInfo::chain_position`.
             if let Some(prev_startxref) = find_prev(bytes, current_startxref)? {
                 current_startxref = prev_startxref;
+                chain_position += 1;
             } else {
                 break;
             }
@@ -212,23 +276,31 @@ impl RevisionMap {
 
     /// Find the revision where an object number was last changed.
     /// Returns the startxref of the newest revision containing that object.
+    ///
+    /// "Newest" is the smallest [`RevisionInfo::chain_position`], not the
+    /// largest offset: see that field for why the two are not the same thing.
     pub fn last_changed_revision(&self, obj_num: u32) -> Option<u64> {
-        // Find the newest (highest startxref) revision that defines this object
         self.revisions
-            .iter()
-            .rev()
-            .find(|(_, info)| info.obj_numbers.contains(&obj_num))
-            .map(|(startxref, _)| *startxref)
+            .values()
+            .filter(|info| info.obj_numbers.contains(&obj_num))
+            .min_by_key(|info| info.chain_position)
+            .map(|info| info.startxref)
     }
 
-    /// All revisions in order from oldest to newest.
+    /// All revisions in chain order, from oldest to newest.
     pub fn all_revisions(&self) -> Vec<&RevisionInfo> {
-        self.revisions.values().collect()
+        self.all_revisions_map()
+            .into_iter()
+            .map(|(_, info)| info)
+            .collect()
     }
 
-    /// All revisions as (startxref, info) pairs in order.
+    /// All revisions as (startxref, info) pairs, oldest to newest.
     pub fn all_revisions_map(&self) -> Vec<(&u64, &RevisionInfo)> {
-        self.revisions.iter().collect()
+        let mut out: Vec<(&u64, &RevisionInfo)> = self.revisions.iter().collect();
+        // Oldest first: the largest chain position is the deepest `/Prev`.
+        out.sort_by_key(|(_, info)| std::cmp::Reverse(info.chain_position));
+        out
     }
 }
 
@@ -261,7 +333,14 @@ fn find_startxref(bytes: &[u8]) -> Result<u64> {
 }
 
 /// Parse xref extent: find where the xref section starts and ends.
-/// Returns (xref_start, xref_end, has_xref_stm).
+/// Returns (xref_start, xref_end, has_xref_stm), as **absolute file offsets**.
+///
+/// `xref_end` is what §28.2 means by where a revision's cross-reference
+/// container ends: past the classic `trailer` dictionary, or past the `endobj`
+/// of a cross-reference stream. It is compared against a signature's coverage
+/// end, so an offset that is relative to `startxref` rather than to the file
+/// silently under-reports and lets a signature that does not cover its own
+/// cross-reference data pass as if it did.
 fn parse_xref_extent(bytes: &[u8], startxref: u64) -> Result<(u64, u64, bool)> {
     let xref_pos = startxref as usize;
     if xref_pos >= bytes.len() {
@@ -296,31 +375,69 @@ fn parse_xref_extent(bytes: &[u8], startxref: u64) -> Result<(u64, u64, bool)> {
             ));
         }
 
-        // Scan trailer dictionary for /XRefStm and closing >>
+        // Scan the trailer dictionary for /XRefStm and its own closing `>>`.
+        //
+        // Depth matters, and stopping at the first `>>` was a hole in two
+        // directions at once: a nested dictionary — an inline `/Info`, or one
+        // planted for the purpose — truncated `xref_end` to somewhere inside
+        // the trailer, and it hid every key that followed. `/XRefStm` among
+        // them, so a hybrid file was read as plain classic and slipped past
+        // the refusal below, while `ObjectResolver` went on following the
+        // `/XRefStm` it could still see. Two halves of verification reading
+        // different documents is the divergence this exists to prevent.
         let mut has_xref_stm = false;
-        let mut dict_end = 0;
+        let mut dict_end = None;
+        let mut dict_depth = 0i32;
 
         tokenizer.seek(trailer_start);
         while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"/XRefStm" {
+            if token == b"<<" {
+                dict_depth += 1;
+            } else if token == b">>" {
+                dict_depth -= 1;
+                if dict_depth <= 0 {
+                    dict_end = Some(tokenizer.position());
+                    break;
+                }
+            } else if token == b"/XRefStm" && dict_depth == 1 {
+                // Only at the trailer's own level: a `/XRefStm` inside some
+                // nested dictionary is not the hybrid marker of §7.5.8.4.
                 has_xref_stm = true;
-            }
-            if token == b">>" {
-                dict_end = tokenizer.position();
-                break;
             }
         }
 
-        let xref_end = dict_end as u64;
+        let Some(dict_end) = dict_end else {
+            return Err(VerifyError::XrefParseError(
+                "the classic cross-reference table's trailer dictionary is never closed"
+                    .to_string(),
+            ));
+        };
+
         let xref_start = xref_pos as u64;
+        let xref_end = (xref_pos + dict_end) as u64;
+        if xref_end <= xref_start {
+            return Err(VerifyError::XrefParseError(
+                "the classic cross-reference table's container has no extent".to_string(),
+            ));
+        }
 
         Ok((xref_start, xref_end, has_xref_stm))
     } else {
-        // Xref stream (object): parse object header and dict
-        // Format: obj_num gen_num obj ... endobj
+        // A cross-reference stream: `obj_num gen obj << … >> stream … endobj`.
+        //
+        // The scan must stop at the dictionary's closing `>>`. Past it lies
+        // the stream body, which is compressed binary — tokenising it yields
+        // whatever `<<` and `>>` byte pairs the deflate output happens to
+        // contain, and a run to end-of-file therefore reported a container
+        // end somewhere in the middle of a later revision. `/XRefStm` is a
+        // classic-trailer key. `/XRefStm` is still looked for *inside* the
+        // dictionary: this branch is also reached when `startxref` does not
+        // point at a cross-reference section at all, and the trailer of a
+        // hybrid file may then be the dictionary that gets scanned. Refusing
+        // such a file is right; misreading it is not.
+        let mut dict_depth = 0i32;
+        let mut dict_end = None;
         let mut has_xref_stm = false;
-        let mut dict_end = 0;
-        let mut dict_depth = 0;
 
         while let Ok(Some(token)) = tokenizer.next_token() {
             if token == b"<<" {
@@ -328,16 +445,45 @@ fn parse_xref_extent(bytes: &[u8], startxref: u64) -> Result<(u64, u64, bool)> {
             } else if token == b">>" {
                 dict_depth -= 1;
                 if dict_depth == 0 {
-                    dict_end = tokenizer.position();
+                    dict_end = Some(tokenizer.position());
+                    break;
                 }
-            }
-            if token == b"/XRefStm" {
+            } else if token == b"/XRefStm" {
                 has_xref_stm = true;
             }
         }
 
+        let Some(dict_end) = dict_end else {
+            return Err(VerifyError::XrefParseError(
+                "the cross-reference stream's dictionary is never closed".to_string(),
+            ));
+        };
+
+        // The container is the whole indirect object, so its end is past
+        // `endobj` — and finding that `endobj` is the lexer's job, not a byte
+        // search's. Searching for the literal `endobj` from the dictionary's
+        // end runs *through* the stream body, which is attacker-controlled: an
+        // `endobj` planted in it moved the container end backwards, and a
+        // signature that stops short of its own cross-reference stream then
+        // classified as EntireRevision. `parse_indirect_object` steps over the
+        // body by its declared and validated extent, so the end it reports is
+        // the real one.
+        //
+        // This branch is also reached when `startxref` does not point at an
+        // indirect object at all; a parse that fails then falls back to the
+        // dictionary's end, which is the most that can honestly be claimed.
         let xref_start = xref_pos as u64;
-        let xref_end = dict_end as u64;
+        let dict_end_abs = xref_pos + dict_end;
+        let mut lexer = objects::Lexer::new(bytes, xref_pos);
+        let xref_end = match lexer.parse_indirect_object() {
+            Ok((_, _, _, end)) if end >= dict_end_abs => end as u64,
+            _ => dict_end_abs as u64,
+        };
+        if xref_end <= xref_start {
+            return Err(VerifyError::XrefParseError(
+                "the cross-reference stream's container has no extent".to_string(),
+            ));
+        }
 
         Ok((xref_start, xref_end, has_xref_stm))
     }
@@ -470,13 +616,18 @@ pub fn classify_coverage(
 
     // Check 5: Look up the revision where the signature was last changed
     let coverage_end = start2 + len2;
-    if let Some(_sig_rev_info) = revisions.get_by_startxref(sig_dict_revision_startxref) {
+    if let Some(sig_rev_info) = revisions.get_by_startxref(sig_dict_revision_startxref) {
         // Check 6: Any xref container of revisions <= rev ends beyond start2+len2?
         // Per §28.2: if any xref container of revision <= rev ends beyond start2 + len2
         //            -> ContiguousBlockFromStart
-        for (startxref, rev_info) in revisions.all_revisions_map() {
+        //
+        // "Revision <= rev" is a position in the `/Prev` chain, not a byte
+        // offset. Comparing offsets let a section written earlier in the file
+        // than the one that supersedes it drop out of this loop entirely, so
+        // its `xref_end` was never compared against the coverage end.
+        for rev_info in revisions.all_revisions() {
             // Only check revisions up to and including the revision where sig was last changed
-            if *startxref <= sig_dict_revision_startxref {
+            if rev_info.chain_position >= sig_rev_info.chain_position {
                 // If any xref container ends BEYOND the coverage end, we don't have full coverage
                 if rev_info.xref_end > coverage_end {
                     return Ok((SignatureCoverage::ContiguousBlockFromStart, true));
@@ -497,21 +648,28 @@ pub fn classify_coverage(
 pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<StructuralReport>> {
     // An encrypted document cannot be read structurally, and appending to one
     // would silently produce a broken file. Report it instead of guessing.
-    if is_encrypted(bytes) {
+    // One resolver for the whole pass. Building it decodes every
+    // cross-reference stream in the chain and caches every object stream it
+    // touches, so building one per field lookup — which is what calling the
+    // free functions in a loop did — re-did all of that up to MAX_FIELD_NODES
+    // times. A crafted 1.3 MB document with 32 chained cross-reference streams
+    // took hours; with one resolver it is a single pass.
+    let resolver = ObjectResolver::new(bytes);
+    if resolver.is_encrypted() {
         return Err(VerifyError::EncryptedPdf);
     }
 
     let mut reports = Vec::new();
 
     // Find catalog
-    let catalog_ref = find_catalog_ref(bytes)?;
+    let catalog_ref = find_catalog_ref_with(&resolver, bytes)?;
 
     // Walk the whole field tree, with /FT and /T resolved through parents.
-    let fields = find_field_tree(bytes, catalog_ref)?;
+    let fields = find_field_tree_with(&resolver, catalog_ref)?;
 
     // Enumerate fields in document order
     for field in &fields {
-        match extract_signature_field(bytes, field, revisions) {
+        match extract_signature_field(&resolver, bytes, field, revisions) {
             Ok(Some(sig_report)) => {
                 reports.push(sig_report);
             }
@@ -566,9 +724,20 @@ pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<
 
 /// Parse the catalog reference from the trailer.
 pub fn find_catalog_ref(bytes: &[u8]) -> Result<(u32, u16)> {
+    find_catalog_ref_with(&ObjectResolver::new(bytes), bytes)
+}
+
+/// [`find_catalog_ref`], against a resolver the caller already built.
+///
+/// Building an `ObjectResolver` re-parses — and re-inflates — the whole
+/// cross-reference chain. Every `_with` entry point in this module exists so
+/// that one verification or pre-flight pass pays that once instead of once per
+/// object it looks up; see [`object_definition`] for what the per-lookup shape
+/// cost on a chain-heavy document.
+pub fn find_catalog_ref_with(resolver: &ObjectResolver<'_>, bytes: &[u8]) -> Result<(u32, u16)> {
     // The resolver knows the merged trailer of the active revision, including
     // the cross-reference-stream case the tokenizer walk below cannot read.
-    if let Some(root) = ObjectResolver::new(bytes).root_ref() {
+    if let Some(root) = resolver.root_ref() {
         return Ok(root);
     }
 
@@ -658,7 +827,8 @@ pub fn find_field_tree(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<Fiel
     find_field_tree_with(&resolver, catalog_ref)
 }
 
-fn find_field_tree_with(
+/// [`find_field_tree`], against a resolver the caller already built.
+pub fn find_field_tree_with(
     resolver: &ObjectResolver<'_>,
     catalog_ref: (u32, u16),
 ) -> Result<Vec<FieldEntry>> {
@@ -752,8 +922,11 @@ fn walk_field_node(
         .map(|s| s.to_string())
         .or_else(|| inherited_ft.map(|s| s.to_string()));
 
+    // `/T` is a text string, not UTF-8 bytes: reading it lossily turned a
+    // UTF-16BE name into mojibake in the signature panel and in every name
+    // comparison downstream.
     let own_name = match dict.get("T") {
-        Some(PdfValue::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+        Some(PdfValue::Str(s)) => Some(crate::pdftext::decode_text_string(s)),
         _ => None,
     };
     let qualified_name = match (inherited_name, own_name.as_deref()) {
@@ -804,11 +977,28 @@ pub fn find_fields_array(bytes: &[u8], catalog_ref: (u32, u16)) -> Result<Vec<(u
         .collect())
 }
 
+/// [`find_fields_array`], against a resolver the caller already built.
+pub fn find_fields_array_with(
+    resolver: &ObjectResolver<'_>,
+    catalog_ref: (u32, u16),
+) -> Result<Vec<(u32, u16)>> {
+    Ok(find_field_tree_with(resolver, catalog_ref)?
+        .into_iter()
+        .map(|f| f.obj)
+        .collect())
+}
+
 /// Find object bytes by object number, through the cross-reference chain.
 ///
-/// The returned slice covers `N G obj … endobj` in the file. An object that
-/// lives in an object stream has no such slice; use
-/// [`ObjectResolver::object_bytes`] for those.
+/// The returned slice covers `N G obj … endobj` **in the file**, so the caller
+/// also learns where the object is. That is what a signature dictionary needs
+/// — `/ByteRange` describes file offsets, so the `/Contents` reservation has
+/// to be addressable — and it is why this cannot be replaced wholesale by
+/// [`object_definition`].
+///
+/// An object that lives in an object stream has no such slice and is reported
+/// as not found. A caller that only reads an object's dictionary should use
+/// [`object_definition`], which handles both.
 pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
     let resolver = ObjectResolver::new(bytes);
     let (start, end, _conf) = resolver
@@ -817,6 +1007,27 @@ pub fn find_object(bytes: &[u8], obj_num: u32) -> Result<&[u8]> {
     bytes
         .get(start..end)
         .ok_or(VerifyError::SignatureObjectNotFound)
+}
+
+/// The definition of object `obj_num`, wherever the cross-reference chain says
+/// it lives.
+///
+/// This is the one lookup every caller that only needs to *read* an object
+/// should use. [`find_object`] can only ever return a slice of the file, so it
+/// cannot see an object packed into a `/Type /ObjStm` — which is where a PDF
+/// 1.5+ producer puts every dictionary in the document. This returns an owned
+/// `N 0 obj … endobj` definition instead: for an in-file object it is the file
+/// bytes verbatim, and for one inside an object stream it is the object's
+/// lexical content re-wrapped in a header and trailer, so a caller that
+/// tokenises the result sees the same thing either way.
+///
+/// The cost is a copy per lookup. It buys the property that classic tables,
+/// cross-reference streams and object streams are indistinguishable above this
+/// line, which is what makes the sign path shape-agnostic.
+pub fn object_definition(bytes: &[u8], obj_num: u32) -> Result<Vec<u8>> {
+    ObjectResolver::new(bytes)
+        .object_bytes(obj_num)
+        .map(|(definition, _confidence)| definition)
 }
 
 /// Find object bytes together with the confidence of the lookup.
@@ -851,6 +1062,7 @@ pub fn is_encrypted(bytes: &[u8]) -> bool {
 
 /// Extract a signature field from field reference.
 fn extract_signature_field(
+    resolver: &ObjectResolver<'_>,
     bytes: &[u8],
     field: &FieldEntry,
     revisions: &RevisionMap,
@@ -862,7 +1074,11 @@ fn extract_signature_field(
     let mut field_name: Option<String> = field.qualified_name.clone();
     let mut sig_dict_ref: Option<(u32, u16)> = field.value_ref;
 
-    let field_obj_slice = find_object(bytes, field_ref.0)?;
+    // The field dictionary may live in an object stream even in a signed
+    // document — only its `/V` signature dictionary is pinned to a file
+    // offset, because its `/Contents` has to be addressable by `/ByteRange`.
+    let (field_obj_definition, _) = resolver.object_bytes(field_ref.0)?;
+    let field_obj_slice = field_obj_definition.as_slice();
     if field_obj_slice.is_empty() {
         // Field object exists but is empty: this is a broken /Sig field that should
         // be reported, not dropped. Return error to trigger broken-report path.
@@ -880,40 +1096,37 @@ fn extract_signature_field(
             break;
         }
 
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            // Only treat '/' names as keys if we don't already have a key
-            if key.is_none() && token_str.starts_with('/') {
-                if let Some(name) = token_str.strip_prefix('/') {
-                    key = Some(name.to_string());
+        // Keys are matched on bytes. A `/T` whose value is a UTF-16BE string
+        // is not valid UTF-8, and a pass that skipped the whole token on that
+        // ground also failed to consume the key — so the *next* key was eaten
+        // as this one's value and `/V` went unseen, which reads a signed
+        // field as unsigned.
+        // Only treat '/' names as keys if we don't already have a key
+        if key.is_none() && token.starts_with(b"/") {
+            key = Some(String::from_utf8_lossy(&token[1..]).into_owned());
+        } else if let Some(k) = key.take() {
+            match k.as_str() {
+                "FT" => {
+                    if let Some(ft_name) = token.strip_prefix(b"/".as_slice()) {
+                        field_type = Some(String::from_utf8_lossy(ft_name).into_owned());
+                    }
                 }
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "FT" => {
-                        if let Ok(ft_str) = std::str::from_utf8(&token) {
-                            if let Some(ft_name) = ft_str.strip_prefix('/') {
-                                field_type = Some(ft_name.to_string());
-                            }
-                        }
+                // The qualified name from the field tree wins: it carries
+                // the ancestors' /T, which this local pass cannot see.
+                "T" if field_name.is_none() => {
+                    if let Some(name_val) = parse_pdf_string(&token) {
+                        field_name = Some(name_val);
                     }
-                    // The qualified name from the field tree wins: it carries
-                    // the ancestors' /T, which this local pass cannot see.
-                    "T" if field_name.is_none() => {
-                        if let Ok(name_str) = std::str::from_utf8(&token) {
-                            if let Some(name_val) = parse_pdf_string(name_str) {
-                                field_name = Some(name_val);
-                            }
-                        }
-                    }
-                    "V" => {
-                        if let Ok(ref_str) = std::str::from_utf8(&token) {
-                            if let Ok(num) = ref_str.parse::<u32>() {
-                                if let Ok(Some(gen_token)) = tokenizer.next_token() {
-                                    if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
-                                        if let Ok(gen) = gen_str.parse::<u16>() {
-                                            if let Ok(Some(r_token)) = tokenizer.next_token() {
-                                                if r_token == b"R" {
-                                                    sig_dict_ref = Some((num, gen));
-                                                }
+                }
+                "V" => {
+                    if let Ok(ref_str) = std::str::from_utf8(&token) {
+                        if let Ok(num) = ref_str.parse::<u32>() {
+                            if let Ok(Some(gen_token)) = tokenizer.next_token() {
+                                if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
+                                    if let Ok(gen) = gen_str.parse::<u16>() {
+                                        if let Ok(Some(r_token)) = tokenizer.next_token() {
+                                            if r_token == b"R" {
+                                                sig_dict_ref = Some((num, gen));
                                             }
                                         }
                                     }
@@ -921,8 +1134,8 @@ fn extract_signature_field(
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
     }
@@ -942,8 +1155,30 @@ fn extract_signature_field(
     let field_name = field_name.unwrap_or_else(|| format!("Field_{}", field_ref.0));
     let sig_dict_ref = sig_dict_ref.unwrap();
 
-    // Extract signature dictionary
-    let sig_dict_slice = find_object(bytes, sig_dict_ref.0)?;
+    // Extract the signature dictionary, as a span in the file: `/ByteRange`
+    // describes file offsets, so the `/Contents` extent has to be one too.
+    //
+    // The confidence is load-bearing and used to be discarded. A dictionary
+    // the cross-reference chain could not account for, found only because the
+    // repair scan swept the file for `N G obj`, is not a signature that can be
+    // verified: the scan's answer is a guess, and a guess about which bytes
+    // are the signature decides `/ByteRange`, the `/Contents` extent, the
+    // `/SubFilter` and the DocMDP level. It is refused, which surfaces the
+    // field as broken rather than presenting a guess as a verified signature.
+    let (start, end, confidence) = resolver
+        .object_span(sig_dict_ref.0)
+        .ok_or(VerifyError::SignatureObjectNotFound)?;
+    if confidence != Confidence::Resolved {
+        return Err(VerifyError::MalformedPdf(format!(
+            "the signature dictionary (object {}) is not accounted for by the document's \
+             cross-reference data and was located only by a repair scan; a signature whose \
+             own dictionary cannot be resolved is not verifiable",
+            sig_dict_ref.0
+        )));
+    }
+    let sig_dict_slice = bytes
+        .get(start..end)
+        .ok_or(VerifyError::SignatureObjectNotFound)?;
     let (sub_filter, mod_date) = extract_subfilter_and_mod_date(sig_dict_slice);
     if sig_dict_slice.is_empty() {
         // Signature dictionary exists but is empty: broken signature.
@@ -953,7 +1188,7 @@ fn extract_signature_field(
     }
 
     // Find the absolute position of sig_dict_slice in bytes
-    let sig_dict_offset = find_object_offset(bytes, sig_dict_ref.0)?;
+    let sig_dict_offset = start as u64;
     // If extraction fails, propagate the error instead of silently skipping.
     // This ensures tampered signatures are reported as broken, not dropped.
     let (br, ce, mdp) = extract_sig_dict_info(sig_dict_slice, sig_dict_offset)?;
@@ -993,27 +1228,25 @@ fn extract_subfilter_and_mod_date(sig_dict_slice: &[u8]) -> (Option<String>, Opt
         if token == b"endobj" {
             break;
         }
-        let Ok(text) = std::str::from_utf8(&token) else {
-            pending = None;
-            continue;
-        };
         match pending.take() {
             Some(key) if key == "SubFilter" => {
-                if let Some(name) = text.strip_prefix('/') {
-                    sub_filter = Some(name.to_string());
+                if let Some(name) = token.strip_prefix(b"/".as_slice()) {
+                    sub_filter = Some(String::from_utf8_lossy(name).into_owned());
                     continue;
                 }
             }
             Some(key) if key == "M" => {
-                if let Some(date) = parse_pdf_string(text) {
+                // `/M` is a text string like any other, so it goes through the
+                // same decode rather than assuming the bytes are UTF-8.
+                if let Some(date) = parse_pdf_string(&token) {
                     mod_date = Some(date);
                     continue;
                 }
             }
             _ => {}
         }
-        if let Some(name) = text.strip_prefix('/') {
-            pending = Some(name.to_string());
+        if let Some(name) = token.strip_prefix(b"/".as_slice()) {
+            pending = Some(String::from_utf8_lossy(name).into_owned());
         }
     }
 
@@ -1161,25 +1394,16 @@ fn extract_docmdp_level(sig_dict_slice: &[u8]) -> Result<Option<MdpPerm>> {
     Ok(None)
 }
 
-/// Parse a PDF string (both literal and hex formats).
-pub fn parse_pdf_string(s: &str) -> Option<String> {
-    if s.starts_with('(') && s.ends_with(')') {
-        Some(s[1..s.len() - 1].to_string())
-    } else if s.starts_with('<') && s.ends_with('>') {
-        // Hex string
-        let hex_str = &s[1..s.len() - 1];
-        let mut result = String::new();
-        for i in (0..hex_str.len()).step_by(2) {
-            if i + 1 < hex_str.len() {
-                if let Ok(byte) = u8::from_str_radix(&hex_str[i..i + 2], 16) {
-                    result.push(byte as char);
-                }
-            }
-        }
-        Some(result)
-    } else {
-        None
-    }
+/// Parse a PDF string token — `(…)` or `<…>` — into UTF-8.
+///
+/// The argument is bytes, not `&str`, and that is the whole point: a text
+/// string is UTF-16BE or PDFDocEncoding (§7.9.2.2), so a caller that tried to
+/// view the token as UTF-8 first would drop every non-ASCII name on the
+/// floor. Escapes, the byte-order mark and the encoding tables all live in
+/// [`crate::pdftext`], so that pre-flight, verification and the signing path
+/// cannot disagree about what a field is called.
+pub fn parse_pdf_string(token: &[u8]) -> Option<String> {
+    crate::pdftext::decode_text_string_token(token)
 }
 
 #[cfg(test)]
@@ -1405,6 +1629,7 @@ mod tests {
                 xref_end: 220,
                 eof: 300,
                 obj_numbers: obj_nums,
+                chain_position: 0,
             },
         );
 
@@ -1430,6 +1655,7 @@ mod tests {
                 xref_end: 120,
                 eof: 500,
                 obj_numbers: obj_nums_1,
+                chain_position: 1,
             },
         );
 
@@ -1444,6 +1670,7 @@ mod tests {
                 xref_end: 420,
                 eof: 800,
                 obj_numbers: obj_nums_2,
+                chain_position: 0,
             },
         );
 
@@ -1480,6 +1707,7 @@ mod tests {
                 xref_end: 130,
                 eof: 500,
                 obj_numbers: obj_nums_1,
+                chain_position: 1,
             },
         );
 
@@ -1493,6 +1721,7 @@ mod tests {
                 xref_end: 550, // Extends beyond coverage end (500)
                 eof: 800,
                 obj_numbers: obj_nums_2,
+                chain_position: 0,
             },
         );
 
@@ -2217,6 +2446,590 @@ mod tests {
 
         let revisions = result.unwrap();
         assert_eq!(revisions.all_revisions().len(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // `parse_xref_extent` against real bytes.
+    //
+    // Every `classify_coverage` test above hand-builds a `RevisionInfo`, so
+    // nothing pinned the offsets the classifier is actually fed. These do.
+    // ---------------------------------------------------------------
+
+    /// A `/W [1 4 2]` cross-reference stream body from `(type, second, third)`.
+    fn xref_rows(entries: &[(u8, u32, u16)]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(entries.len() * 7);
+        for (kind, second, third) in entries {
+            out.push(*kind);
+            out.extend_from_slice(&second.to_be_bytes());
+            out.extend_from_slice(&third.to_be_bytes());
+        }
+        out
+    }
+
+    /// A classic table's container ends past its `trailer` dictionary, at an
+    /// **absolute** file offset. It used to be reported relative to
+    /// `startxref`, which under-reports for every revision but the first and
+    /// lets a signature that stops short of its own cross-reference data pass
+    /// as if it covered it.
+    #[test]
+    fn a_classic_tables_container_end_is_an_absolute_file_offset() {
+        let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
+        let startxref = find_startxref(&pdf).expect("the fixture has a startxref");
+        let (xref_start, xref_end, hybrid) =
+            parse_xref_extent(&pdf, startxref).expect("the classic table parses");
+
+        assert!(!hybrid);
+        assert_eq!(xref_start, startxref, "the container starts at startxref");
+
+        // The trailer's closing `>>` is the last one before `startxref`.
+        let startxref_at = pdf
+            .windows(9)
+            .rposition(|w| w == b"startxref")
+            .expect("the fixture has a startxref keyword");
+        let close_at = pdf[..startxref_at]
+            .windows(2)
+            .rposition(|w| w == b">>")
+            .expect("the trailer closes");
+        assert_eq!(
+            xref_end,
+            (close_at + 2) as u64,
+            "the container end must be the absolute offset past the trailer's `>>`, \
+             not an offset relative to startxref"
+        );
+        assert!(xref_end > startxref);
+    }
+
+    /// Coverage classification on a real classic file, both ways.
+    ///
+    /// This is a behaviour change worth pinning: `xref_end` for a classic
+    /// table is now an absolute file offset, so classification against it is
+    /// genuinely stricter than it was. A signature that stops before the
+    /// table's trailer no longer passes as covering its own revision.
+    #[test]
+    fn a_classic_files_coverage_is_classified_against_its_real_container_end() {
+        let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
+        let revisions = RevisionMap::build(&pdf).expect("the revision map builds");
+        let startxref = find_startxref(&pdf).expect("the fixture has a startxref");
+        let info = revisions
+            .get_by_startxref(startxref)
+            .expect("the revision is recorded");
+        assert!(info.xref_end > startxref, "an absolute container end");
+        assert!(
+            info.xref_end < pdf.len() as u64,
+            "and it is inside the file"
+        );
+
+        let ce = ContentsExtent {
+            c_start: 10,
+            c_end: 20,
+        };
+
+        // Stops at the `xref` keyword: it does not cover the table at all.
+        let short = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: startxref - 20,
+        };
+        let (coverage, _) =
+            classify_coverage(&short, &ce, pdf.len() as u64, startxref, &revisions).unwrap();
+        assert_eq!(coverage, SignatureCoverage::ContiguousBlockFromStart);
+
+        // Reaches past the trailer's `>>`: it covers the whole revision.
+        let full = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: info.xref_end - 20,
+        };
+        let (coverage, later) =
+            classify_coverage(&full, &ce, pdf.len() as u64, startxref, &revisions).unwrap();
+        assert_eq!(coverage, SignatureCoverage::EntireRevision);
+        assert!(later, "bytes follow the covered region");
+
+        // And all the way to the end is the whole file.
+        let whole = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: pdf.len() as u64 - 20,
+        };
+        let (coverage, later) =
+            classify_coverage(&whole, &ce, pdf.len() as u64, startxref, &revisions).unwrap();
+        assert_eq!(coverage, SignatureCoverage::EntireFile);
+        assert!(!later);
+    }
+
+    /// A cross-reference stream's container is the whole indirect object, so
+    /// it ends past `endobj` — and the `endobj` that ends it is the lexer's,
+    /// not the first byte sequence spelling `endobj` after the dictionary.
+    /// Searching for that literal ran *through* the stream body, which is
+    /// attacker-controlled: an `endobj` planted in it moved the container end
+    /// backwards, and a signature that stops short of its own cross-reference
+    /// stream then classified as EntireRevision.
+    #[test]
+    fn an_endobj_planted_in_a_stream_body_does_not_shorten_the_container() {
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+        let xref_at = pdf.len();
+
+        // Four rows; the third is six bytes of `endobj` and a pad byte, so the
+        // literal appears inside the compressed-looking body.
+        let mut body = xref_rows(&[(0, 0, 0xFFFF), (1, 9, 0)]);
+        body.extend_from_slice(b"endobj\x00");
+        body.extend_from_slice(&xref_rows(&[(1, xref_at as u32, 0)]));
+        assert_eq!(body.len(), 28);
+
+        pdf.extend_from_slice(
+            format!(
+                "2 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let body_at = pdf.len();
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF").as_bytes());
+
+        let planted = body_at
+            + body
+                .windows(6)
+                .position(|w| w == b"endobj")
+                .expect("the decoy is in the body");
+        let real = pdf
+            .windows(6)
+            .rposition(|w| w == b"endobj")
+            .expect("the object closes");
+        assert!(planted < real, "the decoy must precede the real `endobj`");
+
+        let (_start, xref_end, _hybrid) =
+            parse_xref_extent(&pdf, xref_at as u64).expect("the cross-reference stream parses");
+        assert_eq!(
+            xref_end,
+            (real + b"endobj".len()) as u64,
+            "the container must end past the object's own `endobj`, not the planted one"
+        );
+
+        // And the classification that rests on it: a signature that stops at
+        // the decoy does not cover its own cross-reference stream.
+        let revisions = RevisionMap::build(&pdf).expect("the revision map builds");
+        let short = (planted + b"endobj".len()) as u64;
+        let br = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: short - 20,
+        };
+        let ce = ContentsExtent {
+            c_start: 10,
+            c_end: 20,
+        };
+        let (coverage, _) =
+            classify_coverage(&br, &ce, pdf.len() as u64, xref_at as u64, &revisions).unwrap();
+        assert_eq!(
+            coverage,
+            SignatureCoverage::ContiguousBlockFromStart,
+            "a signature that stops inside its own cross-reference stream must not \
+             classify as covering the whole revision"
+        );
+
+        // The same document, signed all the way past the container, does.
+        let br = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: xref_end - 20,
+        };
+        let (coverage, later) =
+            classify_coverage(&br, &ce, pdf.len() as u64, xref_at as u64, &revisions).unwrap();
+        assert_eq!(coverage, SignatureCoverage::EntireRevision);
+        assert!(later);
+    }
+
+    /// A nested dictionary in a classic trailer used to end the scan at its
+    /// own `>>`, which truncated the container end **and** hid every key that
+    /// followed. `/XRefStm` among them: the hybrid refusal was bypassed and
+    /// the file read as plain classic, while `ObjectResolver` went on
+    /// following the `/XRefStm` it could still see.
+    #[test]
+    fn a_nested_dictionary_in_a_classic_trailer_does_not_hide_xrefstm() {
+        let head = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n";
+        let xref_at = head.len();
+        let mut pdf = head.to_vec();
+        pdf.extend_from_slice(b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n");
+        pdf.extend_from_slice(b"<</Size 2 /Root 1 0 R /Foo <</A 1>> /XRefStm 9>>\n");
+        pdf.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF").as_bytes());
+
+        assert!(
+            matches!(
+                RevisionMap::build(&pdf),
+                Err(VerifyError::HybridXrefNotSupported)
+            ),
+            "a /XRefStm behind a nested dictionary is still a hybrid file"
+        );
+
+        // Without the /XRefStm the same shape parses, and the container end
+        // reaches past the *trailer's* `>>` rather than the nested one's.
+        let plain = String::from_utf8(pdf.clone())
+            .unwrap()
+            .replace(" /XRefStm 9", "");
+        let plain = plain.as_bytes();
+        let (_start, xref_end, hybrid) =
+            parse_xref_extent(plain, xref_at as u64).expect("the classic table parses");
+        assert!(!hybrid);
+        let nested_close = plain
+            .windows(2)
+            .position(|w| w == b">>")
+            .expect("the nested dictionary closes");
+        assert!(
+            xref_end > (nested_close + 2) as u64,
+            "the scan must not stop at the nested dictionary's `>>`"
+        );
+        assert!(RevisionMap::build(plain).is_ok());
+    }
+
+    /// Revision order is the `/Prev` chain, not the `startxref` offset.
+    ///
+    /// A `/Prev` that points *forward* — which a linearized document does
+    /// legitimately and a crafted one does on purpose — made an older section
+    /// sort as if it were newer, so its container end dropped out of the
+    /// coverage loop and was never compared against the signature's coverage
+    /// end.
+    #[test]
+    fn a_forward_prev_does_not_reorder_the_revisions() {
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+
+        // The newest section, at the *lower* offset, whose /Prev points
+        // forward at the older one. The offset is patched in once known.
+        let newest_at = pdf.len();
+        let body_new = xref_rows(&[(0, 0, 0xFFFF), (1, 9, 0)]);
+        pdf.extend_from_slice(
+            format!(
+                "2 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Prev 0000000000 \
+                 /Length {}>>\nstream\n",
+                body_new.len()
+            )
+            .as_bytes(),
+        );
+        let prev_field = pdf
+            .windows(10)
+            .rposition(|w| w == b"0000000000")
+            .expect("the placeholder is there");
+        pdf.extend_from_slice(&body_new);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let oldest_at = pdf.len();
+        let body_old = xref_rows(&[(0, 0, 0xFFFF), (1, 9, 0), (1, oldest_at as u32, 0)]);
+        pdf.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body_old.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body_old);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{newest_at}\n%%EOF").as_bytes());
+        pdf[prev_field..prev_field + 10].copy_from_slice(format!("{oldest_at:010}").as_bytes());
+
+        let revisions = RevisionMap::build(&pdf).expect("the chain is walkable");
+        let ordered = revisions.all_revisions();
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(
+            ordered[0].startxref, oldest_at as u64,
+            "oldest first is chain order, not offset order"
+        );
+        assert_eq!(ordered[0].chain_position, 1);
+        assert_eq!(ordered[1].startxref, newest_at as u64);
+        assert_eq!(ordered[1].chain_position, 0);
+
+        // The older section sits at the higher offset, so ordering on offsets
+        // filtered it out of the coverage loop entirely.
+        let older_end = ordered[0].xref_end;
+        let newer_end = ordered[1].xref_end;
+        assert!(older_end > newer_end);
+
+        let br = ByteRange {
+            z: 0,
+            len1: 10,
+            start2: 20,
+            len2: newer_end - 20,
+        };
+        let ce = ContentsExtent {
+            c_start: 10,
+            c_end: 20,
+        };
+        let (coverage, _) =
+            classify_coverage(&br, &ce, pdf.len() as u64, newest_at as u64, &revisions).unwrap();
+        assert_eq!(
+            coverage,
+            SignatureCoverage::ContiguousBlockFromStart,
+            "a section the signature does not cover must be compared against it \
+             whatever offset it was written at"
+        );
+    }
+
+    /// A signature dictionary the cross-reference chain places inside an
+    /// object stream has no file span, and `/ByteRange` needs one. Falling
+    /// through to the repair scan handed back a stale in-file copy that no
+    /// conforming reader ever sees — a shadow signature dictionary, read for
+    /// `/ByteRange`, `/Contents`, `/SubFilter` and the DocMDP level.
+    #[test]
+    fn a_signature_dictionary_the_xref_puts_in_an_object_stream_is_not_found() {
+        let decoy = b"5 0 obj\n<</Type /Sig /ByteRange [0 9999 9999 1] /Contents <00> \
+                      /DECOY true>>\nendobj\n";
+        let inner = "5 0 <</Type /Sig /AUTHORITATIVE true>>";
+        let first = 4; // "5 0 " before the value
+
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        let decoy_at = pdf.len();
+        pdf.extend_from_slice(decoy);
+        let objstm_at = pdf.len();
+        pdf.extend_from_slice(
+            format!(
+                "4 0 obj\n<</Type /ObjStm /N 1 /First {first} /Length {}>>\nstream\n{inner}\n\
+                 endstream\nendobj\n",
+                inner.len()
+            )
+            .as_bytes(),
+        );
+        let xref_at = pdf.len();
+        let body = xref_rows(&[
+            (0, 0, 0xFFFF),
+            (1, 9, 0),
+            (1, 9, 0),
+            (1, 9, 0),
+            (1, objstm_at as u32, 0),
+            (2, 4, 0),
+            (1, xref_at as u32, 0),
+        ]);
+        pdf.extend_from_slice(
+            format!(
+                "6 0 obj\n<</Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF").as_bytes());
+
+        // The decoy is really there, and a repair scan really does find it.
+        assert!(objects::scan_object_definitions(&pdf).contains_key(&5));
+        assert_eq!(objects::scan_object_definitions(&pdf)[&5].0, decoy_at);
+
+        let resolver = ObjectResolver::new(&pdf);
+        assert!(matches!(
+            resolver.xref().and_then(|i| i.get(5)),
+            Some(XrefEntry::InStream { .. })
+        ));
+        assert!(
+            resolver.object_span(5).is_none(),
+            "an object the xref places in an object stream has no file span"
+        );
+        assert!(matches!(
+            find_object(&pdf, 5),
+            Err(VerifyError::SignatureObjectNotFound)
+        ));
+        assert!(matches!(
+            find_object_offset(&pdf, 5),
+            Err(VerifyError::SignatureObjectNotFound)
+        ));
+
+        // `object_bytes` was already xref-authoritative, and stays so: it
+        // returns the object-stream copy, never the shadowed in-file one.
+        let (definition, _) = resolver.object_bytes(5).expect("the objstm copy resolves");
+        let text = String::from_utf8_lossy(&definition);
+        assert!(text.contains("AUTHORITATIVE"), "got {text}");
+        assert!(!text.contains("DECOY"), "got {text}");
+    }
+
+    /// A signature dictionary the cross-reference data does not account for,
+    /// found only by the repair scan, is a guess — and a guess about which
+    /// bytes are the signature decides `/ByteRange`, the `/Contents` extent
+    /// and the DocMDP level. The confidence used to be discarded.
+    #[test]
+    fn a_signature_dictionary_found_only_by_a_repair_scan_is_refused() {
+        let mut pdf = build_classic_pdf(
+            &[
+                obj(1, 0, b"<</Type /Catalog /AcroForm 2 0 R>>"),
+                obj(2, 0, b"<</Fields [3 0 R] /SigFlags 3>>"),
+                obj(3, 0, b"<</FT /Sig /T (Sig1) /V 4 0 R>>"),
+                obj(
+                    4,
+                    0,
+                    b"<</Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 10 20 30] \
+                      /Contents <0102030405060708>>>",
+                ),
+            ],
+            "",
+        );
+
+        // With an intact table the signature is resolved and reported.
+        let revisions = RevisionMap::build(&pdf).expect("the revision map builds");
+        let resolver = ObjectResolver::new(&pdf);
+        assert_eq!(
+            resolver.object_span(4).expect("object 4 resolves").2,
+            Confidence::Resolved
+        );
+
+        // Break only object 4's xref entry, so the chain can no longer account
+        // for the signature dictionary and the scan is the only way to it.
+        let entry = format!("4 1\n{:010} {:05} n \n", 0, 0);
+        let old = pdf
+            .windows(4)
+            .position(|w| w == b"4 1\n")
+            .expect("the subsection header for object 4 is there");
+        let end = old + entry.len();
+        pdf[old..end].copy_from_slice(entry.as_bytes());
+
+        let resolver = ObjectResolver::new(&pdf);
+        assert_eq!(
+            resolver.object_span(4).expect("the scan still finds it").2,
+            Confidence::Scanned,
+            "the fixture must exercise the scan path"
+        );
+
+        let reports = discover_signatures(&pdf, &revisions).expect("discovery runs");
+        assert_eq!(reports.len(), 1, "the field must not vanish");
+        assert_eq!(
+            reports[0].coverage,
+            SignatureCoverage::Unclear,
+            "a signature whose own dictionary was only guessed at must be reported \
+             as broken, not silently trusted"
+        );
+    }
+
+    /// The revision cap and the resolver's chain cap used to disagree — 1024
+    /// against 256 — so a document with a chain between the two got a revision
+    /// map while `ObjectResolver` silently degraded to a repair scan, and the
+    /// two halves of verification described different documents.
+    /// One resolver per pass, not one per lookup.
+    ///
+    /// Every object lookup used to build its own `ObjectResolver`, which
+    /// re-parses the whole cross-reference chain — decoding every
+    /// cross-reference stream in it — and throws away the object-stream cache
+    /// on the way out. With up to MAX_FIELD_NODES fields to read, a document
+    /// with a long chain multiplied that into hours of work in the process
+    /// that owns the user interface. The chain here is deliberately expensive
+    /// to walk; the pass must pay for it a fixed number of times.
+    #[test]
+    fn a_long_cross_reference_chain_is_walked_once_per_pass() {
+        const SECTIONS: usize = 24;
+        const ROWS: usize = 20_000;
+        const FIELDS: u32 = 64;
+
+        // Objects: 1 catalog, 2 acroform, then FIELDS terminal fields.
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        let mut offsets: Vec<(u32, usize)> = Vec::new();
+
+        offsets.push((1, pdf.len()));
+        let field_refs: Vec<String> = (0..FIELDS).map(|i| format!("{} 0 R", 3 + i)).collect();
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog /AcroForm 2 0 R>>\nendobj\n");
+        offsets.push((2, pdf.len()));
+        pdf.extend_from_slice(
+            format!(
+                "2 0 obj\n<</Fields [{}] /SigFlags 3>>\nendobj\n",
+                field_refs.join(" ")
+            )
+            .as_bytes(),
+        );
+        for i in 0..FIELDS {
+            let num = 3 + i;
+            offsets.push((num, pdf.len()));
+            pdf.extend_from_slice(
+                format!("{num} 0 obj\n<</FT /Tx /T (Field{i})>>\nendobj\n").as_bytes(),
+            );
+        }
+
+        // A chain of uncompressed cross-reference streams. Each one carries
+        // the real entries plus a long tail of filler rows, so walking the
+        // chain is measurably expensive without any decompression at all.
+        let mut rows: Vec<u8> = xref_rows(&[(0, 0, 0xFFFF)]);
+        for (num, at) in &offsets {
+            let _ = num;
+            rows.extend_from_slice(&xref_rows(&[(1, *at as u32, 0)]));
+        }
+        let real_rows = rows.len() / 7;
+        rows.extend_from_slice(&xref_rows(&vec![(1, 9, 0); ROWS]));
+
+        let mut section_offsets: Vec<usize> = Vec::new();
+        for i in 0..SECTIONS {
+            let at = pdf.len();
+            section_offsets.push(at);
+            let prev = match i {
+                0 => String::new(),
+                _ => format!("/Prev {} ", section_offsets[i - 1]),
+            };
+            let index = format!("/Index [0 {real_rows} 100000 {ROWS}]");
+            pdf.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<</Type /XRef /Size 200000 /W [1 4 2] {index} /Root 1 0 R \
+                     {prev}/Length {}>>\nstream\n",
+                    1000 + i,
+                    rows.len()
+                )
+                .as_bytes(),
+            );
+            pdf.extend_from_slice(&rows);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(
+            format!("startxref\n{}\n%%EOF", section_offsets[SECTIONS - 1]).as_bytes(),
+        );
+
+        let revisions = RevisionMap::build(&pdf).expect("the revision map builds");
+        assert_eq!(revisions.all_revisions().len(), SECTIONS);
+
+        let started = std::time::Instant::now();
+        let reports = discover_signatures(&pdf, &revisions).expect("discovery runs");
+        let elapsed = started.elapsed();
+        assert!(reports.is_empty(), "the fixture has no signatures");
+
+        // Measured on this fixture in a debug build: one fresh resolver costs
+        // ~130 ms, so the per-lookup shape takes >8 s for the field objects
+        // alone, while the whole threaded pass takes ~0.15 s. The bound sits
+        // between them with an order of magnitude of headroom either way, so
+        // it discriminates without pinning a machine's speed.
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "discovery over {FIELDS} fields on a {SECTIONS}-section chain took {elapsed:?}; \
+             the cross-reference chain is being rebuilt per lookup"
+        );
+    }
+
+    #[test]
+    fn the_revision_cap_and_the_resolver_chain_cap_agree() {
+        // A chain one longer than the shared cap, of classic sections.
+        let sections = objects::MAX_XREF_CHAIN + 1;
+        let mut pdf = Vec::from(&b"%PDF-1.4\n"[..]);
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        for i in 0..sections {
+            let at = pdf.len();
+            offsets.push(at);
+            pdf.extend_from_slice(
+                b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n",
+            );
+            let prev = match i {
+                0 => String::new(),
+                _ => format!("/Prev {} ", offsets[i - 1]),
+            };
+            pdf.extend_from_slice(format!("<</Size 2 /Root 1 0 R {prev}>>\n").as_bytes());
+        }
+        pdf.extend_from_slice(format!("startxref\n{}\n%%EOF", offsets[sections - 1]).as_bytes());
+
+        let revision_map = RevisionMap::build(&pdf);
+        let resolver_index = XrefIndex::build(&pdf);
+        assert!(
+            revision_map.is_err() && resolver_index.is_err(),
+            "one cap must not admit a chain the other refuses: revision map {:?}, \
+             resolver index {:?}",
+            revision_map.map(|m| m.all_revisions().len()),
+            resolver_index.map(|i| i.entries().len())
+        );
     }
 
     #[test]

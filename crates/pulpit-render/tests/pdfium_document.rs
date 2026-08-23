@@ -28,6 +28,7 @@ use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
 
 mod common;
+mod signing_fixture;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-document-{name}"));
@@ -766,4 +767,146 @@ fn finding_text_reports_hits_with_the_geometry_to_draw_them() {
         .expect("clamped, not refused");
     assert_eq!(clamped.to_page, 3);
     assert!(clamped.hits.is_empty());
+}
+
+/// The user-visible bug this pins: a file signed with a *visible* signature
+/// opens in pulpit's own reader with the appearance missing, while every other
+/// viewer draws it.
+///
+/// A signature's visible appearance is a `/Widget` annotation's `/AP` `/N`, and
+/// `FPDF_RenderPageBitmap` draws no widget at all — not even with `FPDF_ANNOT`
+/// set, which document mode does set. The only pass that puts a widget on the
+/// page is `FPDF_FFLDraw`, over the form-fill environment. So this asserts the
+/// outcome that the whole two-pass arrangement exists for, on the two paths a
+/// reader's pixels can come from: the document engine, and the render pool the
+/// reader submits its page jobs to.
+///
+/// Measured with each half suppressed in turn: with the `FPDF_FFLDraw` pass
+/// removed the count below goes to zero even though `FPDF_ANNOT` is set, and
+/// with `FPDF_ANNOT` cleared it stays at its full value. Losing the form-fill
+/// environment — a library whose `FPDFDOC_InitFormFillEnvironment` refuses the
+/// interface version, say — therefore takes a signed document's signature off
+/// the page while every other viewer still draws it.
+#[test]
+fn a_signed_visible_signature_is_in_the_picture() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let Some(credential) = signing_fixture::load_test_credential() else {
+        signing_fixture::skip_message();
+        return;
+    };
+    let directory = temp_dir("signature-appearance");
+    let unsigned = directory.join("unsigned.pdf");
+    let signed = directory.join("signed.pdf");
+
+    // The reported shape: one page, one `/Sig` field whose widget box is in
+    // the bottom-right corner of the sheet.
+    let rect = [376.0f32, 36.0, 576.0, 106.0];
+    std::fs::write(
+        &unsigned,
+        signing_fixture::build_unsigned_pdf_multipage(
+            1,
+            &[signing_fixture::FixtureField {
+                name: "Recipient",
+                page: 0,
+                rect: [
+                    rect[0] as f64,
+                    rect[1] as f64,
+                    rect[2] as f64,
+                    rect[3] as f64,
+                ],
+            }],
+        ),
+    )
+    .expect("write the unsigned document");
+
+    let mut request = pulpit_render::sign::SignRequest {
+        signing_time: signing_fixture::SIGNING_TIME_UNIX,
+        field: pulpit_render::sign::SignTarget::ExistingField("Recipient".to_string()),
+        id2: [3u8; 16],
+        ..Default::default()
+    };
+    request.appearance = Some(pulpit_render::sign::SignAppearance {
+        page_rotation: pulpit_render::sign::AppearanceRotation::None,
+        placement: pulpit_render::sign::AppearancePlacement::FieldRect,
+        content: pulpit_render::sign::AppearanceContent::Ink {
+            strokes: vec![
+                vec![(0.05, 0.1), (0.5, 0.9), (0.95, 0.1)],
+                vec![(0.05, 0.5), (0.95, 0.5)],
+            ],
+            stroke_width: 4.0,
+        },
+    });
+    pulpit_render::sign::sign_document_file(&unsigned, &signed, &credential, &request)
+        .expect("signing with a visible appearance succeeds");
+
+    // One pixel per point, so the widget's `/Rect` is its pixel rectangle with
+    // y measured from the top.
+    let (width, height) = (612u32, 792u32);
+    let frame = |backend: &mut PdfiumBackend, path: &Path| -> Vec<u8> {
+        let document = open(backend, path);
+        document
+            .render_page(
+                PageIndex(0),
+                pulpit_core::notes::Region::FULL,
+                width,
+                height,
+                None,
+            )
+            .expect("the page renders")
+    };
+    let before = frame(&mut guard, &unsigned);
+    let after = frame(&mut guard, &signed);
+
+    let dark = |pixels: &[u8]| -> usize {
+        let mut count = 0;
+        for y in (height - rect[3] as u32)..(height - rect[1] as u32) {
+            for x in (rect[0] as u32)..(rect[2] as u32) {
+                let at = ((y as usize) * width as usize + x as usize) * 4;
+                if pixels[at] < 200 && pixels[at + 1] < 200 && pixels[at + 2] < 200 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+    let before_dark = dark(&before);
+    let after_dark = dark(&after);
+    assert!(
+        after_dark > before_dark + 200,
+        "the signed page has {after_dark} dark pixels inside the signature's box \
+         against {before_dark} before signing — pulpit is not drawing the \
+         appearance every other viewer shows"
+    );
+
+    // The reader's own path: its page jobs are rendered by the pool, from the
+    // presentation's document, `with_annotations`.
+    let pool_dark = {
+        use pulpit_render::pdf::PdfBackend;
+        let backend = &mut *guard;
+        let opened = backend
+            .open(&signed)
+            .expect("the pool opens the signed file");
+        let request = pulpit_render::pdf::RenderRequest {
+            document: opened,
+            page: 0,
+            region: pulpit_core::notes::Region::FULL,
+            width,
+            height,
+            full_size: None,
+            with_annotations: true,
+        };
+        let frame = backend
+            .render(&request, &pulpit_render::pdf::NeverCancel)
+            .expect("the pool renders the signed page");
+        let counted = dark(&frame.pixels);
+        backend.close(opened);
+        counted
+    };
+    assert_eq!(
+        pool_dark, after_dark,
+        "the render pool and the document engine disagree about the signature's \
+         box; the reader's frames come from the pool"
+    );
 }

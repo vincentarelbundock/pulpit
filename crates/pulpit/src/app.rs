@@ -941,7 +941,9 @@ pub struct App {
     signing_source: Option<PathBuf>,
     /// The signature field a page-surface click asked to sign into
     /// (`SignMsg::StartInField`, SPEC-signing.md §31.1), consulted once by
-    /// `ContinueToOptions` to preselect it among `sign_target_candidates`.
+    /// `enter_signing_review` to preselect it among `sign_target_candidates`
+    /// — or, when preflight does not offer it, to say so in the Review step
+    /// rather than quietly sign into a different field.
     /// Cleared when the flow starts, cancels or finishes — not when the
     /// credential changes mid-flow, since switching credentials does not
     /// change which field was clicked.
@@ -5809,9 +5811,7 @@ impl App {
                     }
                     if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
                         self.signing_source = Some(saved.path.clone());
-                        self.signing = Some(crate::signing::SigningFlow::start(
-                            !self.settings.signatures.profiles.is_empty(),
-                        ));
+                        self.enter_sign_first_step();
                     }
                 }
                 crate::reader_link::Told::EditFailed { message, fatal } => {
@@ -8775,59 +8775,7 @@ impl App {
                 Task::none()
             }
             SignMsg::ProfileChosen(id) => {
-                let Some(profile) = self.settings.signatures.profile(&id) else {
-                    self.signing = Some(SigningFlow::Failed {
-                        detail: "That signature profile no longer exists.".to_string(),
-                    });
-                    return Task::none();
-                };
-                let Some(credential_path) = self.signature_profile_credential_path(profile) else {
-                    self.signing = Some(SigningFlow::Failed {
-                        detail: "The profile's credential location is invalid.".to_string(),
-                    });
-                    return Task::none();
-                };
-                if !credential_path.is_file() {
-                    self.signing = Some(SigningFlow::Failed {
-                        detail: format!(
-                            "The credential for profile “{}” is missing at {}.",
-                            profile.name,
-                            credential_path.display()
-                        ),
-                    });
-                    return Task::none();
-                }
-                self.signing_profile = Some(id.clone());
-                // Already unlocked this session: skip the passphrase step and
-                // land where it would have led. The summary is rebuilt
-                // against the current time rather than reused, so an expiry
-                // that has since passed is still warned about.
-                if let Some(credential) = self.unlocked_credentials.get(&id).cloned() {
-                    match credential.summary() {
-                        Ok(summary) => {
-                            let info = crate::signing::CredentialInfo::from_summary(
-                                summary,
-                                self.unix_now(),
-                            );
-                            self.signing = Some(SigningFlow::CredentialSummary {
-                                credential_path,
-                                credential,
-                                info,
-                            });
-                            return Task::none();
-                        }
-                        Err(_) => {
-                            // A cached credential that can no longer describe
-                            // itself is of no use: drop it and ask again.
-                            self.unlocked_credentials.remove(&id);
-                        }
-                    }
-                }
-                self.signing = Some(SigningFlow::EnterPassphrase {
-                    credential_path,
-                    passphrase: String::new(),
-                    error: None,
-                });
+                self.enter_signing_profile(&id);
                 Task::none()
             }
             SignMsg::UseAnotherCredential => {
@@ -8895,8 +8843,10 @@ impl App {
                 )
             }
             SignMsg::CredentialLoaded(Ok(credential)) => {
-                let Some(SigningFlow::LoadingCredential { credential_path }) = self.signing.take()
-                else {
+                // The path it came from has done its job: the Review step
+                // names the profile, or the certificate's own subject for an
+                // ad-hoc file, and neither needs the filename.
+                let Some(SigningFlow::LoadingCredential { .. }) = self.signing.take() else {
                     return Task::none();
                 };
                 let summary = match credential.summary() {
@@ -8915,11 +8865,7 @@ impl App {
                 if let Some(id) = self.signing_profile.clone() {
                     self.unlocked_credentials.insert(id, credential.clone());
                 }
-                self.signing = Some(SigningFlow::CredentialSummary {
-                    credential_path,
-                    credential,
-                    info,
-                });
+                self.enter_signing_review(credential, info);
                 Task::none()
             }
             SignMsg::CredentialLoaded(Err(detail)) => {
@@ -8935,74 +8881,34 @@ impl App {
                 Task::none()
             }
             SignMsg::OverrideValidity => {
-                if let Some(SigningFlow::CredentialSummary { info, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { info, .. }) = self.signing.as_mut() {
                     info.override_validity = true;
                 }
                 Task::none()
             }
-            SignMsg::ContinueToOptions => {
-                let Some(SigningFlow::CredentialSummary {
-                    credential_path,
-                    credential,
-                    info,
-                }) = self.signing.take()
-                else {
-                    return Task::none();
-                };
-                if !info.may_proceed() {
-                    self.signing = Some(SigningFlow::CredentialSummary {
-                        credential_path,
-                        credential,
-                        info,
-                    });
-                    return Task::none();
+            SignMsg::ToggleDetails => {
+                if let Some(SigningFlow::Review {
+                    details_expanded, ..
+                }) = self.signing.as_mut()
+                {
+                    *details_expanded = !*details_expanded;
                 }
-                let SignTargetCandidates {
-                    candidates,
-                    countersigning,
-                } = self.sign_target_candidates();
-                let target = crate::signing::pick_signing_target(
-                    &candidates,
-                    self.signing_prefill_field.as_deref(),
-                );
-                let mut options = crate::signing::SigningOptions {
-                    target,
-                    countersigning,
-                    ..Default::default()
-                };
-                let context = self.placement_context(options.target.as_ref());
-                let profile_appearance = self
-                    .signing_profile
-                    .as_deref()
-                    .and_then(|id| self.settings.signatures.profile(id))
-                    .map(|profile| profile.appearance.clone());
-                crate::signing::apply_target_defaults(
-                    &mut options,
-                    profile_appearance.as_ref(),
-                    &context,
-                );
-                self.signing = Some(SigningFlow::Options {
-                    credential,
-                    info,
-                    options,
-                    candidates,
-                });
                 Task::none()
             }
             SignMsg::ReasonChanged(value) => {
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     options.reason = value;
                 }
                 Task::none()
             }
             SignMsg::LocationChanged(value) => {
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     options.location = value;
                 }
                 Task::none()
             }
             SignMsg::ContactChanged(value) => {
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     options.contact = value;
                 }
                 Task::none()
@@ -9013,7 +8919,7 @@ impl App {
                 // falls back to. The visible/invisible answer is the reader's
                 // and carries across; where it lands is re-resolved here.
                 let context = self.placement_context(Some(&choice));
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     options.target = Some(choice);
                     options.retarget(&context);
                 }
@@ -9025,17 +8931,17 @@ impl App {
                 // Sign time: what the reader saw when they chose is what gets
                 // signed, however far they scroll before confirming.
                 let target = match self.signing.as_ref() {
-                    Some(SigningFlow::Options { options, .. }) => options.target.clone(),
+                    Some(SigningFlow::Review { options, .. }) => options.target.clone(),
                     _ => None,
                 };
                 let context = self.placement_context(target.as_ref());
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     options.set_visible(requested, &context);
                 }
                 Task::none()
             }
             SignMsg::PlacementPositionChosen(position) => {
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     if let Some(crate::signing::AppearancePlan::Preset { placement, .. }) =
                         options.placement.as_mut()
                     {
@@ -9045,7 +8951,7 @@ impl App {
                 Task::none()
             }
             SignMsg::PlacementSizeChosen(size) => {
-                if let Some(SigningFlow::Options { options, .. }) = self.signing.as_mut() {
+                if let Some(SigningFlow::Review { options, .. }) = self.signing.as_mut() {
                     if let Some(crate::signing::AppearancePlan::Preset { placement, .. }) =
                         options.placement.as_mut()
                     {
@@ -9054,55 +8960,37 @@ impl App {
                 }
                 Task::none()
             }
-            SignMsg::ContinueToConfirm => {
-                let Some(SigningFlow::Options {
-                    credential,
+            // The Review dialog is the confirmation (§31.1 step 7): Sign goes
+            // straight to the destination it has been showing all along.
+            SignMsg::Confirm => {
+                let Some(SigningFlow::Review {
                     info,
                     options,
-                    candidates,
-                }) = self.signing.take()
+                    destination,
+                    ..
+                }) = self.signing.as_ref()
                 else {
                     return Task::none();
                 };
-                if options.target.is_none() {
-                    self.signing = Some(SigningFlow::Failed {
-                        detail: "No signature field is available to sign into: the document \
-                                 has no empty signature field to countersign, and already \
-                                 carries one if it is not offering a new field."
-                            .to_string(),
-                    });
+                // Defense in depth: the view offers no Sign button while
+                // either gate is closed, and neither gate is re-checked
+                // anywhere later.
+                if !info.may_proceed() || options.target.is_none() {
                     return Task::none();
                 }
-                self.signing = Some(SigningFlow::Confirm {
-                    credential,
-                    info,
-                    options,
-                    candidates,
-                });
-                Task::none()
+                let destination = destination.clone();
+                self.sign_execute(destination)
             }
-            SignMsg::BackToOptions => {
-                let Some(SigningFlow::Confirm {
-                    credential,
-                    info,
-                    options,
-                    candidates,
-                }) = self.signing.take()
-                else {
-                    return Task::none();
-                };
-                self.signing = Some(SigningFlow::Options {
-                    credential,
-                    info,
-                    options,
-                    candidates,
-                });
-                Task::none()
-            }
-            SignMsg::Confirm => self.sign_pick_destination(),
             SignMsg::ChooseDestination => self.sign_pick_destination(),
             SignMsg::DestinationChosen(None) => Task::none(),
-            SignMsg::DestinationChosen(Some(destination)) => self.sign_execute(destination),
+            SignMsg::DestinationChosen(Some(chosen)) => {
+                // The picker ran its own overwrite confirmation, so whatever
+                // came back is allowed to already exist.
+                if let Some(SigningFlow::Review { destination, .. }) = self.signing.as_mut() {
+                    *destination = chosen;
+                }
+                Task::none()
+            }
             SignMsg::Completed(Ok(outcome)) => {
                 self.signing = Some(SigningFlow::Result {
                     report: (*outcome.report).clone(),
@@ -9114,6 +9002,26 @@ impl App {
             SignMsg::Completed(Err(detail)) => {
                 self.signing = Some(SigningFlow::Failed { detail });
                 Task::none()
+            }
+            SignMsg::OpenSignedCopy => {
+                let destination = match self.signing.take() {
+                    Some(SigningFlow::Result { destination, .. }) => Some(destination),
+                    other => {
+                        // Not the Result step: put the flow back untouched.
+                        self.signing = other;
+                        None
+                    }
+                };
+                let Some(destination) = destination else {
+                    return Task::none();
+                };
+                self.signing_profile = None;
+                self.signing_source = None;
+                self.signing_prefill_field = None;
+                // The copy already carries a signature, so opening it makes
+                // the §31.3 append-only offer — the right question for a
+                // signed document, asked by the ordinary open path.
+                self.open_document(destination)
             }
             SignMsg::Done => {
                 self.signing = None;
@@ -9146,10 +9054,167 @@ impl App {
             self.signing = Some(SigningFlow::SavingFirst);
             return self.ask_where_to_save_document();
         }
-        self.signing = Some(SigningFlow::start(
-            !self.settings.signatures.profiles.is_empty(),
-        ));
+        self.enter_sign_first_step();
         Task::none()
+    }
+
+    /// §31.1 step 4, once there is nothing left to save: the profile the
+    /// signature would use, or the credential file picker when there is no
+    /// saved profile at all.
+    ///
+    /// Which profile is not asked any more — the default one (or, failing
+    /// that, the first) is used, and the Review step offers the others as a
+    /// row of buttons. A profile list is a question worth a dialog only when
+    /// the answer is not already known, and it almost always is.
+    fn enter_sign_first_step(&mut self) {
+        use crate::signing::{start_step, SigningFlow, StartStep};
+
+        let profile_id = self
+            .settings
+            .signatures
+            .default_profile
+            .clone()
+            .filter(|id| self.settings.signatures.profile(id).is_some())
+            .or_else(|| {
+                self.settings
+                    .signatures
+                    .profiles
+                    .first()
+                    .map(|profile| profile.id.clone())
+            });
+        match start_step(profile_id.as_deref().map(|id| self.is_profile_unlocked(id))) {
+            StartStep::ChooseCredential => {
+                self.signing_profile = None;
+                self.signing = Some(SigningFlow::ChooseCredential);
+            }
+            // Both remaining answers are `enter_signing_profile`'s: it is the
+            // one place that resolves a profile's credential path, notices a
+            // cached unlock, and falls back to the passphrase step.
+            StartStep::Passphrase | StartStep::Review => {
+                let id = profile_id.expect("a profile id, since a profile was found above");
+                self.enter_signing_profile(&id);
+            }
+        }
+    }
+
+    /// Select `id` as the profile to sign with, and land on the step that
+    /// choice implies: Review when its credential is already unlocked this
+    /// session, the passphrase step otherwise, and `Failed` when the profile
+    /// or its credential file has gone missing.
+    ///
+    /// Shared by the flow's first step and the Review dialog's own profile
+    /// row, so switching profiles mid-review takes exactly the same route in
+    /// — a locked profile drops back to `EnterPassphrase` and returns here,
+    /// rather than opening a passphrase box inside the dialog.
+    fn enter_signing_profile(&mut self, id: &str) {
+        use crate::signing::SigningFlow;
+
+        let Some(profile) = self.settings.signatures.profile(id) else {
+            self.signing = Some(SigningFlow::Failed {
+                detail: "That signature profile no longer exists.".to_string(),
+            });
+            return;
+        };
+        let Some(credential_path) = self.signature_profile_credential_path(profile) else {
+            self.signing = Some(SigningFlow::Failed {
+                detail: "The profile's credential location is invalid.".to_string(),
+            });
+            return;
+        };
+        if !credential_path.is_file() {
+            self.signing = Some(SigningFlow::Failed {
+                detail: format!(
+                    "The credential for profile “{}” is missing at {}.",
+                    profile.name,
+                    credential_path.display()
+                ),
+            });
+            return;
+        }
+        self.signing_profile = Some(id.to_string());
+        // Already unlocked this session: skip the passphrase step and land
+        // where it would have led. The summary is rebuilt against the current
+        // time rather than reused, so an expiry that has since passed is
+        // still warned about.
+        if let Some(credential) = self.unlocked_credentials.get(id).cloned() {
+            match credential.summary() {
+                Ok(summary) => {
+                    let info =
+                        crate::signing::CredentialInfo::from_summary(summary, self.unix_now());
+                    self.enter_signing_review(credential, info);
+                    return;
+                }
+                Err(_) => {
+                    // A cached credential that can no longer describe itself
+                    // is of no use: drop it and ask again.
+                    self.unlocked_credentials.remove(id);
+                }
+            }
+        }
+        self.signing = Some(SigningFlow::EnterPassphrase {
+            credential_path,
+            passphrase: String::new(),
+            error: None,
+        });
+    }
+
+    /// Build the one Review step: preflight the document for targets, seed
+    /// the options from the clicked field and the profile's saved
+    /// appearance, and work out where the signed copy would be written.
+    ///
+    /// Switching profiles from inside Review comes back through here, and
+    /// deliberately rebuilds the options rather than carrying them across:
+    /// the new profile has its own saved visibility and box presets, and
+    /// showing the previous profile's answers under a new name would be the
+    /// dishonest half of "nothing changed".
+    fn enter_signing_review(
+        &mut self,
+        credential: std::sync::Arc<pulpit_render::sign::Credential>,
+        info: crate::signing::CredentialInfo,
+    ) {
+        use crate::signing::{SigningFlow, TargetPick};
+
+        let SignTargetCandidates {
+            candidates,
+            countersigning,
+        } = self.sign_target_candidates();
+        let pick =
+            crate::signing::pick_signing_target(&candidates, self.signing_prefill_field.as_deref());
+        // A clicked field preflight cannot offer selects *nothing*: the
+        // signature must not quietly land at a preset corner of some other
+        // page while the dialog reads as though the click was honoured.
+        let (target, prefill_missed) = match pick {
+            TargetPick::Selected(choice) => (Some(choice), None),
+            TargetPick::Missed { clicked } => (None, Some(clicked)),
+            TargetPick::Nothing => (None, None),
+        };
+        let mut options = crate::signing::SigningOptions {
+            target,
+            countersigning,
+            prefill_missed,
+            ..Default::default()
+        };
+        let context = self.placement_context(options.target.as_ref());
+        let profile_appearance = self
+            .signing_profile
+            .as_deref()
+            .and_then(|id| self.settings.signatures.profile(id))
+            .map(|profile| profile.appearance.clone());
+        crate::signing::apply_target_defaults(&mut options, profile_appearance.as_ref(), &context);
+        let destination = self
+            .signing_source_path()
+            .map(|source| {
+                crate::signing::signed_destination(&source, &|path: &std::path::Path| path.exists())
+            })
+            .unwrap_or_default();
+        self.signing = Some(SigningFlow::Review {
+            credential,
+            info: Box::new(info),
+            options,
+            candidates,
+            destination,
+            details_expanded: false,
+        });
     }
 
     /// §31.3's forbidden list, in terms of the commands the toolbar and the
@@ -9370,8 +9435,12 @@ impl App {
         }
     }
 
-    /// §31.1 step 8's destination chooser: `{stem}-signed.pdf` beside the
-    /// source, the same shape Save As already uses.
+    /// The Review step's "Change…" button: the same `{stem}-signed.pdf`
+    /// shape Save As already uses, offered in a real picker. This is the only
+    /// route by which signing may overwrite an existing file, and the
+    /// picker's own confirmation is what makes that a choice rather than an
+    /// accident — the default destination steps aside instead
+    /// (`crate::signing::signed_destination`).
     fn sign_pick_destination(&mut self) -> Task<Message> {
         use crate::signing::SignMsg;
 
@@ -9388,7 +9457,7 @@ impl App {
         use crate::signing::{SignMsg, SignOutcome, SigningFlow};
         use pulpit_render::sign::{SignRequest, SigningProfile};
 
-        let Some(SigningFlow::Confirm {
+        let Some(SigningFlow::Review {
             credential,
             options,
             ..
