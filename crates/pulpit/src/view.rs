@@ -9,8 +9,8 @@
 //! the editor is exactly what appears here.
 
 use iced::widget::{
-    button, canvas, checkbox, column, container, image, mouse_area, pick_list, responsive, row,
-    scrollable, space, stack, text, text_input, tooltip, Column, Row,
+    button, canvas, checkbox, column, container, image, mouse_area, opaque, pick_list, responsive,
+    row, scrollable, space, stack, text, text_input, tooltip, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -3119,6 +3119,11 @@ fn append_only_offer_dialog() -> Element<'static, Message> {
     panel(body, None)
 }
 
+/// How long §31.1 step 3's write may take before the panel over it says what
+/// it is waiting for. Below this the wait is not a state anyone perceives,
+/// and naming it costs more attention than it saves.
+const SAVING_FIRST_EXPLAIN_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Whatever the Sign flow still has to ask, which in the common case is
 /// nothing (SPEC-signing.md §31.1).
 ///
@@ -3138,6 +3143,25 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
 
     match flow {
         SigningFlow::SavingFirst => {
+            // Blocked from the first millisecond, explained only once there
+            // is something to explain. Nothing may edit the document while
+            // the bytes the signature is made from are being written — a
+            // stroke drawn now would be missing from the signed copy with
+            // nothing saying so — but that write is usually over before a
+            // sheet could be read, and a modal that flashes reads as a
+            // glitch. So the ground goes down at once and stays invisible
+            // until the wait is long enough to be worth a word.
+            let waited = app
+                .signing_saving_since
+                .map(|since| app.now.saturating_duration_since(since))
+                .unwrap_or_default();
+            if waited < SAVING_FIRST_EXPLAIN_AFTER {
+                return opaque(
+                    container(space::vertical())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                );
+            }
             let mut body = column![
                 theme::typography::title("Sign"),
                 // No file name in this: the copy being written is scratch,

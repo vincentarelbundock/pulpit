@@ -66,12 +66,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cell is downsampled on its way to the screen and still looks like the page;
   a coarse one that happens to fit is upsampled and does not.
 
-- **Home and End move the document being read.** They were bound to first
-  slide and last slide whatever was on screen, so in a reading layout they
-  walked the deck behind the document and did nothing visible — and mid-talk,
-  End would have jumped the projector to the last slide. They now go to the
-  first and last page of the document, and are recorded in history, so Back
-  returns you to where you were reading.
+- **The navigation keys move the document being read.** Home, End and the
+  arrows were bound to first slide, last slide, next slide and previous slide
+  whatever was on screen, so in a reading layout they walked the deck behind
+  the document and did nothing visible — and mid-talk, End would have jumped
+  the projector to the last slide. They now move the document: Home and End to
+  its first and last page, the arrows one page at a time, the same split the
+  Back and Forward controls have always made. Home and End are recorded in
+  history, so Back returns you to where you were reading; stepping is not,
+  which is what it already meant for a deck. PageUp and PageDown still scroll
+  by a screenful, and every key means what it always did wherever slides are
+  the primary view.
+
+- **The panel over the write that precedes signing no longer flashes.** The
+  edits have to reach the disk before a signature can be made from them, and
+  nothing may change the document while they do — a stroke drawn then would be
+  missing from the signed copy with nothing saying so. The surface is still
+  blocked from the first millisecond; what waits is the sheet explaining why,
+  which now appears only if the write takes longer than a moment. Most writes
+  are over before it is shown at all.
 
 - **The refusal that comes with a signed document points at a control that
   exists.** Declining to edit a signed document is offered once, when the file

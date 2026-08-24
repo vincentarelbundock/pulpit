@@ -1272,6 +1272,16 @@ pub struct App {
     /// from the reader pump, which cannot return the `Task` the save picker
     /// needs, and drained on the next tick.
     sign_resume_pending: bool,
+    /// When §31.1 step 3's write began, for the panel that covers it.
+    ///
+    /// The write is usually over in a few milliseconds and occasionally takes
+    /// a second — a full rewrite of a long document — so a panel shown the
+    /// instant it starts is a modal nobody can read, and one never shown lets
+    /// a stroke drawn mid-write miss the signature made from those bytes.
+    /// Timed instead: the surface is blocked from the first millisecond, and
+    /// the sheet explaining why appears only once the wait is long enough to
+    /// need explaining.
+    pub signing_saving_since: Option<Instant>,
     /// The signed copy the Sign flow has asked to open, so
     /// `finish_document_prepare` knows this document's signature is one the
     /// reader just made rather than one they have walked into.
@@ -1777,6 +1787,7 @@ impl App {
             keyboard_region: KeyboardRegion::Document,
             search_focus_pending: false,
             sign_resume_pending: false,
+            signing_saving_since: None,
             opening_signed_copy: None,
             signing_temp: None,
             search_origin: None,
@@ -1938,6 +1949,11 @@ impl App {
             || self.search_animation.is_animating(self.now)
             || self.search_focus_pending
             || self.sign_resume_pending
+            // The panel over §31.1 step 3's write appears on a deadline
+            // measured in a fraction of a second; the settled tick would
+            // overshoot it and show the sheet after the write it explains had
+            // already finished.
+            || self.signing_saving_since.is_some()
             || self.needs_reconcile
             // Work held back rather than sent has no worker answer to ring a
             // doorbell. The tick that releases it must keep running.
@@ -4219,8 +4235,14 @@ impl App {
                 let spread = self.reader.controls().spread.other();
                 self.on_reader_action(crate::widgets::event::ReadCommand::SetSpread(spread))
             }
-            Action::Next => self.update(Message::Nav(Nav::Next)),
-            Action::Previous => self.update(Message::Nav(Nav::Previous)),
+            // Through `step_sequentially`, which is what makes one step mean
+            // one page of the document being read and one slide otherwise —
+            // the same split `go_to_edge` and `current_place` make. These went
+            // straight to the presentation state whatever was on screen, so
+            // in a reading layout the arrows moved the deck behind the
+            // document and the document stayed where it was.
+            Action::Next => self.step_sequentially(true),
+            Action::Previous => self.step_sequentially(false),
             Action::First => self.go_to_edge(false),
             Action::Last => self.go_to_edge(true),
             Action::PreviewNext => self.update(Message::Nav(Nav::PreviewNext)),
@@ -9091,6 +9113,7 @@ impl App {
         self.signing_profile = None;
         self.signing_source = None;
         self.signing_prefill_field = None;
+        self.signing_saving_since = None;
         // Whether the signature was made, refused or cancelled, the scratch
         // copy has no reason to outlive the flow that wrote it.
         self.discard_signing_scratch();
@@ -9311,6 +9334,7 @@ impl App {
         // on-disk copy and silently lose the edits.
         if self.has_unsaved_edits() {
             self.signing = Some(SigningFlow::SavingFirst);
+            self.signing_saving_since = Some(self.now);
             return self.ask_where_to_save_document();
         }
         self.begin_signing()
@@ -10222,7 +10246,11 @@ impl App {
     /// One step in the reading direction, which is what the buttons fall back
     /// to and what the keys always do.
     fn step_sequentially(&mut self, forward: bool) -> Task<Message> {
-        if self.uses_document_viewer() {
+        // `is_open` as well as the layout, the same pair `go_to_edge` checks:
+        // a reading layout with no document in it has no page to step, and
+        // the deck the audience is showing is then the only thing a step can
+        // mean.
+        if self.uses_document_viewer() && self.reader.is_open() {
             let page = self.reader.controls().page.get();
             let page = if forward {
                 page.saturating_add(1)
