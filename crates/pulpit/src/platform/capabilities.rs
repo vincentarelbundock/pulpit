@@ -30,6 +30,20 @@ impl IdentityQuality {
     }
 }
 
+/// Whether the toolkit publishes an accessibility tree at all.
+///
+/// Iced 0.14 has no AccessKit integration and exposes no accessibility tree,
+/// so no label, role or description pulpit writes reaches assistive technology
+/// — on any platform, under any desktop, however well equipped the session is.
+/// Every adapter's `accessibility_bridge` is therefore gated on this, and the
+/// gate is what keeps a platform that *can* detect a session bus from
+/// reporting one pulpit cannot put anything on.
+///
+/// When Iced gains an accessibility backend this becomes `true` and each
+/// adapter's own detection starts deciding the answer. See the tracking issue
+/// for the rest of the work that unblocks with it.
+pub const TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE: bool = false;
+
 /// What the running desktop can actually do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
@@ -52,7 +66,15 @@ pub struct Capabilities {
     pub native_dialogs: bool,
     /// A desktop-integrated (global) menu is available.
     pub native_menus: bool,
-    /// An accessibility bridge is present.
+    /// Assistive technology can read this application's interface.
+    ///
+    /// Not "the session runs an accessibility bus". A bus with nothing
+    /// published on it is what an X11 desktop with Orca installed looks like
+    /// from here, and reporting that as a bridge would tell a screen-reader
+    /// user the one thing they most need to be told the truth about. Both
+    /// halves have to hold: the session must offer a bridge *and* the toolkit
+    /// must publish a tree to put on it — see
+    /// [`TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE`].
     pub accessibility_bridge: bool,
     /// Media and presenter-remote keys reach the application.
     pub media_keys: bool,

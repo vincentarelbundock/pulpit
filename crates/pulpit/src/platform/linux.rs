@@ -11,7 +11,9 @@ use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::platform::appearance::SystemAppearance;
-use crate::platform::capabilities::{Capabilities, IdentityQuality};
+use crate::platform::capabilities::{
+    Capabilities, IdentityQuality, TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE,
+};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
 use crate::platform::services::{Notification, PlatformServices, Urgency};
@@ -81,9 +83,14 @@ impl PlatformServices for LinuxServices {
             sleep_inhibition: portal_present || which("systemd-inhibit"),
             native_dialogs: true,
             native_menus: false,
-            accessibility_bridge: std::env::var_os("AT_SPI_BUS").is_some()
-                || std::env::var_os("GTK_MODULES")
-                    .is_some_and(|modules| modules.to_string_lossy().contains("atk-bridge")),
+            // Both halves, not just the session's. AT-SPI is running on any
+            // GNOME desktop with Orca installed, and answering "bridge
+            // present" from that alone told a screen-reader user their reader
+            // would work here — while Iced published no tree for it to read.
+            accessibility_bridge: TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE
+                && (std::env::var_os("AT_SPI_BUS").is_some()
+                    || std::env::var_os("GTK_MODULES")
+                        .is_some_and(|modules| modules.to_string_lossy().contains("atk-bridge"))),
             media_keys: true,
             notifications: portal_present,
         }
@@ -377,6 +384,34 @@ mod tests {
         assert_eq!(
             services.release_inhibit(&InhibitState::Released),
             Outcome::Done
+        );
+    }
+
+    /// The one capability whose false positive is worse than its false
+    /// negative.
+    ///
+    /// This is the only adapter that *detects* an accessibility bridge rather
+    /// than hardcoding its absence, and AT-SPI is running on any GNOME desktop
+    /// with a screen reader installed — so this machine may well have the bus.
+    /// Having the bus is not having a bridge: Iced publishes no tree, so the
+    /// honest answer is "absent" no matter what the session offers, and a
+    /// screen-reader user reading the diagnostics is told the truth rather
+    /// than the encouraging half of it.
+    ///
+    /// The environment is set here rather than sampled, so this fails on a CI
+    /// runner with no desktop as surely as it would on a full GNOME session.
+    #[test]
+    fn a_session_bus_alone_is_not_an_accessibility_bridge() {
+        // SAFETY: single-threaded test; no other thread reads the environment
+        // while this runs.
+        unsafe { std::env::set_var("AT_SPI_BUS", "unix:path=/run/user/1000/at-spi/bus") };
+        let capabilities = LinuxServices::new().capabilities();
+        unsafe { std::env::remove_var("AT_SPI_BUS") };
+        assert!(
+            !capabilities.accessibility_bridge,
+            "the session's accessibility bus was reported as a bridge pulpit \
+             cannot publish anything on; assistive technology reads nothing \
+             here until the toolkit exposes a tree"
         );
     }
 }
