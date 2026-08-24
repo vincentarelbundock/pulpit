@@ -22,6 +22,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the file again — importing an existing `.p12`/`.pfx` was already what that
   section is for.
 
+  **Signing an annotated document asks once and writes one file.** The edits
+  still have to reach the disk before a signature can be computed over them,
+  but where that copy goes was never a question worth asking: it is written
+  to a scratch file beside the document and deleted as soon as the signature
+  has been made from it. Signing an edited document used to mean two pickers
+  and two files — an annotated copy nobody asked for, and the signed one.
+
   A field you clicked that the document does not offer for signing is now
   refused by name, instead of the signature landing at a preset corner of some
   other page. Whether a signature is drawn on the page is a tick box in the
@@ -33,9 +40,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   original. §31.2's identity disclosure and §31.3's countersigning note moved
   to the signature panel, which outlives the notice.
 
+- **The signed-document question is asked in the reader's terms.** Opening a
+  PDF that already carries a signature used to offer "Append-only mode" or
+  "Edit anyway" over a paragraph citing §28.4 — the name of the mechanism and
+  a section number, neither of which says what you are allowed to do. It now
+  says "This document is already signed" and offers two answers, each carrying
+  its own consequence underneath it: **Read and sign only**, which keeps the
+  existing signature intact, or **Allow editing**, which will have every viewer
+  report the document as changed after that signature once you save. Nothing
+  in between: a paragraph there could only say the same thing a third time.
+
 - **Corner notices can carry a button.** A notice that names a next step can
   now offer to take it, and one that does never fades on its own: an offer is
   not an offer if it is gone before it can be taken up.
+
+### Fixed
+
+- **Home and End move the document being read.** They were bound to first
+  slide and last slide whatever was on screen, so in a reading layout they
+  walked the deck behind the document and did nothing visible — and mid-talk,
+  End would have jumped the projector to the last slide. They now go to the
+  first and last page of the document, and are recorded in history, so Back
+  returns you to where you were reading.
+
+- **The refusal that comes with a signed document points at a control that
+  exists.** Declining to edit a signed document is offered once, when the file
+  opens; the notice a drawing tool then gave sent the reader back to that
+  offer, which was long gone. The choice now lives in the signature panel, for
+  as long as the document is open.
 
 - **The scrollbar is pulpit's own, drawn over the surface it scrolls.** The
   thumb keeps a minimum length worth grabbing — on a 730-page document iced's

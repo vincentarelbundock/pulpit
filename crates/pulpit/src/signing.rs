@@ -22,6 +22,11 @@
 //!
 //! Every step but the picker is conditional:
 //!
+//! - **SavingFirst** appears only for a document with edits in it, and asks
+//!   nothing: the signature has to be computed over bytes on disk, so the
+//!   edits are written to a scratch copy that is deleted as soon as the
+//!   signature has been made from it. Asking where to put that copy was one
+//!   picker and one file too many for a request that was "sign this".
 //! - **Unlock** appears only when there is a real question: more than one
 //!   saved profile to choose between, or a profile whose credential is still
 //!   locked this session. One unlocked profile goes straight to the picker.
@@ -92,9 +97,44 @@ pub const COUNTERSIGN_DISCLOSURE: &str = "This document already contains a signa
 /// than only stating the problem.
 pub const NO_PROFILE_REFUSAL: &str = "There is no signature profile to sign with. Add one in Settings → Signatures, either by creating a credential or by importing an existing .p12/.pfx file.";
 
-/// §31.3's append-only offer, shown when a document already carrying a
-/// signature is opened.
-pub const APPEND_ONLY_OFFER: &str = "This document already contains a signature. pulpit can keep it open in append-only mode — view, verify, and countersign into an existing empty field, with editing turned off — or you can edit it anyway, which will cause the existing signature to be reported as changed after signing once you save (§28.4). This is not a bug in either mode.";
+// §31.3's offer is these four strings and nothing else.
+//
+// Not spec-verbatim, unlike `IDENTITY_DISCLOSURE` and
+// `COUNTERSIGN_DISCLOSURE`: §31.3 requires the *choice* be offered before
+// anything can mutate a signed document, not that it be worded a particular
+// way. The wording it first shipped with named the mechanism — "append-only
+// mode", "edit anyway", "§28.4" — which says nothing to someone who has just
+// opened a PDF and wants to know what they are allowed to do with it. These
+// name the consequence instead, one under each answer, which is also why
+// there is no standing paragraph above them: it could only say the same
+// thing a third time.
+
+/// The safe answer, and the default.
+pub const APPEND_ONLY_CHOICE: &str = "Read and sign only";
+
+/// What that answer costs, said where it is chosen rather than left to be
+/// discovered at the moment a drawing tool refuses to arm.
+pub const APPEND_ONLY_CHOICE_DETAIL: &str = "Read it, check the signature it carries, and add your own. Marking up and filling in fields stay switched off.";
+
+/// The other answer. Named by what it permits, not by the warning it
+/// overrides: "anyway" told the reader they were insisting on something
+/// without telling them what it cost.
+pub const EDIT_ANYWAY_CHOICE: &str = "Allow editing";
+
+pub const EDIT_ANYWAY_CHOICE_DETAIL: &str = "Mark it up and fill in fields. The signature already in the document will be reported as changed once you save.";
+
+/// Why a mutating command was refused, and where to change that.
+///
+/// Built from [`EDIT_ANYWAY_CHOICE`] so the two cannot drift: this used to
+/// send the reader to a control that no longer existed — the offer is shown
+/// once, when the document opens, and nothing raised it again. It now names
+/// the signature panel, which is on screen for as long as the document is.
+pub fn append_only_refusal() -> String {
+    format!(
+        "This document already carries a signature, so pulpit is keeping its content as it is. \
+         Choose “{EDIT_ANYWAY_CHOICE}” in the signature panel to change it anyway."
+    )
+}
 
 /// Whether a document opened this session is being kept append-only (§31.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -818,8 +858,11 @@ fn parse_unix_ish(value: &str) -> Option<i64> {
 /// nothing: the platform's save dialog is on screen instead.
 #[derive(Debug)]
 pub enum SigningFlow {
-    /// Step 3: unsaved edits exist, and Save As is running before signing
-    /// can start. The flow resumes once the save completes.
+    /// Step 3: the document has edits, and they are being written to the
+    /// scratch copy the signature will be computed over (`App::signing_temp`)
+    /// before signing can start. The flow resumes once that write completes.
+    /// Nothing is asked here — the scratch copy is not a file the reader
+    /// chose or keeps.
     SavingFirst,
     /// The one question left, and only when it is a real one: which saved
     /// profile to sign with (when there is more than one), and the
@@ -1012,6 +1055,40 @@ mod tests {
              software — including pulpit — to report that the document changed after the \
              earlier signature was made. This is expected. Software that analyses the change \
              in detail, such as Acrobat, will report both signatures correctly."
+        );
+    }
+
+    #[test]
+    fn the_append_only_offer_speaks_to_the_reader_not_to_the_format() {
+        let refusal = append_only_refusal();
+        let copy = [
+            APPEND_ONLY_CHOICE,
+            APPEND_ONLY_CHOICE_DETAIL,
+            EDIT_ANYWAY_CHOICE,
+            EDIT_ANYWAY_CHOICE_DETAIL,
+            refusal.as_str(),
+        ];
+        for line in copy {
+            // A section number is a note to whoever is implementing this, and
+            // it shipped in the dialog once. It is not something a reader who
+            // has just opened a PDF can act on.
+            assert!(
+                !line.contains('§'),
+                "spec reference in reader copy: {line:?}"
+            );
+            // Nor is the name of the mechanism: "append-only" describes how
+            // the file is written, and the question being asked is what the
+            // reader is allowed to do.
+            assert!(
+                !line.to_lowercase().contains("append-only"),
+                "the format's word for it, in reader copy: {line:?}"
+            );
+        }
+        // And the refusal names a control that is really there, spelled the
+        // way the control spells itself.
+        assert!(
+            refusal.contains(EDIT_ANYWAY_CHOICE),
+            "the refusal does not name the control that answers it: {refusal:?}"
         );
     }
 

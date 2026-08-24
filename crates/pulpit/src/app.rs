@@ -1272,6 +1272,22 @@ pub struct App {
     /// from the reader pump, which cannot return the `Task` the save picker
     /// needs, and drained on the next tick.
     sign_resume_pending: bool,
+    /// The scratch file §31.1 step 3's save writes to, while signing an
+    /// edited document.
+    ///
+    /// Signing an annotated document used to ask *twice* — once for where to
+    /// put the annotated copy, once for where to put the signed one — and
+    /// left two files behind where the reader wanted one. The intermediate
+    /// copy is not a thing anyone asked for: it exists because the signature
+    /// has to be computed over bytes on disk, and the edits are in memory.
+    /// So it is written here, unasked, and deleted as soon as the signature
+    /// has been made from it. The only file the reader names, and the only
+    /// one left afterwards, is the signed one.
+    ///
+    /// Beside the source rather than in the system temporary directory, and
+    /// hidden: it is a copy of the reader's document, and it should be no
+    /// more exposed than the document already is.
+    signing_temp: Option<PathBuf>,
     /// The search rail's disclosure transition. Kept beside the outline's
     /// animation so opening either rail has the same timing and reduced-motion
     /// behaviour.
@@ -1757,6 +1773,7 @@ impl App {
             keyboard_region: KeyboardRegion::Document,
             search_focus_pending: false,
             sign_resume_pending: false,
+            signing_temp: None,
             search_origin: None,
             search_scroll: 0.0,
             search_viewport: std::rc::Rc::new(std::cell::Cell::new(600.0)),
@@ -4199,8 +4216,8 @@ impl App {
             }
             Action::Next => self.update(Message::Nav(Nav::Next)),
             Action::Previous => self.update(Message::Nav(Nav::Previous)),
-            Action::First => self.update(Message::Nav(Nav::First)),
-            Action::Last => self.update(Message::Nav(Nav::Last)),
+            Action::First => self.go_to_edge(false),
+            Action::Last => self.go_to_edge(true),
             Action::PreviewNext => self.update(Message::Nav(Nav::PreviewNext)),
             Action::PreviewPrevious => self.update(Message::Nav(Nav::PreviewPrevious)),
             // Committing the preview is what Return ordinarily does; when a
@@ -4345,6 +4362,11 @@ impl App {
         self.session.clear();
         self.reader_journal = None;
         crate::reader_journal::Journal::discard(&Self::journal_path());
+        // A Sign flow interrupted by the quit leaves its scratch copy of the
+        // document sitting beside the original. It is an unsigned copy of
+        // something the reader was working on, so it goes with the process
+        // rather than waiting for the next run to overwrite it.
+        self.discard_signing_scratch();
         iced::exit()
     }
 
@@ -5796,6 +5818,22 @@ impl App {
                     saved,
                     unfilled_required,
                 } => {
+                    // The scratch copy signing writes for itself is not a
+                    // save the reader made: it is not announced, it does not
+                    // inherit the document's remembered layout, and it does
+                    // not settle the journal, because the edits are still
+                    // unsaved as far as the open document is concerned. The
+                    // signature is made from it and it is deleted.
+                    if self.signing_temp.as_deref() == Some(saved.path.as_path()) {
+                        self.save_reviewed = false;
+                        self.signing_source = Some(saved.path.clone());
+                        // Resuming needs to open a file picker, and a picker
+                        // is a `Task` this reader pump has no way to return.
+                        // The tick picks the flag up on its next pass, the
+                        // same way a pending search focus is handled.
+                        self.sign_resume_pending = true;
+                        continue;
+                    }
                     self.notify(format!("Saved {}", saved.path.display()));
                     // Said once, at the moment the copy exists, and never
                     // enforced: the document names these fields required for
@@ -7516,12 +7554,7 @@ impl App {
             .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
             && Self::read_command_mutates(&command)
         {
-            self.notify(
-                "This document is open in append-only mode because it already carries a \
-                 signature. Choose \"Edit anyway\" from the signature notice to make content \
-                 changes."
-                    .to_string(),
-            );
+            self.notify(crate::signing::append_only_refusal());
             return Task::none();
         }
 
@@ -8410,17 +8443,76 @@ impl App {
     }
 
     /// The file picker itself, reached either straight away or through the
-    /// review above.
+    /// review above — except while signing, which has somewhere to put this
+    /// copy already and does not ask.
     fn pick_where_to_save_document(&mut self) -> Task<Message> {
-        let Some(document) = self.documents.active() else {
+        let Some(source) = self
+            .documents
+            .active()
+            .map(|document| document.path.clone())
+        else {
             self.cancel_signing_if_saving_first();
             return Task::none();
         };
-        let source = document.path.clone();
+        // §31.1 step 3's save is not a Save As the reader asked for: it is
+        // how the edits reach the disk so a signature can be computed over
+        // them. Asking where to put it produced a second file nobody wanted
+        // and a second picker to dismiss (see `signing_temp`). The one
+        // question signing asks is where the *signed* copy goes.
+        if let Some(scratch) = self.signing_scratch_destination() {
+            return self.save_document_to(scratch);
+        }
         Task::perform(
             pick_derived_pdf(source, "annotated"),
             Message::SaveDocumentTo,
         )
+    }
+
+    /// Where §31.1 step 3's save should write, when the save in flight is
+    /// signing's own. `None` for an ordinary Save As, which asks.
+    fn signing_scratch_destination(&mut self) -> Option<PathBuf> {
+        if !matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
+            return None;
+        }
+        if let Some(existing) = self.signing_temp.clone() {
+            return Some(existing);
+        }
+        let source = self
+            .documents
+            .active()
+            .map(|document| document.path.clone())?;
+        let directory = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        // One per process: two Sign flows cannot be in flight at once, and a
+        // file left behind by a crash is overwritten by the next run rather
+        // than accumulating.
+        let scratch = directory.join(format!(".pulpit-signing-{}.pdf", std::process::id()));
+        self.signing_temp = Some(scratch.clone());
+        Some(scratch)
+    }
+
+    /// Delete the scratch copy, if one was written. Called wherever the Sign
+    /// flow ends — completed, refused, or cancelled — so the file never
+    /// outlives the signature it was made for.
+    fn discard_signing_scratch(&mut self) {
+        let Some(scratch) = self.signing_temp.take() else {
+            return;
+        };
+        // Best effort: a scratch file that cannot be removed is worth a line
+        // in the diagnostics bundle and nothing more. It is not an error the
+        // reader can act on, and the signature it was made for either exists
+        // or was already reported as failed.
+        if let Err(error) = std::fs::remove_file(&scratch) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                self.diagnostics.note(format!(
+                    "could not remove the signing scratch file {}: {error}",
+                    scratch.display()
+                ));
+            }
+        }
     }
 
     /// Write the annotated document where the user said.
@@ -8804,15 +8896,15 @@ impl App {
         use zeroize::Zeroize;
 
         match msg {
+            // Both entry points start from nothing held over — including a
+            // scratch copy a previous attempt left behind, which would
+            // otherwise be signed in place of this document's edits.
             SignMsg::Start => {
-                self.signing_profile = None;
-                self.signing_source = None;
-                self.signing_prefill_field = None;
+                self.end_sign_flow();
                 self.start_sign_flow()
             }
             SignMsg::StartInField(name) => {
-                self.signing_profile = None;
-                self.signing_source = None;
+                self.end_sign_flow();
                 self.signing_prefill_field = Some(name);
                 self.start_sign_flow()
             }
@@ -8978,6 +9070,9 @@ impl App {
         self.signing_profile = None;
         self.signing_source = None;
         self.signing_prefill_field = None;
+        // Whether the signature was made, refused or cancelled, the scratch
+        // copy has no reason to outlive the flow that wrote it.
+        self.discard_signing_scratch();
     }
 
     /// Refuse to sign, saying why (§33: what failed, and that the source is
@@ -9182,14 +9277,17 @@ impl App {
     fn start_sign_flow(&mut self) -> Task<Message> {
         use crate::signing::SigningFlow;
 
-        // §31.1 step 3: unsaved edits are saved first, and the signature is
-        // applied to the saved bytes. Whether required fields are still
-        // empty is a question for the save path itself —
-        // `ask_where_to_save_document` runs the "Save anyway?" review
-        // (`pending_save_review`) over that — and must not decide here
-        // whether the save happens at all: skipping the save on an unfilled
-        // required field would sign the stale on-disk copy and silently
-        // lose the edits.
+        // §31.1 step 3: edits are written out first, and the signature is
+        // made over those bytes. Not to a file the reader is asked to name —
+        // that produced two pickers and two files for one request — but to
+        // the scratch copy `pick_where_to_save_document` diverts this save
+        // to, which is deleted the moment the signature exists (see
+        // `signing_temp`). Whether required fields are still empty is a
+        // question for the save path itself — `ask_where_to_save_document`
+        // runs the "Save anyway?" review (`pending_save_review`) over that —
+        // and must not decide here whether the write happens at all:
+        // skipping it on an unfilled required field would sign the stale
+        // on-disk copy and silently lose the edits.
         if self.has_unsaved_edits() {
             self.signing = Some(SigningFlow::SavingFirst);
             return self.ask_where_to_save_document();
@@ -9305,10 +9403,7 @@ impl App {
     /// change forgets.
     fn cancel_signing_if_saving_first(&mut self) {
         if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
-            self.signing = None;
-            self.signing_profile = None;
-            self.signing_source = None;
-            self.signing_prefill_field = None;
+            self.end_sign_flow();
         }
     }
 
@@ -10073,6 +10168,34 @@ impl App {
             Some(place) => self.go_to_place(place),
             None => self.step_sequentially(true),
         }
+    }
+
+    /// The far end of what is being read: the first page, or the last.
+    ///
+    /// The same split `step_sequentially` and `current_place` already make,
+    /// and for the same reason. `Action::First` and `Action::Last` used to
+    /// move the presentation state whatever the layout showed, so Home and
+    /// End did nothing a reader could see while the document viewer was the
+    /// primary: they walked the deck behind it and left the document exactly
+    /// where it was.
+    ///
+    /// Recorded as a jump, unlike the presenter's own First and Last, which
+    /// `Message::Nav` deliberately treats as stepping. In a deck, going back
+    /// from the last slide is one key and the eye can find its place again.
+    /// In a seven-hundred-page document it is neither: End is a real jump,
+    /// and Back has to be able to undo it.
+    fn go_to_edge(&mut self, last: bool) -> Task<Message> {
+        if !self.uses_document_viewer() || !self.reader.is_open() {
+            return self.update(Message::Nav(if last { Nav::Last } else { Nav::First }));
+        }
+        let count = self.reader.page_count();
+        if count == 0 {
+            return Task::none();
+        }
+        let page = if last { count - 1 } else { 0 };
+        self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(
+            pulpit_core::PageIndex(page),
+        ))
     }
 
     /// One step in the reading direction, which is what the buttons fall back

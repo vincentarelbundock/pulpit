@@ -3041,6 +3041,30 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
         body = body.push(rule());
     }
 
+    // The answer given when the document was opened, and the way to change
+    // it. The offer itself is shown once and never again, so without this the
+    // refusal a drawing tool gives names a control that is no longer on
+    // screen — and the reader has no way back but closing and reopening the
+    // file. Offered in one direction only: turning editing back off would
+    // not un-edit anything, so it would promise a safety it cannot deliver.
+    if app
+        .append_only
+        .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
+    {
+        body = body.push(rule());
+        body = body.push(
+            column![
+                theme::typography::caption(crate::signing::APPEND_ONLY_CHOICE_DETAIL),
+                button(theme::typography::label(crate::signing::EDIT_ANYWAY_CHOICE))
+                    .padding(gap::S)
+                    .style(theme::ambient::alert_button)
+                    .on_press(Message::EditAnyway),
+                theme::typography::caption(crate::signing::EDIT_ANYWAY_CHOICE_DETAIL),
+            ]
+            .spacing(gap::XS),
+        );
+    }
+
     // §31.2, verbatim, and §31.3 when it applies. The Sign flow used to
     // carry both on its confirmation dialog; with that dialog gone this
     // panel is where the claim is made, and it is the one place that
@@ -3060,20 +3084,47 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
 /// §31.3, A9: the append-only offer, shown the moment a document that
 /// already carries a signature is opened, before anything can mutate it.
 fn append_only_offer_dialog() -> Element<'static, Message> {
+    use crate::signing::{
+        APPEND_ONLY_CHOICE, APPEND_ONLY_CHOICE_DETAIL, EDIT_ANYWAY_CHOICE,
+        EDIT_ANYWAY_CHOICE_DETAIL,
+    };
+
+    // Each answer carries what it costs, under the button that takes it.
+    // Two bare labels side by side made the reader guess which one was the
+    // careful choice, and guessing wrong is permanent for the copy they save.
+    let choice =
+        |label: &'static str,
+         detail: &'static str,
+         style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style,
+         message: Message| {
+            column![
+                button(theme::typography::label(label))
+                    .padding(gap::S)
+                    .width(Length::Fill)
+                    .style(style)
+                    .on_press(message),
+                theme::typography::caption(detail),
+            ]
+            .spacing(gap::XS)
+        };
+
     let body = column![
-        theme::typography::title("Keep this document append-only?"),
-        theme::typography::body(crate::signing::APPEND_ONLY_OFFER),
-        row![
-            button(theme::typography::label("Edit anyway"))
-                .padding(gap::S)
-                .style(theme::ambient::alert_button)
-                .on_press(Message::EditAnyway),
-            button(theme::typography::label("Append-only mode"))
-                .padding(gap::S)
-                .style(theme::ambient::selected_button)
-                .on_press(Message::AcceptAppendOnly),
-        ]
-        .spacing(gap::S),
+        // The title says the situation; the two answers below say what
+        // follows from it. A paragraph between them would only be the same
+        // thing again, in the place a reader is least likely to read it.
+        theme::typography::title("This document is already signed"),
+        choice(
+            APPEND_ONLY_CHOICE,
+            APPEND_ONLY_CHOICE_DETAIL,
+            theme::ambient::selected_button,
+            Message::AcceptAppendOnly,
+        ),
+        choice(
+            EDIT_ANYWAY_CHOICE,
+            EDIT_ANYWAY_CHOICE_DETAIL,
+            theme::ambient::alert_button,
+            Message::EditAnyway,
+        ),
     ]
     .spacing(gap::M);
 
@@ -3103,15 +3154,19 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
         SigningFlow::SavingFirst => {
             let mut body = column![
                 theme::typography::title("Sign"),
-                theme::typography::body("Saving your edits before signing…"),
+                // No file name in this: the copy being written is scratch,
+                // deleted as soon as the signature has been made from it, and
+                // naming it would invite the reader to look for it.
+                theme::typography::body("Preparing your edits to be signed…"),
             ]
             .spacing(gap::M);
             if !app.document_signatures.is_empty() {
-                // This is a full rewrite, not an append (§28.4): it does
-                // not carry the document's existing signatures forward.
+                // This goes through a full rewrite, not an append (§28.4), so
+                // it does not carry the document's existing signatures
+                // forward — and the signed copy is made from it.
                 body = body.push(theme::typography::caption(
-                    "This save rewrites the document; its existing signatures will not \
-                         carry over.",
+                    "Writing the edits rewrites the document, so its existing signatures will \
+                         not carry over into the signed copy.",
                 ));
             }
             body = body.push(cancel());
