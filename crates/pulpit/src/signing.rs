@@ -10,42 +10,61 @@
 //!
 //! ## Shape of the flow
 //!
-//! §31.1 numbers nine steps, and v1 first shipped them as nine dialogs. That
-//! was wrong in use: one signature meant six or seven sequential popups, each
-//! carrying one question whose answer was already known. The steps are the
-//! same; what changed is that the middle five collapse into one
-//! [`SigningFlow::Review`] dialog that shows all of them at once and signs
-//! from there.
+//! §31.1 numbers nine steps, and v1 first shipped them as nine dialogs, then
+//! as one. Both were wrong in use: everything that dialog asked has an answer
+//! already recorded in Settings or in the document, and a modal that only
+//! restates known answers is a click, not a safeguard. What is left asks
+//! nothing it can look up.
 //!
 //! ```text
-//! Start ─► SavingFirst? ─► ChooseCredential ─► EnterPassphrase ─► LoadingCredential ─┐
-//!                      └───────────────────► EnterPassphrase ─────────────────────►──┤
-//!                      └───────────────────────────────────────────────────────►─ Review
-//!                                                          Review ─► Signing ─► Result
+//! Start ─► SavingFirst? ─► Unlock? ─► ConfirmValidity? ─► save picker ─► Signing
 //! ```
 //!
-//! Nothing is hidden by the collapse: the credential, the target, the
-//! placement, both §31.2/§31.3 disclosures and the destination are all on the
-//! one dialog, and its Sign button is the confirmation §31.1 step 7 asks for.
+//! Every step but the picker is conditional:
+//!
+//! - **Unlock** appears only when there is a real question: more than one
+//!   saved profile to choose between, or a profile whose credential is still
+//!   locked this session. One unlocked profile goes straight to the picker.
+//! - **ConfirmValidity** appears only for an expired or not-yet-valid
+//!   certificate, which §33's last paragraph says may not be used without an
+//!   explicit override.
+//! - The **save picker** is the platform's own file dialog, and in the
+//!   common case it is the only thing signing shows.
+//!
+//! With no profile saved at all there is nothing to sign with, and no dialog
+//! offers to pick a `.p12` in the moment: importing one is Settings' job
+//! (`ProfileSource::Existing`), where it is named, given an appearance, and
+//! kept for every later signature. The flow refuses with
+//! [`NO_PROFILE_REFUSAL`] instead.
+//!
+//! Nothing that used to be *disclosed* on the confirmation is lost: §31.2 and
+//! §31.3's texts move to the notice raised once the file has been written
+//! ([`signed_notice`]), which is where they can still be acted on — the
+//! signed copy is a new file beside the source, and the source is untouched.
 //!
 //! ## Scope of this v1
 //!
-//! - Visible signatures place either the selected profile's saved ink,
-//!   text, or combined appearance, or §25.5's default text template for an
-//!   ad-hoc credential. Profile ink is captured in Settings by a
-//!   signature-specific pad, distinct from the page annotation ink tool.
+//! - A signature is visible unless the profile it signs with saved
+//!   "Invisible" as its default: the flow itself never asks. The mark is that
+//!   profile's saved ink, text, or combined appearance. Profile ink is
+//!   captured in Settings by a signature-specific pad, distinct from the page
+//!   annotation ink tool.
+//! - The field is chosen, not asked for: the field a page-surface click
+//!   named, otherwise the document's own first empty `/Sig` field, otherwise
+//!   a new one. A click on a field preflight cannot offer is refused by name
+//!   ([`prefill_missed_line`]) rather than quietly redirected elsewhere.
 //! - Where the mark goes depends on what is being signed, and both cases are
 //!   named by [`AppearancePlan`]. Signing into an existing field whose box
 //!   the application could locate draws inside that box, on whatever page
 //!   the document already puts it on: the sender drew the rectangle, so
 //!   there is nothing left to place. Everywhere else — a new field, or an
-//!   existing field with no usable `/Rect` — placement uses a small set of
-//!   position and size presets against one captured page, rather than a
-//!   free-form box-drawing interaction; see [`PlacementPosition`]'s doc
-//!   comment for why the annotation system's rubber-band gesture
-//!   (`SPEC-document.md` §8.4) is not reused here. The page is captured when
-//!   the Visible choice is made, so scrolling afterwards cannot move the
-//!   mark out from under the choice the reader saw.
+//!   existing field with no usable `/Rect` — placement uses the profile's
+//!   saved position and size preset against the page the reader is showing,
+//!   rather than a free-form box-drawing interaction; see
+//!   [`PlacementPosition`]'s doc comment for why the annotation system's
+//!   rubber-band gesture (`SPEC-document.md` §8.4) is not reused here.
+//! - Reason, location and contact are not collected. They were three empty
+//!   boxes on the dialog that is gone, and nothing else fills them.
 //! - No certification (`NO_CHANGES`) and no timestamp authority: v1 always
 //!   produces an approval signature with no TSA call, matching
 //!   `pulpit-render`'s current `sign_document_file`.
@@ -65,6 +84,13 @@ pub const IDENTITY_DISCLOSURE: &str = "pulpit verifies that a signature is intac
 /// existing field, since an existing empty `/Sig` field is now also offered
 /// on unsigned documents, where this disclosure would be false.
 pub const COUNTERSIGN_DISCLOSURE: &str = "This document already contains a signature. Adding yours will cause some software — including pulpit — to report that the document changed after the earlier signature was made. This is expected. Software that analyses the change in detail, such as Acrobat, will report both signatures correctly.";
+
+/// What signing says when Settings holds no signature profile at all.
+///
+/// There is nowhere left in the flow to pick a `.p12` — see this module's
+/// doc comment — so this names the one place that can accept one, rather
+/// than only stating the problem.
+pub const NO_PROFILE_REFUSAL: &str = "There is no signature profile to sign with. Add one in Settings → Signatures, either by creating a credential or by importing an existing .p12/.pfx file.";
 
 /// §31.3's append-only offer, shown when a document already carrying a
 /// signature is opened.
@@ -154,52 +180,30 @@ pub fn pick_signing_target(candidates: &[TargetChoice], prefill: Option<&str>) -
     }
 }
 
-/// The line the Review step shows when the field a click asked for is not on
-/// offer. Named, quoted, and in the reader's own terms: the point is that the
-/// signature is *not* going where the click pointed.
+/// What signing says when the field a click asked for is not on offer.
+///
+/// Named, quoted, and in the reader's own terms: the point is that the
+/// signature is *not* going where the click pointed. With no dialog left to
+/// offer alternatives, this refuses the click outright rather than signing
+/// somewhere else — a signature at a preset corner of another page, from a
+/// click on a named field, is the one failure this whole path exists to
+/// prevent.
 pub fn prefill_missed_line(clicked: &str) -> String {
     format!(
-        "The field you clicked, “{clicked}”, could not be offered for signing here; the choices \
-         below are what the document supports."
+        "The field you clicked, “{clicked}”, is not one this document offers for signing; \
+         nothing was signed."
     )
 }
 
-/// Where the flow lands when it starts (§31.1 step 4), given what the
-/// application knows about the profile it would use: `None` for "there is no
-/// saved profile", otherwise whether that profile's credential is already
-/// unlocked for this session.
+/// The name the save picker opens on: `{stem}-signed.pdf` beside the source,
+/// stepping to `-signed-2`, `-signed-3` … while a file already exists under
+/// the name.
 ///
-/// The dialog train this replaces asked which profile, then for a passphrase,
-/// then showed the credential, then the options, then a confirmation. An
-/// already-unlocked profile now goes straight to the one Review step that
-/// carries all of it, because every one of those questions has an answer the
-/// reader can see and change there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartStep {
-    /// No saved profile: choose a `.p12`/`.pfx` file first.
-    ChooseCredential,
-    /// A saved profile whose credential is still locked.
-    Passphrase,
-    /// A saved profile already unlocked this session.
-    Review,
-}
-
-pub fn start_step(profile_unlocked: Option<bool>) -> StartStep {
-    match profile_unlocked {
-        None => StartStep::ChooseCredential,
-        Some(false) => StartStep::Passphrase,
-        Some(true) => StartStep::Review,
-    }
-}
-
-/// The default destination the Review step offers: `{stem}-signed.pdf` beside
-/// the source, stepping to `-signed-2`, `-signed-3` … while a file already
-/// exists under the name.
-///
-/// Signing writes without asking again, so it must never land on a file that
-/// is already there: overwriting stays reachable only through the explicit
-/// "Change…" picker, which asks for itself. `exists` is passed in rather than
-/// read here, which is what keeps this testable and this module free of I/O.
+/// The picker is where overwriting is agreed to, and it asks for itself; what
+/// this is for is that the name it *starts* on never points at a file that is
+/// already there, so confirming the default can never destroy anything.
+/// `exists` is passed in rather than read here, which is what keeps this
+/// testable and this module free of I/O.
 pub fn signed_destination(
     source: &std::path::Path,
     exists: &dyn Fn(&std::path::Path) -> bool,
@@ -225,33 +229,30 @@ pub fn signed_destination(
     candidate
 }
 
-/// Reason, location and contact — the free-text half of §31.1 step 5.
+/// Everything the flow decided before the save picker opens: what is being
+/// signed into, and what mark will be drawn where.
+///
+/// Every field here is derived — from the click, from preflight, from the
+/// profile — rather than asked for. §31.1 step 5's free-text reason, location
+/// and contact are gone with the dialog that collected them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SigningOptions {
-    pub reason: String,
-    pub location: String,
-    pub contact: String,
     pub target: Option<TargetChoice>,
-    /// Whether the document already carries a signature — set once on entry
-    /// to the Review step, from the same preflight pass that computed the
-    /// candidates, not derived from `target`: an existing empty field is now
-    /// offered on unsigned documents too, so "the target is an existing
-    /// field" no longer implies "the document is already signed" (§31.3's
-    /// countersign disclosure gates on this, not on the target's shape).
+    /// Whether the document already carries a signature — set from the same
+    /// preflight pass that computed the candidates, not derived from
+    /// `target`: an existing empty field is offered on unsigned documents
+    /// too, so "the target is an existing field" does not imply "the
+    /// document is already signed" (§31.3's countersign disclosure gates on
+    /// this, not on the target's shape).
     pub countersigning: bool,
-    /// `true` once the user has chosen Visible over the default Invisible.
-    /// Only meaningful together with `placement`, which is `Some` exactly
-    /// when this is `true` (see [`SigningOptions::set_visible`]).
+    /// Whether a mark will be drawn. Taken from the profile's saved default
+    /// — or forced on when the target field has a box of its own — never
+    /// asked for. Only meaningful together with `placement`, which is `Some`
+    /// exactly when this is `true` (see [`SigningOptions::set_visible`]).
     pub visible_requested: bool,
     /// Where the mark goes, set together with `visible_requested`. `None`
     /// for an invisible signature.
     pub placement: Option<AppearancePlan>,
-    /// The field a page-surface click asked to sign into, when preflight did
-    /// not offer it ([`TargetPick::Missed`]). Kept for the whole flow so the
-    /// Review step keeps saying so even after a target is picked by hand —
-    /// the reader chose *instead of* the field they clicked, and that is
-    /// worth still seeing at the moment they press Sign.
-    pub prefill_missed: Option<String>,
 }
 
 impl SigningOptions {
@@ -269,16 +270,6 @@ impl SigningOptions {
     pub fn set_visible(&mut self, visible: bool, context: &PlacementContext) {
         self.visible_requested = visible;
         self.placement = visible.then(|| context.plan(self.chosen_preset()));
-    }
-
-    /// Re-resolve an already-made visible choice against a new `context`,
-    /// leaving an invisible signature invisible. Selecting a different target
-    /// field changes where the mark would land but not whether the reader
-    /// asked for one, so the visible flag is carried across.
-    pub fn retarget(&mut self, context: &PlacementContext) {
-        if self.visible_requested {
-            self.set_visible(true, context);
-        }
     }
 
     /// The preset the reader picked, if the current plan uses presets at all.
@@ -389,36 +380,9 @@ pub enum PlacementPosition {
     Center,
 }
 
-impl PlacementPosition {
-    pub const ALL: [PlacementPosition; 5] = [
-        PlacementPosition::TopLeft,
-        PlacementPosition::TopRight,
-        PlacementPosition::BottomLeft,
-        PlacementPosition::BottomRight,
-        PlacementPosition::Center,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PlacementPosition::TopLeft => "Top left",
-            PlacementPosition::TopRight => "Top right",
-            PlacementPosition::BottomLeft => "Bottom left",
-            PlacementPosition::BottomRight => "Bottom right",
-            PlacementPosition::Center => "Center",
-        }
-    }
-
-    /// The same choice mid-sentence: "…at the top left of page 3."
-    pub fn spot_label(self) -> &'static str {
-        match self {
-            PlacementPosition::TopLeft => "top left",
-            PlacementPosition::TopRight => "top right",
-            PlacementPosition::BottomLeft => "bottom left",
-            PlacementPosition::BottomRight => "bottom right",
-            PlacementPosition::Center => "center",
-        }
-    }
-}
+// No labels here any more: the presets are chosen once, in Settings, where
+// `StoredSignaturePosition` carries its own names. Nothing in the Sign flow
+// shows this choice, because nothing in it asks for it.
 
 /// A signature box size, in points, before margin clamping in
 /// [`Placement::rect`].
@@ -430,20 +394,6 @@ pub enum PlacementSize {
 }
 
 impl PlacementSize {
-    pub const ALL: [PlacementSize; 3] = [
-        PlacementSize::Small,
-        PlacementSize::Medium,
-        PlacementSize::Large,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PlacementSize::Small => "Small",
-            PlacementSize::Medium => "Medium",
-            PlacementSize::Large => "Large",
-        }
-    }
-
     fn dims_pt(self) -> (f64, f64) {
         match self {
             PlacementSize::Small => (150.0, 50.0),
@@ -725,62 +675,91 @@ pub fn appearance_for_profile(
     })
 }
 
-/// The Review step's target line (§31.1 step 7): what is being signed
-/// into, whether a mark will be visible, and where that mark will land. The
-/// last part is what makes the line honest — "visible" alone does not say
-/// whether the mark lands in the box the sender drew or somewhere this
-/// dialog chose.
-pub fn confirm_target_line(options: &SigningOptions) -> String {
-    // 1-based, the way every page number a reader sees is.
-    let page_no = |index: usize| index + 1;
-    let visibility = if options.visible_requested {
-        "visible"
-    } else {
-        "invisible"
-    };
-    match (options.target.as_ref(), options.placement.as_ref()) {
-        (
-            Some(TargetChoice::ExistingField(name)),
-            Some(AppearancePlan::InFieldBox { page_index, .. }),
-        ) => format!(
-            "Signing into field “{name}”, visible inside its own box on page {}.",
-            page_no(*page_index)
-        ),
-        (
-            Some(TargetChoice::ExistingField(name)),
-            Some(AppearancePlan::Preset {
-                page_index,
-                placement,
-            }),
-        ) => format!(
-            "Signing into field “{name}”, visible at the {} of page {}.",
-            placement.position.spot_label(),
-            page_no(*page_index)
-        ),
-        (Some(TargetChoice::ExistingField(name)), None) => {
-            format!("Signing into field “{name}”, {visibility}.")
-        }
-        (
-            Some(TargetChoice::NewField),
-            Some(AppearancePlan::Preset {
-                page_index,
-                placement,
-            }),
-        ) => format!(
-            "A new, visible signature field will be created at the {} of page {}.",
-            placement.position.spot_label(),
-            page_no(*page_index)
-        ),
-        // A new field has no box of its own to draw inside, so the
-        // application never builds `InFieldBox` for one; say the plain thing
-        // rather than invent a page number this arm cannot vouch for.
-        (Some(TargetChoice::NewField), _) => {
-            format!("A new, {visibility} signature field will be created.")
-        }
-        // No target selected: the Review step's Sign button is not offered,
-        // and the picker above this line is what the reader is being asked
-        // to look at.
-        (None, _) => "No signature field is selected yet.".to_string(),
+/// The short form of §31.2, for the corner notice raised after signing.
+///
+/// §31.2's text is required verbatim "at every confirmation". There is no
+/// confirmation dialog left to carry it, and a 360-pixel toast is not a place
+/// to read four sentences, so the claim is made in one line here and the
+/// verbatim [`IDENTITY_DISCLOSURE`] stays where a reader can go back to it:
+/// the signature panel (§31.4), which is also the only place that outlives
+/// the notice.
+pub const SIGNED_NOTICE_DISCLOSURE: &str = "pulpit checked that this signature is intact and matches the certificate inside it; it did not check whether that certificate is genuine. The signature panel says this in full.";
+
+/// The corner notice raised once signing has finished: what was written,
+/// what re-verifying the produced file said, and what is claimed about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedNotice {
+    /// One line: what happened.
+    pub message: String,
+    /// The caption under it: what it means, or what is wrong.
+    pub detail: String,
+    /// `false` when re-opening and re-verifying the file pulpit has just
+    /// written did not come back clean. The copy exists either way — this is
+    /// what decides whether the notice fades or stays until dismissed, since
+    /// a signature that does not verify moments after being made must not
+    /// disappear on a four-second timer.
+    pub verified: bool,
+}
+
+/// Build the notice for a completed signature.
+///
+/// `verification` is the result of re-reading `destination` and verifying it,
+/// which is §31.1 step 9 — the notice reports what that pass found rather
+/// than what signing believed it wrote.
+pub fn signed_notice(
+    destination: &std::path::Path,
+    report: &SignReport,
+    verification: &[SignatureVerification],
+    countersigning: bool,
+) -> SignedNotice {
+    let count = report.signature_count;
+    let message = format!(
+        "Signed “{}” into {} — {count} signature{} now present.",
+        report.field_name,
+        destination.display(),
+        if count == 1 { "" } else { "s" },
+    );
+    let problems: Vec<String> = verification
+        .iter()
+        .filter_map(|entry| match signature_line_for_verification(entry) {
+            SignatureLine::NotValid { reason } => Some(reason),
+            _ => None,
+        })
+        .collect();
+    if !problems.is_empty() {
+        return SignedNotice {
+            message,
+            detail: format!(
+                "Re-checking the copy that was just written reports: {}. The source document is \
+                 unchanged.",
+                problems.join("; ")
+            ),
+            verified: false,
+        };
+    }
+    let mut detail = String::from(SIGNED_NOTICE_DISCLOSURE);
+    if countersigning {
+        // §31.3, in the one line there is room for: the reader is about to
+        // see pulpit itself call the earlier signature changed, and that is
+        // expected. The verbatim text is [`COUNTERSIGN_DISCLOSURE`].
+        detail.push_str(
+            " The document already carried a signature, so some software — pulpit included — \
+             will now report that it changed after that earlier signature was made.",
+        );
+    }
+    if report.seed_value_ignored {
+        // §25.4, §36.5: the sender asked for constraints pulpit does not
+        // implement. Saying nothing would let the signature pass for one that
+        // honoured them.
+        detail.push_str(
+            " The field carried signing constraints (a seed value dictionary) that pulpit does \
+             not apply.",
+        );
+    }
+    SignedNotice {
+        message,
+        detail,
+        verified: true,
     }
 }
 
@@ -832,133 +811,90 @@ fn parse_unix_ish(value: &str) -> Option<i64> {
 ///
 /// Not `Clone`: [`Credential`] holds zeroize-on-drop key material and
 /// deliberately implements neither `Clone` nor `Copy` (§30.2).
+///
+/// Three of the four variants are conditional, and the common signature —
+/// one saved profile, already unlocked this session, a field the reader
+/// clicked — passes through only [`SigningFlow::Signing`], which draws
+/// nothing: the platform's save dialog is on screen instead.
 #[derive(Debug)]
 pub enum SigningFlow {
     /// Step 3: unsaved edits exist, and Save As is running before signing
-    /// can start. The flow resumes at its first step ([`start_step`]) once
-    /// the save completes.
+    /// can start. The flow resumes once the save completes.
     SavingFirst,
-    /// Step 4, before a credential file has been chosen. Reached only when
-    /// no saved profile exists, or when the reader asks for another file.
-    ChooseCredential,
-    /// Step 4: a `.p12`/`.pfx` was chosen; waiting for a passphrase.
-    EnterPassphrase {
-        credential_path: PathBuf,
+    /// The one question left, and only when it is a real one: which saved
+    /// profile to sign with (when there is more than one), and the
+    /// passphrase for it (when its credential is not already unlocked this
+    /// session).
+    Unlock {
+        /// The profile currently selected. Never empty — the flow refuses
+        /// with [`NO_PROFILE_REFUSAL`] before reaching this step when there
+        /// are no profiles at all.
+        profile_id: String,
         passphrase: String,
         /// Set after a failed load, so the passphrase box can say why
-        /// without losing the file that was chosen (§33: state what failed,
-        /// what to do next).
+        /// without losing the profile that was chosen (§33: state what
+        /// failed, what to do next).
         error: Option<String>,
+        /// A load is in flight; the buttons are inert until it answers.
+        busy: bool,
     },
-    /// Step 4, in progress: `load_pkcs12` dispatched off the UI thread.
-    LoadingCredential { credential_path: PathBuf },
-    /// Steps 4–7 in one: who is signing, what is being signed into, what the
-    /// mark will look like, the disclosures, and where the result will be
-    /// written. Pressing Sign here signs — this step *is* the confirmation,
-    /// so it is non-dismissable except by its own Cancel and Sign buttons.
-    ///
-    /// The five sequential dialogs this replaces (profile, credential
-    /// summary, options, confirmation, destination picker) each asked one
-    /// question and each needed an answer before the next one could be seen.
-    /// Every one of those answers has a default, and showing them together is
-    /// what lets the common case be read at a glance instead of clicked
-    /// through.
-    Review {
+    /// §33's last paragraph: the credential loaded, but its certificate is
+    /// expired or not yet valid. This may not be used without an explicit
+    /// override, which is the only thing this step asks for.
+    ConfirmValidity {
         credential: std::sync::Arc<Credential>,
         /// Boxed only for size: the certificate summary is eight owned
         /// strings, and inlining it here would make every `SigningFlow` —
         /// including the one-word `SavingFirst` — carry that width.
         info: Box<CredentialInfo>,
-        options: SigningOptions,
-        /// Every empty `/Sig` field a preflight pass over the document
-        /// found, for the target picker. One entry (`NewField` or a single
-        /// `ExistingField`) in the ordinary case; more than one when
-        /// countersigning a document preflight reported
-        /// `AmbiguousSignatureField` for.
-        candidates: Vec<TargetChoice>,
-        /// Where Sign will write, already made unique against the files
-        /// beside the source ([`signed_destination`]) or chosen through the
-        /// "Change…" picker.
-        destination: PathBuf,
-        /// Whether the optional reason/location/contact inputs are unfolded.
-        /// Collapsed by default: they are metadata almost nobody fills, and
-        /// three empty text boxes at the top is most of what made the old
-        /// Options step look like work.
-        details_expanded: bool,
     },
-    /// Step 8, in progress. `credential` and `options` are held rather than
-    /// dropped so a failed attempt could retry without reloading the
-    /// credential or re-asking the options — not wired up in v1, so the
-    /// view only reads `destination`.
+    /// The save picker is open, or the signature is being written to the
+    /// destination it came back with. Draws no dialog in either case: the
+    /// picker is the platform's own window, and the write is short.
+    ///
+    /// `credential` and `options` are decided before the picker opens, so
+    /// that a document with nothing to sign into is refused while there is
+    /// still nothing on screen to take back. The destination is not kept
+    /// here: it is the one thing this step does not decide, and it travels
+    /// with the message that answers the picker.
     Signing {
-        #[allow(dead_code)]
         credential: std::sync::Arc<Credential>,
-        #[allow(dead_code)]
         options: SigningOptions,
-        destination: PathBuf,
     },
-    /// Step 9: the produced file has been reopened and re-verified.
-    Result {
-        report: SignReport,
-        destination: PathBuf,
-        verification: Vec<SignatureVerification>,
-    },
-    /// A step failed. The source file is always unaffected (§33).
-    Failed { detail: String },
 }
 
-/// What the Sign dialog can ask `app.rs` to do. Grouped under one
+/// What the Sign flow can ask `app.rs` to do. Grouped under one
 /// `Message::Sign(SignMsg)` variant, the way `TimerCommand` and
 /// `ReadCommand` already group their own popups' messages.
 #[derive(Debug, Clone)]
 pub enum SignMsg {
     /// The toolbar's Sign button.
     Start,
-    /// The page surface's signature dead-field was clicked (§31.1, with the
-    /// field pre-selected in the Review step's target picker, or the miss
-    /// said out loud — see `pick_signing_target`'s prefill handling).
+    /// The page surface's signature dead-field was clicked (§31.1): that
+    /// field is the target, with no picker and no confirmation. A field
+    /// preflight does not offer is refused by name rather than swapped for
+    /// another (see [`pick_signing_target`]).
     StartInField(String),
-    /// Cancel at any step. Always safe (§33): nothing has been written yet,
-    /// or the write was to a temporary file that is now discarded.
+    /// §31.1 step 3's save has landed, and the flow parked at
+    /// [`SigningFlow::SavingFirst`] can go on. Raised from the tick rather
+    /// than from the reader pump that learns of the save, because resuming
+    /// opens a file picker and the pump has no way to return a task.
+    ResumeAfterSave,
+    /// Cancel at any step, including the save picker coming back empty.
+    /// Always safe (§33): nothing has been written yet.
     Cancel,
+    /// The Unlock step's profile row.
     ProfileChosen(String),
-    UseAnotherCredential,
-    ChooseCredentialFile,
-    CredentialFileChosen(Option<PathBuf>),
     PassphraseChanged(String),
     PassphraseSubmit,
     /// `Err` carries a message already worded per §33 (states what failed,
     /// that the source is unchanged, what to do next).
     CredentialLoaded(Result<std::sync::Arc<Credential>, String>),
+    /// The ConfirmValidity step's "Sign anyway".
     OverrideValidity,
-    /// Fold the Review step's optional reason/location/contact inputs in or
-    /// out.
-    ToggleDetails,
-    ReasonChanged(String),
-    LocationChanged(String),
-    ContactChanged(String),
-    /// Sent by the Review view's target picker (see
-    /// `SigningFlow::Review::candidates`).
-    TargetChosen(TargetChoice),
-    /// Visible/invisible toggle. Turning it on is what captures the
-    /// [`PlacementContext`] — the target's own box, or the page the reader is
-    /// showing — so the answer cannot drift afterwards.
-    VisibleChanged(bool),
-    PlacementPositionChosen(PlacementPosition),
-    PlacementSizeChosen(PlacementSize),
-    /// The Review step's Sign button: sign, to the destination already shown.
-    Confirm,
-    /// The Review step's "Change…" button beside the destination.
-    ChooseDestination,
-    /// The picker's answer. `None` — cancelled — keeps the shown default.
+    /// The save picker's answer. `None` — cancelled — ends the flow.
     DestinationChosen(Option<PathBuf>),
     Completed(Result<SignOutcome, String>),
-    /// The Result step's "Open the signed copy": close the flow and open the
-    /// file it wrote. Without this the reader keeps showing the unsigned
-    /// source, which reads as "the signature did not appear" — the signed
-    /// bytes live in the copy, never in the document on screen.
-    OpenSignedCopy,
-    Done,
 }
 
 /// A successful run of the flow's Sign + verify steps (§31.1 steps 8–9).
@@ -1147,26 +1083,23 @@ mod tests {
     }
 
     #[test]
-    fn a_missed_prefill_selects_nothing_and_says_which_field_was_clicked() {
+    fn a_missed_prefill_refuses_by_name_rather_than_signing_elsewhere() {
         let candidates = vec![TargetChoice::NewField];
         let pick = pick_signing_target(&candidates, Some("Membre jury"));
         let TargetPick::Missed { clicked } = pick else {
             panic!("expected a miss, got {pick:?}");
         };
-        let mut options = SigningOptions {
-            prefill_missed: Some(clicked.clone()),
-            ..Default::default()
-        };
-        // Nothing preselected: the reader has to look at the choice.
-        assert_eq!(options.target, None);
+        // `NewField` was on offer and is deliberately *not* taken: with no
+        // dialog left to say where the signature really went, signing
+        // somewhere other than the field that was clicked is the failure
+        // this whole path exists to prevent.
+        let line = prefill_missed_line(&clicked);
         assert_eq!(
-            prefill_missed_line(&clicked),
-            "The field you clicked, “Membre jury”, could not be offered for signing here; the \
-             choices below are what the document supports."
+            line,
+            "The field you clicked, “Membre jury”, is not one this document offers for \
+             signing; nothing was signed."
         );
-        // And picking by hand does not erase the notice.
-        options.target = Some(TargetChoice::NewField);
-        assert_eq!(options.prefill_missed.as_deref(), Some("Membre jury"));
+        assert!(line.contains("nothing was signed"));
     }
 
     #[test]
@@ -1178,13 +1111,6 @@ mod tests {
                 clicked: "Sig1".to_string()
             }
         );
-    }
-
-    #[test]
-    fn the_first_step_skips_straight_to_review_for_an_unlocked_profile() {
-        assert_eq!(start_step(Some(true)), StartStep::Review);
-        assert_eq!(start_step(Some(false)), StartStep::Passphrase);
-        assert_eq!(start_step(None), StartStep::ChooseCredential);
     }
 
     #[test]
@@ -1517,58 +1443,86 @@ mod tests {
         );
     }
 
+    /// A `SignReport` for the notice tests. Only three of its fields reach
+    /// the notice; the rest describe how the write went, which the reader is
+    /// not told about.
+    fn report_for(field: &str, count: usize, seed_value_ignored: bool) -> SignReport {
+        SignReport {
+            field_name: field.to_string(),
+            signature_count: count,
+            bytes_reserved: 0,
+            cms_len: 0,
+            attempts: 1,
+            output_len: 0,
+            seed_value_ignored,
+        }
+    }
+
+    /// A verification pass that found nothing wrong. Deliberately empty
+    /// rather than a hand-built `Checked` status: what the notice asks of
+    /// this slice is only which entries came back `NotValid`, and
+    /// `signature_line_for_verification` is tested on its own above.
+    const CLEAN: &[SignatureVerification] = &[];
+
     #[test]
-    fn retarget_keeps_the_visible_choice_and_moves_the_mark() {
-        let mut options = SigningOptions::default();
-        options.set_visible(true, &presets_on(0));
-        options.retarget(&field_box_on("Sig2", 5));
-        assert!(options.visible_requested);
-        assert_eq!(
-            options.placement,
-            Some(AppearancePlan::InFieldBox {
-                field: "Sig2".into(),
-                page_index: 5,
-            })
+    fn signed_notice_names_the_field_the_file_and_the_count() {
+        let notice = signed_notice(
+            std::path::Path::new("/decks/talk-signed.pdf"),
+            &report_for("Membre jury", 2, false),
+            CLEAN,
+            false,
         );
+        assert_eq!(
+            notice.message,
+            "Signed “Membre jury” into /decks/talk-signed.pdf — 2 signatures now present."
+        );
+        assert!(notice.verified);
+        assert_eq!(notice.detail, SIGNED_NOTICE_DISCLOSURE);
     }
 
     #[test]
-    fn retarget_leaves_an_invisible_signature_invisible() {
-        let mut options = SigningOptions::default();
-        options.retarget(&field_box_on("Sig2", 5));
-        assert!(!options.visible_requested);
-        assert_eq!(options.placement, None);
+    fn signed_notice_never_claims_the_identity_was_verified() {
+        let notice = signed_notice(
+            std::path::Path::new("/decks/talk-signed.pdf"),
+            &report_for("Sig1", 1, false),
+            CLEAN,
+            false,
+        );
+        let said = format!("{} {}", notice.message, notice.detail);
+        assert!(!said.contains("verified that"));
+        assert!(!said.contains("trusted"));
+        assert!(said.contains("did not check whether that certificate is genuine"));
     }
 
     #[test]
-    fn the_confirm_line_names_where_the_mark_lands() {
-        let mut options = SigningOptions {
-            target: Some(TargetChoice::ExistingField("Sig1".into())),
-            ..Default::default()
-        };
-        assert_eq!(
-            confirm_target_line(&options),
-            "Signing into field “Sig1”, invisible."
+    fn a_countersignature_and_an_ignored_seed_value_are_both_said_out_loud() {
+        let notice = signed_notice(
+            std::path::Path::new("/decks/talk-signed.pdf"),
+            &report_for("Sig2", 2, true),
+            CLEAN,
+            true,
         );
-        options.set_visible(true, &field_box_on("Sig1", 2));
-        assert_eq!(
-            confirm_target_line(&options),
-            "Signing into field “Sig1”, visible inside its own box on page 3."
-        );
+        assert!(notice.verified);
+        assert!(notice.detail.contains("already carried a signature"));
+        assert!(notice.detail.contains("seed value dictionary"));
+    }
 
-        let mut options = SigningOptions {
-            target: Some(TargetChoice::NewField),
-            ..Default::default()
-        };
-        assert_eq!(
-            confirm_target_line(&options),
-            "A new, invisible signature field will be created."
+    #[test]
+    fn a_copy_that_does_not_verify_is_not_reported_as_a_clean_signature() {
+        let notice = signed_notice(
+            std::path::Path::new("/decks/talk-signed.pdf"),
+            &report_for("Sig1", 1, false),
+            &[SignatureVerification::Broken {
+                field_name: "Sig1".to_string(),
+                reason: "the signed byte range is malformed".to_string(),
+            }],
+            false,
         );
-        options.set_visible(true, &presets_on(4));
-        assert_eq!(
-            confirm_target_line(&options),
-            "A new, visible signature field will be created at the bottom right of page 5."
-        );
+        // Not `verified`, so the caller keeps it on screen rather than
+        // letting it fade: the file exists and does not check out.
+        assert!(!notice.verified);
+        assert!(notice.detail.contains("the signed byte range is malformed"));
+        assert!(notice.detail.contains("The source document is unchanged."));
     }
 
     #[test]
@@ -1576,7 +1530,13 @@ mod tests {
         let page_w = 612.0;
         let page_h = 792.0;
         let geometry = PageGeometry::upright(page_w as f32, page_h as f32);
-        for position in PlacementPosition::ALL {
+        for position in [
+            PlacementPosition::TopLeft,
+            PlacementPosition::TopRight,
+            PlacementPosition::BottomLeft,
+            PlacementPosition::BottomRight,
+            PlacementPosition::Center,
+        ] {
             let placement = Placement {
                 position,
                 size: PlacementSize::Medium,
@@ -1668,7 +1628,7 @@ mod tests {
         );
         // The field-box path draws on the field's own page, so it needs the
         // same treatment: the rect is the sender's, the orientation is not.
-        options.retarget(&field_box_on("Sig1", 0));
+        options.set_visible(true, &field_box_on("Sig1", 0));
         let appearance = appearance_for(&options, "Jane Doe", "now", &geometry).unwrap();
         assert_eq!(
             appearance.placement,

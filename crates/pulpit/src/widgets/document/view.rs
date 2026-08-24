@@ -170,16 +170,22 @@ fn page_surface<'a, Message: Clone + 'static>(
         )
     })
     .into();
-    if !mode.interactive()
-        || !reader.document_keyboard_focus
-        || reader.focused_widget.is_some()
-        || reader.composing.is_some()
-    {
-        return page;
-    }
+    // Whether these keys mean scrolling *now* — captured, never used to decide
+    // whether to wrap. Taking the key scope away when a field takes the focus
+    // would change the shape of the tree between the window root and the
+    // scrollable, and Iced would tear that scrollable down and mount a fresh
+    // one born at zero: the reader would lose its place on every click into a
+    // form, and again on every click back out. The scope is layout-transparent,
+    // so leaving it mounted and inert costs nothing. See
+    // `crate::view::document_surface_fingerprint` for the same hazard stated
+    // from the other end.
+    let scrolls = mode.interactive()
+        && reader.document_keyboard_focus
+        && reader.focused_widget.is_none()
+        && reader.composing.is_none();
     crate::widgets::panel::on_key(page, move |key, modifiers| {
         use iced::keyboard::{key::Named, Key};
-        if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        if !scrolls || modifiers.control() || modifiers.alt() || modifiers.logo() {
             return None;
         }
         match key {

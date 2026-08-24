@@ -8,6 +8,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Signing no longer opens a dialogue.** Every question the Sign dialog asked
+  had an answer already recorded in Settings or in the document, and a modal
+  that only restates known answers is a click, not a safeguard. The field is
+  the one you clicked; visibility, position and size come from the signature
+  profile; the reason/location/contact boxes are gone. With one profile
+  already unlocked this session, the only thing signing shows is the save
+  dialog for the signed copy. A small panel appears only when there is a real
+  question: which profile, when more than one is saved; its passphrase, when
+  the session does not already hold the credential; and §33's override for an
+  expired certificate. With no profile saved at all, signing refuses and names
+  Settings → Signatures rather than offering a `.p12` picker that would forget
+  the file again — importing an existing `.p12`/`.pfx` was already what that
+  section is for.
+
+  A field you clicked that the document does not offer for signing is now
+  refused by name, instead of the signature landing at a preset corner of some
+  other page. Whether a signature is drawn on the page is a tick box in the
+  profile editor, beside the position and size it has always had.
+
+  What signing produced is reported in the corner rather than in a dialog, and
+  that notice carries an **Open** button for the signed copy — signing writes
+  a new file beside the source, and the reader keeps showing the unsigned
+  original. §31.2's identity disclosure and §31.3's countersigning note moved
+  to the signature panel, which outlives the notice.
+
+- **Corner notices can carry a button.** A notice that names a next step can
+  now offer to take it, and one that does never fades on its own: an offer is
+  not an offer if it is gone before it can be taken up.
+
 - **The scrollbar is pulpit's own, drawn over the surface it scrolls.** The
   thumb keeps a minimum length worth grabbing — on a 730-page document iced's
   own rule works out at under four points — and it is grabbable exactly where

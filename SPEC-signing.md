@@ -40,8 +40,10 @@ The full prose specification of the implemented mechanics is in the git history
 - DocMDP/FieldMDP **read** for pre-flight; signing refused under a prior
   `NO_CHANGES` certification, and encrypted documents refused up front per §35
   S0 step 5 (`verify/preflight.rs`).
-- Invisible signatures, and visible ones using a profile's saved ink, text, or
-  combined appearance, or §25.5's default text template.
+- Visible signatures using a profile's saved ink, text, or combined
+  appearance, or §25.5's default text template; invisible ones for a profile
+  whose saved default says so. The Sign flow itself does not ask: visibility
+  and the box preset are a profile setting.
 
 **CMS (§26)**
 - `SignedData` via the `cms` crate, pinned at 0.2.x behind the module's own
@@ -66,7 +68,14 @@ The full prose specification of the implemented mechanics is in the git history
 **Integration and UI (§31, §32)**
 - Save As pipeline stages; the §32 gate reads the candidate back from disk and
   refuses to promote on any failure.
-- Signing flow, §31.2 identity disclosure, signature panel.
+- Signing flow, §31.2 identity disclosure, signature panel. The flow asks only
+  what it cannot look up: which profile (when more than one is saved), its
+  passphrase (when the session does not already hold the credential), §33's
+  override for an expired certificate, and where to save the signed copy. In
+  the common case the platform's save dialog is the only thing it shows. §31.2
+  and §31.3's texts live on the signature panel, which outlives the corner
+  notice raised when a signature is written; with no saved profile, signing
+  refuses and names Settings rather than offering a `.p12` picker.
 - Append-only mode for signed documents, including countersigning into an
   existing empty field (§31.3). An existing empty `/Sig` field is offered as
   a target on signed and unsigned documents alike, ordered ahead of "new

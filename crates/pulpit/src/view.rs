@@ -9,8 +9,8 @@
 //! the editor is exactly what appears here.
 
 use iced::widget::{
-    button, canvas, column, container, image, mouse_area, pick_list, responsive, row, scrollable,
-    space, stack, text, text_input, tooltip, Column, Row,
+    button, canvas, checkbox, column, container, image, mouse_area, pick_list, responsive, row,
+    scrollable, space, stack, text, text_input, tooltip, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -1628,6 +1628,20 @@ fn toasts(app: &App) -> Option<Element<'_, Message>> {
         if let Some(action) = &toast.action {
             body = body.push(theme::typography::caption(action.as_str()));
         }
+        // What the notice can do about what it reports. Below the caption
+        // rather than beside the close glyph: the two are opposite answers,
+        // and a button that acts sitting next to one that discards is how
+        // the wrong one gets pressed.
+        if let Some(offer) = &toast.offer {
+            body = body.push(
+                button(theme::typography::label(offer.label()))
+                    .padding(gap::XS)
+                    .style(theme::ambient::selected_button)
+                    .on_press(match offer {
+                        crate::toast::Offer::Open(path) => Message::Opened(Some(path.clone())),
+                    }),
+            );
+        }
         stack_of_toasts = stack_of_toasts.push(
             container(body)
                 .padding(gap::M)
@@ -2148,20 +2162,25 @@ fn signature_profile_editor<'a>(
         ));
     }
 
-    let visible = row![
-        selectable(
-            button(theme::typography::label("Visible")),
-            editor.appearance.visible,
-        )
-        .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(true))),
-        selectable(
-            button(theme::typography::label("Invisible")),
-            !editor.appearance.visible,
-        )
-        .on_press(Message::SignatureProfile(ProfileMsg::VisibleChanged(false))),
-    ]
-    .spacing(gap::S);
-    body = body.push(dialog_section("Default visibility", visible));
+    // The one place visibility is decided. The Sign flow does not ask —
+    // see `crate::signing`'s module doc — so this tick box is what stands
+    // between a profile and a signature nobody can see on the page.
+    body = body.push(dialog_section(
+        "Visibility",
+        column![
+            checkbox(editor.appearance.visible)
+                .label("Draw the signature on the page")
+                .size(type_scale::BODY)
+                .text_size(type_scale::BODY)
+                .on_toggle(|value| Message::SignatureProfile(ProfileMsg::VisibleChanged(value))),
+            theme::typography::caption(
+                "Off means an invisible signature: cryptographically identical, with no mark \
+                 drawn. Signing into a field the sender drew a box for is always visible, \
+                 whatever this says.",
+            ),
+        ]
+        .spacing(gap::XS),
+    ));
 
     if editor.appearance.visible {
         let mut positions = Row::new().spacing(gap::XS);
@@ -3022,6 +3041,19 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
         body = body.push(rule());
     }
 
+    // §31.2, verbatim, and §31.3 when it applies. The Sign flow used to
+    // carry both on its confirmation dialog; with that dialog gone this
+    // panel is where the claim is made, and it is the one place that
+    // outlives the notice raised when a signature is written.
+    body = body.push(theme::typography::caption(
+        crate::signing::IDENTITY_DISCLOSURE,
+    ));
+    if app.document_signatures.len() > 1 {
+        body = body.push(theme::typography::caption(
+            crate::signing::COUNTERSIGN_DISCLOSURE,
+        ));
+    }
+
     panel(body, Some(Message::ToggleSignaturePanel))
 }
 
@@ -3050,16 +3082,21 @@ fn append_only_offer_dialog() -> Element<'static, Message> {
     panel(body, None)
 }
 
-/// The Sign flow (SPEC-signing.md §31.1), one dialog per step.
+/// Whatever the Sign flow still has to ask, which in the common case is
+/// nothing (SPEC-signing.md §31.1).
+///
+/// Three of the four steps draw a small panel; [`SigningFlow::Signing`] draws
+/// none, because the platform's own save dialog is on screen during it and
+/// the write that follows is short. What signing produced is reported in the
+/// corner afterwards (`crate::signing::signed_notice`), not here.
 fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Element<'a, Message> {
-    use crate::signing::SigningFlow;
-    use pulpit_render::sign::SigningProfile;
+    use crate::signing::{SignMsg, SigningFlow};
 
     let cancel = || {
         button(theme::typography::label("Cancel"))
             .padding(gap::S)
             .style(theme::ambient::tool_button)
-            .on_press(Message::Sign(crate::signing::SignMsg::Cancel))
+            .on_press(Message::Sign(SignMsg::Cancel))
     };
 
     match flow {
@@ -3078,471 +3115,129 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 ));
             }
             body = body.push(cancel());
-            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+            panel(body, Some(Message::Sign(SignMsg::Cancel)))
         }
-        SigningFlow::ChooseCredential => {
-            let body = column![
-                theme::typography::title("Sign"),
-                theme::typography::body("Choose the PKCS#12 (.p12/.pfx) credential to sign with."),
-                dialog_footer(
-                    button(theme::typography::label("Choose file…"))
-                        .padding(gap::S)
-                        .style(theme::ambient::selected_button)
-                        .on_press(Message::Sign(crate::signing::SignMsg::ChooseCredentialFile)),
-                ),
-            ]
-            .spacing(gap::M);
-            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
-        }
-        SigningFlow::EnterPassphrase {
-            credential_path,
+        SigningFlow::Unlock {
+            profile_id,
             passphrase,
             error,
+            busy,
         } => {
-            // Name what is being unlocked: a saved profile by name, since its
-            // credential path is an implementation detail the reader chose
-            // by naming the profile, not the file — otherwise the credential
-            // file itself, the same way Save As already shows a path.
-            let unlocking = app
-                .signing_profile
-                .as_deref()
-                .and_then(|id| app.settings.signatures.profile(id))
-                .map(|profile| format!("profile “{}”", profile.name))
-                .unwrap_or_else(|| {
-                    credential_path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| credential_path.display().to_string())
-                });
-            let mut body = column![
-                theme::typography::title("Sign"),
-                theme::typography::body(format!("Enter the passphrase for {unlocking}.")),
-                text_input("Passphrase", passphrase)
-                    .secure(true)
-                    .on_input(|typed| {
-                        Message::Sign(crate::signing::SignMsg::PassphraseChanged(typed))
-                    })
-                    .on_submit(Message::Sign(crate::signing::SignMsg::PassphraseSubmit))
-                    .style(theme::ambient::text_field)
-                    .padding(gap::S),
-            ]
-            .spacing(gap::M);
+            let profiles = &app.settings.signatures.profiles;
+            let selected = app.settings.signatures.profile(profile_id);
+            let name = selected
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| profile_id.clone());
+            // Unlocked already: this step is only up because there is more
+            // than one profile to choose between, so there is no passphrase
+            // to ask for and Continue is the whole interaction.
+            let locked = !app.is_profile_unlocked(profile_id);
+
+            let mut body = column![theme::typography::title("Sign")].spacing(gap::M);
+
+            // The profile row earns its place only when there is a choice.
+            // With one profile this step is never reached unlocked, and the
+            // row would be a single button that changes nothing.
+            if profiles.len() > 1 {
+                let mut choices = Row::new().spacing(gap::S);
+                for profile in profiles {
+                    choices = choices.push(
+                        selectable(
+                            button(theme::typography::label(profile.name.clone())),
+                            profile.id == *profile_id,
+                        )
+                        .on_press_maybe(
+                            (!*busy)
+                                .then(|| Message::Sign(SignMsg::ProfileChosen(profile.id.clone()))),
+                        ),
+                    );
+                }
+                body = body.push(dialog_section("Sign with", choices.wrap()));
+            } else {
+                body = body.push(theme::typography::body(format!("Signing with {name}.")));
+            }
+
+            if locked {
+                body =
+                    body.push(dialog_section(
+                        "Passphrase",
+                        text_input("Passphrase", passphrase)
+                            .secure(true)
+                            .on_input_maybe((!*busy).then_some(|typed| {
+                                Message::Sign(SignMsg::PassphraseChanged(typed))
+                            }))
+                            .on_submit(Message::Sign(SignMsg::PassphraseSubmit))
+                            .style(theme::ambient::text_field)
+                            .padding(gap::S),
+                    ));
+            }
             if let Some(error) = error {
                 body = body
                     .push(theme::typography::caption(error.clone()).color(theme::ambient::alert()));
             }
+            // Named before it happens: the next thing on screen is a save
+            // dialog, and nothing is written until it is answered.
+            body = body.push(theme::typography::caption(
+                "Next: choose where to save the signed copy. The document itself is not \
+                 changed.",
+            ));
             body = body.push(
                 row![
                     cancel(),
-                    button(theme::typography::label("Continue"))
-                        .padding(gap::S)
-                        .style(theme::ambient::selected_button)
-                        .on_press(Message::Sign(crate::signing::SignMsg::PassphraseSubmit)),
+                    button(theme::typography::label(if *busy {
+                        "Reading the credential…"
+                    } else {
+                        "Continue"
+                    }))
+                    .padding(gap::S)
+                    .style(theme::ambient::selected_button)
+                    .on_press_maybe((!*busy).then_some(Message::Sign(SignMsg::PassphraseSubmit))),
                 ]
                 .spacing(gap::S),
             );
-            panel(body, Some(Message::Sign(crate::signing::SignMsg::Cancel)))
+            panel(body, (!*busy).then_some(Message::Sign(SignMsg::Cancel)))
         }
-        SigningFlow::LoadingCredential { .. } => {
+        // §33's last paragraph: an expired or not-yet-valid certificate stops
+        // the flow until it is overridden on purpose. Collapsing the dialogs
+        // did not collapse this gate — it is the one thing left that is worth
+        // stopping for.
+        SigningFlow::ConfirmValidity { info, .. } => {
+            let summary = &info.summary;
+            let warning = if info.expired {
+                "This certificate has expired."
+            } else {
+                "This certificate is not yet valid."
+            };
             let body = column![
                 theme::typography::title("Sign"),
-                theme::typography::body("Reading the credential…"),
-            ]
-            .spacing(gap::M);
-            panel(body, None)
-        }
-        // The one dialog the flow's middle now is: who is signing, what is
-        // being signed into, what the mark looks like, the §31.2/§31.3
-        // disclosures, and where the signed copy goes — with Sign as the
-        // confirmation §31.1 step 7 asks for. Six popups became this.
-        SigningFlow::Review {
-            info,
-            options,
-            candidates,
-            destination,
-            details_expanded,
-            ..
-        } => {
-            use crate::signing::{PlacementPosition, PlacementSize, SignMsg, TargetChoice};
-
-            let summary = &info.summary;
-            let common_name = crate::signing::subject_common_name(&summary.subject).to_string();
-            let current_profile = app
-                .signing_profile
-                .as_deref()
-                .and_then(|id| app.settings.signatures.profile(id));
-            let who = match current_profile {
-                Some(profile) => format!("{} — {common_name}", profile.name),
-                // An ad-hoc `.p12`: there is no profile name to give, so the
-                // certificate's own common name is the whole answer.
-                None => common_name,
-            };
-            let key = match summary.key_bits {
-                Some(bits) => format!("{} ({bits} bits)", summary.key_algorithm),
-                None => summary.key_algorithm.clone(),
-            };
-
-            let mut identity = column![theme::typography::body(who)].spacing(gap::XS);
-            // The fingerprint is what a recipient checks this signature
-            // against, so it is shown whole — never truncated — just quietly.
-            identity = identity
-                .push(theme::typography::caption(format!(
-                    "{key} · signature profile {}",
-                    match SigningProfile::AdbePkcs7Detached {
-                        SigningProfile::AdbePkcs7Detached => "B-B",
-                        SigningProfile::EtsiCadesDetached => "B-B (PAdES)",
-                    }
-                )))
-                .push(theme::typography::caption(format!(
-                    "SHA-256 {}",
-                    summary.sha256_fingerprint
-                )))
-                .push(theme::typography::caption(format!(
+                theme::typography::body(warning).color(theme::ambient::alert()),
+                theme::typography::body(crate::signing::subject_common_name(&summary.subject)),
+                theme::typography::caption(format!(
                     "Valid {} — {}",
                     summary.not_before, summary.not_after
-                )));
-
-            // More than one saved profile: switching is a row of buttons
-            // here rather than a dialog of its own. A locked profile drops
-            // back to the passphrase step and returns to this dialog.
-            let mut switcher = row![].spacing(gap::S);
-            if app.settings.signatures.profiles.len() > 1 {
-                for profile in &app.settings.signatures.profiles {
-                    let selected = app.signing_profile.as_deref() == Some(profile.id.as_str());
-                    switcher = switcher.push(
-                        button(theme::typography::label(profile.name.clone()))
-                            .padding(gap::XS)
-                            .style(if selected {
-                                theme::ambient::selected_button
-                            } else {
-                                theme::ambient::tool_button
-                            })
-                            .on_press(Message::Sign(SignMsg::ProfileChosen(profile.id.clone()))),
-                    );
-                }
-            }
-            switcher = switcher.push(
-                button(theme::typography::label("Use another .p12/.pfx…"))
-                    .padding(gap::XS)
-                    .style(theme::ambient::tool_button)
-                    .on_press(Message::Sign(SignMsg::UseAnotherCredential)),
-            );
-            identity = identity.push(switcher);
-
-            let mut body = column![
-                theme::typography::title("Sign"),
-                dialog_section("Signing as", identity),
-            ]
-            .spacing(gap::M);
-
-            // §33's last paragraph: an expired or not-yet-valid certificate
-            // stops the flow until it is overridden on purpose. Collapsing
-            // the dialogs did not collapse this gate — there is simply no
-            // Sign button below until it is answered.
-            if info.expired || info.not_yet_valid {
-                let warning = if info.expired {
-                    "This certificate has expired."
-                } else {
-                    "This certificate is not yet valid."
-                };
-                body = body.push(theme::typography::body(warning).color(theme::ambient::alert()));
-                if !info.override_validity {
-                    body = body.push(
-                        button(theme::typography::label("Sign anyway"))
-                            .padding(gap::S)
-                            .style(theme::ambient::alert_button)
-                            .on_press(Message::Sign(SignMsg::OverrideValidity)),
-                    );
-                }
-            }
-
-            // The field a click asked for that preflight could not offer.
-            // Loud, named, and above the picker: the whole failure this
-            // notice exists for is a signature landing somewhere the reader
-            // never pointed at, with nothing saying so.
-            if let Some(clicked) = options.prefill_missed.as_deref() {
-                body = body.push(
-                    theme::typography::body(crate::signing::prefill_missed_line(clicked))
-                        .color(theme::ambient::alert()),
-                );
-            }
-
-            let mut target_section = column![theme::typography::body(
-                crate::signing::confirm_target_line(options)
-            )]
-            .spacing(gap::S);
-            // The picker earns its place when there is a real choice to make:
-            // several candidate fields, or nothing preselected because the
-            // clicked field was not on offer.
-            if candidates.len() > 1 || options.target.is_none() {
-                let mut picker = column![].spacing(gap::S);
-                for candidate in candidates {
-                    let label = match candidate {
-                        TargetChoice::NewField => "New field".to_string(),
-                        // Quoted so a raw PDF field name reads as data, not
-                        // as pulpit's own copy.
-                        TargetChoice::ExistingField(name) => format!("“{name}”"),
-                    };
-                    let selected = options.target.as_ref() == Some(candidate);
-                    picker = picker.push(
-                        button(theme::typography::label(label))
-                            .padding(gap::S)
-                            .style(if selected {
-                                theme::ambient::selected_button
-                            } else {
-                                theme::ambient::tool_button
-                            })
-                            .on_press(Message::Sign(SignMsg::TargetChosen(candidate.clone()))),
-                    );
-                }
-                target_section = target_section.push(picker);
-            }
-            // This picks which field to sign into, not where the mark sits on
-            // the page — the Appearance section below owns position and size.
-            body = body.push(dialog_section(
-                "Which signature field to sign into",
-                target_section,
-            ));
-
-            // §25.5. Where the mark goes depends on what is being signed:
-            // inside the field's own box when the sender drew one, and
-            // otherwise at a position/size preset on the page the reader was
-            // showing when they chose Visible — see `crate::signing`'s module
-            // doc comment for why presets rather than a drawn box.
-            let mut appearance_section = column![row![
-                button(theme::typography::label("Invisible"))
-                    .padding(gap::S)
-                    .style(if options.visible_requested {
-                        theme::ambient::tool_button
-                    } else {
-                        theme::ambient::selected_button
-                    })
-                    .on_press(Message::Sign(SignMsg::VisibleChanged(false))),
-                button(theme::typography::label("Visible"))
-                    .padding(gap::S)
-                    .style(if options.visible_requested {
-                        theme::ambient::selected_button
-                    } else {
-                        theme::ambient::tool_button
-                    })
-                    .on_press(Message::Sign(SignMsg::VisibleChanged(true))),
-            ]
-            .spacing(gap::S)]
-            .spacing(gap::S);
-            if let Some(crate::signing::AppearancePlan::InFieldBox { field, page_index }) =
-                options.placement.as_ref()
-            {
-                // The sender already drew the rectangle, so there is nothing
-                // to place: say where it is instead of offering presets that
-                // would not be honoured.
-                appearance_section = appearance_section.push(theme::typography::caption(format!(
-                    "Drawn inside “{field}”’s box on page {}.",
-                    page_index + 1
-                )));
-            }
-            if let Some(crate::signing::AppearancePlan::Preset {
-                page_index,
-                placement,
-            }) = options.placement.as_ref()
-            {
-                let placement = *placement;
-                let mut positions = row![].spacing(gap::S);
-                for position in PlacementPosition::ALL {
-                    let selected = placement.position == position;
-                    positions = positions.push(
-                        button(theme::typography::label(position.label()))
-                            .padding(gap::XS)
-                            .style(if selected {
-                                theme::ambient::selected_button
-                            } else {
-                                theme::ambient::tool_button
-                            })
-                            .on_press(Message::Sign(SignMsg::PlacementPositionChosen(position))),
-                    );
-                }
-                let mut sizes = row![].spacing(gap::S);
-                for size in PlacementSize::ALL {
-                    let selected = placement.size == size;
-                    sizes = sizes.push(
-                        button(theme::typography::label(size.label()))
-                            .padding(gap::XS)
-                            .style(if selected {
-                                theme::ambient::selected_button
-                            } else {
-                                theme::ambient::tool_button
-                            })
-                            .on_press(Message::Sign(SignMsg::PlacementSizeChosen(size))),
-                    );
-                }
-                appearance_section = appearance_section
-                    .push(dialog_section("Position", positions))
-                    .push(dialog_section("Size", sizes))
-                    // The page was captured when Visible was pressed, so say
-                    // which one: the reader may scroll before confirming.
-                    .push(theme::typography::caption(format!(
-                        "Placed on page {}.",
-                        page_index + 1
-                    )));
-            }
-            body = body.push(dialog_section("Appearance", appearance_section));
-
-            // Reason, location and contact are optional PDF metadata almost
-            // nobody fills. Three empty boxes at the top of the dialog is
-            // most of what made the old Options step read as work, so they
-            // are folded away until asked for.
-            body = body.push(
-                button(theme::typography::label(if *details_expanded {
-                    "Hide details"
-                } else {
-                    "Details…"
-                }))
-                .padding(gap::S)
-                .style(theme::ambient::tool_button)
-                .on_press(Message::Sign(SignMsg::ToggleDetails)),
-            );
-            if *details_expanded {
-                body = body.push(
-                    column![
-                        dialog_section(
-                            "Reason (optional)",
-                            text_input("Reason", &options.reason)
-                                .on_input(|v| Message::Sign(SignMsg::ReasonChanged(v)))
-                                .style(theme::ambient::text_field)
-                                .padding(gap::S),
-                        ),
-                        dialog_section(
-                            "Location (optional)",
-                            text_input("Location", &options.location)
-                                .on_input(|v| Message::Sign(SignMsg::LocationChanged(v)))
-                                .style(theme::ambient::text_field)
-                                .padding(gap::S),
-                        ),
-                        dialog_section(
-                            "Contact (optional)",
-                            text_input("Contact", &options.contact)
-                                .on_input(|v| Message::Sign(SignMsg::ContactChanged(v)))
-                                .style(theme::ambient::text_field)
-                                .padding(gap::S),
-                        ),
-                    ]
-                    .spacing(gap::M),
-                );
-            }
-
-            body = body.push(theme::typography::caption(
-                crate::signing::IDENTITY_DISCLOSURE,
-            ));
-            if options.countersigning {
-                body = body.push(theme::typography::caption(
-                    crate::signing::COUNTERSIGN_DISCLOSURE,
-                ));
-            }
-
-            // Where Sign will write, in full and before it is pressed. The
-            // default has already stepped aside from anything already there
-            // (`crate::signing::signed_destination`); overwriting is reachable
-            // only through this picker, which asks for itself.
-            body = body.push(dialog_section(
-                "Save the signed copy as",
-                column![
-                    theme::typography::caption(destination.display().to_string()),
-                    button(theme::typography::label("Change…"))
-                        .padding(gap::S)
-                        .style(theme::ambient::tool_button)
-                        .on_press(Message::Sign(SignMsg::ChooseDestination)),
-                ]
-                .spacing(gap::S),
-            ));
-
-            let mut actions = row![cancel()].spacing(gap::S);
-            if candidates.is_empty() {
-                // Only reachable for a document that already carries a
-                // signature and has no empty field left to countersign into
-                // (every other preflight outcome keeps "new field" on offer).
-                body = body.push(
-                    theme::typography::body(
-                        "No signature field is available to sign into: the document has no \
-                         empty signature field to countersign, and already carries one if it \
-                         is not offering a new field.",
-                    )
-                    .color(theme::ambient::alert()),
-                );
-            }
-            if info.may_proceed() && options.target.is_some() {
-                actions = actions.push(
-                    button(theme::typography::label("Sign"))
-                        .padding(gap::S)
-                        .style(theme::ambient::selected_button)
-                        .on_press(Message::Sign(SignMsg::Confirm)),
-                );
-            }
-            body = body.push(actions);
-            // Non-dismissable except its own buttons (§31.1 step 7): it
-            // carries both disclosures, so no ground-behind press and no
-            // close glyph.
-            panel(body, None)
-        }
-        SigningFlow::Signing { destination, .. } => {
-            let body = column![
-                theme::typography::title("Sign"),
-                theme::typography::body(format!("Signing to {}…", destination.display())),
-            ]
-            .spacing(gap::M);
-            panel(body, None)
-        }
-        SigningFlow::Result {
-            report,
-            destination,
-            verification,
-        } => {
-            let mut body = column![
-                theme::typography::title("Signed"),
-                theme::typography::body(format!(
-                    "Wrote {} ({} signature{} now present).",
-                    destination.display(),
-                    report.signature_count,
-                    if report.signature_count == 1 { "" } else { "s" }
                 )),
-            ]
-            .spacing(gap::M);
-            for entry in verification {
-                let line = crate::signing::signature_line_for_verification(entry);
-                body = body.push(theme::typography::body(line.summary_text()));
-            }
-            // Opening the copy is the primary action: the reader on screen
-            // still shows the unsigned source, and a signature that exists
-            // only in a file nobody opened reads as one that never appeared.
-            body = body.push(
+                theme::typography::caption(format!("SHA-256 {}", summary.sha256_fingerprint)),
+                theme::typography::caption(crate::signing::IDENTITY_DISCLOSURE),
                 row![
-                    button(theme::typography::label("Done"))
+                    cancel(),
+                    button(theme::typography::label("Sign anyway"))
                         .padding(gap::S)
-                        .style(theme::ambient::tool_button)
-                        .on_press(Message::Sign(crate::signing::SignMsg::Done)),
-                    button(theme::typography::label("Open the signed copy"))
-                        .padding(gap::S)
-                        .style(theme::ambient::selected_button)
-                        .on_press(Message::Sign(crate::signing::SignMsg::OpenSignedCopy)),
+                        .style(theme::ambient::alert_button)
+                        .on_press(Message::Sign(SignMsg::OverrideValidity)),
                 ]
                 .spacing(gap::S),
-            );
-            panel(body, Some(Message::Sign(crate::signing::SignMsg::Done)))
-        }
-        SigningFlow::Failed { detail } => {
-            let body = column![
-                theme::typography::title("Signing failed"),
-                theme::typography::body(detail.clone()).color(theme::ambient::alert()),
-                theme::typography::caption("The source document is unchanged."),
-                button(theme::typography::label("Close"))
-                    .padding(gap::S)
-                    .style(theme::ambient::tool_button)
-                    .on_press(Message::Sign(crate::signing::SignMsg::Done)),
             ]
             .spacing(gap::M);
-            panel(body, Some(Message::Sign(crate::signing::SignMsg::Done)))
+            // Non-dismissable except its own buttons: it is a warning being
+            // answered, and a press on the ground behind it would read as
+            // either answer.
+            panel(body, None)
         }
+        // The save picker is the platform's own window, and the write after
+        // it is over in well under a second. A modal here would flash.
+        SigningFlow::Signing { .. } => blank(),
     }
 }
-
 /// Offer back the edits a previous run did not save (§11.4).
 ///
 /// The wording is deliberately careful about what pulpit does not know: the
