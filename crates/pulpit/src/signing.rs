@@ -1198,15 +1198,19 @@ mod tests {
 
     #[test]
     fn the_default_destination_steps_aside_rather_than_overwrite() {
+        let directory = std::path::Path::new("/decks");
+        // Compared as paths rather than as strings: `join` renders the
+        // platform's own separator, so matching on `to_str()` against
+        // "/decks/..." answered "free" for every candidate on Windows and
+        // the first name came back unchanged. Path equality compares
+        // components, which is what this predicate actually means.
         let taken = |path: &std::path::Path| {
-            matches!(
-                path.to_str(),
-                Some("/decks/talk-signed.pdf") | Some("/decks/talk-signed-2.pdf")
-            )
+            path == directory.join("talk-signed.pdf")
+                || path == directory.join("talk-signed-2.pdf")
         };
         assert_eq!(
             signed_destination(std::path::Path::new("/decks/talk.pdf"), &taken),
-            PathBuf::from("/decks/talk-signed-3.pdf")
+            directory.join("talk-signed-3.pdf")
         );
     }
 
