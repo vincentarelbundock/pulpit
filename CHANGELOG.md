@@ -54,6 +54,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report the document as changed after that signature once you save. Nothing
   in between: a paragraph there could only say the same thing a third time.
 
+### Removed
+
+- **The menu's separate "Diagnostics…" entry.** It sent the reader to
+  Settings, exactly as "Settings…" three lines above it does, and what it
+  promised is a section of that page. Two entries for one destination is a
+  menu that has to be read twice to learn they are the same place.
+
+- **The notice about the audience window covering the presenter view.** A
+  toast is drawn on the presenter window and nowhere else, so a notice about
+  that window being covered sits under the thing covering it. It is still
+  written to the diagnostics bundle.
+
 ### Fixed
 
 - **Leaving fullscreen no longer leaves the page soft.** The reader's cell
