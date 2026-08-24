@@ -4311,19 +4311,16 @@ impl App {
                     && self.resolved_index(Role::Presenter) == self.resolved_index(Role::Audience);
                 self.coordinator.roles.allow_shared_display = wanted && shared;
                 if wanted && shared && self.audience_started {
-                    // The way back out has to be the key that is actually
-                    // bound: this notice is the only thing on screen when the
-                    // audience window is covering the presenter view.
-                    let key = self
-                        .action_shortcut(Action::ToggleAudienceFullscreen)
-                        .map(|key| format!("Press {key} to bring it back."))
-                        .unwrap_or_else(|| {
-                            "Bind a key to \"Audience fullscreen\" to bring it back.".to_string()
-                        });
-                    self.notify(format!(
-                        "The audience window is now fullscreen on this screen and covers the \
-                         presenter view. {key}"
-                    ));
+                    // Recorded, not raised. A toast is drawn on the presenter
+                    // window and nowhere else, so a notice about that window
+                    // being covered is a notice under the thing covering it —
+                    // it either cannot be read or is a warning about a state
+                    // the presenter asked for and can see for themselves. The
+                    // diagnostics bundle keeps the record either way.
+                    self.diagnostics.note(
+                        "audience fullscreen on the shared display; it covers the presenter view"
+                            .to_string(),
+                    );
                 }
 
                 self.settings.display.roles = self.coordinator.roles.clone();
@@ -6466,6 +6463,19 @@ impl App {
         // it *did* is only known from the answer. See
         // [`App::form_commits_possible_in_flight`].
         let may_commit = event.can_change_the_document();
+        // §31.3, A9, at the other choke point: a form event that could change
+        // a value is refused in append-only mode, while the pointer and focus
+        // events that only move the caret about go through. This also closes
+        // what the command-level check never covered — a field reached with
+        // Tab and typed into, which never sent a `ReadCommand` at all.
+        if may_commit
+            && self
+                .append_only
+                .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
+        {
+            self.notify(crate::signing::append_only_refusal());
+            return false;
+        }
         let sent = match self.reader_link.as_mut() {
             Some(link) => link.ask(crate::reader_link::Ask::FormEvent { page, event }),
             None => false,
@@ -9400,13 +9410,23 @@ impl App {
     /// from the toolbar or by clicking the field itself), and
     /// `sign_execute`'s own preflight pass enforces the rest of §25.4 no
     /// matter what this check misses.
+    ///
+    /// `PagePressed` and `PageReleased` are not here either, and used to be.
+    /// They are the *gesture*, not what it does: with no tool armed a press
+    /// is the hand, which pans the page, follows a link, drags out a crop
+    /// marquee or selects text — none of which touch the document. Refusing
+    /// them took the hand away from every signed document, which is most of
+    /// what reading one consists of. What a gesture may go on to commit is
+    /// refused where it commits instead — `commit_to_document` and
+    /// `ask_form_event_on` — which is both narrower and wider than this list
+    /// could be: narrower because reading is untouched, wider because it
+    /// also covers the paths that never came through here at all, such as
+    /// typing into a field reached with Tab.
     fn read_command_mutates(command: &crate::widgets::event::ReadCommand) -> bool {
         use crate::widgets::event::ReadCommand;
         matches!(
             command,
             ReadCommand::Arm(Some(_))
-                | ReadCommand::PagePressed
-                | ReadCommand::PageReleased
                 | ReadCommand::CommitMark
                 | ReadCommand::ComposeMark(_)
                 | ReadCommand::DeleteSelected
@@ -10670,6 +10690,18 @@ impl App {
         transaction: pulpit_render::document::DocumentTransaction,
     ) -> bool {
         if transaction.is_empty() {
+            return false;
+        }
+        // §31.3, A9: the one place every annotation transaction passes
+        // through, whatever gesture made it. Guarding here rather than at the
+        // gesture is what lets the hand keep panning a signed document while
+        // still refusing the one thing the hand can change — picking a mark
+        // up and putting it down somewhere else.
+        if self
+            .append_only
+            .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
+        {
+            self.notify(crate::signing::append_only_refusal());
             return false;
         }
         // A form event in flight may commit a value, and a commit is a
@@ -13479,6 +13511,50 @@ fn physical_scancode(physical: &iced::keyboard::key::Physical) -> Option<u32> {
         Physical::Unidentified(NativeCode::Windows(code)) => Some(*code as u32),
         Physical::Unidentified(NativeCode::MacOS(code)) => Some(*code as u32),
         Physical::Unidentified(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod append_only_tests {
+    use super::App;
+    use crate::widgets::event::ReadCommand;
+
+    #[test]
+    fn a_signed_document_still_takes_the_gestures_that_only_read_it() {
+        // With no tool armed a press is the hand: it pans the page, follows a
+        // link, drags out a crop marquee, selects text. Refusing the gesture
+        // took all of that away from every signed document, which is most of
+        // what reading one consists of — and the hand is the tool a reader
+        // spends the whole time in.
+        for command in [ReadCommand::PagePressed, ReadCommand::PageReleased] {
+            assert!(
+                !App::read_command_mutates(&command),
+                "{command:?} is a gesture, not a change to the document"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_gesture_goes_on_to_commit_is_still_refused() {
+        // The list keeps everything that *is* a change, and the two choke
+        // points the gestures reach — `commit_to_document` and
+        // `ask_form_event_on` — refuse the rest.
+        for command in [
+            ReadCommand::Arm(Some(pulpit_core::annotation::AnnotationTool::Ink)),
+            ReadCommand::CommitMark,
+            ReadCommand::DeleteSelected,
+            ReadCommand::EditSelected,
+            ReadCommand::PickTime,
+            ReadCommand::SaveAs,
+        ] {
+            assert!(
+                App::read_command_mutates(&command),
+                "{command:?} changes the document and must be refused"
+            );
+        }
+        // Signing is the one addition append-only mode exists to permit.
+        assert!(!App::read_command_mutates(&ReadCommand::Sign));
+        assert!(!App::read_command_mutates(&ReadCommand::Arm(None)));
     }
 }
 

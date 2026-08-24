@@ -86,6 +86,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which now appears only if the write takes longer than a moment. Most writes
   are over before it is shown at all.
 
+- **The hand still works in a signed document.** Append-only mode refused the
+  page-surface press and release outright, but those are the gesture, not what
+  it does: with no tool armed a press is the hand, which pans the page,
+  follows a link, drags out a crop marquee or selects text. None of that
+  touches the document, and refusing it took the hand away from every signed
+  document — which is most of what reading one consists of. What a gesture may
+  go on to commit is now refused where it commits, at the two choke points
+  every change passes through. That is both narrower and wider than the old
+  list: reading is untouched, and it also covers what never came through that
+  list at all, such as typing into a field reached with Tab.
+
 - **The refusal that comes with a signed document points at a control that
   exists.** Declining to edit a signed document is offered once, when the file
   opens; the notice a drawing tool then gave sent the reader back to that

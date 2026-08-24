@@ -1279,7 +1279,10 @@ fn menu(app: &App) -> Element<'_, Message> {
             Message::ToggleShortcuts,
         ));
         items = items.push(entry("Documentation", None, Message::OpenDocumentation));
-        items = items.push(entry("Diagnostics…", None, Message::ShowSettings));
+        // No "Diagnostics…" of its own: it sent `ShowSettings`, exactly as
+        // "Settings…" above does, and what it promised is a section of that
+        // page. Two entries for one destination is a menu that has to be read
+        // twice to find out they are the same place.
         items = items.push(entry("About Pulpit", None, Message::ShowAbout));
 
         items = items.push(
