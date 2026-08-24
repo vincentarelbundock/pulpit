@@ -308,6 +308,50 @@ mod tests {
     }
 
     #[test]
+    fn every_hand_written_wrapper_forwards_widget_operations() {
+        // `Widget::operate` defaults to a no-op that does not descend, so a
+        // wrapper that leaves it out swallows every operation aimed at its
+        // subtree — and nothing says so: it compiles, it draws, it handles
+        // events, and only the operations quietly stop arriving.
+        //
+        // `Thumbed` shipped without it once. `scroll_to` stopped reaching the
+        // document surface, so the session's offset and the scrollable's
+        // parted company: the page column built its visible pages behind a
+        // leading spacer as tall as the session thought it had scrolled,
+        // while the scrollable stayed put, and the surface showed the spacer
+        // — no pages at all.
+        //
+        // Checked by reading the source because the alternative needs a live
+        // `iced::Renderer`, which a unit test has no way to build. The
+        // needles are assembled at run time rather than written out: this
+        // module is inside one of the files being scanned, and an assertion
+        // that spells its own needle would find itself and pass no matter
+        // what the widget above it does.
+        let wrappers = [
+            ("scroll::Thumbed", include_str!("scroll.rs")),
+            ("panel::KeyScope", include_str!("panel.rs")),
+            ("residency", include_str!("../residency.rs")),
+            (
+                "annotations::popover",
+                include_str!("annotations/popover.rs"),
+            ),
+        ];
+        let implements = format!("{} for", "Widget<Message, iced::Theme, iced::Renderer>");
+        let forwards = format!("fn {}(", "operate");
+        for (name, source) in wrappers {
+            assert!(
+                source.contains(&implements),
+                "{name} no longer implements Widget; drop it from this list or fix the path"
+            );
+            assert!(
+                source.contains(&forwards),
+                "{name} implements Widget without forwarding `operate`, so every widget \
+                 operation aimed through it — `scroll_to` above all — is silently discarded"
+            );
+        }
+    }
+
+    #[test]
     fn a_surface_with_nothing_to_scroll_reports_no_offset() {
         assert_eq!(offset_for_thumb_top(120.0, 400.0, 400.0), 0.0);
     }
@@ -582,6 +626,38 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Messa
             },
             colour,
         );
+    }
+
+    /// Widget operations reach the surface underneath, and every wrapper on
+    /// the way has to pass them on by hand: the default implementation is a
+    /// no-op that does not descend, so a wrapper that forgets this silently
+    /// swallows every operation aimed at its subtree.
+    ///
+    /// That is not a cosmetic loss here. `scroll_to` is how the application
+    /// moves the reader — a page chosen in the overview, a page number typed,
+    /// a link followed, a zoom, an arrow key, a position restored on remount,
+    /// and this widget's own thumb drag, which publishes an offset and then
+    /// relies on the surface being told about it. Without this, the session's
+    /// offset and the scrollable's part company: the page column builds its
+    /// visible pages behind a leading spacer as tall as the session thinks it
+    /// has scrolled, while the scrollable stays where it was, so what is on
+    /// screen is the spacer — a surface with no pages in it at all.
+    fn operate(
+        &mut self,
+        tree: &mut widget::Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.surface.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                operation,
+            );
+        });
     }
 
     fn overlay<'a>(
