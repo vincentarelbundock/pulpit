@@ -24,7 +24,28 @@ use crate::runtime::{discover_chromium, probe_external_chromium};
 use crate::surface::AttachedRing;
 use crate::worker::reply;
 
+/// How long one command may take once the browser is up and a page is on
+/// screen.
+///
+/// Deliberately short. Past this the browser is not slow, it is wedged, and a
+/// presentation is the worst place to find that out slowly.
 const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long the commands that *bring* a browser and a page up may take.
+///
+/// Three times [`COMMAND_DEADLINE`], because cold start is a different
+/// activity from steady state and was being measured against the wrong one. A
+/// first command's reply waits on process start, profile creation, GPU and
+/// renderer init, and the first paint of a page — seconds of real work on an
+/// idle machine, and on a loaded one (a CI runner, a laptop compiling
+/// something) several times that. Ten seconds was enough on an idle machine
+/// and not enough on a busy one, which is a timeout that fails exactly when
+/// the user is least able to do anything about it.
+///
+/// Under the 40-second ceiling the media tests give a session to produce its
+/// first frames, so a genuine hang is reported here, by the command that hung,
+/// rather than as a test that saw no frames and cannot say why.
+const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const IDLE_TICK: Duration = Duration::from_millis(4);
 /// The loop cadence while every session is parked: nothing is producing
 /// frames, so only stdin commands and stray CDP events need service.
@@ -87,7 +108,7 @@ impl Browser {
         let mut pipe = CdpPipe::launch(executable, &profile, viewport, &[])?;
         // Version and feature probing happen before any document content is
         // loaded, so an incompatible browser fails here rather than on stage.
-        let product = pipe.feature_probe(COMMAND_DEADLINE)?;
+        let product = pipe.feature_probe(STARTUP_DEADLINE)?;
         tracing::debug!(%product, "browser ready");
         Ok(Self {
             pipe,
@@ -165,8 +186,20 @@ impl Browser {
 
     /// Send a command to one page and wait for its reply.
     fn command(&mut self, page: &str, method: &str, params: Json) -> Result<Json, MediaError> {
+        self.command_within(page, method, params, COMMAND_DEADLINE)
+    }
+
+    /// The same, for a caller that knows this command is not steady state —
+    /// see [`STARTUP_DEADLINE`].
+    fn command_within(
+        &mut self,
+        page: &str,
+        method: &str,
+        params: Json,
+        deadline: Duration,
+    ) -> Result<Json, MediaError> {
         let id = self.pipe.send_to_session(method, params, Some(page))?;
-        self.wait_for(id, COMMAND_DEADLINE)
+        self.wait_for(id, deadline)
     }
 
     /// Send a command to one page without waiting.
@@ -193,7 +226,7 @@ impl Browser {
             "Target.createTarget",
             serde_json::json!({ "url": "about:blank", "newWindow": true, "background": false }),
         )?;
-        let created = self.wait_for(created, COMMAND_DEADLINE)?;
+        let created = self.wait_for(created, STARTUP_DEADLINE)?;
         let target = created
             .get("targetId")
             .and_then(Json::as_str)
@@ -218,7 +251,7 @@ impl Browser {
     /// is the path this adapter has always used, and it costs nothing.
     fn initial_page(&mut self) -> Result<Option<Page>, MediaError> {
         let id = self.pipe.send("Target.getTargets", serde_json::json!({}))?;
-        let listed = self.wait_for(id, COMMAND_DEADLINE)?;
+        let listed = self.wait_for(id, STARTUP_DEADLINE)?;
         let Some(target) = listed
             .get("targetInfos")
             .and_then(Json::as_array)
@@ -255,7 +288,7 @@ impl Browser {
             "Target.attachToTarget",
             serde_json::json!({ "targetId": target, "flatten": true }),
         )?;
-        let attached = self.wait_for(id, COMMAND_DEADLINE)?;
+        let attached = self.wait_for(id, STARTUP_DEADLINE)?;
         attached
             .get("sessionId")
             .and_then(Json::as_str)
@@ -417,6 +450,19 @@ impl Session {
         browser.command(&page, method, params)
     }
 
+    /// The same, for the commands that bring this session up — see
+    /// [`STARTUP_DEADLINE`].
+    fn command_within(
+        &mut self,
+        browser: &mut Browser,
+        method: &str,
+        params: Json,
+        deadline: Duration,
+    ) -> Result<Json, MediaError> {
+        let page = self.page.session.clone();
+        browser.command_within(&page, method, params, deadline)
+    }
+
     /// Send a command to this session's page without waiting for a reply.
     fn send_page(
         &mut self,
@@ -474,7 +520,8 @@ impl Session {
                 }),
             ),
         ] {
-            self.command(browser, method, params)?;
+            // Bring-up: the browser may still be starting behind these.
+            self.command_within(browser, method, params, STARTUP_DEADLINE)?;
         }
 
         // The screencast starts *before* the navigation, and the order is not
@@ -483,11 +530,14 @@ impl Session {
         // has an active one, and `Page.startScreencast` is refused with "Not
         // attached to an active page". Started first, the screencast is bound
         // to the tab and survives the swap.
-        self.start_screencast(browser)?;
+        self.start_screencast(browser, STARTUP_DEADLINE)?;
 
         let url_params = serde_json::json!({ "url": url });
         let id = self.send_page(browser, "Page.navigate", url_params)?;
-        browser.wait_for(id, COMMAND_DEADLINE)?;
+        // The slowest of the lot: this reply waits on the document being
+        // fetched and committed, which on a cold browser follows the process
+        // start it has not finished paying for yet.
+        browser.wait_for(id, STARTUP_DEADLINE)?;
         let paused = self.collect_paused(browser);
         self.resolve_fetches(browser, paused)?;
 
@@ -497,10 +547,11 @@ impl Session {
         // therefore never produces a frame. Every subsequent request — which
         // is every request a bundle can actually make — is still intercepted
         // and refused unless it stays on the private origin.
-        self.command(
+        self.command_within(
             browser,
             "Fetch.enable",
             serde_json::json!({ "patterns": [{ "urlPattern": "*" }] }),
+            STARTUP_DEADLINE,
         )?;
         Ok(())
     }
@@ -512,7 +563,15 @@ impl Session {
     /// and every frame is then resampled on the worker's own thread — the cost
     /// paid per frame, for a picture the browser could have produced correctly
     /// in the first place.
-    fn start_screencast(&mut self, browser: &mut Browser) -> Result<(), MediaError> {
+    ///
+    /// `deadline` because this is on both paths: once while the session is
+    /// still coming up, and again whenever the cast has to be restarted under
+    /// a browser that is long since warm.
+    fn start_screencast(
+        &mut self,
+        browser: &mut Browser,
+        deadline: Duration,
+    ) -> Result<(), MediaError> {
         self.cast_size = (self.spec.viewport.width, self.spec.viewport.height);
         let (width, height) = self.cast_size;
         // A coarse browser-side throttle: on a 60 Hz compositor every second
@@ -524,7 +583,7 @@ impl Session {
             fps if fps <= 30 => 2,
             _ => 1,
         };
-        self.command(
+        self.command_within(
             browser,
             "Page.startScreencast",
             serde_json::json!({
@@ -534,6 +593,7 @@ impl Session {
                 "maxHeight": height,
                 "everyNthFrame": every_nth,
             }),
+            deadline,
         )?;
         self.cast_running = true;
         self.next_publish = None;
@@ -565,7 +625,7 @@ impl Session {
         self.active = active;
         if active {
             if !self.cast_running {
-                self.start_screencast(browser)?;
+                self.start_screencast(browser, COMMAND_DEADLINE)?;
             }
         } else {
             self.stop_screencast(browser)?;
@@ -948,7 +1008,7 @@ impl Session {
             self.stop_screencast(browser)?;
             self.cast_size = (viewport.width, viewport.height);
             if self.active {
-                self.start_screencast(browser)?;
+                self.start_screencast(browser, COMMAND_DEADLINE)?;
             }
         }
         Ok(())
