@@ -84,8 +84,3 @@ hex = "0.4"
 [profile.release]
 debug = 1
 
-# Iced 0.14 hard-codes a two-point scrollbar thumb minimum. This narrow patch
-# makes it configurable so Pulpit's shared scrollbar can enforce one usable
-# minimum across every scrolling surface.
-[patch.crates-io]
-iced_widget = { path = "vendor/iced_widget" }

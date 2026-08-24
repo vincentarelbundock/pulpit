@@ -107,6 +107,9 @@ fn page_surface<'a, Message: Clone + 'static>(
     }
 
     let surface = PageSurface::from(reader);
+    // Read out here rather than inside: the closure outlives the borrow, and
+    // the thumb only needs the number.
+    let offset = reader.controls.offset;
     let page: Element<'a, Message> = responsive(move |viewport| {
         let sheets = surface.sheets(compose, mode, on_event);
         let scroller = scrollable(
@@ -142,7 +145,11 @@ fn page_surface<'a, Message: Clone + 'static>(
         // In the editor the surface is a representation, so it takes no
         // events.
         if !mode.interactive() {
-            return scroller.into();
+            return crate::widgets::scroll::thumbed(scroller, offset, move |_| {
+                // A representation takes no events, so the thumb is drawn
+                // and never dragged; the surface still shows where it sits.
+                on_event(WidgetEvent::Read(ReadCommand::DragScrollTo(offset)))
+            });
         }
         // The widget's scroll position is the session's scroll offset: the
         // wheel, the handle and the keyboard all arrive here, and the session
@@ -150,15 +157,17 @@ fn page_surface<'a, Message: Clone + 'static>(
         // The surface's own size comes back with every scroll event, which is
         // how a fit is fitted to the window that exists rather than to the
         // cell the layout asked for.
-        scroller
-            .on_scroll(move |viewport| {
+        crate::widgets::scroll::thumbed(
+            scroller.on_scroll(move |viewport| {
                 on_event(WidgetEvent::Read(ReadCommand::ScrollTo {
                     offset: viewport.absolute_offset().y,
                     offset_x: viewport.absolute_offset().x,
                     viewport: viewport.bounds().height,
                 }))
-            })
-            .into()
+            }),
+            offset,
+            move |offset| on_event(WidgetEvent::Read(ReadCommand::DragScrollTo(offset))),
+        )
     })
     .into();
     if !mode.interactive()
@@ -2217,17 +2226,20 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
         if window.after > 0.0 {
             rows = rows.push(space::vertical().height(window.after));
         }
-        crate::widgets::scroll::vertical(rows)
-            .id(outline_scrollable_id())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(move |viewport| {
-                on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
-                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
-                    viewport: viewport.bounds().height.max(0.0).round() as u32,
-                }))
-            })
-            .into()
+        crate::widgets::scroll::thumbed(
+            crate::widgets::scroll::vertical(rows)
+                .id(outline_scrollable_id())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(move |viewport| {
+                    on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
+                        offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                        viewport: viewport.bounds().height.max(0.0).round() as u32,
+                    }))
+                }),
+            scroll,
+            move |offset| on_event(WidgetEvent::Read(ReadCommand::OutlineDragScrollTo(offset))),
+        )
     })
     .into()
 }
@@ -2255,17 +2267,20 @@ fn virtual_outline<Message: Clone + 'static>(
         if window.after > 0.0 {
             rows = rows.push(space::vertical().height(window.after));
         }
-        crate::widgets::scroll::vertical(rows)
-            .id(outline_scrollable_id())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(move |viewport| {
-                on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
-                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
-                    viewport: viewport.bounds().height.max(0.0).round() as u32,
-                }))
-            })
-            .into()
+        crate::widgets::scroll::thumbed(
+            crate::widgets::scroll::vertical(rows)
+                .id(outline_scrollable_id())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(move |viewport| {
+                    on_event(WidgetEvent::Read(ReadCommand::OutlineScrolled {
+                        offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                        viewport: viewport.bounds().height.max(0.0).round() as u32,
+                    }))
+                }),
+            scroll,
+            move |offset| on_event(WidgetEvent::Read(ReadCommand::OutlineDragScrollTo(offset))),
+        )
     })
     .into()
 }

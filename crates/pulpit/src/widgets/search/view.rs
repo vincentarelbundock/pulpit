@@ -277,17 +277,24 @@ fn results<Message: Clone + 'static>(
         if window.after > 0.0 {
             rows = rows.push(space::vertical().height(window.after));
         }
-        crate::widgets::scroll::vertical(rows)
-            .id(results_id())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(move |viewport| {
-                on_event(WidgetEvent::Find(FindCommand::Scrolled {
-                    offset: viewport.absolute_offset().y.max(0.0).round() as u32,
-                    viewport: viewport.bounds().height.max(0.0).round() as u32,
-                }))
-            })
-            .into()
+        crate::widgets::scroll::thumbed(
+            crate::widgets::scroll::vertical(rows)
+                .id(results_id())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(move |viewport| {
+                    on_event(WidgetEvent::Find(FindCommand::Scrolled {
+                        offset: viewport.absolute_offset().y.max(0.0).round() as u32,
+                        viewport: viewport.bounds().height.max(0.0).round() as u32,
+                    }))
+                }),
+            scroll,
+            move |offset| {
+                on_event(WidgetEvent::Find(FindCommand::DragScrollTo(
+                    offset.max(0.0).round() as u32,
+                )))
+            },
+        )
     })
     .into()
 }

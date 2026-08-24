@@ -4,6 +4,29 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The scrollbar is pulpit's own, drawn over the surface it scrolls.** The
+  thumb keeps a minimum length worth grabbing — on a 730-page document iced's
+  own rule works out at under four points — and it is grabbable exactly where
+  it is drawn, which is the part a purely cosmetic thumb could not give.
+  Dragging the empty track jumps the thumb to the pointer and carries on as a
+  drag. The three states it always had are unchanged: quiet at rest, clearer
+  under the pointer, accented while dragged.
+
+  This replaces the vendored fork of `iced_widget`, which existed only to make
+  that minimum configurable. A `[patch.crates-io]` applies inside a workspace
+  and nowhere else, so the fork made the `pulpit` crate unpublishable: on
+  crates.io it resolved the real `iced_widget`, which has no
+  `min_scroller_length`, and 0.0.7 reached the registry without the
+  application. `vendor/` is gone and the arithmetic now lives in
+  `widgets/scroll.rs`, where it is unit-tested rather than buried in a
+  dependency — including the part iced gets away with and we could not: with a
+  floor worth aiming at, the offset has to be mapped through the shortened
+  track, or the thumb hangs past the bottom by whatever the floor added.
+
 ## [0.0.7] — 2026-08-24
 
 ### Fixed

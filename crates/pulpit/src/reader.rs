@@ -3165,6 +3165,11 @@ impl ReaderSession {
         let tool_overflow = self.controls.tool_overflow;
         self.controls.tool_overflow = false;
         match command {
+            ReadCommand::OutlineDragScrollTo(_) => true,
+            ReadCommand::DragScrollTo(offset) => {
+                self.scroll_to(*offset);
+                true
+            }
             ReadCommand::ScrollTo {
                 offset,
                 offset_x,

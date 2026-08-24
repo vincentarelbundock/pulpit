@@ -192,6 +192,8 @@ pub enum Message {
     PointerReleased,
     /// The overview was scrolled; the grid builds only what is on screen.
     OverviewScrolled(f32),
+    /// The presenter dragged the overview's own scroll thumb.
+    OverviewThumbDragged(f32),
     /// Show or hide the deck as thumbnails.
     ToggleOverview,
     /// Jump to a slide from the overview, which then closes: picking a slide
@@ -2995,6 +2997,18 @@ impl App {
                     .pointer_released(over, pulpit_media::PointerButton::Left);
                 self.deliver(routed);
                 Task::none()
+            }
+            Message::OverviewThumbDragged(offset) => {
+                // A drag is the presenter's own choice, exactly as a keyboard
+                // reveal is: it outranks a glide still in flight and claims
+                // the offset until the scrollable reports it back.
+                self.overview_settling = None;
+                self.overview_scroll = offset;
+                self.overview_scroll_claim = Some((offset, Instant::now() + OVERVIEW_SCROLL_CLAIM));
+                iced::widget::operation::scroll_to(
+                    crate::view::overview_scrollable(),
+                    iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                )
             }
             Message::OverviewScrolled(offset) => {
                 let now = Instant::now();
@@ -7494,6 +7508,23 @@ impl App {
             return Task::none();
         }
 
+        // A drag on the reader's own thumb moves the session, and the
+        // surface has to be pushed to follow: its scroll position did not
+        // change by itself, exactly as it does not for a jump or a zoom.
+        if let ReadCommand::OutlineDragScrollTo(offset) = command {
+            let (_, viewport) = self.reader.outline_scroll_position();
+            self.reader.report_outline_scroll(offset, viewport);
+            return iced::widget::operation::scroll_to(
+                crate::widgets::document::view::outline_scrollable_id(),
+                iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+            );
+        }
+
+        if let ReadCommand::DragScrollTo(offset) = command {
+            self.reader.apply(&ReadCommand::DragScrollTo(offset));
+            return self.scroll_surface_to_reader();
+        }
+
         match &command {
             ReadCommand::MoveOutlineFocus(direction) => {
                 let direction = *direction;
@@ -9730,6 +9761,16 @@ impl App {
                 self.search_origin = None;
                 let hit = self.search.current().cloned();
                 self.go_to_hit(hit)
+            }
+            FindCommand::DragScrollTo(offset) => {
+                let offset = offset as f32;
+                // The list has not moved by itself, so it is told where to
+                // go as well as being recorded.
+                self.search_scroll = offset;
+                iced::widget::operation::scroll_to(
+                    crate::widgets::search::view::results_id(),
+                    iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                )
             }
             FindCommand::Scrolled { offset, viewport } => {
                 self.search_scroll = offset as f32;

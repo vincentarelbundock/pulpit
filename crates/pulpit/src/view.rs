@@ -649,11 +649,14 @@ fn overview(app: &App) -> Element<'_, Message> {
             )));
         }
 
-        crate::widgets::scroll::vertical(content)
-            .id(overview_scrollable())
-            .height(Length::Fill)
-            .on_scroll(|viewport| Message::OverviewScrolled(viewport.absolute_offset().y))
-            .into()
+        crate::widgets::scroll::thumbed(
+            crate::widgets::scroll::vertical(content)
+                .id(overview_scrollable())
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::OverviewScrolled(viewport.absolute_offset().y)),
+            app.overview_scroll,
+            Message::OverviewThumbDragged,
+        )
     });
 
     // How far along the warming is, but only while there is something to

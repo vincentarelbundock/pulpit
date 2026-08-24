@@ -84,6 +84,10 @@ pub enum FindCommand {
     ActivateCurrent,
     /// The result stream reports its real viewport so keyboard selection can
     /// be revealed without guessing around its header and controls.
+    /// The results list's own scroll thumb was dragged to an offset.
+    ///
+    /// Whole points, as [`Scrolled`](FindCommand::Scrolled) reports them.
+    DragScrollTo(u32),
     Scrolled {
         offset: u32,
         viewport: u32,
@@ -121,6 +125,15 @@ pub enum ChromeCommand {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)] // see `crate::reader::ReaderSession`
 pub enum ReadCommand {
+    /// The outline's own scroll thumb was dragged to an offset.
+    OutlineDragScrollTo(f32),
+    /// The reader's own scroll thumb was dragged to an offset.
+    ///
+    /// Distinct from [`ScrollTo`](ReadCommand::ScrollTo), which is the
+    /// surface *reporting* where it already is. Here the surface has not
+    /// moved and must be told to, the same way a page jump or a zoom tells
+    /// it.
+    DragScrollTo(f32),
     /// Scroll the page column to an offset in layout points.
     ScrollTo {
         /// Where the surface now is, in layout points from the top.
