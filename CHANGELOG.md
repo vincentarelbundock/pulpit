@@ -68,6 +68,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A browser that is merely starting is no longer mistaken for a wedged
+  one.** Every command to the media browser had the same ten-second budget,
+  including the ones that bring it up — process start, profile creation, GPU
+  and renderer init, the first paint of a page. That is seconds of real work
+  on an idle machine and several times that on a loaded one, so on a busy
+  machine an overlay could fail to start with "the browser did not answer in
+  time" while nothing was actually wrong. Bring-up now has a budget of its
+  own, three times the other. Steady-state commands keep the short one: past
+  ten seconds a browser mid-presentation is wedged, not slow, and that is the
+  worst moment to find out slowly.
+
 - **Leaving fullscreen no longer leaves the page soft.** The reader's cell
   shrinks on the way out, so the sharp frames rendered for the full screen no
   longer fit it and the coarse previews do — and the frame chooser took the
