@@ -725,6 +725,15 @@ pub fn appearance_for_profile(
 /// the notice.
 pub const SIGNED_NOTICE_DISCLOSURE: &str = "pulpit checked that this signature is intact and matches the certificate inside it; it did not check whether that certificate is genuine. The signature panel says this in full.";
 
+/// Said first in the notice, because the document on screen has changed
+/// underneath the reader: signing writes a *new* file beside the source, and
+/// that copy is opened rather than left for them to find. It opens with
+/// editing off — the answer [`APPEND_ONLY_CHOICE`] stands for — which is not
+/// asked about, since the reader has just made this signature themselves and
+/// confirming it back to them is not a safeguard. Where to change it is named
+/// here, in the same words the control uses.
+pub const SIGNED_COPY_OPENED: &str = "The signed copy is now the document on screen, with editing switched off so its signatures keep verifying. Turn editing on with “Allow editing” in the signature panel.";
+
 /// The corner notice raised once signing has finished: what was written,
 /// what re-verifying the produced file said, and what is claimed about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -771,13 +780,16 @@ pub fn signed_notice(
             message,
             detail: format!(
                 "Re-checking the copy that was just written reports: {}. The source document is \
-                 unchanged.",
+                 unchanged. {SIGNED_COPY_OPENED}",
                 problems.join("; ")
             ),
             verified: false,
         };
     }
-    let mut detail = String::from(SIGNED_NOTICE_DISCLOSURE);
+    // The change to what is on screen comes first: it is the thing the reader
+    // has to notice, and the disclosure is the thing they may want to go back
+    // and read.
+    let mut detail = format!("{SIGNED_COPY_OPENED} {SIGNED_NOTICE_DISCLOSURE}");
     if countersigning {
         // §31.3, in the one line there is room for: the reader is about to
         // see pulpit itself call the earlier signature changed, and that is
@@ -1541,6 +1553,15 @@ mod tests {
     /// `signature_line_for_verification` is tested on its own above.
     const CLEAN: &[SignatureVerification] = &[];
 
+    /// A verification pass that came back with a problem.
+    static BROKEN: std::sync::LazyLock<Vec<SignatureVerification>> =
+        std::sync::LazyLock::new(|| {
+            vec![SignatureVerification::Broken {
+                field_name: "Sig1".to_string(),
+                reason: "the signed byte range is malformed".to_string(),
+            }]
+        });
+
     #[test]
     fn signed_notice_names_the_field_the_file_and_the_count() {
         let notice = signed_notice(
@@ -1554,7 +1575,27 @@ mod tests {
             "Signed “Membre jury” into /decks/talk-signed.pdf — 2 signatures now present."
         );
         assert!(notice.verified);
-        assert_eq!(notice.detail, SIGNED_NOTICE_DISCLOSURE);
+        // What changed on screen, then what is claimed about the signature.
+        assert!(notice.detail.starts_with(SIGNED_COPY_OPENED));
+        assert!(notice.detail.ends_with(SIGNED_NOTICE_DISCLOSURE));
+    }
+
+    #[test]
+    fn the_notice_says_the_document_on_screen_has_been_replaced() {
+        // Signing swaps the document under the reader without asking. That
+        // is only acceptable if it is said — and said in the same words as
+        // the control that undoes it, since the notice is where a reader
+        // finds out that editing is off at all.
+        for verification in [CLEAN, BROKEN.as_slice()] {
+            let notice = signed_notice(
+                std::path::Path::new("/decks/talk-signed.pdf"),
+                &report_for("Sig1", 1, false),
+                verification,
+                false,
+            );
+            assert!(notice.detail.contains(SIGNED_COPY_OPENED), "{notice:?}");
+            assert!(notice.detail.contains(EDIT_ANYWAY_CHOICE), "{notice:?}");
+        }
     }
 
     #[test]

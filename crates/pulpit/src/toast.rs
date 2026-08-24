@@ -9,34 +9,7 @@
 //! stays on screen until the presenter dismisses it, so a message cannot be
 //! missed while they are looking at the projector.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
-/// Something a toast offers to *do* about what it reports, beyond dismissing
-/// it.
-///
-/// Data rather than a `Message`: this module's job is to say what happened
-/// and what can be done about it, and the view is what turns that into a
-/// button. Keeping it that way is what lets the toast stack be tested without
-/// a display, the same way every other state here is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Offer {
-    /// Open this file in the reader. Raised by signing, which writes a *new*
-    /// file beside the source and leaves the reader showing the unsigned
-    /// original — a signature that exists only in a file nobody opened reads
-    /// as one that never appeared.
-    Open(PathBuf),
-}
-
-impl Offer {
-    /// What the button says. Short: it sits beside the close glyph in a
-    /// 360-pixel notice.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Offer::Open(_) => "Open",
-        }
-    }
-}
 
 /// How much attention a message deserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,9 +50,6 @@ pub struct Toast {
     pub message: String,
     /// What the presenter can do about it, when there is something.
     pub action: Option<String>,
-    /// A button beside the close glyph, when the notice can act on what it
-    /// reports rather than only describe it.
-    pub offer: Option<Offer>,
     pub expires_at: Option<Instant>,
     /// Set when this toast reports a standing condition rather than an event.
     /// The key identifies the condition so it can be updated or withdrawn.
@@ -126,38 +96,15 @@ impl Toasts {
         action: Option<String>,
         now: Instant,
     ) -> u64 {
-        self.push_offering(intent, message, action, None, now)
-    }
-
-    /// Show a message carrying a button that acts on it.
-    ///
-    /// A notice with an [`Offer`] never expires, whatever its intent: the
-    /// offer is only real while the notice is on screen, and a four-second
-    /// window is not an offer. It is dismissed by hand — one click, the same
-    /// as taking it up.
-    pub fn push_offering(
-        &mut self,
-        intent: Intent,
-        message: impl Into<String>,
-        action: Option<String>,
-        offer: Option<Offer>,
-        now: Instant,
-    ) -> u64 {
         let message = message.into();
-        let expires_at = match offer {
-            Some(_) => None,
-            None => intent.lifetime().map(|life| now + life),
-        };
         if let Some(existing) = self
             .toasts
             .iter_mut()
             .find(|toast| toast.message == message && toast.intent == intent)
         {
             // Refresh it instead, so a repeat keeps it visible rather than
-            // piling up. The offer is refreshed with it: the same message
-            // said twice may point at a different file the second time.
-            existing.expires_at = expires_at;
-            existing.offer = offer;
+            // piling up.
+            existing.expires_at = intent.lifetime().map(|life| now + life);
             return existing.id;
         }
 
@@ -168,8 +115,7 @@ impl Toasts {
             intent,
             message,
             action,
-            offer,
-            expires_at,
+            expires_at: intent.lifetime().map(|life| now + life),
             condition: None,
         });
 
@@ -242,9 +188,6 @@ impl Toasts {
                         intent: Intent::Warning,
                         message: message.clone(),
                         action: action.clone(),
-                        // A standing condition is a state of the world, not
-                        // something this notice can act on.
-                        offer: None,
                         expires_at: None,
                         condition: Some(key),
                     });
@@ -296,64 +239,6 @@ mod tests {
         // A fixed base so the arithmetic in these tests is exact.
         static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
         *BASE.get_or_init(Instant::now) + Duration::from_secs(seconds)
-    }
-
-    #[test]
-    fn a_notice_that_offers_something_does_not_fade_out_from_under_it() {
-        let mut toasts = Toasts::new();
-        toasts.push_offering(
-            Intent::Info,
-            "Signed “Sig1” into /decks/talk-signed.pdf.",
-            None,
-            Some(Offer::Open(PathBuf::from("/decks/talk-signed.pdf"))),
-            at(0),
-        );
-        // Info fades in four seconds. An offer is not an offer if it is gone
-        // before it can be taken up.
-        assert!(!toasts.tick(at(60)));
-        let toast = toasts.iter().next().expect("the notice is still up");
-        assert!(toast.is_sticky());
-        assert_eq!(
-            toast.offer,
-            Some(Offer::Open(PathBuf::from("/decks/talk-signed.pdf")))
-        );
-        assert_eq!(toast.offer.as_ref().unwrap().label(), "Open");
-    }
-
-    #[test]
-    fn the_same_notice_said_again_points_at_the_newer_file() {
-        let mut toasts = Toasts::new();
-        let first = toasts.push_offering(
-            Intent::Info,
-            "Signed.",
-            None,
-            Some(Offer::Open(PathBuf::from("/decks/one.pdf"))),
-            at(0),
-        );
-        let second = toasts.push_offering(
-            Intent::Info,
-            "Signed.",
-            None,
-            Some(Offer::Open(PathBuf::from("/decks/two.pdf"))),
-            at(1),
-        );
-        assert_eq!(first, second, "the same notice was refreshed");
-        let toast = toasts.iter().next().unwrap();
-        // Refreshing must not leave the button pointing at the file the
-        // previous signature wrote.
-        assert_eq!(
-            toast.offer,
-            Some(Offer::Open(PathBuf::from("/decks/two.pdf")))
-        );
-    }
-
-    #[test]
-    fn an_ordinary_notice_still_fades() {
-        let mut toasts = Toasts::new();
-        toasts.info("Saved.", at(0));
-        assert!(toasts.iter().next().is_some_and(|toast| !toast.is_sticky()));
-        assert!(toasts.tick(at(60)));
-        assert!(toasts.is_empty());
     }
 
     #[test]

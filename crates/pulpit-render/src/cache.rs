@@ -308,7 +308,21 @@ impl FrameCache {
                 within = Some((key, entry));
             }
         }
-        within.or(any).map(|(key, entry)| {
+        // Quality outranks fit. A refined frame wider than the cell is
+        // downsampled on its way to the screen and still looks like the page;
+        // a coarse frame that happens to fit is *upsampled* and looks like a
+        // photograph of the page. Preferring the fitting one whatever its
+        // quality is how leaving fullscreen used to leave every page on
+        // screen soft and keep it that way: the reader's cell shrinks, the
+        // refined frames rendered for the full screen no longer fit, the
+        // coarse previews do — and `satisfies` sees those same wide refined
+        // frames and declines to render anything new, so nothing ever
+        // replaced the soft picture.
+        let choice = match (within, any) {
+            (Some(fitting), Some(best)) if best.0.quality > fitting.0.quality => Some(best),
+            (fitting, best) => fitting.or(best),
+        };
+        choice.map(|(key, entry)| {
             entry.last_used.set(self.tick());
             (*key, entry.frame.clone())
         })
@@ -749,6 +763,55 @@ mod tests {
             .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 100)
             .unwrap();
         assert_eq!(found.width, 1920, "nothing fits, so the best stands in");
+    }
+
+    #[test]
+    fn a_refined_frame_that_does_not_fit_beats_a_coarse_one_that_does() {
+        // Leaving fullscreen, exactly: the refined frames were rendered for
+        // the full screen and no longer fit the cell, and the coarse previews
+        // do. Taking the coarse one leaves the page soft — and `satisfies`
+        // sees the same wide refined frame and asks for no replacement, so
+        // nothing ever sharpens it again.
+        let mut cache = FrameCache::new(100_000_000);
+        let sized = |quality: Quality, width: u32| FrameKey {
+            width,
+            quality,
+            ..key(1, 0, Quality::Refined)
+        };
+        cache.insert(sized(Quality::Refined, 1920), frame(1_000_000));
+        cache.insert(sized(Quality::Coarse, 400), frame(100_000));
+        let (found, _) = cache
+            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 1200)
+            .unwrap();
+        assert_eq!(found.quality, Quality::Refined);
+        assert_eq!(found.width, 1920, "downsampling beats upsampling");
+        // And the reason nothing replaces it: the wide refined frame is
+        // taken to satisfy the narrower refined request.
+        assert!(cache.satisfies(
+            RenderGeneration(1),
+            0,
+            FrameKind::Slide,
+            Quality::Refined,
+            1200
+        ));
+    }
+
+    #[test]
+    fn the_narrower_of_two_refined_frames_still_wins() {
+        // The fit rule is untouched where both candidates are the same
+        // quality: a 400-wide refined frame in a 800-wide cell is the right
+        // picture, and the 1920 one is memory nobody is looking at.
+        let mut cache = FrameCache::new(100_000_000);
+        let sized = |width: u32| FrameKey {
+            width,
+            ..key(1, 0, Quality::Refined)
+        };
+        cache.insert(sized(1920), frame(1_000_000));
+        cache.insert(sized(400), frame(1_000_000));
+        let (found, _) = cache
+            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 800)
+            .unwrap();
+        assert_eq!(found.width, 400);
     }
 
     #[test]

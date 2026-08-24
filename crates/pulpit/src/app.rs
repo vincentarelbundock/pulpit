@@ -1272,6 +1272,10 @@ pub struct App {
     /// from the reader pump, which cannot return the `Task` the save picker
     /// needs, and drained on the next tick.
     sign_resume_pending: bool,
+    /// The signed copy the Sign flow has asked to open, so
+    /// `finish_document_prepare` knows this document's signature is one the
+    /// reader just made rather than one they have walked into.
+    opening_signed_copy: Option<PathBuf>,
     /// The scratch file §31.1 step 3's save writes to, while signing an
     /// edited document.
     ///
@@ -1773,6 +1777,7 @@ impl App {
             keyboard_region: KeyboardRegion::Document,
             search_focus_pending: false,
             sign_resume_pending: false,
+            opening_signed_copy: None,
             signing_temp: None,
             search_origin: None,
             search_scroll: 0.0,
@@ -5442,7 +5447,26 @@ impl App {
         self.restore_layout_for_document();
         self.pending_reader_recovery = prepared.recovery.take();
         self.document_signatures = prepared.signatures;
-        self.pending_append_only_offer = !self.document_signatures.is_empty();
+        // A copy pulpit has just signed is not a document whose signature is
+        // a surprise: the reader asked for it, watched it be made, and is
+        // reading the notice about it. Asking whether to protect it would be
+        // asking them to confirm what they just did, so the safe answer is
+        // taken and the notice says so (§31.3 requires the choice be offered
+        // before anything can *mutate* the document, and "Allow editing" in
+        // the signature panel is where it stays offered).
+        let just_signed = self
+            .opening_signed_copy
+            .take()
+            .zip(
+                self.documents
+                    .active()
+                    .map(|document| document.path.clone()),
+            )
+            .is_some_and(|(signed, opened)| Self::same_path(&signed, &opened));
+        self.pending_append_only_offer = !self.document_signatures.is_empty() && !just_signed;
+        if just_signed && !self.document_signatures.is_empty() {
+            self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
+        }
         // Every entry here names a `/Sig` field that already carries a
         // value, `Broken` included (§28.2/§28.3: broken is still signed,
         // just not verifiably so) — the set `dead_fields_on` uses to keep
@@ -9031,29 +9055,26 @@ impl App {
                 tracing::info!(message = %notice.message);
                 self.diagnostics
                     .note(format!("{} {}", notice.message, notice.detail));
-                // The signature is in a *new* file beside the source, and
-                // the reader still shows the unsigned original: without a way
-                // to open the copy, a signature that worked reads as one that
-                // never appeared. The offer also makes the notice stick, so
-                // the path does not fade out from under it.
-                let offer = Some(crate::toast::Offer::Open(outcome.destination.clone()));
                 let intent = if notice.verified {
                     crate::toast::Intent::Info
                 } else {
                     // A signature that does not verify seconds after being
-                    // made is a failure, whatever the write returned. The
-                    // copy is still offered: reading it is how the reader
-                    // finds out what is wrong with it.
+                    // made is a failure, whatever the write returned, and it
+                    // must not fade on a four-second timer. The copy is still
+                    // opened: reading it is how the reader finds out what is
+                    // wrong with it.
                     crate::toast::Intent::Error
                 };
-                self.toasts.push_offering(
-                    intent,
-                    notice.message,
-                    Some(notice.detail),
-                    offer,
-                    self.now,
-                );
-                Task::none()
+                self.toasts
+                    .push(intent, notice.message, Some(notice.detail), self.now);
+                // The signature is in a *new* file beside the source, and
+                // leaving the unsigned original on screen reads as a
+                // signature that never appeared. So the copy is opened, and
+                // `finish_document_prepare` takes the append-only answer for
+                // it rather than asking the reader to confirm what they have
+                // just done.
+                self.opening_signed_copy = Some(outcome.destination.clone());
+                self.open_document(outcome.destination)
             }
             SignMsg::Completed(Err(detail)) => {
                 self.refuse_signing(detail);

@@ -1628,20 +1628,6 @@ fn toasts(app: &App) -> Option<Element<'_, Message>> {
         if let Some(action) = &toast.action {
             body = body.push(theme::typography::caption(action.as_str()));
         }
-        // What the notice can do about what it reports. Below the caption
-        // rather than beside the close glyph: the two are opposite answers,
-        // and a button that acts sitting next to one that discards is how
-        // the wrong one gets pressed.
-        if let Some(offer) = &toast.offer {
-            body = body.push(
-                button(theme::typography::label(offer.label()))
-                    .padding(gap::XS)
-                    .style(theme::ambient::selected_button)
-                    .on_press(match offer {
-                        crate::toast::Offer::Open(path) => Message::Opened(Some(path.clone())),
-                    }),
-            );
-        }
         stack_of_toasts = stack_of_toasts.push(
             container(body)
                 .padding(gap::M)

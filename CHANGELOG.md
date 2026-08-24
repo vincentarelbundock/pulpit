@@ -34,11 +34,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   other page. Whether a signature is drawn on the page is a tick box in the
   profile editor, beside the position and size it has always had.
 
-  What signing produced is reported in the corner rather than in a dialog, and
-  that notice carries an **Open** button for the signed copy — signing writes
-  a new file beside the source, and the reader keeps showing the unsigned
-  original. §31.2's identity disclosure and §31.3's countersigning note moved
-  to the signature panel, which outlives the notice.
+  **The signed copy is opened, and nothing asks about it.** Signing writes a
+  new file beside the source, so leaving the unsigned original on screen read
+  as a signature that never appeared. The copy now becomes the document on
+  screen, with editing off so its signatures keep verifying — not offered as a
+  choice, because the reader has just made that signature themselves and
+  confirming it back to them is not a safeguard. The corner notice says both,
+  and names **Allow editing** in the signature panel as the way to change it.
+  §31.2's identity disclosure and §31.3's countersigning note live on that
+  panel too, which outlives the notice.
 
 - **The signed-document question is asked in the reader's terms.** Opening a
   PDF that already carries a signature used to offer "Append-only mode" or
@@ -50,11 +54,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report the document as changed after that signature once you save. Nothing
   in between: a paragraph there could only say the same thing a third time.
 
-- **Corner notices can carry a button.** A notice that names a next step can
-  now offer to take it, and one that does never fades on its own: an offer is
-  not an offer if it is gone before it can be taken up.
-
 ### Fixed
+
+- **Leaving fullscreen no longer leaves the page soft.** The reader's cell
+  shrinks on the way out, so the sharp frames rendered for the full screen no
+  longer fit it and the coarse previews do — and the frame chooser took the
+  one that fit, whatever its quality. Nothing replaced it either: those same
+  wide sharp frames were counted as already satisfying the narrower request,
+  so no new render was ever asked for, and the page stayed soft for as long
+  as it was looked at. Quality now outranks fit. A sharp frame wider than the
+  cell is downsampled on its way to the screen and still looks like the page;
+  a coarse one that happens to fit is upsampled and does not.
 
 - **Home and End move the document being read.** They were bound to first
   slide and last slide whatever was on screen, so in a reading layout they
