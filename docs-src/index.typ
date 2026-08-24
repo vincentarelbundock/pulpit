@@ -20,25 +20,11 @@
   )[Read, Annotate, and Present PDF]
 ]
 
-#html.elem("div", attrs: (style: "text-align: center; margin-block: 0 2rem;"))[
-  #html.elem(
-    "video",
-    attrs: (
-      src: "assets/tour.mp4",
-      controls: "",
-      playsinline: "",
-      preload: "metadata",
-      style: "width: 50%; min-width: 18rem; height: auto; display: block;"
-        + " margin: 0 auto; border-radius: 0.5rem;",
-    ),
-  )[]
-]
-
 Pulpit is a cross-platform, free, and open source application to read,
 annotate, sign, and present PDF documents and slide shows. Its design goals
 are to be simple, fast, and minimalist.
 
-#let mode-card(title, tagline, features) = html.elem(
+#let mode-card(title, tagline, features, video) = html.elem(
   "div",
   attrs: (
     style: "flex: 1 1 18rem; border: 1px solid var(--calepin-color-border);"
@@ -68,6 +54,17 @@ are to be simple, fast, and minimalist.
       html.elem("li", attrs: (style: "margin: 0.2rem 0;"))[#feature]
     }
   ]
+  #html.elem(
+    "video",
+    attrs: (
+      src: video,
+      controls: "",
+      playsinline: "",
+      preload: "metadata",
+      style: "width: 100%; height: auto; display: block;"
+        + " margin: 1.1rem 0 0; border-radius: 0.5rem;",
+    ),
+  )[]
 ]
 
 #html.elem(
@@ -90,6 +87,7 @@ are to be simple, fast, and minimalist.
       [Sign, and verify what is signed],
       [Reloads when the file is rebuilt],
     ),
+    "assets/tour-reader.mp4",
   )
   #mode-card(
     [Presenter],
@@ -104,6 +102,7 @@ are to be simple, fast, and minimalist.
       [Thumbnail jump menu and remotes],
       [Video and web overlays],
     ),
+    "assets/tour-presenter.mp4",
   )
 ]
 

@@ -405,6 +405,56 @@ pub enum SessionError {
     UnknownSchema { found: u32, known: u32 },
 }
 
+/// The snapshot this process writes.
+///
+/// One file per copy, named after the process, because several copies of
+/// pulpit may be running: a shared name would have two of them overwriting
+/// each other's crash record, and a clean quit in one deleting the other's.
+pub fn snapshot_name(pid: u32) -> String {
+    format!("session-{pid}.json")
+}
+
+/// The pid a snapshot file is named after, or `None` for anything else in
+/// the directory.
+fn snapshot_pid(name: &str) -> Option<u32> {
+    name.strip_prefix("session-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
+}
+
+/// Snapshots left behind by copies that are no longer running.
+///
+/// `is_live` answers whether the process that wrote a snapshot still exists;
+/// a snapshot whose writer is alive is that copy's business, and taking it
+/// would offer a running session back as a crashed one. This process's own
+/// snapshot is never abandoned, whatever the answer.
+pub fn abandoned_snapshots(directory: &Path, is_live: impl Fn(u32) -> bool) -> Vec<PathBuf> {
+    let mut found: Vec<(u32, PathBuf)> = match std::fs::read_dir(directory) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let pid = snapshot_pid(name.to_str()?)?;
+                (pid != std::process::id() && !is_live(pid)).then(|| (pid, entry.path()))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    // Oldest process first, so a machine that crashed twice replays in a
+    // stable order rather than whatever the directory happens to yield.
+    found.sort_by_key(|(pid, _)| *pid);
+    let mut paths: Vec<PathBuf> = found.into_iter().map(|(_, path)| path).collect();
+    // The name used before snapshots were per-process. Whoever wrote it can
+    // only be a version that is no longer running, and dropping it silently
+    // would lose an interrupted session across an upgrade.
+    let legacy = directory.join("session.json");
+    if legacy.is_file() {
+        paths.insert(0, legacy);
+    }
+    paths
+}
+
 /// The snapshot file, written atomically beside the settings.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -413,7 +463,9 @@ pub struct SessionStore {
 
 impl Default for SessionStore {
     fn default() -> Self {
-        Self::new(crate::settings::store::config_directory().join("session.json"))
+        Self::new(
+            crate::settings::store::config_directory().join(snapshot_name(std::process::id())),
+        )
     }
 }
 
@@ -541,6 +593,71 @@ mod tests {
     use super::*;
     use pulpit_core::{DocumentId, DocumentInfo};
     use pulpit_display::{IdentityRecord, MonitorIdentity, RoleTarget};
+
+    /// A snapshot belongs to the copy that wrote it. Only what a departed copy
+    /// left behind is a crash record anyone else may take.
+    #[test]
+    fn only_a_departed_copys_snapshot_is_abandoned() {
+        let directory = tempfile::tempdir().unwrap();
+        let live = 4242;
+        let gone = 4243;
+        for pid in [live, gone, std::process::id()] {
+            std::fs::write(directory.path().join(snapshot_name(pid)), "{}").unwrap();
+        }
+        // Not a snapshot at all, and never collected as one.
+        std::fs::write(directory.path().join("settings.toml"), "").unwrap();
+
+        let abandoned = abandoned_snapshots(directory.path(), |pid| pid == live);
+        assert_eq!(
+            abandoned,
+            vec![directory.path().join(snapshot_name(gone))],
+            "a live copy's snapshot and this copy's own are left alone"
+        );
+    }
+
+    /// Two crashes, two snapshots: the order they are offered in is the order
+    /// they were written in, not whatever the directory yields.
+    #[test]
+    fn abandoned_snapshots_are_offered_in_a_stable_order() {
+        let directory = tempfile::tempdir().unwrap();
+        for pid in [900u32, 100, 500] {
+            std::fs::write(directory.path().join(snapshot_name(pid)), "{}").unwrap();
+        }
+        let abandoned = abandoned_snapshots(directory.path(), |_| false);
+        let names: Vec<String> = abandoned
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![snapshot_name(100), snapshot_name(500), snapshot_name(900)]
+        );
+    }
+
+    /// The name snapshots had before they were per-process. An upgrade must
+    /// not lose an interrupted session that was written by the old one.
+    #[test]
+    fn a_snapshot_from_before_the_rename_is_still_offered() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("session.json"), "{}").unwrap();
+        std::fs::write(directory.path().join(snapshot_name(4243)), "{}").unwrap();
+
+        let abandoned = abandoned_snapshots(directory.path(), |_| false);
+        assert_eq!(
+            abandoned.first(),
+            Some(&directory.path().join("session.json")),
+            "the older record is offered before the newer one"
+        );
+        assert_eq!(abandoned.len(), 2);
+    }
+
+    /// A directory that is not there is not an error: it is a machine that has
+    /// never run pulpit.
+    #[test]
+    fn a_missing_directory_holds_no_abandoned_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(abandoned_snapshots(&directory.path().join("nothing"), |_| false).is_empty());
+    }
 
     fn interrupted_state(pages: usize) -> PresentationState {
         let mut state = PresentationState::new(

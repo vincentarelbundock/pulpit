@@ -1749,7 +1749,7 @@ mod tests {
         let before = designer.layout().clone();
 
         let ranked = designer.recommendations();
-        assert_eq!(ranked.len(), 3, "one per built-in");
+        assert_eq!(ranked.len(), 2, "one per built-in");
         for pair in ranked.windows(2) {
             assert!(
                 pair[0].wasted_fraction <= pair[1].wasted_fraction,

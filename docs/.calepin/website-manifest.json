@@ -2,7 +2,8 @@
   "outputs": [
     "assets/favicon.svg",
     "assets/logo.svg",
-    "assets/tour.mp4",
+    "assets/tour-presenter.mp4",
+    "assets/tour-reader.mp4",
     "index.html",
     "llms.txt",
     "robots.txt",

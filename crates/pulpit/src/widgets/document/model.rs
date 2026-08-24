@@ -554,6 +554,10 @@ pub struct ReaderControls {
     pub tool: Option<pulpit_core::annotation::AnnotationTool>,
     /// Which tool's options popover is open in the toolbar, if any.
     pub tool_options: Option<pulpit_core::annotation::AnnotationTool>,
+    /// Which tool's colour wheel is open, if any. The fixed swatches cover
+    /// the colours a reader reaches for without thinking; the wheel is for
+    /// the one they have in mind.
+    pub tool_wheel: Option<pulpit_core::annotation::AnnotationTool>,
     /// Whether the compact navigation overflow menu is open.
     pub navigation_overflow: bool,
     /// Whether the compact annotation overflow menu is open.
@@ -600,6 +604,7 @@ impl Default for ReaderControls {
             page: PageIndex(0),
             tool: None,
             tool_options: None,
+            tool_wheel: None,
             navigation_overflow: false,
             tool_overflow: false,
             ink_color: pulpit_core::annotate::MarkStyle::default().color,

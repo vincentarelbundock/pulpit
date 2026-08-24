@@ -1498,7 +1498,7 @@ fn crop_control<Message: Clone + 'static>(
         .style(theme::ambient::dialog)
         .into()
     });
-    crate::widgets::annotations::popover::Popover::new(trigger, panel).into()
+    crate::widgets::common::popover::Popover::new(trigger, panel).into()
 }
 
 /// The navigation band: where you are, and how big the page is.
@@ -1707,11 +1707,11 @@ fn navigation_overflow<Message: Clone + 'static>(
     let panel = state
         .overflow_open
         .then(|| navigation_overflow_menu(state, on_event));
-    crate::widgets::annotations::popover::Popover::new(
-        hint(trigger, "More navigation controls"),
-        panel,
-    )
-    .into()
+    crate::widgets::common::popover::Popover::new(hint(trigger, "More navigation controls"), panel)
+        .on_dismiss(on_event(WidgetEvent::Read(
+            ReadCommand::NavigationOverflow(false),
+        )))
+        .into()
 }
 
 fn navigation_overflow_menu<Message: Clone + 'static>(
@@ -2325,6 +2325,7 @@ fn tools<Message: Clone + 'static>(
         open: reader.open,
         tool: reader.controls.tool,
         tool_options: reader.controls.tool_options,
+        tool_wheel: reader.controls.tool_wheel,
         overflow_open: reader.controls.tool_overflow,
         ink_color: reader.controls.ink_color,
         ink_width: reader.controls.ink_width,
@@ -2344,6 +2345,7 @@ struct DocumentToolsState {
     open: bool,
     tool: Option<AnnotationTool>,
     tool_options: Option<AnnotationTool>,
+    tool_wheel: Option<AnnotationTool>,
     overflow_open: bool,
     ink_color: InkColor,
     ink_width: f32,
@@ -2501,16 +2503,28 @@ fn document_tool_control<Message: Clone + 'static>(
             (!options_open).then_some(tool),
         ))));
     }
-    let trigger = row![
+    let trigger: Element<'static, Message> = row![
         control,
         container(arrow)
             .height(Length::Fixed(theme::type_scale::HEADING + 8.0))
             .align_y(Alignment::End),
     ]
     .spacing(0)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    .into();
+
+    let trigger = crate::widgets::common::color::wheel(
+        trigger,
+        state.live && state.tool_wheel == Some(tool),
+        state.color(tool).unwrap_or_default(),
+        on_event(WidgetEvent::Read(ReadCommand::ToolColorWheel(None))),
+        move |colour| on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour))),
+    );
+
     let panel = options_open.then(|| document_tool_options_panel(tool, state, on_event));
-    crate::widgets::annotations::popover::Popover::new(trigger, panel).into()
+    crate::widgets::common::popover::Popover::new(trigger, panel)
+        .on_dismiss(on_event(WidgetEvent::Read(ReadCommand::ToolOptions(None))))
+        .into()
 }
 
 impl DocumentToolsState {
@@ -2570,11 +2584,11 @@ fn document_tools_overflow<Message: Clone + 'static>(
     let panel = state
         .overflow_open
         .then(|| document_tools_overflow_menu(state, on_event));
-    crate::widgets::annotations::popover::Popover::new(
-        hint(trigger, "More annotation controls"),
-        panel,
-    )
-    .into()
+    crate::widgets::common::popover::Popover::new(hint(trigger, "More annotation controls"), panel)
+        .on_dismiss(on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(
+            false,
+        ))))
+        .into()
 }
 
 fn document_tools_overflow_menu<Message: Clone + 'static>(
@@ -2692,52 +2706,41 @@ fn document_tool_options_panel<Message: Clone + 'static>(
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let selected = state.color(tool).unwrap_or_default();
-    let mut swatches = Row::new().spacing(theme::space::XS);
-    for colour in InkColor::ALL {
-        let (red, green, blue) = colour.rgb();
-        swatches =
-            swatches.push(
-                button(space::horizontal())
-                    .width(Length::Fixed(24.0))
-                    .height(Length::Fixed(24.0))
-                    .padding(0)
-                    .style(theme::color_swatch_button(
-                        iced::Color::from_rgb(red, green, blue),
-                        selected == colour,
-                    ))
-                    .on_press_maybe(state.live.then(|| {
-                        on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour)))
-                    })),
-            );
-    }
-    let mut panel =
-        column![text("Color").size(theme::type_scale::CAPTION), swatches].spacing(theme::space::XS);
+    let swatches = crate::widgets::common::color::swatches(
+        selected,
+        24.0,
+        state.live,
+        move |colour| on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour))),
+        on_event(WidgetEvent::Read(ReadCommand::ToolColorWheel(Some(tool)))),
+        hint,
+    );
+    let mut panel = crate::widgets::common::options::Options::new(tool.label())
+        .on_close(
+            state
+                .live
+                .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOptions(None)))),
+        )
+        .row("Color", swatches);
+    // Measures are in page points here rather than fractions of the page, so
+    // the caption carries the number: a reader setting a pen to two points is
+    // setting it to something the document itself is measured in.
     if tool == AnnotationTool::Ink {
-        panel = panel
-            .push(
-                text(format!("Width — {:.1} pt", state.ink_width)).size(theme::type_scale::CAPTION),
-            )
-            .push(
-                slider(0.5..=12.0, state.ink_width, move |value| {
-                    on_event(WidgetEvent::Read(ReadCommand::SetInkWidth(value)))
-                })
-                .step(0.5_f32),
-            );
+        panel = panel.row(
+            format!("Width — {:.1} pt", state.ink_width),
+            slider(0.5..=12.0, state.ink_width, move |value| {
+                on_event(WidgetEvent::Read(ReadCommand::SetInkWidth(value)))
+            })
+            .step(0.5_f32),
+        );
     }
     if matches!(tool, AnnotationTool::Text | AnnotationTool::Note) {
-        panel = panel
-            .push(
-                text(format!("Size — {:.0} pt", state.text_size)).size(theme::type_scale::CAPTION),
-            )
-            .push(
-                slider(6.0..=48.0, state.text_size, move |value| {
-                    on_event(WidgetEvent::Read(ReadCommand::SetTextSize(value)))
-                })
-                .step(1.0_f32),
-            );
+        panel = panel.row(
+            format!("Size — {:.0} pt", state.text_size),
+            slider(6.0..=48.0, state.text_size, move |value| {
+                on_event(WidgetEvent::Read(ReadCommand::SetTextSize(value)))
+            })
+            .step(1.0_f32),
+        );
     }
-    container(panel)
-        .padding(theme::space::S)
-        .style(theme::ambient::dialog)
-        .into()
+    panel.into()
 }

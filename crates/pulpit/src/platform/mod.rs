@@ -46,7 +46,7 @@ pub use appearance::{Appearance, Motion, MotionSetting};
 pub use capabilities::Capabilities;
 pub use inhibit::Inhibitor;
 pub use input::{InputPolicy, Shortcut};
-pub use instance::{acquire as acquire_instance, Instance};
+pub use instance::{acquire as acquire_claim, is_claimed, Instance, InstanceLock};
 pub use paths::Directories;
 pub use services::PlatformServices;
 pub use window::{Bounds, WindowPolicy};

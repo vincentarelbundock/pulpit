@@ -1,9 +1,13 @@
 //! A small controlled popover anchored above a widget.
 //!
 //! Iced's tooltip already solves the positioning problem, but its open state
-//! is hover-driven. Annotation options are opened by a click or context click,
-//! so this wrapper exposes the same kind of overlay with application-owned
-//! state and forwards events to the interactive controls inside it.
+//! is hover-driven. Tool options are opened by a click or context click, so
+//! this wrapper exposes the same kind of overlay with application-owned state
+//! and forwards events to the interactive controls inside it.
+//!
+//! It lives here rather than beside the presenter palette because the Reader's
+//! toolbar hangs the same panels off the same kind of button: one popover, so
+//! a panel behaves the same wherever it is opened.
 
 use iced::advanced::widget::{self, Widget};
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
@@ -15,6 +19,10 @@ pub struct Popover<'a, Message> {
     /// closed popover used to build, tree and diff its panel on every view
     /// pass anyway; a closed popover now carries nothing but its trigger.
     popup: Option<Element<'a, Message>>,
+    /// What to send when a press lands outside the panel. A panel that can
+    /// only be closed by finding its close button again is a panel in the
+    /// way: clicking off it is what every other menu here already means.
+    on_dismiss: Option<Message>,
     gap: f32,
 }
 
@@ -26,12 +34,23 @@ impl<'a, Message> Popover<'a, Message> {
         Self {
             content: content.into(),
             popup,
+            on_dismiss: None,
             gap: 6.0,
         }
     }
+
+    /// Close on a press outside the panel.
+    ///
+    /// The trigger is deliberately not part of "outside": it toggles the
+    /// panel itself, and a click that both toggled and dismissed would land
+    /// on a panel that never opens.
+    pub fn on_dismiss(mut self, message: Message) -> Self {
+        self.on_dismiss = Some(message);
+        self
+    }
 }
 
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Message> {
+impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Message> {
     fn children(&self) -> Vec<widget::Tree> {
         match &self.popup {
             Some(popup) => vec![widget::Tree::new(&self.content), widget::Tree::new(popup)],
@@ -144,12 +163,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Messa
             viewport,
             translation,
         );
+        let on_dismiss = self.on_dismiss.as_ref();
+        let gap = self.gap;
         let popup = self.popup.as_mut().map(|popup| {
             overlay::Element::new(Box::new(PopupOverlay {
                 anchor: layout.bounds() + translation,
                 popup,
                 tree: children.next().expect("popup state"),
-                gap: self.gap,
+                on_dismiss,
+                gap,
             }))
         });
 
@@ -181,7 +203,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Messa
     }
 }
 
-impl<'a, Message: 'a> From<Popover<'a, Message>> for Element<'a, Message> {
+impl<'a, Message: Clone + 'a> From<Popover<'a, Message>> for Element<'a, Message> {
     fn from(popover: Popover<'a, Message>) -> Self {
         Element::new(popover)
     }
@@ -191,10 +213,11 @@ struct PopupOverlay<'a, 'b, Message> {
     anchor: Rectangle,
     popup: &'b mut Element<'a, Message>,
     tree: &'b mut widget::Tree,
+    on_dismiss: Option<&'b Message>,
     gap: f32,
 }
 
-impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer>
+impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
     for PopupOverlay<'_, '_, Message>
 {
     fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
@@ -252,6 +275,30 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer>
             shell,
             &layout.bounds(),
         );
+
+        // A press anywhere else closes the panel. The controls inside it have
+        // already seen the event above, so what reaches here is a press that
+        // was aimed at neither the panel nor the button that opens it.
+        let Some(dismiss) = self.on_dismiss else {
+            return;
+        };
+        if !matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(_))
+                | Event::Touch(iced::touch::Event::FingerPressed { .. })
+        ) {
+            return;
+        }
+        let Some(position) = cursor.position() else {
+            return;
+        };
+        if layout.bounds().contains(position) || self.anchor.contains(position) {
+            return;
+        }
+        shell.publish(dismiss.clone());
+        // The click is spent closing the panel: a press that dismisses must
+        // not also land on the page underneath and start a stroke there.
+        shell.capture_event();
     }
 
     fn mouse_interaction(

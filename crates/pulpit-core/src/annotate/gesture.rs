@@ -185,7 +185,8 @@ impl Gesture {
             Gesture::Selecting { quads, .. } => quads.is_empty(),
             Gesture::Erasing { touched, .. } => touched.is_empty(),
             // A band that never left the point it started from is a click,
-            // and a click selects nothing but clears what was held.
+            // which gathers nothing up: what a click means is decided by the
+            // caller, which has the marks to test it against (§8.4).
             Gesture::Marquee { anchor, head, .. } => anchor == head,
             Gesture::Transforming {
                 original, current, ..

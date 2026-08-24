@@ -232,6 +232,12 @@ pub enum ReadCommand {
     /// Open one tool's options popover in the toolbar, or close whichever is
     /// open.
     ToolOptions(Option<pulpit_core::annotation::AnnotationTool>),
+    /// Open one tool's colour wheel, or close whichever is open.
+    ///
+    /// The wheel replaces the options popover rather than sitting on top of
+    /// it: both hang off the same button, and the panel underneath would be
+    /// showing the colour that is being changed.
+    ToolColorWheel(Option<pulpit_core::annotation::AnnotationTool>),
     /// Open or close the navigation band's compact overflow menu.
     NavigationOverflow(bool),
     /// Open or close the annotation band's compact overflow menu.

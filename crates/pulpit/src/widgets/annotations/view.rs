@@ -381,7 +381,11 @@ fn overflow_control<Message: Clone + 'static>(
     };
 
     let panel = overflow_open.then(|| overflow_menu(hidden, open, options, mode, on));
-    super::popover::Popover::new(trigger, panel).into()
+    crate::widgets::common::popover::Popover::new(trigger, panel)
+        .on_dismiss(on(WidgetEvent::Annotate(AnnotationCommand::OpenOverflow(
+            false,
+        ))))
+        .into()
 }
 
 fn overflow_menu<Message: Clone + 'static>(
@@ -590,35 +594,30 @@ fn tool_control<Message: Clone + 'static>(
     .style(theme::ambient::surface)
     .into();
 
-    // The colour wheel hangs off the tool's own button, so it opens over the
-    // control it belongs to and the panel it was reached from is gone.
-    let trigger: Element<'static, Message> = if mode.interactive() && wheel == Some(tool) {
-        let (red, green, blue) = colour_of(armable, options).rgb();
-        crate::vendor::iced_aw::ColorPicker::new(
-            true,
-            iced::Color::from_rgb(red, green, blue),
-            trigger,
-            on(WidgetEvent::Annotate(AnnotationCommand::OpenColorWheel(
-                None,
-            ))),
-            move |colour| {
-                on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
-                    armable,
-                    InkColor::from_rgb(colour.r, colour.g, colour.b),
-                )))
-            },
-        )
-        .into()
-    } else {
-        trigger
-    };
+    let trigger = crate::widgets::common::color::wheel(
+        trigger,
+        mode.interactive() && wheel == Some(tool),
+        colour_of(armable, options),
+        on(WidgetEvent::Annotate(AnnotationCommand::OpenColorWheel(
+            None,
+        ))),
+        move |colour| {
+            on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
+                armable, colour,
+            )))
+        },
+    );
 
     // The options panel exists only while its popover is open: building all
     // five closed panels per view pass was widget-tree churn for UI nobody
     // could see.
     let panel = (mode.interactive() && open == Some(tool))
         .then(|| options_panel(tool, armable, options, mode, on));
-    super::popover::Popover::new(trigger, panel).into()
+    crate::widgets::common::popover::Popover::new(trigger, panel)
+        .on_dismiss(on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(
+            None,
+        ))))
+        .into()
 }
 
 /// The colour a tool is about to lay down. The eraser and the spotlight lay
@@ -638,6 +637,22 @@ fn colour_of(tool: AnnotationTool, options: crate::widgets::AnnotationOptions) -
         | AnnotationTool::Stamp
         | AnnotationTool::Select => options.ink_color,
     }
+}
+
+/// The palette sits at the foot of the presenter screen, so its labels rise
+/// above the control rather than dropping below it.
+fn palette_hint<Message: 'static>(
+    control: Element<'static, Message>,
+    label: &str,
+) -> Element<'static, Message> {
+    tooltip(
+        control,
+        text(label.to_string()).size(theme::type_scale::CAPTION),
+        tooltip::Position::Top,
+    )
+    .gap(4)
+    .style(theme::ambient::surface)
+    .into()
 }
 
 fn options_panel<Message: Clone + 'static>(
@@ -688,31 +703,17 @@ fn options_panel<Message: Clone + 'static>(
     }
     .step(0.005_f32);
 
-    let mut panel = column![
-        row![
-            text(armable.label()).size(theme::type_scale::LABEL),
-            space::horizontal().width(Length::Fill),
-            button(theme::icon::icon(
-                theme::Icon::Close,
-                theme::type_scale::BODY
-            ))
-            .padding(2)
-            .style(theme::ambient::tool_button)
-            .on_press_maybe(
-                mode.interactive()
-                    .then(|| on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(None))))
-            ),
-        ]
-        .align_y(Alignment::Center),
-        text("Size").size(theme::type_scale::CAPTION),
-        size.width(Length::Fill),
-    ]
-    .spacing(theme::space::S);
+    let mut panel = crate::widgets::common::options::Options::new(armable.label())
+        .width(232.0)
+        .on_close(
+            mode.interactive()
+                .then(|| on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(None)))),
+        );
 
     // The pointer control is two things, and which one it is belongs in its
     // own panel: a presenter who wants the spotlight is already looking here
     // for the size of it.
-    if tool == AnnotationTool::Pointer {
+    let mode_row = (tool == AnnotationTool::Pointer).then(|| {
         let mut modes = Row::new().spacing(theme::space::S);
         for (label, glyph, spotlight) in [
             ("Dot", theme::Icon::Pointer, false),
@@ -740,98 +741,49 @@ fn options_panel<Message: Clone + 'static>(
             }
             modes = modes.push(choice);
         }
-        panel = panel
-            .push(text("Mode").size(theme::type_scale::CAPTION))
-            .push(modes);
-    }
+        modes
+    });
 
     // The spotlight is a hole in the dimming rather than something drawn, so
     // it has no colour to pick; everything else that lays down colour does.
-    if matches!(
+    let color_row = matches!(
         armable,
         AnnotationTool::Ink
             | AnnotationTool::Highlighter
             | AnnotationTool::Pointer
             | AnnotationTool::Text
-    ) {
+    )
+    .then(|| {
         let selected = match armable {
             AnnotationTool::Ink => options.ink_color,
             AnnotationTool::Highlighter => options.highlight_color,
             AnnotationTool::Text => options.text_color,
             _ => options.pointer_color,
         };
-        let mut swatches = Row::new().spacing(theme::space::XS);
-        for colour in InkColor::ALL {
-            let (r, g, b) = colour.rgb();
-            let mut swatch = button(space::horizontal())
-                .width(Length::Fixed(28.0))
-                .height(Length::Fixed(28.0))
-                .padding(0)
-                .style(theme::color_swatch_button(
-                    iced::Color::from_rgb(r, g, b),
-                    selected == colour,
-                ));
-            if mode.interactive() {
-                swatch = swatch.on_press(on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
+        crate::widgets::common::color::swatches(
+            selected,
+            28.0,
+            mode.interactive(),
+            move |colour| {
+                on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
                     armable, colour,
-                ))));
-            }
-            swatches = swatches.push(swatch);
-        }
+                )))
+            },
+            on(WidgetEvent::Annotate(AnnotationCommand::OpenColorWheel(
+                Some(tool),
+            ))),
+            palette_hint,
+        )
+    });
 
-        // The sixth swatch is the way out of the five: it fills with the mixed
-        // colour once there is one, and always carries the pencil — the five
-        // fixed swatches are bare, so the pencil is what says "this one is
-        // yours to change", whether or not it holds a colour already.
-        let (r, g, b) = selected.rgb();
-        let fill = iced::Color::from_rgb(r, g, b);
-        let pencil = if selected.is_custom() {
-            theme::icon::tinted(
-                theme::Icon::Pencil,
-                theme::type_scale::CAPTION,
-                theme::ambient::palette().text_on(fill),
-            )
-        } else {
-            theme::icon::icon(theme::Icon::Pencil, theme::type_scale::CAPTION)
-        };
-        let face: Element<'static, Message> = container(pencil)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into();
-        let mut mixer = button(face)
-            .width(Length::Fixed(28.0))
-            .height(Length::Fixed(28.0))
-            .padding(0);
-        mixer = if selected.is_custom() {
-            mixer.style(theme::color_swatch_button(fill, true))
-        } else {
-            mixer.style(theme::ambient::tool_button)
-        };
-        if mode.interactive() {
-            mixer = mixer.on_press(on(WidgetEvent::Annotate(
-                AnnotationCommand::OpenColorWheel(Some(tool)),
-            )));
-        }
-        swatches = swatches.push(
-            tooltip(
-                mixer,
-                text("Mix a colour").size(theme::type_scale::CAPTION),
-                tooltip::Position::Top,
-            )
-            .gap(4)
-            .style(theme::ambient::surface),
-        );
-
-        panel = panel
-            .push(text("Color").size(theme::type_scale::CAPTION))
-            .push(swatches);
+    if let Some(swatches) = color_row {
+        panel = panel.row("Color", swatches);
     }
-
-    container(panel)
-        .width(Length::Fixed(232.0))
-        .padding(theme::space::M)
-        .style(theme::ambient::surface)
-        .into()
+    panel = panel.row("Size", size.width(Length::Fill));
+    if let Some(modes) = mode_row {
+        panel = panel.row("Mode", modes);
+    }
+    panel.into()
 }
 
 /// One closed shape of the highlight wash.

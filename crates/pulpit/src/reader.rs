@@ -2192,6 +2192,26 @@ impl ReaderSession {
             .find(|summary| &summary.id == id)?;
         let replacement = match summary.to_draft()? {
             pulpit_core::annotate::AnnotationDraft::FreeText(mut free) => {
+                // The box grows to hold what was typed and never shrinks: the
+                // appearance is clipped to the `/Rect`, so a longer second
+                // thought written into a box measured for the first would be
+                // cut off — and a reader who dragged the box bigger meant it
+                // to stay that way.
+                let (width, height) =
+                    pulpit_core::annotate::text_box::fit(&text, free.style.font_size);
+                // Growth stops at the edge of the page, and a box that was
+                // already past it — pulpit did not place every mark it edits
+                // — is left the size it was rather than cut down.
+                free.rect.right = free
+                    .rect
+                    .right
+                    .max(free.rect.left + width)
+                    .min(geometry.width.max(free.rect.right));
+                free.rect.bottom = free
+                    .rect
+                    .bottom
+                    .max(free.rect.top + height)
+                    .min(geometry.height.max(free.rect.bottom));
                 free.text = text;
                 pulpit_core::annotate::AnnotationDraft::FreeText(free)
             }
@@ -2270,18 +2290,29 @@ impl ReaderSession {
         let geometry = self.pages.get(page.get()).copied()?;
         let content = match tool {
             AnnotationTool::Note => pulpit_core::annotate::PlacedMark::Note { text },
-            _ => pulpit_core::annotate::PlacedMark::FreeText {
-                text,
-                source: pulpit_core::annotate::TextSource::Plain,
-                // A box wide enough for a line of comment at the style's own
-                // size, and tall enough for two of them. The reader can move
-                // and resize it afterwards; guessing narrower would clip the
-                // first thing anybody types.
-                size: (
-                    (self.interaction.text_style().font_size * 18.0).min(geometry.width),
-                    self.interaction.text_style().font_size * 2.4,
-                ),
-            },
+            _ => {
+                // The box is measured from the words it holds rather than
+                // guessed at (§8.4): a `/FreeText` mark *is* its box, so a box
+                // wider than its text is empty space the reader cannot see and
+                // cannot aim a rubber band at, and one narrower clips what
+                // they typed.
+                //
+                // Cut to what is left of the page from where it was placed,
+                // never past the edge — a band dragged on the page cannot
+                // enclose a box that reaches past it.
+                let size = pulpit_core::annotate::text_box::fit(
+                    &text,
+                    self.interaction.text_style().font_size,
+                );
+                pulpit_core::annotate::PlacedMark::FreeText {
+                    text,
+                    source: pulpit_core::annotate::TextSource::Plain,
+                    size: (
+                        size.0.min((geometry.width - at.x).max(1.0)),
+                        size.1.min((geometry.height - at.y).max(1.0)),
+                    ),
+                }
+            }
         };
         let outcome = self.interaction.place(page, at, content, &geometry);
         let commands = outcome.commands();
@@ -2672,7 +2703,29 @@ impl ReaderSession {
         // annotations it has to be tested against live with this session and
         // not in the gesture (§8.4).
         if let Some((page, band)) = self.interaction.marquee() {
+            let clicked = band.width() <= 0.0 && band.height() <= 0.0;
             self.interaction.cancel();
+            // A band that never left the point it started from is a click, and
+            // a click takes the mark under it. Enclosure alone cannot reach
+            // every mark: a text box is a *box*, drawn only where its words
+            // are, so a band around what the reader can see clips the empty
+            // rest of it, and a box that runs off the edge of the page cannot
+            // be enclosed by any band at all (§8.4).
+            if clicked {
+                let at = PagePoint::new(band.left, band.top);
+                let tolerance = self.eraser_tolerance();
+                let hit = self
+                    .annotations
+                    .get(&page)
+                    .and_then(|candidates| {
+                        pulpit_core::annotate::hit::topmost(candidates, at, tolerance)
+                    })
+                    .map(|hit| hit.id.clone());
+                // Clicking bare page puts down what was held, exactly as it
+                // does for the hand.
+                self.interaction.select(hit);
+                return None;
+            }
             let gathered = self
                 .annotations
                 .get(&page)
@@ -2683,9 +2736,10 @@ impl ReaderSession {
                         .collect()
                 })
                 .unwrap_or_default();
-            // An empty band puts down what was held rather than leaving it:
-            // dragging over blank page is how a reader says "none of these",
-            // and it reads the same as clicking away from a selection.
+            // A band that gathered nothing puts down what was held rather
+            // than leaving it: dragging over blank page is how a reader says
+            // "none of these", and it reads the same as clicking away from a
+            // selection.
             self.interaction.select_many(gathered);
             return None;
         }
@@ -3356,9 +3410,18 @@ impl ReaderSession {
             }
             ReadCommand::ToolOptions(tool) => {
                 self.controls.tool_options = *tool;
+                self.controls.tool_wheel = None;
                 // Options opened from the compact menu expand inside that
                 // menu, so the menu remains mounted while the question is
                 // being answered.
+                self.controls.tool_overflow = tool_overflow;
+                false
+            }
+            ReadCommand::ToolColorWheel(tool) => {
+                self.controls.tool_wheel = *tool;
+                if tool.is_some() {
+                    self.controls.tool_options = None;
+                }
                 self.controls.tool_overflow = tool_overflow;
                 false
             }
@@ -3371,6 +3434,9 @@ impl ReaderSession {
                 false
             }
             ReadCommand::SetToolColor(tool, color) => {
+                // The wheel was opened to answer this question, and it has
+                // been answered.
+                self.controls.tool_wheel = None;
                 self.controls.tool_overflow = tool_overflow;
                 match tool {
                     AnnotationTool::Ink => {
@@ -6936,6 +7002,42 @@ mod tests {
         assert_eq!(session.controls().tool_options, None);
     }
 
+    /// The five fixed swatches are the colours a reader reaches for without
+    /// thinking; the wheel is for the one they have in mind. It replaces the
+    /// options panel rather than covering it, and picking a colour ends it.
+    #[test]
+    fn the_colour_wheel_replaces_the_options_panel_and_closes_on_an_answer() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Ink)));
+        session.apply(&ReadCommand::ToolColorWheel(Some(AnnotationTool::Ink)));
+        assert_eq!(session.controls().tool_wheel, Some(AnnotationTool::Ink));
+        assert_eq!(
+            session.controls().tool_options,
+            None,
+            "the panel underneath would be showing the colour being changed"
+        );
+
+        let mixed = pulpit_core::annotation::InkColor::from_rgb(0.2, 0.4, 0.6);
+        session.apply(&ReadCommand::SetToolColor(AnnotationTool::Ink, mixed));
+        assert_eq!(session.controls().tool_wheel, None);
+        assert_eq!(session.controls().ink_color, mixed);
+    }
+
+    /// Opening the panel again puts the wheel away: one question at a time.
+    #[test]
+    fn opening_the_options_panel_closes_the_wheel() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::ToolColorWheel(Some(
+            AnnotationTool::Highlighter,
+        )));
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Highlighter)));
+        assert_eq!(session.controls().tool_wheel, None);
+        assert_eq!(
+            session.controls().tool_options,
+            Some(AnnotationTool::Highlighter)
+        );
+    }
+
     #[test]
     fn compact_overflow_dismisses_after_actions_but_keeps_inline_options() {
         let mut session = open(1);
@@ -7185,6 +7287,164 @@ mod tests {
             session.selection().is_empty(),
             "dragging over nothing says 'none of these'"
         );
+    }
+
+    #[test]
+    fn a_click_with_the_band_armed_takes_the_mark_under_it() {
+        // §8.4: enclosure cannot reach every mark. A text box is a box and is
+        // drawn only where its words are, so a band around what the reader
+        // can see clips the empty rest of it. A click is how that mark — and
+        // any other — is aimed at directly.
+        let mut session = open(2);
+        let text = text_box();
+        let id = text.id.clone();
+        session.set_annotations(PageIndex(0), &[text]);
+
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 110.0, 110.0);
+        assert!(session.pointer_pressed(), "the band opened");
+        assert!(matches!(session.pointer_released(), Released::Nothing));
+        assert_eq!(
+            session.selection(),
+            &[id],
+            "the click took the box it landed in"
+        );
+    }
+
+    #[test]
+    fn a_click_with_the_band_armed_on_bare_page_puts_down_what_was_held() {
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[text_box()]);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.pointer_moved(PageIndex(0), 110.0, 110.0);
+        session.pointer_pressed();
+        session.pointer_released();
+        assert_eq!(session.selection().len(), 1);
+
+        session.pointer_moved(PageIndex(0), 500.0, 600.0);
+        session.pointer_pressed();
+        session.pointer_released();
+        assert!(
+            session.selection().is_empty(),
+            "clicking away from a selection is how it is dismissed"
+        );
+    }
+
+    #[test]
+    fn a_text_box_placed_near_an_edge_stays_on_the_page() {
+        // A box that reaches past the sheet is geometry no band dragged on
+        // that sheet can enclose, so the mark could never be picked up by
+        // one. The words are drawn from the box's own top-left, so cutting
+        // the box to the page takes away nothing that was visible.
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Text)));
+        session.pointer_moved(PageIndex(0), 580.0, 780.0);
+        let (page, at, tool) = session.placement().expect("text has somewhere to go");
+
+        let transaction = session
+            .place_text(page, at, tool, "a comment".into())
+            .expect("it commits");
+        let pulpit_render::document::DocumentCommand::Annotation(
+            pulpit_core::annotate::AnnotationCommand::Create(draft),
+        ) = &transaction.0[0]
+        else {
+            panic!("a create");
+        };
+        let bounds = draft.bounds().expect("free text has a rect");
+        assert!(
+            bounds.right <= 612.0 && bounds.bottom <= 792.0,
+            "the box is inside the page: {bounds:?}"
+        );
+    }
+
+    /// The rect a text transaction is about to write.
+    fn text_rect(transaction: &DocumentTransaction) -> pulpit_core::page::PageRect {
+        let pulpit_render::document::DocumentCommand::Annotation(command) = &transaction.0[0]
+        else {
+            panic!("a text mark is an annotation command");
+        };
+        let draft = match command {
+            pulpit_core::annotate::AnnotationCommand::Create(draft) => draft,
+            pulpit_core::annotate::AnnotationCommand::Replace { replacement, .. } => replacement,
+            other => panic!("not a text mark: {other:?}"),
+        };
+        draft.bounds().expect("free text has a rect")
+    }
+
+    #[test]
+    fn a_text_box_is_measured_from_the_words_it_holds() {
+        // §8.4: the mark *is* its box. A box wider than its text is empty
+        // space nobody can see, and a rubber band has to enclose all of it.
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Text)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        let (page, at, tool) = session.placement().unwrap();
+
+        let short = text_rect(
+            &session
+                .place_text(page, at, tool, "hi".into())
+                .expect("it commits"),
+        );
+        let long = text_rect(
+            &session
+                .place_text(page, at, tool, "a much longer second thought".into())
+                .expect("it commits"),
+        );
+        let tall = text_rect(
+            &session
+                .place_text(page, at, tool, "one\ntwo\nthree".into())
+                .expect("it commits"),
+        );
+
+        assert!(
+            long.width() > short.width(),
+            "more words is a wider box: {} vs {}",
+            long.width(),
+            short.width()
+        );
+        assert!(
+            tall.height() > short.height(),
+            "three lines is a taller box"
+        );
+        // …and wide enough for what will be drawn in it, which is the whole
+        // point: the appearance is clipped to this rectangle.
+        let size = session.interaction.text_style().font_size;
+        assert!(
+            long.width()
+                > pulpit_core::annotate::text_box::line_width("a much longer second thought", size)
+        );
+    }
+
+    #[test]
+    fn editing_a_text_mark_grows_its_box_rather_than_clipping_the_new_text() {
+        let mut session = open(2);
+        let mark = text_box();
+        let id = mark.id.clone();
+        let was = mark.bounds;
+        session.set_annotations(PageIndex(0), &[mark]);
+
+        let long = "a second thought considerably longer than the first".to_string();
+        let grown = text_rect(
+            &session
+                .replace_text(&id, PageIndex(0), long.clone())
+                .expect("the rewrite commits"),
+        );
+        assert_eq!(grown.left, was.left, "it is rewritten where it already is");
+        assert_eq!(grown.top, was.top);
+        assert!(
+            grown.width() > was.width(),
+            "the box grew to hold the longer line"
+        );
+
+        // A shorter thought leaves the box the size the reader last saw it:
+        // shrinking under them would move the mark's own edges while they
+        // were typing into it.
+        let shrunk = text_rect(
+            &session
+                .replace_text(&id, PageIndex(0), "hi".into())
+                .expect("the rewrite commits"),
+        );
+        assert_eq!(shrunk, was, "an edit never takes the box away");
     }
 
     #[test]

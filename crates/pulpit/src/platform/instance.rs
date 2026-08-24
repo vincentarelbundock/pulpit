@@ -1,14 +1,22 @@
-//! One presenter, one process.
+//! Claims: which copy of pulpit owns something only one copy may own.
 //!
-//! Two copies of pulpit on one machine is not a harmless mistake: both
-//! open an audience window, both claim the projector, and the window manager
-//! flips between them many times a second. What the presenter sees is a
-//! violently flickering screen with no explanation, in the middle of a talk.
+//! Several copies of pulpit may run at once — a second deck, a second
+//! document, a file clicked in a file manager while the first window is
+//! open — and reading, annotating, filling and signing are per-process work
+//! that costs nothing to duplicate.
 //!
-//! So the second copy declines to start and says where the first one is. The
-//! record is a small file holding the process id; a file left behind by a
-//! crash is recognised as stale and reclaimed, because refusing to start
-//! after a crash would be a worse failure than the one being prevented.
+//! The projector is not. Two audience windows on one screen make the window
+//! manager flip between them many times a second, and what the presenter sees
+//! is a violently flickering screen with no explanation, in the middle of a
+//! talk. So the audience window is claimed, and a copy that cannot have it is
+//! told who does rather than opening a second one.
+//!
+//! Each copy also claims a file naming itself, which is how another copy can
+//! tell an abandoned crash-recovery file from one a running instance is still
+//! writing to. The claim is a small file holding the process id, locked for as
+//! long as the process lives; a file left behind by a crash is recognised as
+//! stale and reclaimed, because refusing after a crash would be a worse
+//! failure than the one being prevented.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +24,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
-/// The outcome of trying to become *the* running copy.
+/// The outcome of trying to take a claim.
 #[derive(Debug)]
 pub enum Instance {
     /// This process holds the claim; the lock is released when it is dropped.
@@ -51,7 +59,7 @@ impl Drop for InstanceLock {
     }
 }
 
-/// Claim the single-instance lock at `path`.
+/// Take the claim recorded at `path`, if nobody else holds it.
 pub fn acquire(path: &Path) -> Instance {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -61,16 +69,27 @@ pub fn acquire(path: &Path) -> Instance {
         }
     }
 
-    // Open or create the lock file. We use OpenOptions to allow both creation
-    // and opening of existing files.
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    // Open or create the lock file. On Windows the open itself is the lock:
+    // denying every kind of sharing is what makes `is_claimed` answerable
+    // there, since there is no flock to ask.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)]
     {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    let file = match options.open(path) {
         Ok(f) => f,
+        // A file that exists but will not open is one somebody else has open
+        // with sharing denied, which on Windows is precisely the holder.
+        #[cfg(windows)]
+        Err(_) if path.exists() => {
+            return Instance::AlreadyRunning {
+                pid: read_pid(path),
+                lock: path.to_path_buf(),
+            }
+        }
         Err(e) => {
             return Instance::Unknown {
                 reason: format!("cannot open lock file: {e}"),
@@ -134,6 +153,62 @@ pub fn acquire(path: &Path) -> Instance {
     }
 }
 
+/// Is a live process holding the claim at `path`?
+///
+/// A read-only probe. It never writes to the file and never leaves a lock
+/// behind, because the file belongs to whoever holds it: this is how one
+/// instance decides whether *another* instance's crash-recovery file has been
+/// abandoned, and a probe that wrote would corrupt the record it is asking
+/// about.
+///
+/// Undecidable cases answer "held". Recovering a file whose owner is still
+/// running would take a live instance's journal away from it, which is worse
+/// than leaving a genuinely stale file on disk until the next launch.
+pub fn is_claimed(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            // No file at all is nobody's claim. A file that exists but cannot
+            // be opened is somebody's, as far as this process can tell.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        // LOCK_EX | LOCK_NB, then LOCK_UN: taking the lock is how the question
+        // is asked, so it is given straight back.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), 2 | 4) } == 0;
+        if taken {
+            unsafe { libc::flock(file.as_raw_fd(), 8) };
+        }
+        !taken
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        if !path.exists() {
+            return false;
+        }
+        // The holder opens its claim denying every kind of sharing, so an
+        // open that succeeds proves there is no holder.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(path)
+            .is_err()
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Nothing here can be asked honestly, so nothing is reclaimed.
+        path.exists()
+    }
+}
 fn write_pid(file: &std::fs::File) -> std::io::Result<()> {
     use std::io::Seek;
     let mut file = file;
@@ -166,6 +241,58 @@ fn is_running(_pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// The probe is how one copy tells another copy's live recovery file from
+    /// a dead one, so it must agree with the claim it is asking about.
+    #[test]
+    #[cfg(unix)]
+    fn a_held_claim_reads_as_held_and_a_released_one_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("live/4242.lock");
+
+        assert!(!is_claimed(&path), "nothing has been claimed yet");
+        let held = match acquire(&path) {
+            Instance::Acquired(lock) => lock,
+            other => panic!("expected the claim, got {other:?}"),
+        };
+        assert!(is_claimed(&path), "a claim in hand reads as held");
+        drop(held);
+        assert!(!is_claimed(&path), "a released claim is nobody's");
+    }
+
+    /// A probe must not become a claim, or the first question asked about a
+    /// file would answer every later one wrongly.
+    #[test]
+    #[cfg(unix)]
+    fn probing_leaves_the_claim_where_it_was() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("live/7.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "7").unwrap();
+
+        assert!(!is_claimed(&path));
+        assert!(!is_claimed(&path), "asking twice gives the same answer");
+        // And the file the probe opened is still available to be claimed.
+        match acquire(&path) {
+            Instance::Acquired(_) => {}
+            other => panic!("a probed file is still free, got {other:?}"),
+        }
+    }
+
+    /// The pid recorded belongs to the holder. A probe that rewrote it would
+    /// make the holder's own file name somebody else.
+    #[test]
+    #[cfg(unix)]
+    fn probing_does_not_rewrite_the_holders_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("instance.pid");
+        let held = match acquire(&path) {
+            Instance::Acquired(lock) => lock,
+            other => panic!("expected the claim, got {other:?}"),
+        };
+        assert!(is_claimed(&path));
+        assert_eq!(read_pid(&path), Some(std::process::id()));
+        drop(held);
+    }
     #[test]
     fn the_first_copy_gets_the_claim() {
         let directory = tempfile::tempdir().unwrap();

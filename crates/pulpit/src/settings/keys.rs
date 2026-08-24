@@ -159,7 +159,6 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
     ShortcutGroup {
         title: "Read & search",
         actions: &[
-            Action::ToggleReader,
             Action::ToggleOutline,
             Action::FocusSearch,
             Action::FindNext,
@@ -181,14 +180,13 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
 ];
 
 /// The compact reference shown before a document is open.
-pub const QUICK_START_ACTIONS: [Action; 8] = [
+pub const QUICK_START_ACTIONS: [Action; 7] = [
     Action::Next,
     Action::Previous,
     Action::First,
     Action::Last,
     Action::FocusSearch,
     Action::ShowOverview,
-    Action::ToggleReader,
     Action::ShowShortcuts,
 ];
 
@@ -470,10 +468,11 @@ impl From<KeymapWire> for Keymap {
             .bindings
             .into_iter()
             .map(|(binding, action)| (binding.normalized(), action))
+            // Retired bindings go from stored keymaps too, or existing users
+            // would keep a key that fresh installs stopped advertising.
             // Preview stepping is controlled by the scrubber rather than the
-            // fixed keymap. Remove the retired bindings from stored keymaps
-            // too, or existing users would keep Tab after fresh installs
-            // stopped advertising it.
+            // fixed keymap; reading and presenting are reached by cycling
+            // layouts, which is the same act named once instead of twice.
             .filter(|(_, action)| {
                 !matches!(
                     action,
@@ -481,6 +480,7 @@ impl From<KeymapWire> for Keymap {
                         | Action::PreviewPrevious
                         | Action::CommitPreview
                         | Action::CancelPreview
+                        | Action::ToggleReader
                 )
             })
             .collect();
@@ -542,11 +542,6 @@ impl Default for Keymap {
                 // now a navigation key; "o" is free because opening a file is
                 // `Ctrl+O` like everywhere else.
                 named("o", Action::ShowOverview),
-                // "r" for read: the same file, as a document to mark up
-                // rather than a deck to present. Pressed again it goes back.
-                // This binding existed before and never fired, because the
-                // timer reset had taken "r" earlier in the list.
-                named("r", Action::ToggleReader),
                 // Cycling is the live layout action; the shifted form opens
                 // the library when a specific layout is wanted.
                 named("l", Action::CycleLayout),
@@ -728,11 +723,16 @@ impl Keymap {
 
     /// Actions deliberately left unbound by default.
     ///
-    /// Preview control belongs to the scrubber rather than Tab/Enter, and
-    /// stepping through a slide's links is rare enough that it does not earn
-    /// one of the bare letters. The variants remain internal actions, but no
-    /// fixed shortcut or reference entry advertises them.
-    pub const UNBOUND_BY_DEFAULT: [Action; 6] = [
+    /// Reading and presenting are which layout is mounted, so the layout keys
+    /// are how a file moves between them: `l` cycles and `Shift+L` opens the
+    /// library, and a second key doing the same thing to a bare letter is one
+    /// vocabulary too many. Preview control belongs to the scrubber rather
+    /// than Tab/Enter, and stepping through a slide's links is rare enough
+    /// that it does not earn one of the bare letters. The variants remain
+    /// internal actions, but no fixed shortcut or reference entry advertises
+    /// them.
+    pub const UNBOUND_BY_DEFAULT: [Action; 7] = [
+        Action::ToggleReader,
         Action::PreviewNext,
         Action::PreviewPrevious,
         Action::CommitPreview,
@@ -816,6 +816,150 @@ impl Keymap {
                 Some(Action::Previous)
             }
             _ => None,
+        }
+    }
+}
+
+/// A keymap key name as an interface should print it. Letters are stored as
+/// the toolkit reports them, in lower case, and the function keys
+/// inconsistently so; a key cap is upper case either way.
+///
+/// The menus, the in-application reference and the website's table all spell
+/// a key through this one function, so none of them can drift from another.
+pub fn display_key(key: &str) -> String {
+    match key {
+        "slash" => "/".into(),
+        "Right" => "→".into(),
+        "Left" => "←".into(),
+        "PageDown" => "PgDn".into(),
+        "PageUp" => "PgUp".into(),
+        other if other.len() == 1 => other.to_ascii_uppercase(),
+        other if other.len() <= 3 && other.starts_with(['f', 'F']) => other.to_ascii_uppercase(),
+        other => other.to_string(),
+    }
+}
+
+/// The website's keyboard reference, generated from this file.
+///
+/// The table on the site was typed by hand for a while, which is a promise
+/// nothing checks: a binding could change here and stay wrong there
+/// indefinitely. It is rendered from [`SHORTCUT_GROUPS`] and
+/// [`Keymap::default`] instead, and a test compares the rendering against
+/// `docs-src/parts/keys.typ`, so a keymap change that is not carried into the
+/// documentation fails the build rather than surviving it.
+///
+/// The spelling is deliberately platform-neutral — `Ctrl`, not whatever this
+/// desktop's primary modifier happens to be — because one page is read from
+/// every platform. That is the single difference from what the application
+/// shows; `crate::platform`'s `InputPolicy` handles the rest there.
+#[cfg(test)]
+mod website {
+    use super::*;
+
+    /// Where the generated table lives, relative to this crate.
+    const GENERATED: &str = "../../docs-src/parts/keys.typ";
+
+    fn path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GENERATED)
+    }
+
+    /// A binding as the website prints it, or `None` for a raw scancode,
+    /// which names nothing a reader could press deliberately.
+    fn spell(binding: &KeyBinding) -> Option<String> {
+        let KeyBinding::Named { key, mods } = binding else {
+            return None;
+        };
+        Some(format!("{}{}", mods.prefix(), display_key(key)))
+    }
+
+    /// The keycap cell for one action: the primary bindings, then the
+    /// Vim/Zathura alternative in parentheses, exactly as the application's
+    /// own reference splits them.
+    fn keys_cell(keymap: &Keymap, action: Action) -> String {
+        let mut primary = Vec::new();
+        let mut alternate = Vec::new();
+        for (binding, bound) in &keymap.bindings {
+            if *bound != action {
+                continue;
+            }
+            let Some(spelled) = spell(binding) else {
+                continue;
+            };
+            if Keymap::is_alternate(action, binding) {
+                alternate.push(format!("`{spelled}`"));
+            } else {
+                primary.push(format!("`{spelled}`"));
+            }
+        }
+        let mut cell = primary.join(" ");
+        if !alternate.is_empty() {
+            cell.push_str(&format!(" ({})", alternate.join(" ")));
+        }
+        cell
+    }
+
+    /// Two key/action pairs to a row, so the whole reference fits a screen
+    /// rather than scrolling past one.
+    fn render() -> String {
+        let keymap = Keymap::default();
+        let mut out = String::from(
+            "// Generated from the application keymap. Do not edit.\n\
+             //\n\
+             // Regenerate with `make docs-keys` after changing\n\
+             // `crates/pulpit/src/settings/keys.rs`.\n\
+             \n\
+             #table(\n  \
+             columns: (auto, 1fr, auto, 1fr),\n  \
+             stroke: none,\n  \
+             inset: (x: 0.5em, y: 0.4em),\n",
+        );
+        for group in SHORTCUT_GROUPS {
+            out.push_str(&format!(
+                "  table.cell(colspan: 4)[#smallcaps[{}]],\n",
+                group.title
+            ));
+            for pair in group.actions.chunks(2) {
+                let mut cells = Vec::new();
+                for action in pair {
+                    cells.push(format!("[{}]", keys_cell(&keymap, *action)));
+                    cells.push(format!("[{}]", action.label()));
+                }
+                // An odd group leaves the second pair empty rather than
+                // pulling the next group's first entry up beside it.
+                while cells.len() < 4 {
+                    cells.push("[]".to_string());
+                }
+                out.push_str(&format!("  {},\n", cells.join(", ")));
+            }
+        }
+        out.push_str(")\n");
+        out
+    }
+
+    #[test]
+    fn the_published_reference_is_the_keymap_itself() {
+        let generated = render();
+        if std::env::var_os("PULPIT_UPDATE_DOCS").is_some() {
+            std::fs::write(path(), &generated).expect("write the generated table");
+            return;
+        }
+        let published = std::fs::read_to_string(path()).unwrap_or_default();
+        assert!(
+            published == generated,
+            "docs-src/parts/keys.typ no longer matches the keymap. \
+             Run `make docs-keys` and commit the result.\n\n\
+             --- expected ---\n{generated}\n--- published ---\n{published}"
+        );
+    }
+
+    /// The reference is worth publishing only if every row names a key.
+    #[test]
+    fn every_published_row_has_a_key_to_press() {
+        let keymap = Keymap::default();
+        for group in SHORTCUT_GROUPS {
+            for action in group.actions {
+                assert!(!keys_cell(&keymap, *action).is_empty(), "{action:?}");
+            }
         }
     }
 }
@@ -1132,11 +1276,19 @@ mod tests {
         }
     }
 
+    /// Reading and presenting are layouts, and the layout keys are how a file
+    /// moves between them. `r` is free: it was a second name for `l`.
     #[test]
-    fn reader_mode_is_actually_reachable() {
-        // The regression this whole change started from.
+    fn reading_and_presenting_are_reached_by_the_layout_keys() {
         let keymap = Keymap::default();
-        assert_eq!(keymap.resolve(Some("r"), None), Some(Action::ToggleReader));
+        assert_eq!(keymap.resolve(Some("r"), None), None);
+        assert!(keymap.keys_for(Action::ToggleReader).is_empty());
+        assert_eq!(keymap.resolve(Some("l"), None), Some(Action::CycleLayout));
+    }
+
+    #[test]
+    fn the_timer_keys_are_unaffected_by_the_letters_around_them() {
+        let keymap = Keymap::default();
         assert_eq!(
             keymap.resolve_with_mods(Some("t"), Mods::shift(), None),
             Some(Action::ResetTimer)

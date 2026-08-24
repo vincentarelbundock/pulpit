@@ -28,7 +28,7 @@ endif
 
 .PHONY: help all build launch test check lint pdfium install uninstall bundle \
         linux-packages app app-universal icons windows website serve version \
-        bump release clean sign-oracle-setup sign-oracle fuzz-sign
+        bump release clean sign-oracle-setup sign-oracle fuzz-sign docs-keys
 
 help:  ## Display this help screen
 	@echo -e "\033[1mAvailable commands:\033[0m\n"
@@ -151,7 +151,11 @@ fuzz-sign:  ## Run all fuzzing targets for 60 seconds each (development fuzzing)
 # Documentation targets
 # ==============================================================================
 
-website:  ## Compile docs-src/ into docs/ with Calepin
+docs-keys:  ## Regenerate the website keyboard reference from the keymap
+	PULPIT_UPDATE_DOCS=1 $(CARGO) test --bin pulpit \
+		settings::keys::website::the_published_reference_is_the_keymap_itself
+
+website: docs-keys  ## Compile docs-src/ into docs/ with Calepin
 	calepin compile docs-src docs
 
 serve: website  ## Build and serve the website at http://$(HOST):$(PORT)

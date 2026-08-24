@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn a_fresh_store_offers_the_built_ins_and_nothing_else() {
         let (_directory, store) = store();
-        assert_eq!(store.built_in().len(), 3);
+        assert_eq!(store.built_in().len(), 2);
         assert!(store.custom().is_empty());
         assert!(store.get(&LayoutId("presenter-default".into())).is_some());
     }
@@ -665,7 +665,7 @@ mod tests {
         let text = store.export(&LayoutId("reader-default".into())).unwrap();
         let (id, _) = store.import(&text).unwrap();
         assert_eq!(store.get(&id).unwrap().origin, Origin::Custom);
-        assert_eq!(store.built_in().len(), 3, "the built-in is untouched");
+        assert_eq!(store.built_in().len(), 2, "the built-in is untouched");
     }
 
     #[test]

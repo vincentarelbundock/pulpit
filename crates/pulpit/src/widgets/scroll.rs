@@ -331,10 +331,7 @@ mod tests {
             ("scroll::Thumbed", include_str!("scroll.rs")),
             ("panel::KeyScope", include_str!("panel.rs")),
             ("residency", include_str!("../residency.rs")),
-            (
-                "annotations::popover",
-                include_str!("annotations/popover.rs"),
-            ),
+            ("common::popover", include_str!("common/popover.rs")),
         ];
         let implements = format!("{} for", "Widget<Message, iced::Theme, iced::Renderer>");
         let forwards = format!("fn {}(", "operate");

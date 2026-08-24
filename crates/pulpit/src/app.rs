@@ -1012,6 +1012,22 @@ pub struct App {
     pub color_picker_open: Option<crate::theme::ColorRole>,
     /// Where the crash-recovery snapshot lives.
     pub session: crate::session::SessionStore,
+    /// This copy's claim that it is alive, held for the life of the process.
+    ///
+    /// Several copies may run at once, so a crash-recovery file names the
+    /// process that wrote it and this is what lets another copy tell a file
+    /// whose owner is gone from one still being written. `None` when the
+    /// claim could not be recorded, which never stops the application.
+    ///
+    /// Never read: holding it is the whole of its job, and dropping it at
+    /// exit is what tells the next launch that this copy has gone.
+    #[allow(dead_code)]
+    live_claim: Option<crate::platform::InstanceLock>,
+    /// Where the claim on the audience window is recorded.
+    audience_claim_path: std::path::PathBuf,
+    /// That claim, while this copy holds it. Only one copy may drive the
+    /// projector: two audience windows on one screen fight for it.
+    audience_claim: Option<crate::platform::InstanceLock>,
     /// The interrupted previous run, until startup begins applying it.
     ///
     /// While this is `Some` the application is a fresh start in every way the
@@ -1511,6 +1527,52 @@ struct SignTargetCandidates {
     countersigning: bool,
 }
 
+/// Where this copy's own recovery files and claims live.
+///
+/// Taken once in `App::new`: `directories()` builds paths from the
+/// environment, and the liveness probe asks about one pid at a time.
+fn claim_directories() -> crate::platform::Directories {
+    crate::platform::Directories::detect()
+}
+
+/// Is the copy of pulpit that wrote a recovery file still running?
+///
+/// Every running copy holds a claim named after its process. A claim nobody
+/// holds means that copy is gone and what it left behind is a crash leftover;
+/// anything this cannot decide is reported as live, so a running copy's
+/// journal is never taken from it.
+fn owner_is_live(directories: &crate::platform::Directories, pid: u32) -> bool {
+    crate::platform::is_claimed(&directories.live_claim(pid))
+}
+
+/// Remove claims left by copies that crashed long ago.
+///
+/// Only files a week old and held by nobody: a claim written moments ago may
+/// belong to a copy that is still starting up, and unlinking it would leave
+/// two copies both believing they are the only one.
+fn sweep_stale_claims(directories: &crate::platform::Directories) {
+    const A_WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(
+        directories
+            .live_claim(std::process::id())
+            .parent()
+            .unwrap_or(std::path::Path::new(".")),
+    ) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map(|modified| modified.elapsed().unwrap_or_default() > A_WEEK)
+            .unwrap_or(false);
+        if old && !crate::platform::is_claimed(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 impl App {
     pub fn new(
         initial: Option<PathBuf>,
@@ -1569,15 +1631,48 @@ impl App {
 
         let now = Instant::now();
 
+        // Say that this copy is running, before looking at what other copies
+        // left behind: a claim taken first cannot be mistaken for a crash
+        // leftover by a copy starting at the same moment.
+        let directories = claim_directories();
+        let live_claim =
+            match crate::platform::acquire_claim(&directories.live_claim(std::process::id())) {
+                crate::platform::Instance::Acquired(lock) => Some(lock),
+                other => {
+                    // Recovery files this copy writes may then be collected by a
+                    // later launch while this one is still running. That is a
+                    // recoverable annoyance; refusing to start is not.
+                    tracing::warn!(?other, "could not record that this copy is running");
+                    None
+                }
+            };
+        sweep_stale_claims(&directories);
+        let is_live = |pid| owner_is_live(&directories, pid);
+
         // A snapshot that survived the last run means that run did not go
         // through `quit`, which deletes it: this is the crash signal. Turn it
         // into a restore plan now; startup applies it automatically once the
         // application has been assembled.
+        //
+        // The snapshot searched for is another copy's, not this one's: every
+        // running copy writes its own, so what is worth restoring is one whose
+        // process is gone. It is taken off disk as it is read, because a
+        // restore that itself crashes must not be replayed for ever, and
+        // because the copy that reads it is now the one responsible for it.
         let session = crate::session::SessionStore::default();
-        let pending_restore = if restore_interrupted_session {
-            session
-                .load()
-                .filter(|snapshot| snapshot.is_worth_offering())
+        let pending_restore = restore_interrupted_session
+            .then(|| {
+                crate::session::abandoned_snapshots(
+                    &crate::settings::store::config_directory(),
+                    is_live,
+                )
+                .into_iter()
+                .find_map(|path| {
+                    let store = crate::session::SessionStore::new(path);
+                    let snapshot = store.load().filter(|snapshot| snapshot.is_worth_offering());
+                    store.clear();
+                    snapshot
+                })
                 .map(|snapshot| {
                     let current = snapshot
                         .document
@@ -1585,9 +1680,8 @@ impl App {
                         .and_then(|document| crate::session::fingerprint(&document.path));
                     snapshot.plan(current.as_ref())
                 })
-        } else {
-            None
-        };
+            })
+            .flatten();
         if pending_restore.is_some() {
             tracing::info!("a previous session did not exit cleanly; restoring it");
         }
@@ -1697,6 +1791,9 @@ impl App {
             save_reviewed: false,
             color_picker_open: None,
             session,
+            live_claim,
+            audience_claim_path: directories.audience_claim(),
+            audience_claim: None,
             pending_restore,
             restoring_into_document: None,
             session_throttle: crate::session::SaveThrottle::default(),
@@ -4065,7 +4162,7 @@ impl App {
         }
         Some(self.platform.input.format(&Shortcut {
             modifiers,
-            key: display_key(key),
+            key: crate::settings::keys::display_key(key),
         }))
     }
 
@@ -5419,19 +5516,27 @@ impl App {
 
     fn prepare_document_task(&mut self, path: PathBuf, serial: u64) -> Task<Message> {
         let results = self.prepare_document.clone();
-        let journal_path = Self::journal_path();
+        let directories = claim_directories();
+        let abandoned = crate::reader_journal::abandoned_journals(
+            &crate::settings::store::config_directory(),
+            |pid| owner_is_live(&directories, pid),
+        );
         let reader_enabled = std::env::var_os("PULPIT_NO_READER").is_none();
         let (done, finished) = iced::futures::channel::oneshot::channel();
         let spawn = std::thread::Builder::new()
             .name("document-open".into())
             .spawn(move || {
                 let fingerprint = crate::session::fingerprint(&path);
-                let recovery =
-                    crate::reader_journal::Journal::recover(&journal_path).filter(|recovered| {
+                // A journal belonging to a copy that is gone, and to this file:
+                // anything else on disk is another document's or another
+                // running copy's, and is left where it is.
+                let recovery = abandoned.iter().find_map(|candidate| {
+                    crate::reader_journal::Journal::recover(candidate).filter(|recovered| {
                         fingerprint
                             .as_ref()
                             .is_some_and(|current| recovered.applies_to(&path, current))
-                    });
+                    })
+                });
                 let signatures = std::fs::read(&path)
                     .ok()
                     .and_then(|bytes| pulpit_render::verify::verify_signatures(&bytes).ok())
@@ -5564,8 +5669,12 @@ impl App {
 
     /// Where the document journal lives: beside the session snapshot, because
     /// it answers the same question about the same run (§11.1).
+    /// This copy's journal. One file per process: several copies may be
+    /// editing different documents at once, and one name for all of them
+    /// would interleave two edit histories into a history that never was.
     fn journal_path() -> PathBuf {
-        crate::settings::store::config_directory().join("document-journal.jsonl")
+        crate::settings::store::config_directory()
+            .join(crate::reader_journal::journal_name(std::process::id()))
     }
 
     /// Record one revision-incrementing operation, durably, at commit.
@@ -8233,6 +8342,9 @@ impl App {
                 }
             }
         }
+        // Replayed, so the file it came from has done its work. It was
+        // written by a process that is gone, so nothing else will remove it.
+        crate::reader_journal::Journal::discard(&recovered.path);
         self.notify(format!(
             "Putting back {count} unsaved {}.",
             if count == 1 { "edit" } else { "edits" }
@@ -8242,10 +8354,12 @@ impl App {
 
     /// Start fresh: the journal goes, and the document is the file on disk.
     fn discard_reader_edits(&mut self) -> Task<Message> {
-        self.reader_recovery = None;
-        // The journal for *this* run has already replaced the old file, so
-        // there is nothing left to remove; dropping the offer is the whole of
-        // the answer.
+        // The offer was another copy's journal, and declining it is the last
+        // word on those edits: the file goes with the answer rather than
+        // waiting to be offered again by the next launch.
+        if let Some(recovered) = self.reader_recovery.take() {
+            crate::reader_journal::Journal::discard(&recovered.path);
+        }
         Task::none()
     }
 
@@ -11022,6 +11136,44 @@ impl App {
 
     /// Map the prepared audience toplevel and let ordinary reconciliation put
     /// it on the selected display.
+    /// Take the claim on the audience window, or say who has it.
+    ///
+    /// Several copies of pulpit may run at once, and everything else they do
+    /// is independent. The projector is not: two audience windows on one
+    /// screen leave the window manager flipping between them many times a
+    /// second, which is a violently flickering screen in the middle of a talk.
+    /// So the second copy is told where the first one is instead.
+    ///
+    /// A claim that cannot be recorded at all stands down. A missing guard is
+    /// a risk; a guard that stops a presenter from presenting is a certainty.
+    fn claim_audience(&mut self) -> bool {
+        if self.audience_claim.is_some() {
+            return true;
+        }
+        match crate::platform::acquire_claim(&self.audience_claim_path) {
+            crate::platform::Instance::Acquired(claim) => {
+                self.audience_claim = Some(claim);
+                true
+            }
+            crate::platform::Instance::AlreadyRunning { pid, .. } => {
+                let who = match pid {
+                    Some(pid) => format!(" (process {pid})"),
+                    None => String::new(),
+                };
+                self.notify(format!(
+                    "Another copy of pulpit is presenting{who}. \
+                     Stop its audience window first — two on one projector \
+                     would flicker against each other."
+                ));
+                false
+            }
+            crate::platform::Instance::Unknown { reason } => {
+                tracing::warn!(reason, "presenting without recording the audience claim");
+                true
+            }
+        }
+    }
+
     fn start_audience(&mut self, windowed: bool) -> Task<Message> {
         self.audience_start_menu_open = false;
         if self.audience_started {
@@ -11029,6 +11181,9 @@ impl App {
         }
         if self.state.document().is_none() {
             self.notify("Open a document before starting the audience window.".into());
+            return Task::none();
+        }
+        if !self.claim_audience() {
             return Task::none();
         }
 
@@ -11054,6 +11209,9 @@ impl App {
     /// desktop context active at that moment.
     fn stop_audience(&mut self) -> Task<Message> {
         let was_active = self.audience_started;
+        // The projector is free for another copy the moment this one stops
+        // using it, not when this process ends.
+        self.audience_claim = None;
         self.audience_started = false;
         self.audience_start_menu_open = false;
         self.presenter_refocus_deadlines.clear();
@@ -13343,22 +13501,6 @@ fn platform_description() -> String {
     let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into());
     format!("{}/{session} ({desktop})", std::env::consts::OS)
-}
-
-/// The other direction: a keymap key name as a menu should print it. Letters
-/// are stored as the toolkit reports them, in lower case, and the function
-/// keys inconsistently so; a key cap is upper case either way.
-fn display_key(key: &str) -> String {
-    match key {
-        "slash" => "/".into(),
-        "Right" => "→".into(),
-        "Left" => "←".into(),
-        "PageDown" => "PgDn".into(),
-        "PageUp" => "PgUp".into(),
-        other if other.len() == 1 => other.to_ascii_uppercase(),
-        other if other.len() <= 3 && other.starts_with(['f', 'F']) => other.to_ascii_uppercase(),
-        other => other.to_string(),
-    }
 }
 
 /// A stable, human-readable name for a logical key, matching the strings the

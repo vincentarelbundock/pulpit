@@ -127,6 +127,10 @@ pub struct JournalHeader {
 /// A journal read back from disk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveredJournal {
+    /// The file it was read from. The copy that read it owns it now: it
+    /// belonged to a process that is gone, and the answer to the offer is
+    /// what decides when it may be deleted.
+    pub path: PathBuf,
     pub header: JournalHeader,
     pub entries: Vec<JournalEntry>,
     /// True when the file ended mid-line — a crash during a write.
@@ -176,6 +180,51 @@ impl RecoveredJournal {
             format!("{count} unsaved {edits} to {name}")
         }
     }
+}
+
+/// The journal this process writes.
+///
+/// One file per copy, named after the process. Several copies of pulpit may
+/// be editing different documents at once; a shared name would interleave
+/// two edit histories into one file, and replay would reproduce a session
+/// that never happened.
+pub fn journal_name(pid: u32) -> String {
+    format!("document-journal-{pid}.jsonl")
+}
+
+fn journal_pid(name: &str) -> Option<u32> {
+    name.strip_prefix("document-journal-")?
+        .strip_suffix(".jsonl")?
+        .parse()
+        .ok()
+}
+
+/// Journals left behind by copies that are no longer running.
+///
+/// `is_live` answers whether the process that wrote one still exists. A live
+/// copy's journal is being appended to right now: reading it would offer
+/// somebody else's unsaved edits, and deleting it after would take them away.
+pub fn abandoned_journals(directory: &Path, is_live: impl Fn(u32) -> bool) -> Vec<PathBuf> {
+    let mut found: Vec<(u32, PathBuf)> = match std::fs::read_dir(directory) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let pid = journal_pid(name.to_str()?)?;
+                (pid != std::process::id() && !is_live(pid)).then(|| (pid, entry.path()))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    found.sort_by_key(|(pid, _)| *pid);
+    let mut paths: Vec<PathBuf> = found.into_iter().map(|(_, path)| path).collect();
+    // The name used before journals were per-process. Unsaved edits are data
+    // loss (§11.1), so one left by the version that wrote it is still offered.
+    let legacy = directory.join("document-journal.jsonl");
+    if legacy.is_file() {
+        paths.insert(0, legacy);
+    }
+    paths
 }
 
 /// The open journal for one document.
@@ -313,6 +362,7 @@ impl Journal {
             }
         }
         Some(RecoveredJournal {
+            path: path.to_path_buf(),
             header,
             entries,
             truncated,
@@ -364,6 +414,76 @@ mod tests {
             revision: DocumentRevision(revision),
             transaction: stroke(x),
         }
+    }
+
+    /// A running copy is still appending to its journal. Collecting it would
+    /// offer somebody else's unsaved edits and then delete them.
+    #[test]
+    fn only_a_departed_copys_journal_is_abandoned() {
+        let directory = tempfile::tempdir().unwrap();
+        let live = 4242;
+        let gone = 4243;
+        for pid in [live, gone, std::process::id()] {
+            std::fs::write(directory.path().join(journal_name(pid)), "").unwrap();
+        }
+        // Another kind of recovery file entirely, and not this scan's business.
+        std::fs::write(directory.path().join("session-4243.json"), "").unwrap();
+
+        let abandoned = abandoned_journals(directory.path(), |pid| pid == live);
+        assert_eq!(
+            abandoned,
+            vec![directory.path().join(journal_name(gone))],
+            "a live copy's journal and this copy's own are left alone"
+        );
+    }
+
+    /// The name journals had before they were per-process. Unsaved edits from
+    /// before an upgrade are still unsaved edits.
+    #[test]
+    fn a_journal_from_before_the_rename_is_still_offered() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("document-journal.jsonl"), "").unwrap();
+        let abandoned = abandoned_journals(directory.path(), |_| false);
+        assert_eq!(
+            abandoned,
+            vec![directory.path().join("document-journal.jsonl")]
+        );
+    }
+
+    /// Two copies editing at once keep two journals, and neither one's entries
+    /// reach the other's file. One shared name would replay a history that
+    /// never happened.
+    #[test]
+    fn two_copies_write_two_journals() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_ne!(journal_name(1), journal_name(2));
+        let first = directory.path().join(journal_name(1));
+        let second = directory.path().join(journal_name(2));
+        let source = Path::new("/tmp/paper.pdf");
+        let mut a = Journal::start(&first, source, fingerprint()).unwrap();
+        let mut b = Journal::start(&second, source, fingerprint()).unwrap();
+        a.append(&entry(1, 10.0)).unwrap();
+        b.append(&entry(1, 20.0)).unwrap();
+        b.append(&entry(2, 30.0)).unwrap();
+
+        assert_eq!(Journal::recover(&first).unwrap().entries.len(), 1);
+        assert_eq!(Journal::recover(&second).unwrap().entries.len(), 2);
+    }
+
+    /// A recovered journal knows which file it came from: the copy that wrote
+    /// it is gone, so whoever answers the offer is what removes it.
+    #[test]
+    fn a_recovered_journal_names_the_file_it_came_from() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(journal_name(4243));
+        let mut journal =
+            Journal::start(&path, Path::new("/tmp/paper.pdf"), fingerprint()).unwrap();
+        journal.append(&entry(1, 10.0)).unwrap();
+
+        let recovered = Journal::recover(&path).expect("a journal to recover");
+        assert_eq!(recovered.path, path);
+        Journal::discard(&recovered.path);
+        assert!(!path.exists(), "answering the offer removes the file");
     }
 
     #[test]

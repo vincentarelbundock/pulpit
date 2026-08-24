@@ -91,10 +91,20 @@ impl Directories {
         self.config.join("signatures")
     }
 
-    /// Where the single-instance claim is recorded. It belongs with the
+    /// Where a running copy records that it is alive. It belongs with the
     /// cache: it is state about this machine right now, not configuration.
-    pub fn instance_lock(&self) -> PathBuf {
-        self.cache.join("instance.pid")
+    ///
+    /// One file per process, because several copies may run at once. Another
+    /// copy reads this to tell a crash-recovery file whose owner is gone from
+    /// one a live instance is still writing.
+    pub fn live_claim(&self, pid: u32) -> PathBuf {
+        self.cache.join("live").join(format!("{pid}.lock"))
+    }
+
+    /// The claim on the audience window, which only one copy may hold: two
+    /// audience windows on one projector fight for the screen.
+    pub fn audience_claim(&self) -> PathBuf {
+        self.cache.join("audience.pid")
     }
 
     pub fn settings_file(&self) -> PathBuf {

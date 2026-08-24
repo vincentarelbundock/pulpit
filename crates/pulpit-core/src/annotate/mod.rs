@@ -19,6 +19,7 @@ pub mod hit;
 pub mod id;
 pub mod presenter;
 pub mod stroke;
+pub mod text_box;
 
 pub use draft::{
     AnnotationCommand, AnnotationDraft, AnnotationKind, DraftError, FreeTextDraft, HighlightDraft,

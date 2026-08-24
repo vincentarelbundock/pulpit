@@ -1,145 +1,58 @@
 
-= Reading
+= Layouts
 
-A PDF opens in the *Reader*: one continuous document, with a side rail for the
+The screen is not hard-coded. It is a layout: a tree of splits and cells with
+a widget in each cell, rendered proportionally into whatever window it lands
+in. Two built-in layouts ship with the application, namely Reader and
+Presenter, and either can be duplicated into an editable copy.
+
+The two are modes rather than variants of one another: a document is either
+being read or being presented, and mounting the other layout is what moves
+the open file between them. `l` cycles through the layouts and `Shift+L`
+opens the library. The choice is the file's, not the application's, so a
+document you switch to Presenter opens that way next time.
+
+== Reading
+
+A PDF opens in the Reader: one continuous document, with a side rail for the
 outline and a search box that covers the pages, the outline and the speaker
 notes at once. Long documents stay responsive because page text arrives from
 the render worker a chunk at a time, while the outline and notes, already in
 hand, answer immediately.
 
-- *Outline and thumbnails* in the side rail (`Ctrl+B`), for documents that
+- Outline and thumbnails in the side rail (`Ctrl+B`), for documents that
   carry one.
-- *Search* (`Ctrl+F` or `/`), stepping through matches with `F3` and
+- Search (`Ctrl+F` or `/`), stepping through matches with `F3` and
   `Shift+F3`, or `n` and `N`.
-- *Page view*: zoom in and out, actual size, fit page, fit width, rotate, and
+- Page view: zoom in and out, actual size, fit page, fit width, rotate, and
   a two-page spread.
-- *Internal links* are followed by clicking, and *back and forward* return you
+- Internal links are followed by clicking, and back and forward return you
   where you were, which is not the same as turning back a page.
-- *Where you were* is remembered per document: page, zoom and side rail come
+- Where you were is remembered per document: page, zoom and side rail come
   back the next time you open that file.
 
-Press `r` to switch the same file between Reader and Presenter. The choice is
-the file's, not the application's: a document you switch to Presenter opens
-that way next time.
+Several copies of Pulpit can run at once, so a file clicked while a window is
+already open gets a window of its own rather than being refused. Each copy
+keeps its own crash-recovery record, and a copy that stops running leaves its
+unsaved edits to be offered back by the next one that opens that file.
 
-*Reload on rebuild.* Pulpit watches the file and reopens it when it changes,
-which is what makes it usable beside `typst watch` or a LaTeX loop. A watch
-event is a hint, never proof: the file must settle before it is read, the
-rebuilt document is opened and rendered out of sight, and it replaces what is
-on screen only once a complete frame of it exists. Your page, timer and
-blanking survive the swap, and the page is clamped if the document got
-shorter.
+Pulpit watches the file and reopens it when it changes, which is what makes
+it usable beside `typst watch` or a LaTeX loop. A watch event is a hint,
+never proof: the file must settle before it is read, the rebuilt document is
+opened and rendered out of sight, and it replaces what is on screen only once
+a complete frame of it exists. Your page, timer and blanking survive the
+swap, and the page is clamped if the document got shorter.
 
-= Keys
-
-Press `?` for the complete reference inside the application. Conventional
-reader keys are primary; the one familiar Vim/Zathura alternative is shown in
-parentheses.
-
-#table(
-  columns: (1.2fr, 2fr),
-  stroke: none,
-  inset: 0.55em,
-  [*Key*], [*Action*],
-  table.cell(colspan: 2)[*Files and application*],
-  [`Ctrl+O`], [open a document],
-  [`Ctrl+R`], [reload it from disk],
-  [`l` / `Shift+L`], [cycle layouts / open the layout library],
-  [`?`], [the complete shortcut reference],
-  [`Ctrl+Q`], [quit],
-  table.cell(colspan: 2)[*Move through pages*],
-  [`→` `PageDown` (`j`)], [next page or slide],
-  [`←` `PageUp` (`k`)], [previous],
-  [`Home` / `End` (`G`)], [first / last],
-  [`o`], [overview: the whole document as thumbnails],
-  table.cell(colspan: 2)[*Read and search*],
-  [`r`], [switch between Reader and Presenter],
-  [`Ctrl+B`], [show or hide the outline],
-  [`Ctrl+F` (`/`)], [search],
-  [`F3` / `Shift+F3` (`n` / `N`)], [next / previous match],
-  table.cell(colspan: 2)[*Page view*],
-  [`Ctrl+=` (`+`)], [zoom in],
-  [`Ctrl+-` (`-`)], [zoom out],
-  [`Ctrl+1` (`=`)], [actual size],
-  [`Ctrl+0` (`a`)], [fit page],
-  [`Ctrl+2`], [fit width],
-  [`Shift+R`], [rotate pages],
-  [`d`], [two-page view],
-  table.cell(colspan: 2)[*Annotate*],
-  [`1` `2` `3` `4`], [ink, highlighter, eraser, pointer],
-  [`Ctrl+Z` (`u`) / `Ctrl+Shift+Z`], [undo / redo],
-  [`c`], [clear the marks on this page],
-  [`v`], [show or hide the marks on the audience screen],
-  table.cell(colspan: 2)[*Present*],
-  [`b` / `w`], [blank black / blank white],
-  [`t` / `Shift+T`], [start-pause / reset the timer],
-  [`s`], [swap presenter and audience displays],
-  [`f`], [toggle audience fullscreen],
-)
-
-Presenter remotes usually emit `PageUp`/`PageDown`, media keys or browser
-back/forward, all of which are bound by default. A remote whose keys the
-toolkit cannot name is still usable: press the key and the presenter window
-offers to bind it, storing the raw scancode in `settings.toml`.
-
-Keyboard shortcuts are deliberately fixed for now, so the reference is the
-application contract rather than a settings editor.
-
-= Navigation
-
-Four ways to move through a document:
-
-- *Keys*, listed above. In Presenter mode, arrows and `PageUp`/`PageDown`
-  move the audience with you.
-- *Back and forward buttons*, a widget you can place in any layout cell, with
-  or without words beside the arrows. These follow your *traversal*, meaning
-  where an internal link or a jump took you, rather than simply stepping a
-  page.
-- *Slider*, a draggable track across the whole document.
-- *Overview* (`o`), every page as a thumbnail, so you land by eye rather than
-  by number. Picking one closes the menu.
-
-With no document open, Pulpit shows a mode-neutral welcome page instead of a
-Reader or Presenter layout. It leads with *Open a PDF*, teaches compact
-getting-started and presenting subsets of the same fixed shortcuts, and links
-to the online documentation.
-
-= Annotations
-
-The palette offers five controls, and the four tools sit under the digits in
-the order it draws them:
-
-- *Pointer* (`4`): a dot that follows the pointer. Its options also arm
-  *Spotlight*, which lights a circle and dims the rest of the page.
-- *Ink* (`1`): freehand strokes, black by default.
-- *Highlighter* (`2`): a broad translucent stroke that leaves content
-  readable.
-- *Eraser* (`3`): removes the stroke or label it touches.
-- *Text* (`T`): places a typewritten label, black by default.
-
-Select the text tool, click the page, and type into the translucent expanding
-field; `Enter` commits the label and `Ctrl+Enter` inserts a line, and
-`Ctrl/Cmd+V` pastes text.
-
-Text labels are complete Typst 0.15.1 documents. Markup, math,
-set rules, functions, tables, and other built-in Typst features render live
-after a short typing pause. Labels follow Typst's math syntax exactly: for
-example, multiplication is
-`$e=m c^2$`, with whitespace between variables.
-
-Marks can be exported, and in Presenter mode `v` decides whether the room sees
-them or only you do.
-
-= Forms
+=== Forms
 
 Pulpit fills AcroForm PDFs: text fields, check boxes, radio groups, drop-down
 and list boxes. It ships a PDFium built with a JavaScript engine, so a
-form's *own* scripts run as its author intended. Calculated totals recompute,
+form's own scripts run as its author intended. Calculated totals recompute,
 dates and currency format themselves, and keystroke validation rejects what it
 should. A form filled here comes out the same as a form filled in the readers
 those scripts were written for, rather than subtly wrong.
 
-What a script asks the *viewer* to do is reported to you and never performed.
+What a script asks the viewer to do is reported to you and never performed.
 A form that wants to submit itself to a URL, mail itself, print, or read the
 file's path on disk is answered honestly and its request is shown. The data is
 not sent, and the path a hostile form would like to know is not disclosed.
@@ -147,7 +60,7 @@ not sent, and the path a hostile form would like to know is not disclosed.
 Edits are journalled as you make them, so a form half filled in when something
 goes wrong is recoverable rather than retyped.
 
-= Signatures
+=== Signatures
 
 Pulpit signs PDFs and reports on signatures they already carry.
 
@@ -172,7 +85,7 @@ careful about the difference:
   genuine. Other software may or may not accept this signature.
 ]
 
-So a signature is reported as *intact* and attributed to the name in its
+So a signature is reported as intact and attributed to the name in its
 certificate together with that certificate's fingerprint, never as simply
 "valid". Weak algorithms and short keys are reported rather than hidden, and a
 signature that is present but damaged is shown as broken rather than quietly
@@ -183,16 +96,15 @@ read and sign only, which leaves the existing signature intact, or allow
 editing, which will have every viewer report the document as changed after
 that signature once you save.
 
-= Presenting
+== Presenting
 
-Press `r` to take a document into Presenter mode. Pulpit then runs two
-windows.
+Mounting the Presenter layout runs two windows.
 
-The *Presenter Window* is the one you look at: slides, notes, timers and
+The Presenter Window is the one you look at: slides, notes, timers and
 controls, arranged by the active layout. It opens on its own when Pulpit
 starts.
 
-The *Audience Window* is the one the room looks at: the current slide and
+The Audience Window is the one the room looks at: the current slide and
 nothing else. You start it when you are ready, with *Start ▾* beside the
 hamburger, a split button whose *Start* half uses the saved audience display,
 while the arrow lists the connected displays so one click both picks the
@@ -200,31 +112,60 @@ projector and starts the window. *Stop* removes it again.
 
 Two starting modes:
 
-- *Fullscreen*: the window takes the chosen display immediately. A
+- Fullscreen: the window takes the chosen display immediately. A
   five-second delayed start is offered too, which leaves you time to switch to
   the projector workspace during the count.
-- *Windowed*: the window opens as an ordinary window so you can drag it onto
+- Windowed: the window opens as an ordinary window so you can drag it onto
   the right display or desktop position yourself, then press `f` to make it
   fullscreen where it sits. This is the reliable route on compositors that
   place windows themselves.
+
+The projector is the one thing a second copy cannot have: two audience
+windows on one screen leave the window manager flipping between them, which
+is a flickering screen in the middle of a talk. So the first copy to start an
+audience window holds it, another copy that tries is told which one has it,
+and stopping the audience window hands it back.
 
 Connecting a projector, disconnecting it, mirroring, swapping the two screens
 and mixed DPI are treated as the ordinary case rather than as an edge one, and
 the audience never sees a worse frame than it already had: the last complete
 frame stays until a complete replacement exists.
 
-= Layouts
+=== Speaker notes
 
-The presenter screen is not hard-coded. It is a *layout*: a tree of splits and
-cells with a widget in each cell, rendered proportionally into whatever window
-it lands in. Three built-in layouts ship with the application, namely
-*Presenter*, *Reader* and *Reader (fullscreen)*, and any of them can be
-duplicated into an editable copy.
+Notes come in two formats.
+
+The first is a split page: each PDF page is twice as wide as the slide, with
+the slide on one half and the notes on the other. Pulpit shows the audience
+the slide half and keeps the notes half for you. This is what beamer produces
+with
+
+```tex
+\setbeameroption{show notes on second screen=right}
+```
+
+A doubled page is recognised on open, with the slide taken to be the left
+half, which is what beamer writes. If your notes are on the left instead,
+*Swap halves* in the presenter window flips it.
+
+Notes can also live on pages of their own, either alternating with the slides
+or gathered after them, and you choose that in the presenter window.
+
+The second is pdfpc, where the notes are text stored inside the PDF rather
+than drawn on a page. Anything that writes that format works, including
+beamer with the `pdfpc` package, and
+#link("https://vincentarelbundock.github.io/mosaic")[Mosaic], which embeds
+the notes in the PDF it produces.
+
+Whichever format a deck uses, the one in force is shown in the presenter
+window.
+
+== Custom layouts
 
 The *Layout: …* button in the presenter window opens the layout library, and a
 layout opens from there into the designer.
 
-Layouts *import and export as JSON*. A custom layout is a file in
+Layouts import and export as JSON. A custom layout is a file in
 `<config>/layouts/<id>.json`, written atomically: exporting one is copying it
 out, importing one is copying it in, and the file itself is the interchange
 format. The shape, with a `format_version`:
@@ -262,31 +203,63 @@ On import Pulpit runs the full validation, renumbers node ids so they cannot
 collide, and appends a numeric suffix if the name is taken. An imported layout
 is always a custom layout, even if it was exported from a built-in.
 
-= Speaker notes
+= Keys
 
-Notes come in two formats.
+Press `?` for the complete reference inside the application. Conventional
+reader keys are primary; the one familiar Vim/Zathura alternative is shown in
+parentheses.
 
-The first is a *split page*: each PDF page is twice as wide as the slide, with
-the slide on one half and the notes on the other. Pulpit shows the audience
-the slide half and keeps the notes half for you. This is what beamer produces
-with
+#include "keys.typ"
 
-```tex
-\setbeameroption{show notes on second screen=right}
-```
+Presenter remotes usually emit `PageUp`/`PageDown`, media keys or browser
+back/forward, all of which are bound by default. A remote whose keys the
+toolkit cannot name is still usable: press the key and the presenter window
+offers to bind it, storing the raw scancode in `settings.toml`.
 
-A doubled page is recognised on open, with the slide taken to be the left
-half, which is what beamer writes. If your notes are on the left instead,
-*Swap halves* in the presenter window flips it.
+Keyboard shortcuts are deliberately fixed for now, so the reference is the
+application contract rather than a settings editor.
 
-Notes can also live on pages of their own, either alternating with the slides
-or gathered after them, and you choose that in the presenter window.
+= Navigation
 
-The second is *pdfpc*, where the notes are text stored inside the PDF rather
-than drawn on a page. Anything that writes that format works, including
-beamer with the `pdfpc` package, and
-#link("https://vincentarelbundock.github.io/mosaic")[Mosaic], which embeds
-the notes in the PDF it produces.
+Four ways to move through a document:
 
-Whichever format a deck uses, the one in force is shown in the presenter
-window.
+- Keys, listed above. In Presenter mode, arrows and `PageUp`/`PageDown`
+  move the audience with you.
+- Back and forward buttons, a widget you can place in any layout cell, with
+  or without words beside the arrows. These follow your traversal, meaning
+  where an internal link or a jump took you, rather than simply stepping a
+  page.
+- Slider, a draggable track across the whole document.
+- Overview (`o`), every page as a thumbnail, so you land by eye rather than
+  by number. Picking one closes the menu.
+
+With no document open, Pulpit shows a mode-neutral welcome page instead of a
+Reader or Presenter layout. It leads with *Open a PDF*, teaches compact
+getting-started and presenting subsets of the same fixed shortcuts, and links
+to the online documentation.
+
+= Annotations
+
+The palette offers five controls, and the four tools sit under the digits in
+the order it draws them:
+
+- Pointer (`4`): a dot that follows the pointer. Its options also arm
+  Spotlight, which lights a circle and dims the rest of the page.
+- Ink (`1`): freehand strokes, black by default.
+- Highlighter (`2`): a broad translucent stroke that leaves content
+  readable.
+- Eraser (`3`): removes the stroke or label it touches.
+- Text (`T`): places a typewritten label, black by default.
+
+Select the text tool, click the page, and type into the translucent expanding
+field; `Enter` commits the label and `Ctrl+Enter` inserts a line, and
+`Ctrl/Cmd+V` pastes text.
+
+Text labels are complete Typst 0.15.1 documents. Markup, math,
+set rules, functions, tables, and other built-in Typst features render live
+after a short typing pause. Labels follow Typst's math syntax exactly: for
+example, multiplication is
+`$e=m c^2$`, with whitespace between variables.
+
+Marks can be exported, and in Presenter mode `v` decides whether the room sees
+them or only you do.

@@ -7,27 +7,19 @@ With Homebrew:
 brew install --cask vincentarelbundock/tap/pulpit
 ```
 
-Either way the first launch needs the one-time approval described below;
-Homebrew no longer offers a flag that skips it.
-
 Or install it by hand:
 
-+ Download the disk image from the releases page.
++ Download the disk image from the Github releases page.
 + Open it and drag `Pulpit.app` onto Applications.
-+ Launch Pulpit. macOS refuses this first launch.
+
+Either way, on first launch macOS will likely refuse to launch Pulpit. That refusal happens because the app is not registered with Apple, which costs money, even for free open source projects.
+
 + Open System Settings, then Privacy & Security (called Security Settings in
   some versions), and click *Open Anyway* next to the message about Pulpit.
 + Launch Pulpit again. It opens, and the refusal does not come back, this
   version or any later one.
 
-That refusal happens because the app is not registered with Apple, which costs
-money, even for free open source projects.
-
-One download covers both Apple Silicon and Intel Macs, running natively on
-each. macOS 11 Big Sur or newer.
-
-Install both media players too. This is strongly recommended, since without
-them video and interactive slides fall back to their poster image:
+You should probably install both media players too. This is strongly recommended, since without them video and interactive slides fall back to their poster image:
 
 ```sh
 brew install --cask google-chrome

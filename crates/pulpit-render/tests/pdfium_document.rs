@@ -910,3 +910,91 @@ fn a_signed_visible_signature_is_in_the_picture() {
          box; the reader's frames come from the pool"
     );
 }
+
+/// A text mark's box is measured from its words, and the appearance is clipped
+/// to that box — so the measurement has to be right or the mark is cut off.
+///
+/// `pulpit_core::annotate::text_box` decides the size from Helvetica's own
+/// advance widths, which is arithmetic and unit-tested there. What that cannot
+/// show is whether the glyphs PDFium actually paints fit inside it. This
+/// renders the same words twice, once in the box the measurement asks for and
+/// once in one three times its size, and counts the ink: the text is drawn from
+/// the box's top-left either way, so any difference is the fitted box clipping
+/// what the roomy one had room for.
+#[test]
+fn a_text_mark_fits_the_box_measured_for_it() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let directory = temp_dir("text-box-fit");
+    // Ascenders, descenders and the widest letters in the face, so a box that
+    // is short in any direction shows up as missing ink.
+    const WORDS: &str = "Wg mmmm illustrative jjjj";
+    const FONT_SIZE: f32 = 12.0;
+
+    let (fitted, height) = pulpit_core::annotate::text_box::fit(WORDS, FONT_SIZE);
+    let mut mark = |name: &str, width: f32, height: f32| -> PathBuf {
+        let source = directory.join(format!("source-{name}.pdf"));
+        write_pdf(&source, 1, None).unwrap();
+        let written = directory.join(format!("{name}.pdf"));
+        let backend = &mut *guard;
+        let mut document = open(backend, &source);
+        document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::from_annotations([AnnotationCommand::Create(
+                    AnnotationDraft::FreeText(FreeTextDraft {
+                        page: PageIndex(0),
+                        rect: PageRect::new(100.0, 100.0, 100.0 + width, 100.0 + height),
+                        text: WORDS.into(),
+                        source: TextSource::Plain,
+                        style: MarkStyle::default(),
+                    }),
+                )]),
+            )
+            .expect("the mark commits");
+        document
+            .save_as(
+                &written,
+                SaveOptions {
+                    incremental: false,
+                    verify: false,
+                },
+            )
+            .expect("the file saves");
+        written
+    };
+    let tight = mark("fitted", fitted, height);
+    let roomy = mark("roomy", fitted * 3.0, height * 3.0);
+
+    let mut ink = |path: &Path| -> usize {
+        use pulpit_render::pdf::PdfBackend;
+        let backend = &mut *guard;
+        let opened = backend.open(path).expect("the file opens");
+        let request = pulpit_render::pdf::RenderRequest {
+            document: opened,
+            page: 0,
+            region: pulpit_core::notes::Region::FULL,
+            // Twice the page's own points, so a clipped stem is several pixels
+            // rather than one.
+            width: 1224,
+            height: 1584,
+            full_size: None,
+            with_annotations: true,
+        };
+        let frame = backend
+            .render(&request, &pulpit_render::pdf::NeverCancel)
+            .expect("the page renders");
+        let counted = frame.pixels.chunks(4).filter(|p| p[0] < 200).count();
+        backend.close(opened);
+        counted
+    };
+
+    let (tight, roomy) = (ink(&tight), ink(&roomy));
+    assert!(tight > 0, "the mark drew nothing at all");
+    assert_eq!(
+        tight, roomy,
+        "the measured box clips the text: {tight} pixels of ink in it against \
+         {roomy} in a box three times the size"
+    );
+}

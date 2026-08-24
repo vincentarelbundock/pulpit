@@ -136,42 +136,6 @@ fn main() -> iced::Result {
     );
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "pulpit starting");
 
-    // One presenter per machine. A second copy would open a second audience
-    // window on the same projector and the two would fight for the screen.
-    let directories = crate::platform::Directories::detect();
-    let _instance = match crate::platform::acquire_instance(&directories.instance_lock()) {
-        crate::platform::Instance::Acquired(lock) => Some(lock),
-        crate::platform::Instance::AlreadyRunning { pid, lock } => {
-            match pid {
-                Some(pid_num) => {
-                    eprintln!(
-                        "pulpit is already running (process {pid_num}).\n\
-                         Switch to that window instead — a second copy would open a second\n\
-                         audience window and the two would flicker against each other.\n\
-                         If that process is gone, delete {}.",
-                        lock.display()
-                    );
-                    tracing::warn!(pid_num, "refused to start a second instance");
-                }
-                None => {
-                    eprintln!(
-                        "pulpit is already running (process id unavailable).\n\
-                         Switch to that window instead — a second copy would open a second\n\
-                         audience window and the two would flicker against each other.\n\
-                         If that process is gone, delete {}.",
-                        lock.display()
-                    );
-                    tracing::warn!("refused to start a second instance");
-                }
-            }
-            return Ok(());
-        }
-        crate::platform::Instance::Unknown { reason } => {
-            tracing::warn!(reason, "could not record the single-instance claim");
-            None
-        }
-    };
-
     // Iced panics rather than returning an error when the event loop cannot
     // be created, which is precisely the missing-library case. Catch it in a
     // hook so the user gets an explanation rather than a backtrace.
