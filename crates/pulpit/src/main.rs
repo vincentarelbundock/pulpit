@@ -52,7 +52,6 @@ pub enum StartPage {
 
 fn main() -> iced::Result {
     use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
 
     let mut arguments = std::env::args_os().skip(1);
     let mut document: Option<PathBuf> = None;
@@ -60,13 +59,20 @@ fn main() -> iced::Result {
     let mut restore_interrupted_session = true;
     let mut start_page = StartPage::Presenter;
     while let Some(argument) = arguments.next() {
-        let arg_bytes = argument.as_bytes();
+        // `as_encoded_bytes` rather than the Unix-only `OsStrExt::as_bytes`:
+        // a path the shell hands us need not be UTF-8 on any platform, and
+        // this is the one view of an `OsStr`'s bytes every platform offers.
+        let arg_bytes = argument.as_encoded_bytes();
         if argument == "--render-worker" {
             worker = true;
         } else if arg_bytes.starts_with(b"--document-worker=") {
             // Extract the path part after the '=' without UTF-8 conversion
             let path_bytes = &arg_bytes[b"--document-worker=".len()..];
-            let path = PathBuf::from(OsStr::from_bytes(path_bytes));
+            // SAFETY: `path_bytes` is a suffix of bytes that came from
+            // `as_encoded_bytes`, split immediately after an ASCII '='.
+            // Splitting on an ASCII boundary is exactly the case
+            // `from_encoded_bytes_unchecked` documents as valid.
+            let path = PathBuf::from(unsafe { OsStr::from_encoded_bytes_unchecked(path_bytes) });
             run_document_worker(path);
             return Ok(());
         } else if argument == "--typst-worker" {

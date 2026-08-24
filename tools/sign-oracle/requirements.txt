@@ -5,11 +5,21 @@
 # and provides the signature validation oracle used to verify pulpit's signing output
 # Keep the source commit exact: SPEC-signing cites pyHanko source locations,
 # so a PyPI version alone is not enough to keep those citations resolvable.
-pyHanko @ git+https://github.com/MatthiasValvekens/pyHanko.git@0945f9bc64ef6ef386500943ee2b5941b5f142cd
+#
+# The commit below is tag v0.36.2, where pyHanko is a uv workspace: the root
+# is an aggregate package carrying no code, and the distributions live under
+# `pkgs/`. Asking pip for the root makes setuptools try to package `dev/`,
+# `pkgs/` and `internal/` as top-level packages and refuse.
+#
+# The library and the CLI must come from the *same* commit. Every package in
+# that workspace declares `version = "0.0.0.dev1"` and has its real version
+# injected at build time, so a git checkout reports `0.0.0.dev1` and can never
+# satisfy a released `pyhanko-cli`'s `pyhanko>=0.36.1,<0.37` requirement.
+pyHanko @ git+https://github.com/MatthiasValvekens/pyHanko.git@0945f9bc64ef6ef386500943ee2b5941b5f142cd#subdirectory=pkgs/pyhanko
 
 # pyHanko CLI (distributed separately since 0.26+)
 # Provides the `pyhanko` command-line tool for signature validation
-pyhanko-cli==0.4.2
+pyhanko-cli @ git+https://github.com/MatthiasValvekens/pyHanko.git@0945f9bc64ef6ef386500943ee2b5941b5f142cd#subdirectory=pkgs/pyhanko-cli
 
 # certomancer generates test credentials (PKCS#12 key + certificate chains)
 # Used to create deterministic test fixtures without external PKI

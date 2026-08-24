@@ -1653,10 +1653,26 @@ mod tests {
         assert_eq!(FPDF_REVERSE_BYTE_ORDER, 0x10);
     }
 
+    // The rendering path announces every page with `FORM_OnAfterLoadPage`
+    // (see `draw_form_fields` above), which is what makes PDFium create its
+    // V8 isolate — so this test is form-fill work whether or not the fixture
+    // carries a form, and it owes the same one-thread discipline every
+    // integration test observes. libtest hands each `#[test]` its own thread,
+    // so without this the isolate is built on a thread that then exits.
+    #[allow(dead_code)]
+    mod pdfium_thread {
+        include!("../../tests/testkit/pdfium_thread.rs");
+    }
+    use self::pdfium_thread::on_the_pdfium_thread;
+
     /// Only runs where a libpdfium is actually installed; CI without one
     /// still exercises everything above through the fixture backend.
     #[test]
     fn binds_and_renders_when_pdfium_is_present() {
+        on_the_pdfium_thread(binds_and_renders);
+    }
+
+    fn binds_and_renders() {
         let Ok(mut backend) = PdfiumBackend::bind() else {
             eprintln!("skipping: no libpdfium available");
             return;

@@ -16,6 +16,7 @@ jobs:
   # decoding.
   headless:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,6 +48,7 @@ jobs:
   # real hardware with `pulpit-topology`.
   topology-scenarios:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,6 +66,7 @@ jobs:
   # progressive cancellation and metadata extraction are exercised too.
   with-pdfium:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -84,6 +87,7 @@ jobs:
   # stale-generation rejection, shared-memory size validation.
   renderer-failure-injection:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -95,6 +99,7 @@ jobs:
   # verification code with Pulpit.
   signing-oracle:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -117,6 +122,7 @@ jobs:
   # distribution with no global library path.
   nix:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
@@ -133,6 +139,7 @@ jobs:
   # runner can do, and the deterministic tests above remain mandatory.
   x-server-adapter:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -166,6 +173,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -193,6 +201,7 @@ jobs:
   # macOS until somebody runs the app on a Mac with a projector attached.
   macos-package:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -249,6 +258,7 @@ jobs:
   # without a certificate — including on forks, which cannot see secrets.
   windows-package:
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash

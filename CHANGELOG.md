@@ -4,6 +4,51 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **pulpit did not build on macOS or Windows, and had not for a week.** The
+  macOS link failed on `pipe2`, a Linux extension with no macOS symbol, and
+  the two `O_*` constants beside it carried Linux values that `fcntl` on a BSD
+  would have accepted while setting some other flag. The Windows build failed
+  to compile at all: `main` imported the Unix-only `OsStrExt` unconditionally
+  to read its arguments as bytes. Argument parsing now uses
+  `OsStr::as_encoded_bytes`, which every platform offers and which still keeps
+  a path that is not UTF-8 intact.
+
+- **The independent signing oracle had stopped running in continuous
+  integration.** At the pinned tag pyHanko became a workspace whose root
+  package carries no code, so installing it asked setuptools to package the
+  repository's own top-level directories and it refused. The library and the
+  command line tool are now taken from that same commit's `pkgs/`
+  subdirectories — they have to come from one commit, because every package in
+  that workspace reports version `0.0.0.dev1` until its build injects the real
+  one. All thirteen signed fixtures validate again.
+
+- A test that renders through PDFium now runs on the same single thread every
+  other PDFium test uses. Rendering announces each page to the form-fill
+  environment, which is what makes PDFium build its V8 isolate, and libtest
+  gives every test its own thread — so that isolate was being built on a
+  thread that then exited. The renderer test job crashed or hung on roughly
+  half its runs.
+
+### Changed
+
+- **`pulpit-testkit` is no longer a crate.** The fixture builder, the AcroForm
+  corpus and the cross-engine checks moved into `pulpit-render`'s own
+  `tests/testkit`, and the corpus dumper became an example. The crate could
+  never be published, but it was still declared with a version, which meant
+  `cargo publish` demanded it from a registry that will never have it and
+  refused to package `pulpit-render`. The test corpus is excluded from the
+  uploaded crate outright.
+
+- Releasing now waits for continuous integration. The release and crates.io
+  workflows fire on a tag, and nothing had ever checked that the commit under
+  that tag built; `make release` says so before creating the tag, and both
+  workflows refuse a commit whose CI did not pass. Every job also has a time
+  limit, after three runs that hung for six hours apiece.
+
 ## [0.0.6] — 2026-08-23
 
 ### Changed

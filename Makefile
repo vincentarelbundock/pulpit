@@ -256,6 +256,19 @@ bump:  ## Bump the workspace version (usage: make bump VERSION=x.y.z)
 # Refuses to run on a dirty tree so the tag reflects committed code.
 release:  ## Tag and push v$(VERSION); fires the release workflows
 	@test -z "$$(git status --porcelain)" || { echo "working tree is dirty; commit or stash first"; exit 1; }
+	@# The release workflows refuse a commit CI has not passed. Say so here,
+	@# before the tag exists, rather than letting the refusal arrive by email.
+	@if command -v gh >/dev/null 2>&1 && [ -z "$$ALLOW_RED_CI" ]; then \
+	    sha="$$(git rev-parse HEAD)"; \
+	    conclusion="$$(gh run list --workflow=ci.yml --commit="$$sha" --limit 1 \
+	        --json conclusion -q '.[0].conclusion' 2>/dev/null)"; \
+	    if [ "$$conclusion" != "success" ]; then \
+	        echo "CI for $$sha concluded '$${conclusion:-nothing yet}', not success."; \
+	        echo "The release and publish workflows will refuse this tag."; \
+	        echo "Fix CI, or set ALLOW_RED_CI=1 to tag anyway."; \
+	        exit 1; \
+	    fi; \
+	fi
 	@echo "Tagging v$(VERSION) at $$(git rev-parse --short HEAD) and pushing..."
 	git tag -a v$(VERSION) -m "Release v$(VERSION)"
 	git push origin v$(VERSION)

@@ -626,9 +626,17 @@ fn pipe_error(error: std::io::Error) -> MediaError {
 fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError> {
     use std::os::fd::{FromRawFd, OwnedFd};
     let mut fds = [0i32; 2];
+    // `pipe2` is a Linux extension: macOS has no such symbol, and asking for
+    // it there is a link error rather than a run-time failure. Everywhere
+    // else the pipe is created first and marked close-on-exec immediately
+    // afterwards.
+    #[cfg(target_os = "linux")]
     // SAFETY: `fds` is a two-element array, which is what pipe2(2) writes.
     // O_CLOEXEC prevents the fds from leaking into child processes.
     let result = unsafe { libc_pipe2(fds.as_mut_ptr(), O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: `fds` is a two-element array, which is what pipe(2) writes.
+    let result = unsafe { libc_pipe(fds.as_mut_ptr()) };
     if result != 0 {
         return Err(MediaError::new(
             MediaErrorKind::LaunchFailed,
@@ -637,6 +645,27 @@ fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError>
                 std::io::Error::last_os_error()
             ),
         ));
+    }
+    // The two-step form leaves a window in which the descriptors are still
+    // inheritable. Nothing `exec`s in it: the browser is spawned later, and
+    // the descriptors it is meant to receive are re-marked deliberately at
+    // that point.
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        // SAFETY: `fd` is one of the descriptors pipe(2) just handed back.
+        if unsafe { libc_fcntl(fd, F_SETFD, FD_CLOEXEC) } == -1 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: both descriptors are open and owned here, and nothing
+            // else has been handed a copy yet.
+            unsafe {
+                libc_close(fds[0]);
+                libc_close(fds[1]);
+            }
+            return Err(MediaError::new(
+                MediaErrorKind::LaunchFailed,
+                format!("could not close the debugging pipe on exec: {error}"),
+            ));
+        }
     }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
@@ -650,15 +679,29 @@ const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
 #[cfg(unix)]
 const F_SETFD: i32 = 2;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
+const FD_CLOEXEC: i32 = 1;
+// `O_NONBLOCK` is one of the values that genuinely differs between Linux and
+// the BSDs, macOS among them. Taking the wrong platform's number is silent
+// rather than loud: `fcntl` accepts it and sets some other flag.
+#[cfg(all(unix, target_os = "linux"))]
 const O_NONBLOCK: i32 = 0o4000;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(target_os = "linux")]
 const O_CLOEXEC: i32 = 0o2000000;
 
 #[cfg(unix)]
 extern "C" {
+    #[cfg(target_os = "linux")]
     #[link_name = "pipe2"]
     fn libc_pipe2(fds: *mut i32, flags: i32) -> i32;
+    #[cfg(not(target_os = "linux"))]
+    #[link_name = "pipe"]
+    fn libc_pipe(fds: *mut i32) -> i32;
+    #[cfg(not(target_os = "linux"))]
+    #[link_name = "close"]
+    fn libc_close(fd: i32) -> i32;
     #[link_name = "fcntl"]
     fn libc_fcntl(fd: i32, command: i32, argument: i32) -> i32;
     #[link_name = "dup2"]

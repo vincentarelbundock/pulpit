@@ -22,14 +22,53 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag is not a test. v0.0.6 was tagged from a tree whose macOS binary
+  # could not link and whose Windows binary did not compile, and it published
+  # anyway, because a tag push was the only thing either workflow waited for.
+  # Every job below now waits for CI to have passed on this exact commit.
+  gate:
+    name: CI is green for this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require a successful CI run for ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The tagged commit is normally already on main, so its CI run
+          # either exists or is starting; wait rather than race it.
+          for attempt in $(seq 1 80); do
+            run="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"' 2>/dev/null || echo "missing none")"
+            status="${run%% *}"
+            conclusion="${run##* }"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "CI passed for ${GITHUB_SHA}."
+                exit 0
+              fi
+              echo "::error::CI concluded '${conclusion}' for ${GITHUB_SHA}; refusing to release a commit that does not build."
+              exit 1
+            fi
+            echo "CI is '${status}' for ${GITHUB_SHA} (attempt ${attempt}/80); waiting."
+            sleep 30
+          done
+          echo "::error::timed out waiting for CI to finish on ${GITHUB_SHA}."
+          exit 1
+
   publish:
     name: cargo publish
+    needs: gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
