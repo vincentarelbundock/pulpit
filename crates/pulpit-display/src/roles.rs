@@ -57,6 +57,14 @@ pub struct DisplayRoles {
     /// Whether the audience window should be borderless-fullscreen on its
     /// display once one is available.
     pub audience_fullscreen: bool,
+    /// Whether the presenter window should be borderless-fullscreen on its
+    /// own display. Unlike the two targets above this is not a stored
+    /// preference but the live state of the Reader's fullscreen key: serde
+    /// skips it, so a session that ends fullscreen opens windowed. It lives
+    /// here because fullscreen is a role input like any other, and the one
+    /// reconciliation function is what sets window modes.
+    #[serde(skip)]
+    pub presenter_fullscreen: bool,
     /// Escape hatch equivalent to pdfpc's `--windowed=both`: allow the
     /// audience window to go fullscreen even when it would land on the
     /// presenter's display. Off by default, because it hides the presenter.
@@ -69,6 +77,7 @@ impl Default for DisplayRoles {
             presenter: RoleTarget::Auto,
             audience: RoleTarget::Auto,
             audience_fullscreen: true,
+            presenter_fullscreen: false,
             allow_shared_display: false,
         }
     }
@@ -118,6 +127,7 @@ mod tests {
             presenter: record("A"),
             audience: record("B"),
             audience_fullscreen: true,
+            presenter_fullscreen: false,
             allow_shared_display: false,
         };
         let swapped = roles.swapped();

@@ -409,16 +409,23 @@ pub fn reconcile(
         warnings.push(Warning::NoSecondaryDisplay);
     }
 
-    // The presenter window is always visible and windowed unless the user
-    // asked otherwise; it is the control surface and must stay reachable.
+    // The presenter window is always visible; it is the control surface and
+    // must stay reachable. It is windowed unless the Reader asked for
+    // fullscreen, which is the same borderless fullscreen the audience
+    // window gets rather than a maximised window with a band on it.
     if let Some(index) = presenter {
+        let mode = if roles.presenter_fullscreen {
+            WindowMode::Fullscreen
+        } else {
+            WindowMode::Windowed
+        };
         plan_window(
             snapshot,
             windows,
             capabilities,
             Role::Presenter,
             index,
-            WindowMode::Windowed,
+            mode,
             &mut actions,
             &mut warnings,
         );
@@ -488,7 +495,13 @@ fn plan_window(
     // Leaving fullscreen is only requested where it is safe to do so.
     // Staying on the same output is always safe: the stranding hazard is a
     // window unfullscreened onto a monitor that no longer exists.
-    if window.mode == WindowMode::Fullscreen
+    //
+    // That hazard belongs to the audience window, which is the one this
+    // moves between displays. The presenter window is the operator's own,
+    // and its fullscreen is a Reader affordance they toggle with a key: it
+    // must always be possible to leave, or Escape stops meaning anything.
+    if role == Role::Audience
+        && window.mode == WindowMode::Fullscreen
         && mode == WindowMode::Windowed
         && !capabilities.unfullscreen_safe
         && !already_there
@@ -1006,6 +1019,55 @@ mod tests {
         roles.allow_shared_display = false;
         settle(&snapshot, &roles, Capabilities::X11, &mut windows);
         assert_eq!(windows.audience.mode, WindowMode::Windowed);
+    }
+
+    #[test]
+    fn the_reader_gets_a_real_fullscreen_presenter_window_and_can_leave_it() {
+        // The Reader's `f` is not an in-window layout change: it asks for the
+        // same borderless fullscreen the audience window gets, on the
+        // presenter's own display, and Escape puts it back.
+        let snapshot = DisplaySnapshot::new(vec![laptop(), projector()], 1);
+        let mut roles = DisplayRoles::default();
+        let mut windows = ready_windows();
+        settle(&snapshot, &roles, Capabilities::X11, &mut windows);
+        assert_eq!(windows.presenter.mode, WindowMode::Windowed);
+
+        roles.presenter_fullscreen = true;
+        settle(&snapshot, &roles, Capabilities::X11, &mut windows);
+        assert_eq!(windows.presenter.mode, WindowMode::Fullscreen);
+        assert_eq!(
+            windows.audience.mode,
+            WindowMode::Fullscreen,
+            "the audience output is none of the Reader's business"
+        );
+
+        roles.presenter_fullscreen = false;
+        settle(&snapshot, &roles, Capabilities::X11, &mut windows);
+        assert_eq!(windows.presenter.mode, WindowMode::Windowed);
+    }
+
+    #[test]
+    fn leaving_reader_fullscreen_is_never_refused() {
+        // Unfullscreening is gated where it could strand the *audience*
+        // window on a display that is gone. The presenter window is the one
+        // the operator is looking at, and a key they pressed must be a key
+        // they can press again — including on a compositor that owns
+        // placement.
+        let snapshot = DisplaySnapshot::new(vec![laptop()], 1);
+        let mut roles = DisplayRoles {
+            presenter_fullscreen: true,
+            ..DisplayRoles::default()
+        };
+        let mut windows = ready_windows();
+        settle(&snapshot, &roles, Capabilities::WAYLAND, &mut windows);
+        assert_eq!(windows.presenter.mode, WindowMode::Fullscreen);
+
+        roles.presenter_fullscreen = false;
+        let outcome = settle(&snapshot, &roles, Capabilities::WAYLAND, &mut windows);
+        assert_eq!(windows.presenter.mode, WindowMode::Windowed);
+        assert!(!outcome.has_warning(&Warning::CannotLeaveFullscreen {
+            role: Role::Presenter
+        }));
     }
 
     #[test]

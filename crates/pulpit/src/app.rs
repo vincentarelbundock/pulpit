@@ -2188,6 +2188,13 @@ impl App {
         // After every message, not per handler: annotations mutate from a
         // dozen places, and the view must never draw a stale snapshot.
         self.sync_annotation_layers();
+        // Likewise for the presenter window's own mode: `f`, Escape and a
+        // layout that mounts fullscreen all move the same flag, and each of
+        // them wants the window itself to follow.
+        let task = match self.sync_presenter_fullscreen() {
+            Some(reconciled) => Task::batch([task, reconciled]),
+            None => task,
+        };
         self.latency
             .record_stage(|stages| &mut stages.update, started.elapsed());
         task
@@ -2217,6 +2224,21 @@ impl App {
         self.typst_annotations
             .sync(&self.annotations, std::time::Instant::now());
         self.marks_caches.invalidate();
+    }
+
+    /// Give the presenter window the mode the Reader is asking for.
+    ///
+    /// Fullscreen is a role input, so it goes through the one reconciliation
+    /// function rather than a window call of its own: that is what makes it
+    /// the same borderless fullscreen the audience window gets, and what
+    /// makes leaving it as ordinary as arriving. Returns nothing at all when
+    /// the two already agree, which is every message but the few that toggle.
+    fn sync_presenter_fullscreen(&mut self) -> Option<Task<Message>> {
+        if self.coordinator.roles.presenter_fullscreen == self.reader_fullscreen {
+            return None;
+        }
+        self.coordinator.roles.presenter_fullscreen = self.reader_fullscreen;
+        Some(self.reconcile())
     }
 
     /// The annotation snapshot the views draw from.
