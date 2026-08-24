@@ -1876,11 +1876,31 @@ impl App {
             role: Role::Presenter,
             id,
         })];
-        let restoring = app.pending_restore.is_some();
+        // A document named on the command line wins over an interrupted
+        // session. It is what someone double-clicked in a file manager, and
+        // opening the *previous* document instead reads as the application
+        // ignoring the file it was handed — which is what it was doing.
+        //
+        // The restore still wins when the plan is about that same file:
+        // reopening the deck you were presenting when the machine died, at
+        // the page and the clock you left, is the whole point of the
+        // snapshot. It is only a different file that must not be substituted.
+        let restoring = match (initial.as_deref(), app.pending_restore.as_ref()) {
+            (Some(path), Some(plan)) => plan.is_about(path),
+            (Some(_), None) => false,
+            (None, plan) => plan.is_some(),
+        };
         if restoring {
             tasks.push(app.restore_session());
-        } else if let Some(path) = initial {
-            tasks.push(Task::done(Message::Opened(Some(path))));
+        } else {
+            // A plan this run is not going to use has to go, and not only so
+            // it is out of the way: `save_session` refuses to write while one
+            // is pending, so leaving it set would mean this session was never
+            // snapshotted and a second crash had nothing to recover from.
+            app.pending_restore = None;
+            if let Some(path) = initial {
+                tasks.push(Task::done(Message::Opened(Some(path))));
+            }
         }
         // Read the UTC offset now, on purpose: it is cached in a OnceLock
         // but primed by spawning `date +%z`, and the first clock widget to

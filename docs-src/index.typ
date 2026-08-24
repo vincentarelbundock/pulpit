@@ -12,28 +12,12 @@
     ),
   )
   #html.elem(
-    "div",
-    attrs: (
-      style: "font-family: Helvetica, Arial, sans-serif; font-size: 3rem;"
-        + " font-weight: 700; letter-spacing: 0.12em; line-height: 1;",
-    ),
-  )[PULPIT]
-  #html.elem(
     "p",
     attrs: (
       style: "font-size: 1.5rem; font-weight: 600; line-height: 1.3;"
-        + " margin: 0.75rem auto 0;",
+        + " margin: 1.75rem auto 0;",
     ),
-  )[A Snappy and Snazzy PDF Projector]
-  #html.elem(
-    "p",
-    attrs: (
-      style: "font-size: 1.05rem; line-height: 1.6; margin: 0.5rem auto 0;",
-    ),
-  )[
-    Interactive media · Speaker notes · Annotations · Custom layouts ·
-    Jump to page · Timers · And more!
-  ]
+  )[Read, Annotate, and Present PDF]
 ]
 
 #html.elem("div", attrs: (style: "text-align: center; margin-block: 0 2rem;"))[
@@ -48,6 +32,79 @@
         + " margin: 0 auto; border-radius: 0.5rem;",
     ),
   )[]
+]
+
+Pulpit is a cross-platform, free, and open source application to read,
+annotate, sign, and present PDF documents and slide shows. Its design goals
+are to be simple, fast, and minimalist.
+
+#let mode-card(title, tagline, features) = html.elem(
+  "div",
+  attrs: (
+    style: "flex: 1 1 18rem; border: 1px solid var(--calepin-color-border);"
+      + " border-radius: var(--calepin-radius-lg, 0.75rem);"
+      + " background: var(--calepin-surface, transparent);"
+      + " padding: 1.25rem 1.4rem 1.4rem;",
+  ),
+)[
+  #html.elem(
+    "p",
+    attrs: (
+      style: "font-size: 1.25rem; font-weight: 650; margin: 0;",
+    ),
+  )[#title]
+  #html.elem(
+    "p",
+    attrs: (
+      style: "color: var(--calepin-color-muted); line-height: 1.5;"
+        + " margin: 0.35rem 0 0.9rem;",
+    ),
+  )[#tagline]
+  #html.elem(
+    "ul",
+    attrs: (style: "margin: 0; padding-left: 1.1rem; line-height: 1.65;"),
+  )[
+    #for feature in features {
+      html.elem("li", attrs: (style: "margin: 0.2rem 0;"))[#feature]
+    }
+  ]
+]
+
+#html.elem(
+  "div",
+  attrs: (
+    style: "display: flex; flex-wrap: wrap; gap: 1.25rem;"
+      + " margin-block: 0 2.5rem; align-items: stretch;",
+  ),
+)[
+  #mode-card(
+    [Reader],
+    [Read it, mark it up, fill it in, sign it.],
+    (
+      [Continuous scroll, two-page view],
+      [Outline, thumbnails, full-text search],
+      [Remembers your place in every file],
+      [Ink, highlighter, eraser, text notes],
+      [Typst markup and maths in notes],
+      [Form filling, scripts and all],
+      [Sign, and verify what is signed],
+      [Reloads when the file is rebuilt],
+    ),
+  )
+  #mode-card(
+    [Presenter],
+    [Two windows, and a projector that behaves.],
+    (
+      [Presenter and audience windows],
+      [Speaker notes: split-page or pdfpc],
+      [Timers, alarms, and blanking],
+      [Swap displays with one key],
+      [Hot-plug, mirroring, mixed DPI],
+      [Custom layouts, exported as JSON],
+      [Thumbnail jump menu and remotes],
+      [Video and web overlays],
+    ),
+  )
 ]
 
 = Installation

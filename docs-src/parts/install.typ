@@ -26,8 +26,8 @@ money, even for free open source projects.
 One download covers both Apple Silicon and Intel Macs, running natively on
 each. macOS 11 Big Sur or newer.
 
-Install both media players too — strongly recommended, since without them
-video and interactive slides fall back to their poster image:
+Install both media players too. This is strongly recommended, since without
+them video and interactive slides fall back to their poster image:
 
 ```sh
 brew install --cask google-chrome
@@ -75,7 +75,8 @@ sudo pacman -U ./pulpit-*-x86_64.pkg.tar.zst
 ```
 
 The package installs what Pulpit depends on alongside it, and suggests both
-media players. Accept them — strongly recommended — or install them yourself:
+media players. Accept them, which is strongly recommended, or install them
+yourself:
 
 ```sh
 sudo apt install chromium mpv
@@ -107,18 +108,11 @@ the libraries it loads while running. That matters most on NixOS, where those
 libraries do not sit in the usual system-wide location. It also carries the
 two media players itself, so video and interactive slides work immediately.
 
-== Slides with video or interactive content
+== Video and interactions
 
-Pulpit plays no media itself. It borrows two programs, and finds them on its
-own — there is nothing to configure.
+Pulpit can display video and interactive content (ex: HTML+JS) on top of PDF slideshows. For this, you need:
 
-+ *A Chromium-based browser* plays everything, including interactive HTML.
-  Chrome, Chromium, Edge and Brave qualify; Firefox and Safari do not, because
-  Pulpit drives the browser through a protocol only this family speaks. If you
-  install one program, make it this one.
-+ *mpv* plays video and animated images, and Pulpit prefers it for those.
++ A Chromium-based browser (ex: Chrome, Chromium, Edge and Brave).
++ #link("https://mpv.io/")[The mpv video player.] 
 
-Pulpit never uses your own browser session: it starts the browser hidden, in a
-private profile per deck, so your extensions, cookies, logins and history are
-untouched. Without either program a deck still presents — media slides show
-their poster image.
+When displaying interactive content, Pulpit never uses your own browser session: it starts the browser hidden, in a private profile per deck, so your extensions, cookies, logins and history are untouched.

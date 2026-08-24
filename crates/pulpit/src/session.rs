@@ -255,6 +255,33 @@ impl RestorePlan {
         self.snapshot.document.as_ref().map(|d| d.path.as_path())
     }
 
+    /// Whether this plan is about `path` — the document a launch named.
+    ///
+    /// A path given on the command line is what someone double-clicked, and
+    /// it decides whether an interrupted session is a recovery or an
+    /// interruption: restoring is right when the plan is about that same
+    /// file, and wrong when it is about a different one.
+    ///
+    /// The stored path came from a previous process and the given one from a
+    /// file manager, so they can name one file two ways — relative against a
+    /// different working directory, or through a symlink. Equality is tried
+    /// first because it needs no filesystem, and canonical form only when it
+    /// disagrees; a path that cannot be canonicalised (it has been deleted,
+    /// or is not readable) answers "not the same file", which reopens the
+    /// named document rather than restoring over it.
+    pub fn is_about(&self, path: &Path) -> bool {
+        let Some(stored) = self.snapshot.document.as_ref().map(|d| d.path.as_path()) else {
+            return false;
+        };
+        if stored == path {
+            return true;
+        }
+        match (stored.canonicalize(), path.canonicalize()) {
+            (Ok(stored), Ok(named)) => stored == named,
+            _ => false,
+        }
+    }
+
     /// The slide pair to return to, or `None` when the deck changed.
     pub fn slides(&self) -> Option<(SlideIndex, SlideIndex)> {
         self.document_status
@@ -819,6 +846,81 @@ mod tests {
         // A crash mid-save leaves a temporary file that was never renamed.
         std::fs::write(store.path.with_extension("json.tmp"), "{\"schema\"").unwrap();
         assert_eq!(store.load(), Some(snapshot));
+    }
+
+    /// An interrupted session that was looking at `document`, or at nothing.
+    fn snapshot_about(document: Option<DocumentFingerprint>) -> SessionSnapshot {
+        SessionSnapshot::capture(
+            &interrupted_state(40),
+            Some("wide".into()),
+            &roles_with_a_chosen_audience(),
+            document,
+            Instant::now(),
+        )
+    }
+
+    /// The bug this closes: double-clicking a PDF opened the *previous*
+    /// document, because a surviving snapshot was applied before the path the
+    /// launch was given was ever looked at.
+    #[test]
+    fn a_plan_is_only_about_the_document_it_holds() {
+        let snapshot = snapshot_about(Some(unchanged_fingerprint()));
+        let plan = snapshot.plan(Some(&unchanged_fingerprint()));
+
+        assert!(
+            plan.is_about(Path::new("/decks/talk.pdf")),
+            "the plan is about its own document, so a launch naming that file \
+             is a recovery and the page and clock are worth restoring"
+        );
+        assert!(
+            !plan.is_about(Path::new("/decks/other.pdf")),
+            "a launch naming a different file must not be answered with the \
+             document the last session happened to be looking at"
+        );
+    }
+
+    /// A plan with nothing open is about no document, so it can never
+    /// displace a named one.
+    #[test]
+    fn a_plan_with_no_document_is_about_nothing() {
+        let plan = snapshot_about(None).plan(None);
+        assert!(!plan.is_about(Path::new("/decks/talk.pdf")));
+    }
+
+    /// Two names for one file are one file. The snapshot's path came from
+    /// another process and the named one from a file manager, so this is the
+    /// ordinary case rather than a clever one.
+    #[test]
+    fn one_file_named_two_ways_is_still_a_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("talk.pdf");
+        std::fs::write(&path, b"deck").unwrap();
+        let plan = snapshot_about(fingerprint(&path)).plan(fingerprint(&path).as_ref());
+
+        let indirect = dir.path().join(".").join("talk.pdf");
+        assert!(
+            plan.is_about(&indirect),
+            "{indirect:?} is the same file as {path:?} and must be recognised \
+             as one, or a crash recovery turns into a plain reopen"
+        );
+    }
+
+    /// A document that changed since the snapshot is still *that* document.
+    /// `document()` refuses to restore a slide index into it, which is a
+    /// separate question from which file the plan is about.
+    #[test]
+    fn a_rebuilt_document_is_still_the_one_the_plan_is_about() {
+        let plan = snapshot_about(Some(unchanged_fingerprint())).plan(Some(&DocumentFingerprint {
+            path: "/decks/talk.pdf".into(),
+            modified_unix: Some(1_700_000_999),
+            size: Some(5000),
+        }));
+        assert_eq!(plan.document_status, DocumentStatus::Changed);
+        assert_eq!(plan.document(), None, "a moved-on deck restores no slide");
+        assert!(
+            plan.is_about(Path::new("/decks/talk.pdf")),
+            "which file it is about does not depend on whether the file moved on"
+        );
     }
 
     #[test]

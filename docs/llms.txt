@@ -1,7 +1,7 @@
 # Pulpit
 
-> A Snappy and Snazzy PDF Projector
+> Read, annotate, and project PDF documents and slideshows
 
 ## Pages
 
-- [Pulpit](https://vincentarelbundock.github.io/pulpit/): MIT or Apache-2.0.
+- [Pulpit](https://vincentarelbundock.github.io/pulpit/): Pulpit is a cross-platform, free, and open source application to read, annotate, sign, and present PDF documents and slide shows. Its design goals are to be simple, fast, and minimalist.

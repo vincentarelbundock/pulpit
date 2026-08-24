@@ -8,26 +8,12 @@
       "width": 64,
       "height": 64
     },
-    "/assets/logo.svg": {
-      "path": "assets/logo.svg",
-      "xxh3": "f23a930c1bc4bfcd",
-      "bytes": 654,
-      "width": 240,
-      "height": 180
-    },
     "assets/favicon.svg": {
       "path": "assets/favicon.svg",
       "xxh3": "f2f5463ca0c752ae",
       "bytes": 927,
       "width": 64,
       "height": 64
-    },
-    "assets/logo.svg": {
-      "path": "assets/logo.svg",
-      "xxh3": "f23a930c1bc4bfcd",
-      "bytes": 654,
-      "width": 240,
-      "height": 180
     }
   }
 }
