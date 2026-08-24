@@ -520,16 +520,25 @@ impl FormEnvironment {
 /// `FPDFDOC_InitFormFillEnvironment`, which is the address of a
 /// `FormEnvironment`'s first field and therefore of the `FormEnvironment`.
 ///
-/// The returned mutable reference must not be alive across a re-entry into
-/// PDFium. No second call to this function may have a lifetime that overlaps
-/// with the first: the returned reference assumes exclusive access to the
-/// environment, and PDFium is allowed to re-enter through a callback, which
-/// would create aliasing violations.
-unsafe fn environment<'a>(this: *mut FPDF_FORMFILLINFO) -> Option<&'a mut FormEnvironment> {
+/// The borrow must not be alive across a re-entry into PDFium: it assumes
+/// exclusive access to the environment, and PDFium is allowed to re-enter
+/// through a callback, which would alias it. That is why the environment is
+/// lent to a closure rather than returned. A returned `&mut` carried a
+/// lifetime the caller chose, so nothing stopped one from outliving its
+/// callback or overlapping the next; here the borrow ends with `body`, and a
+/// call that tried to keep it would have to smuggle it out past a lifetime the
+/// compiler will not name. Re-entering PDFium from inside `body` is still the
+/// caller's to avoid — but it is now visible in one screenful.
+///
+/// Returns `None`, without calling `body`, when PDFium passes a null pointer.
+unsafe fn with_environment<R>(
+    this: *mut FPDF_FORMFILLINFO,
+    body: impl FnOnce(&mut FormEnvironment) -> R,
+) -> Option<R> {
     if this.is_null() {
         return None;
     }
-    Some(unsafe { &mut *(this as *mut FormEnvironment) })
+    Some(body(unsafe { &mut *(this as *mut FormEnvironment) }))
 }
 
 unsafe extern "C" fn invalidate(
@@ -540,31 +549,36 @@ unsafe extern "C" fn invalidate(
     right: f64,
     bottom: f64,
 ) {
-    let Some(environment) = (unsafe { environment(this) }) else {
-        return;
-    };
-    // Only the page the interaction is open on. The dirty list is read back
-    // as rectangles *of that page*, so a rectangle a calculation script
-    // invalidates on another page — reachable now that `FFI_GetCurrentPage`
-    // answers — must not be patched onto this one. The other page's repaint
-    // arrives with the snapshot the commit triggers, which re-renders it
-    // whole.
-    if !page.is_null() && !environment.current_page.is_null() && page != environment.current_page {
-        return;
-    }
-    let rect = DirtyRect {
-        left,
-        top,
-        right,
-        bottom,
-    };
-    if rect.is_empty() {
-        return;
-    }
-    // Bounded here as well as in `take_dirty`, so a form that invalidates in a
-    // loop cannot grow this vector without limit before anyone looks at it.
-    if environment.dirty.len() < limits::MAX_DIRTY_RECTS * 4 {
-        environment.dirty.push(rect);
+    unsafe {
+        with_environment(this, |environment| {
+            // Only the page the interaction is open on. The dirty list is read
+            // back as rectangles *of that page*, so a rectangle a calculation
+            // script invalidates on another page — reachable now that
+            // `FFI_GetCurrentPage` answers — must not be patched onto this one.
+            // The other page's repaint arrives with the snapshot the commit
+            // triggers, which re-renders it whole.
+            if !page.is_null()
+                && !environment.current_page.is_null()
+                && page != environment.current_page
+            {
+                return;
+            }
+            let rect = DirtyRect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            if rect.is_empty() {
+                return;
+            }
+            // Bounded here as well as in `take_dirty`, so a form that
+            // invalidates in a loop cannot grow this vector without limit
+            // before anyone looks at it.
+            if environment.dirty.len() < limits::MAX_DIRTY_RECTS * 4 {
+                environment.dirty.push(rect);
+            }
+        });
     }
 }
 
@@ -616,8 +630,8 @@ unsafe extern "C" fn get_local_time(_this: *mut FPDF_FORMFILLINFO) -> SystemTime
 }
 
 unsafe extern "C" fn on_change(this: *mut FPDF_FORMFILLINFO) {
-    if let Some(environment) = unsafe { environment(this) } {
-        environment.changed = true;
+    unsafe {
+        with_environment(this, |environment| environment.changed = true);
     }
 }
 
@@ -634,13 +648,16 @@ unsafe extern "C" fn get_page(
     // on (see `FormBinding::open_page`). That page is already loaded and
     // already lent to PDFium, so answering with it hands over nothing new;
     // every other page is honestly not here.
-    let Some(environment) = (unsafe { environment(this) }) else {
-        return std::ptr::null_mut();
-    };
-    if index >= 0 && index == environment.current_page_index {
-        return environment.current_page;
+    unsafe {
+        with_environment(this, |environment| {
+            if index >= 0 && index == environment.current_page_index {
+                environment.current_page
+            } else {
+                std::ptr::null_mut()
+            }
+        })
     }
-    std::ptr::null_mut()
+    .unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn get_current_page(
@@ -652,10 +669,8 @@ unsafe extern "C" fn get_current_page(
     // current page, gets the page the person is actually typing on — a null
     // here is why a subtotal driven from another page used to stop
     // recalculating until its own page was next opened.
-    match unsafe { environment(this) } {
-        Some(environment) => environment.current_page,
-        None => std::ptr::null_mut(),
-    }
+    unsafe { with_environment(this, |environment| environment.current_page) }
+        .unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn get_rotation(_this: *mut FPDF_FORMFILLINFO, _page: FPDF_PAGE) -> c_int {
@@ -671,14 +686,12 @@ unsafe extern "C" fn execute_named_action(this: *mut FPDF_FORMFILLINFO, name: *c
     // drive the viewer. Recorded, never performed here: a document does not get
     // to turn pulpit's pages, open its printer or save its file on its own say
     // so, but the application may choose to honour a navigation (A8).
-    let Some(environment) = (unsafe { environment(this) }) else {
-        return;
-    };
     if name.is_null() {
         return;
     }
     // Bounded, and not assumed to be UTF-8: this is a byte string out of a
-    // hostile document.
+    // hostile document. Read before the environment is borrowed, so the borrow
+    // spans nothing but the push.
     let mut bytes = Vec::new();
     for offset in 0..limits::MAX_JS_STRING_UNITS {
         let byte = unsafe { *name.add(offset) }.to_ne_bytes()[0];
@@ -687,9 +700,13 @@ unsafe extern "C" fn execute_named_action(this: *mut FPDF_FORMFILLINFO, name: *c
         }
         bytes.push(byte);
     }
-    environment.request(HostRequest::NamedAction {
-        name: String::from_utf8_lossy(&bytes).into_owned(),
-    });
+    unsafe {
+        with_environment(this, |environment| {
+            environment.request(HostRequest::NamedAction {
+                name: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        });
+    }
 }
 
 /// Read one of PDFium's null-terminated UTF-16 strings, bounded.
@@ -717,13 +734,17 @@ unsafe fn widestring(text: FPDF_WIDESTRING) -> String {
 /// # Safety
 ///
 /// `this` must be the `JsPlatform` pulpit installed, whose `form_fill_info` is
-/// the address of the owning [`FormEnvironment`].
-unsafe fn js_environment<'a>(this: *mut JsPlatform) -> Option<&'a mut FormEnvironment> {
+/// the address of the owning [`FormEnvironment`]. The borrow is scoped to
+/// `body` for the reason [`with_environment`] gives.
+unsafe fn with_js_environment<R>(
+    this: *mut JsPlatform,
+    body: impl FnOnce(&mut FormEnvironment) -> R,
+) -> Option<R> {
     if this.is_null() {
         return None;
     }
     let info = unsafe { (*this).form_fill_info };
-    unsafe { environment(info.cast()) }
+    unsafe { with_environment(info.cast(), body) }
 }
 
 unsafe extern "C" fn app_alert(
@@ -733,10 +754,12 @@ unsafe extern "C" fn app_alert(
     _buttons: c_int,
     _icon: c_int,
 ) -> c_int {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        let message = unsafe { widestring(message) };
-        let title = unsafe { widestring(title) };
-        environment.request(HostRequest::Alert { message, title });
+    let message = unsafe { widestring(message) };
+    let title = unsafe { widestring(title) };
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Alert { message, title });
+        });
     }
     // `JSPLATFORM_ALERT_RETURN_OK`. The script continues as though the dialog
     // it never saw was acknowledged, which is what a viewer whose user pressed
@@ -745,8 +768,10 @@ unsafe extern "C" fn app_alert(
 }
 
 unsafe extern "C" fn app_beep(this: *mut JsPlatform, _kind: c_int) {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        environment.request(HostRequest::Beep);
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Beep);
+        });
     }
 }
 
@@ -761,10 +786,12 @@ unsafe extern "C" fn app_response(
     _response: *mut c_void,
     _length: c_int,
 ) -> c_int {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        let question = unsafe { widestring(question) };
-        let title = unsafe { widestring(title) };
-        environment.request(HostRequest::Response { question, title });
+    let question = unsafe { widestring(question) };
+    let title = unsafe { widestring(title) };
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Response { question, title });
+        });
     }
     // No bytes written into the response buffer, and zero of them: an empty
     // answer, which is what a cancelled prompt gives. The buffer is left
@@ -778,8 +805,10 @@ unsafe extern "C" fn doc_get_file_path(
     _path: *mut c_void,
     _length: c_int,
 ) -> c_int {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        environment.request(HostRequest::FilePath);
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::FilePath);
+        });
     }
     // Zero bytes, which is a document with no path as far as its script is
     // concerned. Answering honestly would put the user's home directory inside
@@ -799,10 +828,12 @@ unsafe extern "C" fn doc_mail(
     _bcc: FPDF_WIDESTRING,
     _message: FPDF_WIDESTRING,
 ) {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        let to = unsafe { widestring(to) };
-        let subject = unsafe { widestring(subject) };
-        environment.request(HostRequest::Mail { to, subject });
+    let to = unsafe { widestring(to) };
+    let subject = unsafe { widestring(subject) };
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Mail { to, subject });
+        });
     }
 }
 
@@ -818,8 +849,10 @@ unsafe extern "C" fn doc_print(
     _reverse: FPDF_BOOL,
     _annotations: FPDF_BOOL,
 ) {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        environment.request(HostRequest::Print);
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Print);
+        });
     }
 }
 
@@ -829,11 +862,13 @@ unsafe extern "C" fn doc_submit_form(
     length: c_int,
     url: FPDF_WIDESTRING,
 ) {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        let url = unsafe { widestring(url) };
-        environment.request(HostRequest::SubmitForm {
-            url,
-            bytes: length.max(0) as usize,
+    let url = unsafe { widestring(url) };
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::SubmitForm {
+                url,
+                bytes: length.max(0) as usize,
+            });
         });
     }
     // The data is deliberately not retained. A submission is a decision the
@@ -843,9 +878,11 @@ unsafe extern "C" fn doc_submit_form(
 }
 
 unsafe extern "C" fn doc_goto_page(this: *mut JsPlatform, page: c_int) {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        environment.request(HostRequest::GotoPage {
-            page: page.max(0) as usize,
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::GotoPage {
+                page: page.max(0) as usize,
+            });
         });
     }
 }
@@ -855,8 +892,10 @@ unsafe extern "C" fn field_browse(
     _path: *mut c_void,
     _length: c_int,
 ) -> c_int {
-    if let Some(environment) = unsafe { js_environment(this) } {
-        environment.request(HostRequest::Browse);
+    unsafe {
+        with_js_environment(this, |environment| {
+            environment.request(HostRequest::Browse);
+        });
     }
     // No path, which is a cancelled file picker. `FFI_OpenFile` is null for the
     // same reason: a form does not get to read the filesystem.
@@ -869,8 +908,8 @@ unsafe extern "C" fn set_text_field_focus(
     _value_length: c_ulong,
     is_focus: FPDF_BOOL,
 ) {
-    if let Some(environment) = unsafe { environment(this) } {
-        environment.text_focus = is_focus != 0;
+    unsafe {
+        with_environment(this, |environment| environment.text_focus = is_focus != 0);
     }
 }
 

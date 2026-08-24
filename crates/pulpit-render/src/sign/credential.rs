@@ -121,19 +121,10 @@ pub fn load_pkcs12_impl(
         let keystore =
             p12_keystore::KeyStore::from_pkcs12(pkcs12_data, passphrase.as_str(), policy).map_err(
                 |e| {
-                    let err_msg = format!("{:?}", e);
-                    // Map MAC/decryption failures to WrongPassphrase by substring matching on
-                    // the Debug format. This is fragile (§30 LOW finding) but necessary because
-                    // p12_keystore does not expose typed error variants. If the crate's error
-                    // handling changes or adds variants, this list should be updated.
-                    if err_msg.contains("MacError")
-                        || err_msg.contains("InvalidMac")
-                        || err_msg.contains("InvalidPassword")
-                        || err_msg.contains("decrypt")
-                    {
+                    if is_wrong_passphrase(&e) {
                         SigningError::WrongPassphrase
                     } else {
-                        SigningError::KeyLoadFailed(format!("Failed to load PKCS#12: {}", err_msg))
+                        SigningError::KeyLoadFailed(format!("Failed to load PKCS#12: {e:?}"))
                     }
                 },
             )?;
@@ -205,6 +196,30 @@ pub fn load_pkcs12_impl(
         Err(SigningError::KeyLoadFailed(
             "PKCS#12 support requires 'p12-keystore' feature".to_string(),
         ))
+    }
+}
+
+/// Decide whether a PKCS#12 load failure means the passphrase was wrong.
+///
+/// The three variants below are the ones a bad passphrase actually produces:
+/// `MacError` is the integrity check over the whole file failing, `UnpadError`
+/// is a PBES1 block cipher decrypting to garbage padding, and `Pkcs5Error`
+/// carries a PBES2 decryption failure. `p12_keystore` renders that last one as
+/// a `String`, so its interior is matched on text — but only inside a variant
+/// that is already known to be a decryption failure, never over the whole
+/// error's `Debug` rendering. A renamed variant elsewhere in the enum now
+/// breaks the build instead of silently reclassifying a wrong passphrase as an
+/// unreadable file.
+#[cfg(feature = "p12-keystore")]
+fn is_wrong_passphrase(error: &p12_keystore::error::Error) -> bool {
+    use p12_keystore::error::Error;
+    match error {
+        Error::MacError(_) | Error::UnpadError => true,
+        Error::Pkcs5Error(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("decrypt") || message.contains("password") || message.contains("pad")
+        }
+        _ => false,
     }
 }
 

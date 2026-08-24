@@ -149,9 +149,6 @@ pub struct RevisionInfo {
     pub xref_start: u64,
     /// Byte offset just past the end of the xref section/object.
     pub xref_end: u64,
-    /// File size at the time the revisions were last built (end of file).
-    /// Note: For multi-revision PDFs, this is the total file size, not per-revision.
-    pub eof: u64,
     /// Set of object numbers defined in this revision's xref.
     pub obj_numbers: std::collections::HashSet<u32>,
     /// Position in the `/Prev` chain: `0` is the revision the final
@@ -234,7 +231,6 @@ impl RevisionMap {
                 startxref: current_startxref,
                 xref_start,
                 xref_end,
-                eof: file_size,
                 obj_numbers,
                 chain_position,
             };
@@ -1627,7 +1623,6 @@ mod tests {
                 startxref: 50,
                 xref_start: 200,
                 xref_end: 220,
-                eof: 300,
                 obj_numbers: obj_nums,
                 chain_position: 0,
             },
@@ -1653,7 +1648,6 @@ mod tests {
                 startxref: 100,
                 xref_start: 80,
                 xref_end: 120,
-                eof: 500,
                 obj_numbers: obj_nums_1,
                 chain_position: 1,
             },
@@ -1668,7 +1662,6 @@ mod tests {
                 startxref: 200,
                 xref_start: 400,
                 xref_end: 420,
-                eof: 800,
                 obj_numbers: obj_nums_2,
                 chain_position: 0,
             },
@@ -1705,7 +1698,6 @@ mod tests {
                 startxref: 0,
                 xref_start: 100,
                 xref_end: 130,
-                eof: 500,
                 obj_numbers: obj_nums_1,
                 chain_position: 1,
             },
@@ -1719,7 +1711,6 @@ mod tests {
                 startxref: 200,
                 xref_start: 400,
                 xref_end: 550, // Extends beyond coverage end (500)
-                eof: 800,
                 obj_numbers: obj_nums_2,
                 chain_position: 0,
             },

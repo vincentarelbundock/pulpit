@@ -105,6 +105,16 @@ pub enum PadesProfile {
 
 /// A descriptive finding about an algorithm choice. Reported, not judged
 /// (§28.3 step 7).
+///
+/// Reported and not refused, deliberately. A weak algorithm makes a signature
+/// *worth less*, not invalid: the bytes it covers are still the bytes that were
+/// signed, and refusing to verify would replace a signature the reader can
+/// judge with no signature at all, which reads as an unsigned document — the
+/// same failure this crate closes elsewhere. pulpit also does no certificate
+/// path validation, so it is in no position to make a trust decision on the
+/// reader's behalf; what it *can* do honestly is say which algorithm was used
+/// and how large the key was. A viewer that gains path validation should
+/// revisit this and decide whether a floor becomes a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlgorithmFinding {
     /// A digest algorithm that is no longer collision resistant was declared.

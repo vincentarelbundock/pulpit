@@ -365,6 +365,7 @@ fn serialize_name(writer: &mut dyn Write, name: &str) -> Result<()> {
             | b'('
             | b')'
             | b'#'
+            | b'%'
             | 0..=0x20
             | 0x7F..=0xFF => {
                 write!(writer, "#{:02X}", byte).map_err(PdfWriteError::Io)?;
