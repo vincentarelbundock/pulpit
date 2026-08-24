@@ -20,13 +20,14 @@
 
 #![cfg(feature = "pdfium")]
 
+use crate::testkit::{corpus, Expect, Unchanged};
 use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, InkDraft, InkPoint, MarkStyle};
 use pulpit_core::page::PageIndex;
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions};
-use pulpit_testkit::{corpus, Expect, Unchanged};
 
 mod common;
+mod testkit;
 
 /// One ink stroke, which is the mutation every case gets: it exercises the
 /// write path against a document whose form is malformed, which is exactly
@@ -57,7 +58,7 @@ fn every_corpus_case_survives_being_opened_annotated_and_saved() {
     let mut refused: Vec<(&str, String)> = Vec::new();
 
     for case in cases {
-        let source = pulpit_testkit::write_pdf(directory.path(), case.name, &case.bytes);
+        let source = crate::testkit::write_pdf(directory.path(), case.name, &case.bytes);
         // The one irreversible action this program has is writing a file, and
         // the source is the file it must never write (A6).
         let unchanged = Unchanged::new(&source, case.name);
@@ -181,7 +182,7 @@ fn the_corpus_fill_promises_are_kept() {
             Expect::Roundtrips { field, value } => (field, Some(value)),
             Expect::ReadOnly { field } => (field, None),
         };
-        let source = pulpit_testkit::write_pdf(directory.path(), case.name, &case.bytes);
+        let source = crate::testkit::write_pdf(directory.path(), case.name, &case.bytes);
         let unchanged = Unchanged::new(&source, case.name);
 
         let Ok(engine) = PdfiumDocument::open(backend, &source) else {

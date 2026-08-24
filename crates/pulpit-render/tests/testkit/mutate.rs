@@ -79,7 +79,7 @@ pub const NESTING_DEPTH: usize = 64;
 /// parser, which is the point: the caller decides which side of the line to
 /// stand on.
 pub fn deeply_nested_pdf(depth: usize) -> Vec<u8> {
-    let mut pdf = crate::builder::Pdf::new();
+    let mut pdf = super::builder::Pdf::new();
     let mut body = b"<< /Type /Annot /Subtype /Widget /T (nested) /FT /Ch /Opt ".to_vec();
     body.extend(std::iter::repeat_n(b'[', depth));
     body.extend(std::iter::repeat_n(b']', depth));

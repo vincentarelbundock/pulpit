@@ -5020,7 +5020,6 @@ dependencies = [
  "pkcs12 0.1.0",
  "pkcs8 0.10.2",
  "pulpit-core",
- "pulpit-testkit",
  "rand 0.8.7",
  "rcgen",
  "rsa",
@@ -5045,13 +5044,6 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "pulpit-render",
-]
-
-[[package]]
-name = "pulpit-testkit"
-version = "0.0.6"
-dependencies = [
- "tempfile",
 ]
 
 [[package]]

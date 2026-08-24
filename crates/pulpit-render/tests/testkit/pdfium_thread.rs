@@ -1,23 +1,3 @@
-//! One thread for every PDFium form-fill call in a test binary.
-//!
-//! The pinned PDFium is a V8 build. PDFium creates its V8 isolate lazily —
-//! `FORM_OnAfterLoadPage` is what triggers it, so *any* form-fill work does,
-//! not only a document that carries scripts — and the isolate belongs to the
-//! thread that created it. Touching it from a second thread is a segmentation
-//! fault inside V8's snapshot deserialiser: no error return, no unwind, the
-//! whole test binary dies and takes the results of the tests that already
-//! passed with it.
-//!
-//! libtest gives every `#[test]` its own thread, including under
-//! `--test-threads=1`, so a suite with two form-fill tests in it crashes
-//! however it is invoked. That is a property of the harness rather than of
-//! pulpit: the document worker's `serve` loop is a synchronous
-//! read-handle-write on the worker process's main thread, so a running pulpit
-//! only ever calls PDFium from one thread.
-//!
-//! This restores that property for tests. Bodies are handed to one long-lived
-//! thread and run there, one at a time, in the order they arrive.
-
 use std::sync::mpsc::{channel, Sender};
 use std::sync::OnceLock;
 

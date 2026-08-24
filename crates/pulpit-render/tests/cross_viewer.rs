@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::testkit::Engines;
 use pulpit_core::annotate::{
     AnnotationCommand, AnnotationDraft, HighlightDraft, InkDraft, InkPoint, MarkStyle,
 };
@@ -30,10 +31,10 @@ use pulpit_render::document::{
 };
 use pulpit_render::pdf::pdfium::PdfiumBackend;
 use pulpit_render::pdf::synth::write_pdf;
-use pulpit_testkit::Engines;
 
 mod common;
 mod signing_fixture;
+mod testkit;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-cross-{name}"));

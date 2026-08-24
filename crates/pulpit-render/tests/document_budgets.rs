@@ -25,6 +25,7 @@ use pulpit_render::document::{
 
 #[cfg(feature = "pdfium")]
 mod common;
+mod testkit;
 
 #[test]
 fn a_stroke_commits_promptly_enough_to_be_in_the_next_frame() {
@@ -199,7 +200,7 @@ mod commit_path {
 
     #[test]
     fn a_form_commit_pays_a_snapshot_a_reopen_and_a_cold_render_of_every_visible_page() {
-        pulpit_testkit::on_the_pdfium_thread(|| {
+        crate::testkit::on_the_pdfium_thread(|| {
             let Some(mut guard) = common::pdfium("the commit-path budget") else {
                 return;
             };

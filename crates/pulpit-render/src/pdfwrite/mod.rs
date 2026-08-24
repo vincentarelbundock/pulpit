@@ -1185,7 +1185,14 @@ fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulpit_testkit::Pdf;
+    // The fixture builder is test-only code and lives under `tests/`, where
+    // nothing can compile it into the shipped crate. These unit tests are the
+    // one place inside `src/` that needs it, so they name the file directly.
+    #[allow(dead_code)]
+    mod builder {
+        include!("../../tests/testkit/builder.rs");
+    }
+    use self::builder::Pdf;
     use std::io::Read;
 
     #[test]

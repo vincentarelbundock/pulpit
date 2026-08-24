@@ -12,7 +12,7 @@
 //! part of each is a line or two of JavaScript, and a binary blob in the tree
 //! would hide them.
 //!
-//! Both tests run through `pulpit_testkit::on_the_pdfium_thread`, which is not
+//! Both tests run through `testkit::on_the_pdfium_thread`, which is not
 //! optional: PDFium's V8 isolate belongs to the thread that created it, and
 //! libtest gives every test its own. See that module for why this costs
 //! nothing in production.
@@ -26,6 +26,7 @@ use pulpit_render::document::protocol::FormInputEvent;
 use pulpit_render::document::DocumentBackend;
 
 mod common;
+mod testkit;
 
 /// A one-page PDF with two text fields, where `total` is calculated from
 /// `count` by a script and has no value of its own.
@@ -101,7 +102,7 @@ fn inside_count_field() -> PagePoint {
 
 #[test]
 fn a_calculation_script_runs_when_a_field_it_reads_is_committed() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
@@ -199,7 +200,7 @@ fn reaching_form() -> Vec<u8> {
 
 #[test]
 fn what_a_script_asks_the_host_for_is_reported_and_not_performed() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::protocol::HostRequest;
 
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
@@ -265,7 +266,7 @@ fn what_a_script_asks_the_host_for_is_reported_and_not_performed() {
 /// dynamically, and it is the half that arrives in time to be useful.
 #[test]
 fn a_form_whose_script_reaches_out_is_warned_about_when_it_opens() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::DocumentWarning;
 
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
@@ -342,7 +343,7 @@ fn submitting_button() -> Vec<u8> {
 /// submit button.
 #[test]
 fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::{CompatibilityLevel, DocumentWarning};
 
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
@@ -449,7 +450,7 @@ fn cross_page_calculating_form() -> Vec<u8> {
 /// PDFium has started reporting cross-page dirt and the note above is stale.
 #[test]
 fn a_calculation_can_rewrite_a_field_on_another_page_without_invalidating_it() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;
@@ -544,7 +545,7 @@ fn date_stamping_form() -> Vec<u8> {
 /// real clock from a zeroed one, which would produce `0000`.
 #[test]
 fn a_scripts_own_date_is_the_real_one_and_this_callback_does_not_change_that() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the PDFium form JavaScript tests") else {
             eprintln!("no libpdfium; skipping");
             return;

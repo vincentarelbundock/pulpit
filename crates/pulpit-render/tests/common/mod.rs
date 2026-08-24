@@ -9,7 +9,7 @@
 //! binding itself is shared across processes.
 //!
 //! This module only finds and locks the backend. Tests that reach PDFium's
-//! V8 form environment still go through `pulpit_testkit::on_the_pdfium_thread`,
+//! V8 form environment still go through `testkit::on_the_pdfium_thread`,
 //! which is a different boundary and stays where it is.
 
 #![allow(dead_code)]

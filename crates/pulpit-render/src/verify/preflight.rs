@@ -862,7 +862,14 @@ fn is_field_locked(locked_fields: &[String], action: FieldMdpAction, target_fiel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulpit_testkit::Pdf;
+    // The fixture builder is test-only code and lives under `tests/`, where
+    // nothing can compile it into the shipped crate. These unit tests are the
+    // one place inside `src/` that needs it, so they name the file directly.
+    #[allow(dead_code)]
+    mod builder {
+        include!("../../tests/testkit/builder.rs");
+    }
+    use self::builder::Pdf;
 
     #[test]
     fn test_preflight_certify_unsigned_doc() {

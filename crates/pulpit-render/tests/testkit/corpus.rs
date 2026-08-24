@@ -11,7 +11,7 @@
 //! readable PDF or a clean error. Cases that also have a defensible correct
 //! answer say so with [`Expect::Roundtrips`].
 
-use crate::builder::{stream_body, utf16_string, Page, Pdf};
+use super::builder::{stream_body, utf16_string, Page, Pdf};
 
 /// What a case promises beyond mere survival.
 #[derive(Debug, Clone, PartialEq)]

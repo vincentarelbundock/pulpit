@@ -1,10 +1,3 @@
-//! Assembling small PDFs byte by byte.
-//!
-//! The corpus needs documents that are wrong in one specific, chosen way. No
-//! PDF producer will emit those on request, so the tests write the file
-//! format directly: an object per entry, a cross-reference table counted from
-//! the actual byte offsets, and a trailer pointing at object 1 as the catalog.
-
 /// A PDF built from numbered objects, where object `n` is the `n`-th body
 /// added and object 1 is the catalog.
 #[derive(Default, Clone)]

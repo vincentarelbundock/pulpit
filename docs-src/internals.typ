@@ -525,7 +525,7 @@ moving has moved, and can be checked:
   [`FormValue`, `WidgetRect`], [`FormField`, `FieldWidget`, in canonical `PageRect`],
   [AcroForm discovery, choice metadata, write-back], [the `document` module's form path],
   [`edit/fields.rs`], [not ported: no field panel],
-  [`pdfform-testkit` entire], [`pulpit-testkit`],
+  [`pdfform-testkit` entire], [`pulpit-render`'s `tests/testkit`],
   [AcroForm, non-destruction, hostile-input tests], [beside the code they cover],
   [`SPEC.md` compatibility levels], [`SPEC-document.md` §3.4],
   [`SPEC-SIGNING.md`], [`SPEC-signing.md`],
@@ -608,7 +608,7 @@ belongs to the thread that created it; using it from a second thread is a
 segmentation fault inside V8 rather than an error return. The document worker's
 `serve` loop is single-threaded, so a running pulpit satisfies this for free,
 but tests do not — libtest gives every test its own thread, which is what
-`pulpit_testkit::on_the_pdfium_thread` exists to undo. `DocumentBackend` and its
+`testkit::on_the_pdfium_thread` exists to undo. `DocumentBackend` and its
 PDFium implementation are deliberately not `Send`, so a document MUST NOT be
 moved between threads and the compiler, rather than a comment, is what says so.
 

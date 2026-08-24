@@ -6,7 +6,6 @@ members = [
     "crates/pulpit-media",
     "crates/pulpit-render",
     "crates/pulpit-render/fuzz",
-    "crates/pulpit-testkit",
     "crates/pulpit",
 ]
 # `cargo run` at the workspace root means the application. The other two
@@ -29,7 +28,6 @@ pulpit-display = { path = "crates/pulpit-display", version = "0.0.6", default-fe
 # silently never plays — which happened once already, from the other end.
 pulpit-media = { path = "crates/pulpit-media", version = "0.0.6" }
 pulpit-render = { path = "crates/pulpit-render", version = "0.0.6", default-features = false }
-pulpit-testkit = { path = "crates/pulpit-testkit", version = "0.0.6" }
 
 anyhow = "1"
 bincode = { version = "1.3", default-features = false }

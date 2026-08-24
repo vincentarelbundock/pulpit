@@ -28,6 +28,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::testkit::corpus;
 use pulpit_core::page::{PageIndex, PagePoint};
 use pulpit_render::document::pdfium::PdfiumDocument;
 use pulpit_render::document::protocol::{
@@ -36,9 +37,9 @@ use pulpit_render::document::protocol::{
 use pulpit_render::document::worker::DocumentWorker;
 use pulpit_render::document::{FieldKind, PdfDocument, SaveOptions};
 use pulpit_render::pdf::pdfium::PdfiumBackend;
-use pulpit_testkit::corpus;
 
 mod common;
+mod testkit;
 
 /// The corpus's control case: one plain text field named `name`, nothing wrong
 /// with it. If the spike cannot fill this, it cannot fill anything.
@@ -74,7 +75,7 @@ fn click_into(document: &mut PdfDocument<'_>, field: &str) -> Option<PagePoint> 
 
 #[test]
 fn a_documents_fields_are_found_through_the_form_fill_environment() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The first thing the environment buys: the fields exist and are
         // describable. `fields()` returned an empty list before it was wired.
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
@@ -102,7 +103,7 @@ fn a_documents_fields_are_found_through_the_form_fill_environment() {
 
 #[test]
 fn typing_into_a_field_puts_the_characters_in_it() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The gate itself. Raw events in; the field holds what was typed.
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
@@ -139,7 +140,7 @@ fn typing_into_a_field_puts_the_characters_in_it() {
 
 #[test]
 fn backspace_takes_a_character_back_out() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // Not a separate feature: the point is that *editing* is PDFium's too, so
         // a key that is not a character still does what it does in a form.
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
@@ -177,7 +178,7 @@ fn backspace_takes_a_character_back_out() {
 
 #[test]
 fn a_keystroke_reports_the_rectangle_it_dirtied() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // §9.4: the engine answers with invalidated page rectangles, which is what
         // makes a re-composite cost a field rather than a page. A keystroke that
         // reported nothing would leave the caret and the new glyph undrawn.
@@ -220,7 +221,7 @@ fn a_keystroke_reports_the_rectangle_it_dirtied() {
 
 #[test]
 fn a_committed_value_is_one_revision_and_marks_the_document_unsaved() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // §8.6: a committed change is a document change like any other, in the
         // same history as the annotations. Typing is not — only the commit is.
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
@@ -264,7 +265,7 @@ fn a_committed_value_is_one_revision_and_marks_the_document_unsaved() {
 
 #[test]
 fn a_filled_form_saves_and_reopens_with_the_value_in_it() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // Acceptance criterion 5, end to end: filled, saved, reopened, still
         // filled. The reopen goes through a fresh engine, so nothing in memory is
         // being read back to itself.
@@ -312,7 +313,7 @@ fn a_filled_form_saves_and_reopens_with_the_value_in_it() {
 
 #[test]
 fn a_save_asked_for_mid_edit_commits_the_caret_first() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The application's Save As, in the order the application performs it.
         //
         // Nothing here defocuses the field because the test knows to: it
@@ -372,7 +373,7 @@ fn a_save_asked_for_mid_edit_commits_the_caret_first() {
 
 #[test]
 fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The `FPDF_FFLDraw` half, and the reason it is not optional.
         //
         // `FPDF_RenderPageBitmap` draws the appearance stream the file was saved
@@ -434,7 +435,7 @@ fn a_typed_value_is_in_the_picture_before_it_is_in_the_file() {
 
 #[test]
 fn the_form_events_survive_the_worker_boundary() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // §8.6 requires that this stay in the supervised worker: form filling
         // exercises PDFium's most complex code paths on hostile input, and a crash
         // mid-fill must lose at most uncommitted in-field state. So the events go
@@ -490,7 +491,7 @@ fn the_form_events_survive_the_worker_boundary() {
 
 #[test]
 fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // §8.6's "exactly one editing surface", kept while still being able to
         // put a value back. `set_field` used to refuse outright, which made a
         // field edit the one mutation with no inverse — and so the one that
@@ -543,7 +544,7 @@ fn a_field_set_for_undo_goes_through_the_same_editor_as_typing() {
 
 #[test]
 fn type_to_glyph_latency_is_measured_rather_than_assumed() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The number §14.3 step 6 asks for. This is the *engine* half of the
         // round trip — the event in, the invalidation out — which is what the
         // spike had to decide on: if a keystroke cost tens of milliseconds here,
@@ -632,7 +633,7 @@ fn type_to_glyph_latency_is_measured_rather_than_assumed() {
 /// which is what `SelectOption` carries.
 #[test]
 fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::protocol::{FormKey, KeyModifiers};
 
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
@@ -768,7 +769,7 @@ fn a_list_box_answers_the_arrow_keys_and_a_combo_box_needs_the_index() {
 /// as `SelectOption`.
 #[test]
 fn a_press_on_a_plain_combo_box_focuses_it_without_opening_a_list() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
         };
@@ -860,7 +861,7 @@ fn a_press_on_a_plain_combo_box_focuses_it_without_opening_a_list() {
 /// all along.
 #[test]
 fn field_values_are_drawn_by_the_render_pool_and_not_only_by_the_editor() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::pdf::{NeverCancel, PdfBackend, RenderRequest};
 
         /// Pixels inside a fraction-of-the-bitmap rectangle that are not white.
@@ -973,7 +974,7 @@ fn field_values_are_drawn_by_the_render_pool_and_not_only_by_the_editor() {
 /// text threw it away.
 #[test]
 fn a_date_field_is_recognised_and_says_what_it_expects() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         use pulpit_render::document::FieldFormat;
 
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
@@ -1092,7 +1093,7 @@ fn corpus_form(directory: &std::path::Path, name: &str) -> Option<PathBuf> {
 
 #[test]
 fn undoing_a_checkbox_toggle_presses_the_box_again() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // `set_field` used to reach every kind through text replacement, which
         // edits a button not at all — silently, because the read-back then
         // reported the unchanged value as a success. The inverse of a toggle
@@ -1130,7 +1131,7 @@ fn undoing_a_checkbox_toggle_presses_the_box_again() {
 
 #[test]
 fn undoing_a_radio_choice_presses_the_previous_option() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
         };
@@ -1172,7 +1173,7 @@ fn undoing_a_radio_choice_presses_the_previous_option() {
 /// the drawn rows are ticked from comes back on every answer.
 #[test]
 fn a_multi_select_list_box_toggles_one_index_without_clearing_the_others() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
         };
@@ -1275,7 +1276,7 @@ fn a_multi_select_list_box_toggles_one_index_without_clearing_the_others() {
 
 #[test]
 fn a_multi_select_list_box_round_trips_through_its_selection_indices() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // One string cannot name three selections, which is why the undo
         // record carries the selected indices — and why `set_field` takes
         // them: restoring "the first of what was chosen" is not restoring
@@ -1315,7 +1316,7 @@ fn a_multi_select_list_box_round_trips_through_its_selection_indices() {
 
 #[test]
 fn the_text_field_flag_variants_are_told_apart() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // `/FT Tx` hides its variants in `/Ff` bits, and collapsing them into
         // plain text is how a password ends up echoed and a file-select field
         // ends up looking editable when no fill of it can ever succeed.
@@ -1347,7 +1348,7 @@ fn the_text_field_flag_variants_are_told_apart() {
 
 #[test]
 fn the_clipboard_reads_and_replaces_what_a_field_has_selected() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // Copy and paste are PDFium's too, for the same reason typing is. The
         // selection exists only inside the engine — this layer forwarded the
         // clicks that made it and never modelled it — so the text comes out
@@ -1411,7 +1412,7 @@ fn the_clipboard_reads_and_replaces_what_a_field_has_selected() {
 
 #[test]
 fn a_cut_takes_the_text_out_of_the_field_it_copied_it_from() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // A cut is a copy that remembers to remove what it took, and the
         // removal is an empty replacement rather than a run of backspaces: one
         // edit, one keystroke script, one commit.
@@ -1456,7 +1457,7 @@ fn a_cut_takes_the_text_out_of_the_field_it_copied_it_from() {
 
 #[test]
 fn a_space_toggles_the_box_that_holds_the_focus() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // What Tab-then-Space has to do, and the reason the application
         // forwards a character rather than synthesising a click: PDFium's own
         // button handler acts on `FORM_OnChar(' ')`, so the toggle, the
@@ -1497,7 +1498,7 @@ fn a_space_toggles_the_box_that_holds_the_focus() {
 /// A two-page form, one text field on each page, so a keystroke can be
 /// addressed to the wrong one.
 fn two_page_form(directory: &std::path::Path) -> Option<PathBuf> {
-    use pulpit_testkit::{stream_body, Page, Pdf};
+    use crate::testkit::{stream_body, Page, Pdf};
 
     let widget = |name: &str, page: u32| {
         format!(
@@ -1549,7 +1550,7 @@ fn two_page_form(directory: &std::path::Path) -> Option<PathBuf> {
 /// underneath the revision and undo bookkeeping.
 #[test]
 fn a_keystroke_addressed_to_the_wrong_page_is_lost() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
         };
@@ -1618,7 +1619,7 @@ fn a_keystroke_addressed_to_the_wrong_page_is_lost() {
 /// select from the keyboard at all.
 #[test]
 fn shift_and_an_arrow_extend_the_selection_a_copy_reads() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         let Some(mut guard) = common::pdfium("the form-fill spike") else {
             return;
         };
@@ -1681,7 +1682,7 @@ fn shift_and_an_arrow_extend_the_selection_a_copy_reads() {
 /// what it means — a `/V` longer than the read bound, an `/F` that hides the
 /// widget, an `/FT` that holds no value at all.
 fn form_of(fields: &[String]) -> Vec<u8> {
-    use pulpit_testkit::builder::{Page, Pdf};
+    use crate::testkit::builder::{Page, Pdf};
 
     let mut pdf = Pdf::new();
     let catalog = pdf.reserve();
@@ -1730,7 +1731,7 @@ fn write_form(directory: &std::path::Path, name: &str, bytes: Vec<u8>) -> PathBu
 
 #[test]
 fn a_value_longer_than_pulpit_carries_is_cut_and_says_so_rather_than_vanishing() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The bug this holds shut: PDFium's string getters write *nothing*
         // into a buffer smaller than the value they were asked for — they
         // report the length and leave the bytes alone. Reading with a buffer
@@ -1791,7 +1792,7 @@ fn a_value_longer_than_pulpit_carries_is_cut_and_says_so_rather_than_vanishing()
 
 #[test]
 fn a_hidden_widget_is_listed_and_is_not_somewhere_to_put_the_caret() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // `/F` bit 2 is Hidden and bit 6 is NoView; a widget with either set is
         // one no viewer paints. Listing it is right — a field that exists is a
         // fact an inspector may want — and offering it as an editing target is
@@ -1843,7 +1844,7 @@ fn a_hidden_widget_is_listed_and_is_not_somewhere_to_put_the_caret() {
 
 #[test]
 fn a_field_that_holds_no_typed_value_refuses_one_instead_of_swallowing_it() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // A push button and a signature field have no value to type into.
         // `FORM_ReplaceSelection` on one of them edits nothing and reports
         // nothing, so the old catch-all path answered "written" and read back
@@ -1886,7 +1887,7 @@ fn a_field_that_holds_no_typed_value_refuses_one_instead_of_swallowing_it() {
 
 #[test]
 fn one_field_read_by_name_says_what_the_whole_listing_says() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // There are two paths to a field now — the listing and the by-name
         // lookup — and the lookup exists because the listing is a walk of the
         // whole document. Two paths to one answer is two answers waiting to
@@ -1941,7 +1942,7 @@ fn one_field_read_by_name_says_what_the_whole_listing_says() {
 
 #[test]
 fn a_save_made_around_an_open_caret_still_carries_what_was_typed() {
-    pulpit_testkit::on_the_pdfium_thread(|| {
+    crate::testkit::on_the_pdfium_thread(|| {
         // The application drops the focus before Save As and waits for the
         // commit, which is what keeps the *session* consistent — the field
         // list and the undo history know about the value before the file is

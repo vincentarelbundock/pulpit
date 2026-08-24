@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "PDF rendering backends, worker processes and frame cache for pulpit."
+# The test corpus and its fixture builder are development-only, and the crate
+# we upload has no business carrying them: `tests/testkit` is where they live
+# and `examples/dump-corpus.rs` is the one thing that reads it, so the two are
+# excluded together.
+exclude = ["tests/", "examples/dump-corpus.rs"]
 
 [[bin]]
 name = "pulpit-render-worker"
@@ -57,7 +62,6 @@ p12-keystore = { version = "0.3.1", optional = true }
 rand = "0.8"
 
 [dev-dependencies]
-pulpit-testkit = { workspace = true }
 tempfile = { workspace = true }
 rcgen = "0.12"
 # Fixtures hand-build object streams and xref streams, which real producers

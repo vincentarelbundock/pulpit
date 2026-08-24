@@ -2,8 +2,11 @@
 //! real viewer when a test disagrees with one.
 //!
 //! ```text
-//! cargo run -p pulpit-testkit --bin pulpit-dump-corpus -- /tmp/corpus
+//! cargo run -p pulpit-render --example dump-corpus -- /tmp/corpus
 //! ```
+
+#[path = "../tests/testkit/mod.rs"]
+mod testkit;
 
 use std::path::PathBuf;
 
@@ -17,7 +20,7 @@ fn main() {
     let mut index = String::from(
         "# pulpit AcroForm corpus\n\nEach file is wrong, or unusual, in one named way.\n\n",
     );
-    let cases = pulpit_testkit::corpus();
+    let cases = testkit::corpus();
     for case in &cases {
         let path = directory.join(format!("{}.pdf", case.name));
         std::fs::write(&path, &case.bytes).expect("cannot write a case");
