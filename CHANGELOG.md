@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.7] — 2026-08-24
 
 ### Fixed
 
@@ -16,6 +16,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to read its arguments as bytes. Argument parsing now uses
   `OsStr::as_encoded_bytes`, which every platform offers and which still keeps
   a path that is not UTF-8 intact.
+
+- A test that checks a signed file is written beside its source without
+  overwriting anything was reading Windows paths as though they used forward
+  slashes, so it believed every candidate name was free. The behaviour it
+  covers was never wrong — the application asks the filesystem, which has no
+  opinion about how a separator prints — but the test only ran once Windows
+  compiled again.
 
 - **The independent signing oracle had stopped running in continuous
   integration.** At the pinned tag pyHanko became a workspace whose root
