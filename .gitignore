@@ -11,3 +11,12 @@ result-*
 .venv-sign-oracle/
 tools/sign-oracle/credentials/
 tools/sign-oracle/fixtures/
+
+# Key material, wherever it lands. The paths above cover the sign-oracle's
+# own directories; these cover a stray credential written anywhere else.
+*.p12
+*.pfx
+*.pem
+*.key
+*.jks
+*.keystore
