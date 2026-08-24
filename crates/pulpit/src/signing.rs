@@ -1205,8 +1205,7 @@ mod tests {
         // the first name came back unchanged. Path equality compares
         // components, which is what this predicate actually means.
         let taken = |path: &std::path::Path| {
-            path == directory.join("talk-signed.pdf")
-                || path == directory.join("talk-signed-2.pdf")
+            path == directory.join("talk-signed.pdf") || path == directory.join("talk-signed-2.pdf")
         };
         assert_eq!(
             signed_destination(std::path::Path::new("/decks/talk.pdf"), &taken),
