@@ -54,6 +54,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report the document as changed after that signature once you save. Nothing
   in between: a paragraph there could only say the same thing a third time.
 
+- **The timer carries its own controls.** Starting, holding and resetting it
+  needed the keyboard or a trip through the settings panel, which is a long
+  way to reach for a thing the presenter looks at every minute. The timing
+  panel's footer is now two lines: what the reading is doing, and beneath it
+  a row with play/pause, reset and the gear that was already there. The glyph
+  says which way the press will go — `play` while the timer is stopped,
+  `pause` while it runs. Two lines rather than one so the buttons keep their
+  place: a caption that changes from "counting up" to "counting down · 20:00"
+  would otherwise slide them sideways under a finger already on its way down.
+  The alarm line beneath the clock is built from the same footer, so the pair
+  still read as a pair.
+
 ### Removed
 
 - **The menu's separate "Diagnostics…" entry.** It sent the reader to
@@ -67,6 +79,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written to the diagnostics bundle.
 
 ### Fixed
+
+- **Pages are fitted to the window the compositor gave, not the one pulpit
+  asked for.** The application listened only for resize events, and a window
+  that is placed at its final size and then left alone never sends one — the
+  ordinary case on a tiling compositor, where the whole session then fitted
+  its pages to a size no window ever had. The size a window reports when it
+  opens is the same fact as a resize, and is now read as one.
+
+- **Entering fullscreen fits the page to the fullscreen window.** The reader
+  trusts a page surface's own report of its height over the layout's estimate,
+  which is right until the surface is replaced by one that never reports: a
+  page fitted to its window gives its scrollable nothing to scroll, and a
+  scrollable with nothing to scroll publishes no viewport at all. Fullscreen
+  was therefore fitted to the window it was entered from. A remount now
+  retires the departed surface's report, and the layout's own measurement
+  takes the cell back until some surface speaks again.
+
+- **The timer's overtime pulse fades instead of stuttering.** It asks for a
+  frame the same way the alarm's does, but only the alarm was on the list of
+  things that keep the presenter animating, so overtime arrived in about five
+  steps.
 
 - **A browser that is merely starting is no longer mistaken for a wedged
   one.** Every command to the media browser had the same ten-second budget,
