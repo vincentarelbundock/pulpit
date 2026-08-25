@@ -293,6 +293,17 @@ pub enum DocumentRequest {
         page: PageIndex,
         selection: TextSelection,
     },
+    /// The text inside a rectangle on one page.
+    ///
+    /// A different question from [`DocumentRequest::SelectText`], not a
+    /// convenience over it: that one walks the text layer from one character
+    /// index to another, in reading order, and takes everything between them.
+    /// This one bounds an area and takes what falls inside it, which is the
+    /// only way to get one column off a two-column page.
+    AreaText {
+        page: PageIndex,
+        rect: PageRect,
+    },
     /// Find a string in the text layer of a run of pages.
     ///
     /// A run rather than the whole document because a five-hundred-page deck
@@ -745,6 +756,14 @@ pub enum DocumentResponse {
     Annotations(Vec<AnnotationSummary>),
     Annotation(Box<AnnotationSummary>),
     Selection(TextSelectionResult),
+    /// The text a rectangle covered, and whether it had to be cut to fit a
+    /// protocol bound. No quads: nothing draws this answer, it goes to the
+    /// clipboard, and reporting geometry nobody reads would be a second
+    /// representation of the region the caller already has.
+    AreaText {
+        text: String,
+        truncated: bool,
+    },
     /// The hits in one run of pages. A run with none answers with an empty
     /// chunk, which is how the caller knows to move its frontier along.
     Found(HitChunk),
@@ -859,6 +878,7 @@ impl DocumentRequest {
             | DocumentRequest::ListAnnotations { .. }
             | DocumentRequest::GetAnnotation { .. }
             | DocumentRequest::SelectText { .. }
+            | DocumentRequest::AreaText { .. }
             | DocumentRequest::FindText { .. }
             | DocumentRequest::ListFields
             | DocumentRequest::Outline

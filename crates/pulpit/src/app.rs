@@ -547,6 +547,32 @@ type ThumbnailPlanInputs = (
     usize,
 );
 
+/// How much bigger than the page's own points an area copy is rendered.
+///
+/// The frame on screen is at whatever zoom the reader happens to be at, which
+/// is not a resolution anybody chose to paste at — so the crop is rendered
+/// fresh, and this is what it is rendered at. Two device pixels per page point
+/// is roughly 144 dpi: enough that a figure pasted into a document or a slide
+/// does not look softer than the text around it, and not so much that a band
+/// pulled across a whole page produces a frame measured in tens of megabytes.
+const AREA_COPY_SCALE: f32 = 2.0;
+
+/// The largest area copy that will be rendered, in device pixels on a side.
+///
+/// A bound rather than a scale that shrinks, because the two failures are not
+/// symmetrical: a copy that comes back a little smaller than asked for is
+/// still the picture the reader wanted, and one that asks a worker for a
+/// gigabyte is a worker that dies mid-talk.
+const AREA_COPY_MAX_EDGE: u32 = 8192;
+
+/// An area copy waiting on the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AreaCopy {
+    request: RequestId,
+    width: u32,
+    height: u32,
+}
+
 /// A mark the reader placed and is typing into (§8.5).
 ///
 /// Held in the application rather than in the gesture state because it is not
@@ -1276,6 +1302,17 @@ pub struct App {
     /// legitimately ask for a frame of exactly the thumbnail width, and
     /// misrouting that would leave the panel empty for ever.
     thumbnail_requests: std::collections::HashSet<RequestId>,
+    /// The area-image render in flight, if any: the request, and how big the
+    /// frame coming back is meant to be.
+    ///
+    /// One at a time. A second band drawn before the first has come back
+    /// supersedes it — the reader has said what they want more recently, and
+    /// two images racing to the clipboard would leave whichever finished last
+    /// there, which is not the one they asked for.
+    area_copy: Option<AreaCopy>,
+    /// Text a select band covered, on its way to the clipboard. Held here
+    /// because the answer arrives in the pump, which has no `Task` to return.
+    area_clipboard_text: Option<String>,
     /// The generation and page count the warming plan was made for.
     thumbnail_plan: Option<(pulpit_core::RenderGeneration, usize)>,
     /// The one width this document's thumbnails are rendered at, chosen when
@@ -1955,6 +1992,8 @@ impl App {
             thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnail_requests: std::collections::HashSet::new(),
+            area_copy: None,
+            area_clipboard_text: None,
             thumbnail_plan: None,
             thumbnail_plan_width: THUMBNAIL_WIDTH,
             thumbnail_plan_inputs: None,
@@ -3317,11 +3356,23 @@ impl App {
                 if self.presenter_interaction.pending_selection().is_some() {
                     self.ask_presenter_selection(true);
                 } else if self.annotations.band.is_some() {
-                    // A band makes nothing and deletes nothing on its own: it
-                    // closes on what it caught, and the delete key is what
-                    // takes them (§8.4).
-                    let held = self.annotations.finish_band().len();
-                    self.diagnostics.note(format!("holding {held} marks"));
+                    // The same band, and the same three things it can mean as
+                    // in document mode. A copying kind never reaches
+                    // `finish_band`, because that one gathers marks up and
+                    // this band was not drawn around marks.
+                    match self.take_presenter_area() {
+                        Some((page, rect, kind)) => {
+                            self.annotations.band = None;
+                            self.copy_area(page, rect, kind);
+                        }
+                        // A band makes nothing and deletes nothing on its own:
+                        // it closes on what it caught, and the delete key is
+                        // what takes them (§8.4).
+                        None => {
+                            let held = self.annotations.finish_band().len();
+                            self.diagnostics.note(format!("holding {held} marks"));
+                        }
+                    }
                 } else {
                     let finished = self.annotations.end_stroke();
                     self.commit_presenter_gesture(finished);
@@ -4950,6 +5001,12 @@ impl App {
             tasks.push(iced::clipboard::write(text));
         }
 
+        // 1b-i-bis. The text a select band covered, waiting on a `Task` for
+        //           the same reason.
+        if let Some(text) = self.area_clipboard_text.take() {
+            tasks.push(iced::clipboard::write(text));
+        }
+
         // 1b-ii. A Save As that stopped to let a field commit. The commit has
         //        landed, so the review and the file picker go on from here.
         if std::mem::take(&mut self.resume_save_after_form_commit) {
@@ -5459,6 +5516,14 @@ impl App {
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());
+                }
+                // An area copy is not a frame anybody draws: it never entered
+                // `pending`, so it has to be taken before the lookup that
+                // would otherwise drop it as unwanted.
+                if self.area_copy.is_some_and(|copy| copy.request == job.id) {
+                    self.area_copy = None;
+                    self.area_image_ready(&frame);
+                    return;
                 }
                 let Some(key) = self.take_pending(job.id) else {
                     return;
@@ -6381,6 +6446,9 @@ impl App {
                                 .to_string(),
                         );
                     }
+                }
+                crate::reader_link::Told::AreaText { text, truncated } => {
+                    self.area_text_ready(text, truncated);
                 }
                 crate::reader_link::Told::Patched(frame) => {
                     self.reader_patch_landed(*frame);
@@ -8516,6 +8584,9 @@ impl App {
                         // more and the answer is what commits.
                         self.ask_select_text(page, selection, true);
                     }
+                    crate::reader::Released::AwaitingArea { page, rect, kind } => {
+                        self.copy_area(page, rect, kind);
+                    }
                     crate::reader::Released::Nothing => {
                         self.ask_form_pointer(FormPointer::Up);
                     }
@@ -8591,6 +8662,11 @@ impl App {
                 // pen, whichever mode it was picked up in. The presenter's
                 // palette keeps the choice, so it also survives into the next
                 // session with the rest of the layout.
+                // …and so is the band's kind, for the same reason: one band,
+                // whichever mode the reader happened to set it in.
+                if let ReadCommand::SetSelectKind(kind) = command {
+                    self.annotation_controls.options.select_kind = kind;
+                }
                 if let ReadCommand::SetToolColor(tool, color) = command {
                     let options = &mut self.annotation_controls.options;
                     match tool {
@@ -11072,6 +11148,224 @@ impl App {
         false
     }
 
+    /// The presenter's open band, as a rectangle on a page, when the palette
+    /// is set to a kind that copies.
+    ///
+    /// `None` for the band's mark-gathering kind, for a slide that cannot be
+    /// placed on a page — an unmapped slide has no region to render or read —
+    /// and for a rectangle too small to have been meant, which is the same
+    /// floor document mode applies and for the same reason.
+    ///
+    /// The conversion is [`SlidePlacement::to_page`], the one the highlighter
+    /// already uses: the presenter's band is in normalised slide coordinates
+    /// and everything downstream of here is in canonical page points (A4).
+    fn take_presenter_area(
+        &self,
+    ) -> Option<(
+        pulpit_core::page::PageIndex,
+        pulpit_core::page::PageRect,
+        pulpit_core::annotation::SelectKind,
+    )> {
+        let kind = self.annotation_options().select_kind;
+        if !kind.copies() {
+            return None;
+        }
+        let (from, to) = self.annotations.band?;
+        let placement = self.slide_placement()?;
+        let from = placement.to_page(from);
+        let to = placement.to_page(to);
+        let rect = pulpit_core::page::PageRect::new(
+            from.x.min(to.x),
+            from.y.min(to.y),
+            from.x.max(to.x),
+            from.y.max(to.y),
+        );
+        (rect.width() >= crate::reader::MIN_AREA_SIZE
+            && rect.height() >= crate::reader::MIN_AREA_SIZE)
+            .then_some((placement.page, rect, kind))
+    }
+
+    /// A band was drawn with a copying kind: take the region off to whichever
+    /// engine can answer for it.
+    ///
+    /// Neither answer is immediate — one is a render and one is a worker
+    /// round trip — so nothing is reported here. What the reader sees is a
+    /// toast when the clipboard has actually been written, which is the only
+    /// moment at which "copied" is true.
+    fn copy_area(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+        kind: pulpit_core::annotation::SelectKind,
+    ) {
+        match kind {
+            // Not reachable: a band of this kind never produces an area.
+            pulpit_core::annotation::SelectKind::Marks => {}
+            pulpit_core::annotation::SelectKind::Image => self.copy_area_as_image(page, rect),
+            pulpit_core::annotation::SelectKind::Text => self.copy_area_as_text(page, rect),
+        }
+    }
+
+    /// Ask the renderer for the region, freshly drawn at [`AREA_COPY_SCALE`].
+    ///
+    /// A worker round trip rather than a read of what is already on screen,
+    /// for the reason given at [`AREA_COPY_SCALE`]: the picture on screen is
+    /// at the reader's zoom, and the reader's zoom is about reading.
+    fn copy_area_as_image(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+    ) {
+        // Asked before any work is done rather than discovered afterwards: a
+        // session with nowhere to put an image should say so instead of
+        // spending a render on one.
+        if !self.platform.capabilities.image_clipboard {
+            self.notify("This session cannot put an image on the clipboard.".into());
+            return;
+        }
+        let Some(geometry) = self.reader.page_geometry(page).copied() else {
+            return;
+        };
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return;
+        }
+        let Some((document, generation)) = self.reader_render_source() else {
+            return;
+        };
+
+        // The band is in canonical page points (A4) and a render region is a
+        // fraction of the page, so the conversion is a division. The *edges*
+        // are clamped first, before anything is divided: a band dragged off
+        // the side of the page is one the reader meant to reach the edge
+        // with, and clamping the offset and the width independently would
+        // leave the far edge past the page — a region the worker refuses as
+        // malformed, which is not what a slightly overshot drag deserves.
+        let left = rect.left.clamp(0.0, geometry.width);
+        let top = rect.top.clamp(0.0, geometry.height);
+        let right = rect.right.clamp(left, geometry.width);
+        let bottom = rect.bottom.clamp(top, geometry.height);
+        let (span_x, span_y) = (right - left, bottom - top);
+        if span_x <= 0.0 || span_y <= 0.0 {
+            // Entirely off the page: there is nothing there to draw.
+            return;
+        }
+        let region = pulpit_core::notes::Region::new(
+            left / geometry.width,
+            top / geometry.height,
+            span_x / geometry.width,
+            span_y / geometry.height,
+        );
+        // Both edges come down together when either is over the bound. Taking
+        // the two independently would paste a squashed picture, which is a
+        // worse answer than a smaller one.
+        let scale = AREA_COPY_SCALE
+            .min(AREA_COPY_MAX_EDGE as f32 / span_x)
+            .min(AREA_COPY_MAX_EDGE as f32 / span_y);
+        let width = ((span_x * scale).round() as u32).clamp(1, AREA_COPY_MAX_EDGE);
+        let height = ((span_y * scale).round() as u32).clamp(1, AREA_COPY_MAX_EDGE);
+
+        let Some(supervisor) = self.supervisor.as_mut() else {
+            return;
+        };
+        // The one already in flight is now for a rectangle the reader has
+        // moved on from.
+        if let Some(previous) = self.area_copy.take() {
+            supervisor.cancel(previous.request);
+            self.submitted_at.remove(&previous.request);
+        }
+        let id = supervisor.next_request_id();
+        supervisor.submit(RenderJob {
+            id,
+            generation,
+            document,
+            page: page.get(),
+            region,
+            width,
+            height,
+            // The reader is waiting on this with the pointer just up, so it
+            // outranks the pages being warmed in the margin. `Refined`
+            // because there is no coarse-then-fine here: one frame is drawn
+            // and it is the one that gets pasted.
+            priority: Priority::Presenter,
+            quality: pulpit_render::protocol::Quality::Refined,
+            // The document's own marks are part of the page as the reader
+            // sees it. Copying a page and getting it back without the
+            // highlighting they put on it would be a picture of a different
+            // document.
+            with_annotations: true,
+            region_name: String::new(),
+        });
+        self.area_copy = Some(AreaCopy {
+            request: id,
+            width,
+            height,
+        });
+        self.submitted_at.insert(id, Instant::now());
+    }
+
+    /// Ask the document worker for the text the region covers.
+    fn copy_area_as_text(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+    ) {
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::AreaText { page, rect });
+        }
+    }
+
+    /// The renderer answered an area copy: on to the clipboard.
+    fn area_image_ready(&mut self, frame: &pulpit_render::cache::Frame) {
+        let Some(image) = crate::platform::ClipboardImage::new(
+            frame.width,
+            frame.height,
+            frame.pixels.as_ref().clone(),
+        ) else {
+            // The renderer and this process disagree about how big a frame
+            // is, which is a bug rather than a thing the reader did.
+            self.notify("The copied region came back malformed.".into());
+            return;
+        };
+        let bytes = image.byte_len();
+        let outcome = self.platform.services.copy_image(&image);
+        match outcome.describe() {
+            Some(problem) => self.notify(problem),
+            None => {
+                tracing::debug!(
+                    width = frame.width,
+                    height = frame.height,
+                    bytes,
+                    "area copied to the clipboard"
+                );
+                self.notify_done(format!("Copied a {}×{} image.", frame.width, frame.height));
+            }
+        }
+    }
+
+    /// The worker answered an area-text query: to the clipboard, or an honest
+    /// word about why not.
+    fn area_text_ready(&mut self, text: String, truncated: bool) {
+        if text.trim().is_empty() {
+            // Not a failure and not silence. A band pulled over a figure
+            // resolves to no text, and the reader has to be told that rather
+            // than left to discover it at the paste.
+            self.notify("There is no text in that region.".into());
+            return;
+        }
+        let characters = text.chars().count();
+        // The pump has no `Task` to return, so the write waits for the tick,
+        // exactly as a field's copy does.
+        self.area_clipboard_text = Some(text);
+        if truncated {
+            self.notify(format!(
+                "Copied the first {characters} characters; the region held more than pulpit \
+                 will carry."
+            ));
+        } else {
+            self.notify_done(format!("Copied {characters} characters."));
+        }
+    }
+
     /// Put one text-selection query to the document worker, coalescing the
     /// drag's samples: one query in flight, one waiting, newest wins.
     ///
@@ -12453,6 +12747,15 @@ impl App {
                 if self.annotation_controls.wheel == Some(tool) {
                     self.annotation_controls.wheel = None;
                 }
+            }
+            // The band means one thing, whichever palette it was set from.
+            // Same reasoning as the pen's colour above, and unlike the
+            // pointer's mode it does have somewhere to go in document mode.
+            AnnotationCommand::SetSelectKind(kind) => {
+                self.annotation_controls.options.select_kind = kind;
+                let _ = self
+                    .reader
+                    .apply(&crate::widgets::event::ReadCommand::SetSelectKind(kind));
             }
             // Changing the pointer's mode while it is in hand changes what is
             // in hand: a presenter who asks for the spotlight mid-sentence

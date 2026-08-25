@@ -27,6 +27,7 @@
 
 pub mod appearance;
 pub mod capabilities;
+pub mod clipboard;
 pub mod inhibit;
 pub mod input;
 pub mod instance;
@@ -44,6 +45,7 @@ pub mod windows;
 
 pub use appearance::{Appearance, Motion, MotionSetting};
 pub use capabilities::Capabilities;
+pub use clipboard::ClipboardImage;
 pub use inhibit::Inhibitor;
 pub use input::{InputPolicy, Shortcut};
 pub use instance::{acquire as acquire_claim, is_claimed, Instance, InstanceLock};

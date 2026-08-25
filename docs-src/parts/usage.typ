@@ -315,5 +315,28 @@ after a short typing pause. Labels follow Typst's math syntax exactly: for
 example, multiplication is
 `$e=m c^2$`, with whitespace between variables.
 
+== The select band
+
+The select tool pulls a rectangle over the page, and its options say what the
+rectangle is for. The choice sits in the tool's own panel, next to where the
+highlighter keeps its colour, and it holds in both Reader and Presenter mode:
+
+- *Marks*, the default: hold every annotation the band encloses, to move,
+  resize or delete them together. The only kind that touches the document.
+- *Image*: copy the region to the clipboard as a picture. It is rendered
+  freshly at twice the page's own scale rather than lifted off the screen, so
+  what you paste does not depend on the zoom you happened to be reading at.
+- *Text*: copy the text the region covers. This bounds an area and takes what
+  falls inside it, which is how you get one column off a two-column page —
+  a different question from dragging through text, which follows the reading
+  order from one character to another.
+
+A band set to copy leaves the selection alone, and a band set to hold marks
+never reaches the clipboard. Copying an image needs a session that can carry
+one; on a headless session Pulpit says so rather than copying nothing.
+
+Table extraction — dropping row and column dividers over a region and getting
+it back as a spreadsheet — is deliberately not offered.
+
 Marks can be exported, and in Presenter mode `v` decides whether the room sees
 them or only you do.

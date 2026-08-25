@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use pulpit_core::annotation::{
-    AnnotationStyle, AnnotationTool, InkColor, ERASER_RADIUS_RANGE, HIGHLIGHT_WIDTH_RANGE,
+    AnnotationStyle, AnnotationTool, InkColor, SelectKind, ERASER_RADIUS_RANGE,
+    HIGHLIGHT_WIDTH_RANGE,
 };
 
 /// How an annotation palette is configured.
@@ -30,6 +31,13 @@ pub struct AnnotationOptions {
     /// and lighting the paragraph around it are the same gesture, and the
     /// palette has a row to fit.
     pub pointer_spotlight: bool,
+    /// What the select tool's band does with the region it encloses.
+    ///
+    /// The same shape of choice as [`AnnotationOptions::pointer_spotlight`]:
+    /// one control with a mode, because pulling a rectangle over marks and
+    /// pulling one over a figure are the same gesture asking for different
+    /// answers.
+    pub select_kind: SelectKind,
     /// Stroke width as a fraction of the page width.
     pub ink_width: f32,
     pub highlight_width: f32,
@@ -58,6 +66,7 @@ impl Default for AnnotationOptions {
             pointer_color: style.pointer_color,
             text_color: InkColor::Black,
             pointer_spotlight: false,
+            select_kind: SelectKind::Marks,
             ink_width: style.ink_width,
             highlight_width: 0.025,
             eraser_radius: 0.02,
@@ -123,6 +132,7 @@ pub enum AnnotationPatch {
     PointerColor(InkColor),
     PointerRadius(f32),
     PointerSpotlight(bool),
+    SelectKind(SelectKind),
     TextColor(InkColor),
     TextSize(f32),
     AudienceVisible(bool),
@@ -141,6 +151,7 @@ impl AnnotationPatch {
             AnnotationPatch::PointerColor(value) => options.pointer_color = value,
             AnnotationPatch::PointerRadius(value) => options.pointer_radius = value,
             AnnotationPatch::PointerSpotlight(value) => options.pointer_spotlight = value,
+            AnnotationPatch::SelectKind(value) => options.select_kind = value,
             AnnotationPatch::TextColor(value) => options.text_color = value,
             AnnotationPatch::TextSize(value) => options.text_size = value,
             AnnotationPatch::AudienceVisible(value) => options.audience_visible = value,

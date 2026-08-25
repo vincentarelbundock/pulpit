@@ -93,6 +93,13 @@ impl PlatformServices for LinuxServices {
                         .is_some_and(|modules| modules.to_string_lossy().contains("atk-bridge"))),
             media_keys: true,
             notifications: portal_present,
+            // A clipboard belongs to a display server: X11 has a selection
+            // owner and Wayland has the data-control protocol, and a
+            // headless session has neither. Answered from the session type
+            // rather than by opening a clipboard at startup, which on
+            // Wayland means a connection and a thread for a question nobody
+            // has asked yet.
+            image_clipboard: self.x11 || self.wayland,
         }
     }
 
@@ -186,6 +193,12 @@ impl PlatformServices for LinuxServices {
                 &notification.body,
             ],
         )
+    }
+
+    /// One clipboard library serves all three desktops; what differs is
+    /// whether the session offers a clipboard at all, which the outcome says.
+    fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
+        crate::platform::clipboard::copy_image(image)
     }
 
     fn inhibit(&self) -> InhibitState {

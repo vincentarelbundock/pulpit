@@ -553,9 +553,10 @@ fn tool_control<Message: Clone + 'static>(
         main = main.on_press(on(WidgetEvent::Annotate(command)));
     }
 
-    // A tool with nothing to configure carries no arrow and opens no panel:
-    // a rubber band is a shape the hand makes, and it has no colour or size
-    // to choose.
+    // A tool with nothing to configure carries no arrow and opens no panel.
+    // Only the stamp is such a tool: what it puts down is chosen from its own
+    // palette. The band has no colour and no size — a rubber band is a shape
+    // the hand makes — but it does have a kind, so it keeps its arrow.
     if !armable.has_options() {
         return palette_hint(main.into(), armable.label());
     }
@@ -751,6 +752,45 @@ fn options_panel<Message: Clone + 'static>(
         modes
     });
 
+    // The band is three things, the same way the pointer control is two, and
+    // which one it is belongs in the same place: the tool's own panel.
+    let kind_row = (armable == AnnotationTool::Select).then(|| {
+        let mut kinds = Row::new().spacing(theme::space::S);
+        for kind in pulpit_core::annotation::SelectKind::ALL {
+            let glyph = match kind {
+                // The arrow that picks marks up, the rectangle that takes a
+                // region, and the letter. Borrowed from the controls that
+                // already mean those things rather than drawn again: the
+                // crop control is a rectangle pulled over the page too.
+                pulpit_core::annotation::SelectKind::Marks => theme::Icon::Select,
+                pulpit_core::annotation::SelectKind::Image => theme::Icon::Crop,
+                pulpit_core::annotation::SelectKind::Text => theme::Icon::Type,
+            };
+            let chosen = options.select_kind == kind;
+            let mut choice = button(
+                row![
+                    theme::icon::icon(glyph, theme::type_scale::BODY),
+                    text(kind.label()).size(theme::type_scale::CAPTION),
+                ]
+                .spacing(theme::space::XS)
+                .align_y(Alignment::Center),
+            )
+            .padding(Padding::from([4.0, theme::space::S]))
+            .style(if chosen {
+                theme::ambient::selected_button
+            } else {
+                theme::ambient::tool_button
+            });
+            if mode.interactive() {
+                choice = choice.on_press(on(WidgetEvent::Annotate(
+                    AnnotationCommand::SetSelectKind(kind),
+                )));
+            }
+            kinds = kinds.push(palette_hint(choice.into(), kind.description()));
+        }
+        kinds
+    });
+
     // The spotlight is a hole in the dimming rather than something drawn, so
     // it has no colour to pick; everything else that lays down colour does.
     let color_row = matches!(
@@ -786,9 +826,17 @@ fn options_panel<Message: Clone + 'static>(
     if let Some(swatches) = color_row {
         panel = panel.row("Color", swatches);
     }
-    panel = panel.row("Size", size.width(Length::Fill));
+    // A band has no width: it is a shape the hand makes, and the slider above
+    // is built from a measure borrowed to keep it well formed. Drawing it
+    // would offer a control that changes nothing.
+    if armable != AnnotationTool::Select {
+        panel = panel.row("Size", size.width(Length::Fill));
+    }
     if let Some(modes) = mode_row {
         panel = panel.row("Mode", modes);
+    }
+    if let Some(kinds) = kind_row {
+        panel = panel.row("Takes", kinds);
     }
     panel.into()
 }

@@ -491,6 +491,21 @@ impl DocumentBackend for MemoryDocument {
         Ok(TextSelectionResult::default())
     }
 
+    fn area_text(&self, page: PageIndex, _rect: pulpit_core::page::PageRect) -> Result<String> {
+        if page.get() >= self.geometry.len() {
+            return Err(DocumentError::NoSuchPage {
+                page: page.get(),
+                count: self.geometry.len(),
+            });
+        }
+        // A memory document has no text layer, and here that has to be said
+        // rather than answered with an empty string: the band that asked is
+        // about to put the answer on the clipboard.
+        Err(DocumentError::Unsupported(
+            "have its text read: an in-memory document has no text layer".into(),
+        ))
+    }
+
     fn write_to(&mut self, destination: &Path, _options: SaveOptions) -> Result<u64> {
         // Enough of a PDF to be recognisably one, and no more: a memory
         // document is not a document anybody should be saving for real.

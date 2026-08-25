@@ -202,6 +202,7 @@ impl PlatformServices for MacosServices {
             accessibility_bridge: false,
             media_keys: true,
             notifications: true,
+            image_clipboard: true,
         }
     }
 
@@ -266,6 +267,12 @@ impl PlatformServices for MacosServices {
             script.push_str(" sound name \"Basso\"");
         }
         spawn("osascript", &["-e", &script])
+    }
+
+    /// One clipboard library serves all three desktops; what differs is
+    /// whether the session offers a clipboard at all, which the outcome says.
+    fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
+        crate::platform::clipboard::copy_image(image)
     }
 
     fn inhibit(&self) -> InhibitState {

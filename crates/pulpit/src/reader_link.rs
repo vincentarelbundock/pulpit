@@ -79,6 +79,13 @@ pub enum Ask {
         selection: pulpit_render::document::TextSelection,
         finalising: bool,
     },
+    /// Read the text inside a rectangle on one page. Read-only: it never
+    /// moves the revision (§6.3). Not coalesced the way a selection is —
+    /// there is one of these per band, asked when the pointer comes up.
+    AreaText {
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+    },
     /// Find a string in a run of pages. Read-only, and carried with the
     /// generation it belongs to: the answer to a query the user has already
     /// typed past has to be recognisable as stale on arrival.
@@ -179,6 +186,11 @@ pub enum Told {
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
+    },
+    /// The text a band covered, on its way to the clipboard.
+    AreaText {
+        text: String,
+        truncated: bool,
     },
     /// Hits for one run of pages, or the reason there will not be any.
     ///
@@ -640,6 +652,25 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 other => unexpected(other, "a text selection"),
             },
         ],
+        Ask::AreaText { page, rect } => {
+            vec![
+                match session.request(DocumentRequest::AreaText { page, rect }) {
+                    Ok(DocumentResponse::AreaText { text, truncated }) => {
+                        Told::AreaText { text, truncated }
+                    }
+                    // A backend or a page with no text layer answers this way,
+                    // and it is a fact about the region rather than a lost
+                    // worker: the band gets told there was no text in it.
+                    Ok(DocumentResponse::Failed(
+                        pulpit_render::document::protocol::DocumentFailure::Unsupported(_),
+                    )) => Told::AreaText {
+                        text: String::new(),
+                        truncated: false,
+                    },
+                    other => unexpected(other, "the text in an area"),
+                },
+            ]
+        }
         Ask::FindText {
             generation,
             query,

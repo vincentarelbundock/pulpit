@@ -212,6 +212,19 @@ pub trait DocumentBackend {
     fn select_text(&self, page: PageIndex, selection: TextSelection)
         -> Result<TextSelectionResult>;
 
+    /// The text inside `rect` on `page`, in the page's own coordinates.
+    ///
+    /// [`DocumentError::Unsupported`] by default rather than an empty string,
+    /// for the same reason [`DocumentBackend::find_text`] is: a backend with
+    /// no text layer and a rectangle drawn over a photograph are different
+    /// facts, and the person who dragged the band has to be told which one
+    /// they got.
+    fn area_text(&self, _page: PageIndex, _rect: pulpit_core::page::PageRect) -> Result<String> {
+        Err(DocumentError::Unsupported(
+            "have its text read by area: this backend has no text layer".into(),
+        ))
+    }
+
     /// Find `query` in the text layer of `pages`, a half-open range.
     ///
     /// The default is [`DocumentError::Unsupported`] rather than an empty
@@ -353,6 +366,27 @@ impl<'a> PdfDocument<'a> {
             result.truncated = true;
         }
         Ok(result)
+    }
+
+    /// The text a rectangle covers, bounded the way a selection's is.
+    ///
+    /// Returns the text and whether it had to be cut. Read-only, so it never
+    /// touches the revision (§6.3), and bounded here rather than by whoever
+    /// asked, because a page's text layer is document-controlled input.
+    pub fn area_text(
+        &self,
+        page: PageIndex,
+        rect: pulpit_core::page::PageRect,
+    ) -> Result<(String, bool)> {
+        self.check_page(page)?;
+        let mut text = self.backend.area_text(page, rect)?;
+        let mut truncated = false;
+        if text.len() > limits::MAX_TEXT_BYTES {
+            let cut = floor_char_boundary(&text, limits::MAX_TEXT_BYTES);
+            text.truncate(cut);
+            truncated = true;
+        }
+        Ok((text, truncated))
     }
 
     /// Find a string in a run of pages.

@@ -2330,6 +2330,7 @@ fn tools<Message: Clone + 'static>(
         ink_color: reader.controls.ink_color,
         ink_width: reader.controls.ink_width,
         highlight_color: reader.controls.highlight_color,
+        select_kind: reader.controls.select_kind,
         text_color: reader.controls.text_color,
         text_size: reader.controls.text_size,
         selected: reader.selected,
@@ -2350,6 +2351,7 @@ struct DocumentToolsState {
     ink_color: InkColor,
     ink_width: f32,
     highlight_color: InkColor,
+    select_kind: pulpit_core::annotation::SelectKind,
     text_color: InkColor,
     text_size: f32,
     selected: bool,
@@ -2488,7 +2490,10 @@ fn document_tool_control<Message: Clone + 'static>(
         control = control.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
     }
     let control = hint(control, tool.label());
-    if state.color(tool).is_none() {
+    // Asked of the tool rather than of its colour. A colour used to be the
+    // only thing any of these had to configure, so "has a colour" stood in
+    // for "has a panel"; the band has a panel and no colour.
+    if !tool.has_options() {
         return control;
     }
 
@@ -2633,7 +2638,7 @@ fn document_tools_overflow_menu<Message: Clone + 'static>(
         if state.live {
             arm = arm.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
         }
-        if state.color(tool).is_some() {
+        if tool.has_options() {
             let open = state.tool_options == Some(tool);
             let mut arrow = button(theme::icon::icon(
                 if open {
@@ -2705,22 +2710,51 @@ fn document_tool_options_panel<Message: Clone + 'static>(
     state: DocumentToolsState,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let selected = state.color(tool).unwrap_or_default();
-    let swatches = crate::widgets::common::color::swatches(
-        selected,
-        24.0,
-        state.live,
-        move |colour| on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour))),
-        on_event(WidgetEvent::Read(ReadCommand::ToolColorWheel(Some(tool)))),
-        hint,
+    let mut panel = crate::widgets::common::options::Options::new(tool.label()).on_close(
+        state
+            .live
+            .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOptions(None)))),
     );
-    let mut panel = crate::widgets::common::options::Options::new(tool.label())
-        .on_close(
-            state
-                .live
-                .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOptions(None)))),
-        )
-        .row("Color", swatches);
+    // A tool that lays no colour down gets no colour row. Until the band had
+    // options of its own no such tool opened this panel, so the row was
+    // unconditional and fell back to black — which would now offer the
+    // rubber band a colour it has no way to use.
+    if let Some(selected) = state.color(tool) {
+        panel = panel.row(
+            "Color",
+            crate::widgets::common::color::swatches(
+                selected,
+                24.0,
+                state.live,
+                move |colour| on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour))),
+                on_event(WidgetEvent::Read(ReadCommand::ToolColorWheel(Some(tool)))),
+                hint,
+            ),
+        );
+    }
+    // The band's three kinds, the one thing it has to configure.
+    if tool == AnnotationTool::Select {
+        let mut kinds = Row::new().spacing(theme::space::XS);
+        for kind in pulpit_core::annotation::SelectKind::ALL {
+            let glyph = match kind {
+                pulpit_core::annotation::SelectKind::Marks => theme::Icon::Select,
+                pulpit_core::annotation::SelectKind::Image => theme::Icon::Crop,
+                pulpit_core::annotation::SelectKind::Text => theme::Icon::Type,
+            };
+            kinds = kinds.push(hint(
+                document_command_button(
+                    glyph,
+                    kind.description(),
+                    ReadCommand::SetSelectKind(kind),
+                    state.select_kind == kind,
+                    state.live,
+                    on_event,
+                ),
+                kind.label(),
+            ));
+        }
+        panel = panel.row("Takes", kinds);
+    }
     // Measures are in page points here rather than fractions of the page, so
     // the caption carries the number: a reader setting a pen to two points is
     // setting it to something the document itself is measured in.

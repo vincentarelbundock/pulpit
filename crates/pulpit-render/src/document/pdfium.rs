@@ -464,6 +464,50 @@ impl<'a> PdfiumDocument<'a> {
         self.page_text.borrow_mut().clear();
     }
 
+    /// The loaded text layer for one page, loading it if it is not the one
+    /// already held. `None` when the page has no text layer at all.
+    ///
+    /// The samples of one drag all land on the same page, so the loaded page
+    /// and its text layer are kept between them rather than rebuilt per
+    /// sample. A different page ends the previous one first. `doing` names
+    /// what the caller wanted the page for, so a load failure says which
+    /// request it defeated.
+    fn text_page_for(&self, page: PageIndex, doing: &str) -> Result<Option<FPDF_TEXTPAGE>> {
+        if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
+            self.release_text_page();
+            let bindings = self.backend.bindings();
+            let document = self
+                .backend
+                .document_handle(self.document)
+                .map_err(to_document_error)?;
+            let count = self.info.page_count;
+            if page.get() >= count {
+                return Err(DocumentError::NoSuchPage {
+                    page: page.get(),
+                    count,
+                });
+            }
+            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
+            if handle.is_null() {
+                return Err(DocumentError::Backend(format!(
+                    "cannot load page {} to {doing}",
+                    page.get()
+                )));
+            }
+            let text = unsafe { bindings.FPDFText_LoadPage(handle) };
+            if text.is_null() {
+                unsafe { bindings.FPDF_ClosePage(handle) };
+                return Ok(None);
+            }
+            *self.text_page.borrow_mut() = Some(TextPageCache {
+                page: page.get(),
+                handle,
+                text,
+            });
+        }
+        Ok(self.text_page.borrow().as_ref().map(|cache| cache.text))
+    }
+
     fn release_text_page(&self) {
         let Some(cache) = self.text_page.borrow_mut().take() else {
             return;
@@ -3947,49 +3991,79 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ) -> Result<TextSelectionResult> {
         let geometry = self.geometry_of(page)?;
         let bindings = self.backend.bindings();
-
-        // The samples of one drag all land on the same page, so the loaded
-        // page and its text layer are kept between them rather than rebuilt
-        // per sample. A different page ends the previous one first.
-        if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
-            self.release_text_page();
-            let document = self
-                .backend
-                .document_handle(self.document)
-                .map_err(to_document_error)?;
-            let count = self.info.page_count;
-            if page.get() >= count {
-                return Err(DocumentError::NoSuchPage {
-                    page: page.get(),
-                    count,
-                });
-            }
-            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
-            if handle.is_null() {
-                return Err(DocumentError::Backend(format!(
-                    "cannot load page {} to select text on",
-                    page.get()
-                )));
-            }
-            let text = unsafe { bindings.FPDFText_LoadPage(handle) };
-            if text.is_null() {
-                // No text layer is an empty result, not a failure (§6.3).
-                unsafe { bindings.FPDF_ClosePage(handle) };
-                return Ok(TextSelectionResult::default());
-            }
-            *self.text_page.borrow_mut() = Some(TextPageCache {
-                page: page.get(),
-                handle,
-                text,
-            });
-        }
-
-        let cache = self.text_page.borrow();
-        let text = cache
-            .as_ref()
-            .expect("the text page was just loaded for this page")
-            .text;
+        // No text layer is an empty result, not a failure (§6.3).
+        let Some(text) = self.text_page_for(page, "select text on")? else {
+            return Ok(TextSelectionResult::default());
+        };
         Ok(resolve_selection(bindings, text, &geometry, selection))
+    }
+
+    fn area_text(&self, page: PageIndex, rect: pulpit_core::page::PageRect) -> Result<String> {
+        let geometry = self.geometry_of(page)?;
+        let bindings = self.backend.bindings();
+        // Unlike a selection, an area query says so when there is no text
+        // layer at all: a band pulled over a scan gets an explicit refusal
+        // rather than an empty clipboard that looks like a slip of the hand.
+        let Some(text_page) = self.text_page_for(page, "read the text of")? else {
+            return Err(DocumentError::Unsupported(
+                "have its text read: this page has no text layer".into(),
+            ));
+        };
+
+        // Page space is top-left and PDF user space is bottom-left, so the
+        // rectangle's top edge becomes the larger `y` and its bottom edge the
+        // smaller one. Taking `min`/`max` after the conversion rather than
+        // trusting the names is what keeps a rotated or flipped page from
+        // handing PDFium an inside-out box, which it answers with nothing.
+        let (left, top) = geometry.to_user_space(PagePoint::new(rect.left, rect.top));
+        let (right, bottom) = geometry.to_user_space(PagePoint::new(rect.right, rect.bottom));
+        let (left, right) = (left.min(right) as f64, left.max(right) as f64);
+        let (bottom, top) = (bottom.min(top) as f64, bottom.max(top) as f64);
+
+        // Asked for the length first, then for the text: PDFium answers a
+        // null buffer with the count it would need. The count is in UTF-16
+        // values and excludes the terminator, so the buffer is one longer.
+        let count = unsafe {
+            bindings.FPDFText_GetBoundedText(
+                text_page,
+                left,
+                top,
+                right,
+                bottom,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if count <= 0 {
+            return Ok(String::new());
+        }
+        let wanted = (count as usize).min(limits::MAX_TEXT_BYTES);
+        let mut buffer = vec![0u16; wanted + 1];
+        let written = unsafe {
+            bindings.FPDFText_GetBoundedText(
+                text_page,
+                left,
+                top,
+                right,
+                bottom,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
+        };
+        if written <= 0 {
+            return Ok(String::new());
+        }
+        // The terminator is included in the count when there was room for it,
+        // and a lone trailing NUL would travel to the clipboard otherwise.
+        buffer.truncate(written as usize);
+        while buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        // Lossy rather than an error: a document that hands back a split
+        // surrogate — which the bound text call is documented to do when it
+        // cuts — is a document to take the readable part of, not one to
+        // refuse to copy from.
+        Ok(String::from_utf16_lossy(&buffer))
     }
 
     fn find_text(

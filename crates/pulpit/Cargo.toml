@@ -37,6 +37,14 @@ zeroize = { workspace = true }
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"
+# The system clipboard, for the one thing Iced's does not carry: an image.
+# `wayland-data-control` is what gets a Wayland session a clipboard at all;
+# without it this crate is X11-only on Linux and the select tool's image kind
+# would refuse on the desktop most people run.
+arboard = { version = "3", default-features = false, features = [
+    "wayland-data-control",
+    "image-data",
+] }
 # Identifies an open document by its contents, so a file that was moved or
 # renamed still opens into the layout it was last read in. Chosen for speed:
 # this runs on the file the user just asked to open, so it has to be fast

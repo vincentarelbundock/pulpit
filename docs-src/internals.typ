@@ -551,10 +551,11 @@ the first edit no snapshot exists and none is taken: pages render from the
 presentation's own document, already open in every pool worker.
 
 What stayed in the document worker is everything that is not rendering: the
-annotation transactions, the undo history, text selection, the outline — and
-form filling entirely, because a focused field's uncommitted state lives in
-PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and exists in
-no saved copy.
+annotation transactions, the undo history, text selection (both ways of asking:
+from one character to another, and everything inside a rectangle), the outline
+— and form filling entirely, because a focused field's uncommitted state
+lives in PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and
+exists in no saved copy.
 
 == The fold: what came from pdfform
 
@@ -898,7 +899,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents],
+  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -970,9 +971,17 @@ the strength of the parts that were — said the event loop was innocent.
 (`Stable` → `Connector` → `Geometric` → `None`), whether arbitrary placement
 and safe un-fullscreening are possible, whether appearance
 and high contrast can be read, whether sleep can be inhibited, and whether
-native dialogs, menus, an accessibility bridge, media keys and notifications
-exist. `report()` renders it for the diagnostics bundle and the settings page;
-`limitations()` yields the ones worth telling the presenter about.
+native dialogs, menus, an accessibility bridge, media keys, notifications and
+an image clipboard exist. `report()` renders it for the diagnostics bundle and
+the settings page; `limitations()` yields the ones worth telling the presenter
+about.
+
+The image clipboard is the one service that reaches past the toolkit: Iced's
+clipboard carries text and nothing else, so `PlatformServices::copy_image`
+goes through `arboard` instead. It is a capability rather than an assumption
+because a headless session and a compositor with no data-control protocol both
+have nowhere to put the pixels, and the select tool's image kind has to be able
+to say so before it spends a render on one.
 
 The X11 adapter claims placement; the Wayland adapter does not, on any
 compositor. The UI adapts on the resulting capability claim alone — never on

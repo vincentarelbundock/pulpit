@@ -550,6 +550,61 @@ fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
     assert!(empty.is_empty());
 }
 
+/// The other text question, the one a rubber band asks: what is *inside* this
+/// rectangle, rather than what lies between these two characters.
+#[test]
+fn a_rectangle_answers_with_the_text_inside_it() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("area-text");
+    let path = source(&directory);
+    let document = open(backend, &path);
+
+    // The same run of 96-point text the selection test aims at, boxed
+    // generously: a band is drawn around text by eye, not to its metrics.
+    let covered = document
+        .area_text(
+            PageIndex(0),
+            pulpit_core::page::PageRect::new(200.0, 120.0, 700.0, 300.0),
+        )
+        .expect("the page has a text layer");
+    assert!(
+        !covered.0.trim().is_empty(),
+        "no text came back from a rectangle drawn over some"
+    );
+    assert!(!covered.1, "a short run of text was not truncated");
+
+    // The same text the character-range query finds, so the two ways of
+    // asking agree about what is on the page.
+    let geometry = document.page_geometry(PageIndex(0)).unwrap();
+    let at = geometry.from_user_space(320.0, 200.0);
+    let word = document
+        .select_text(PageIndex(0), TextSelection::Word { at })
+        .expect("the page has a text layer");
+    assert!(
+        covered.0.contains(word.text.trim()),
+        "the rectangle missed the word the range query found: {:?} does not contain {:?}",
+        covered.0,
+        word.text
+    );
+
+    // A rectangle over bare page is an empty answer rather than an error: the
+    // page has a text layer, this corner of it simply has nothing in it.
+    let empty = document
+        .area_text(
+            PageIndex(0),
+            pulpit_core::page::PageRect::new(0.0, 0.0, 20.0, 20.0),
+        )
+        .expect("an empty region is not a failure");
+    assert!(
+        empty.0.trim().is_empty(),
+        "found {:?} in a corner with nothing in it",
+        empty.0
+    );
+}
+
 /// A7, and the reason document mode renders through the engine that holds the
 /// document rather than through the render worker pool: the frame drawn after
 /// a commit contains the commit.

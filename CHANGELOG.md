@@ -30,6 +30,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Nothing is asked of the document until the dialog is opened, so a deck going
   onto a projector pays nothing for it.
 
+- **The select band can copy the page, not only pick marks off it.** The
+  rubber band now has a kind, chosen in its own options the way the
+  highlighter's colour is: *Marks* holds the annotations it encloses, as it
+  always has; *Image* copies the region to the clipboard as a picture; *Text*
+  copies the text the region covers. The image is rendered fresh at twice the
+  page's own scale rather than lifted off the screen, so what you paste does
+  not depend on the zoom you happened to be reading at, and the text query
+  bounds an area rather than following the reading order — which is how one
+  column comes off a two-column page. The kind is one setting across both
+  modes, like the pen's colour, and a session that cannot carry an image on
+  its clipboard says so instead of copying nothing. Table extraction is
+  deliberately not offered.
+
 ### Fixed
 
 - **Text written on a slide is kept.** A label typed at the lectern was drawn

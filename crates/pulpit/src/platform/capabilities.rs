@@ -80,6 +80,13 @@ pub struct Capabilities {
     pub media_keys: bool,
     /// Desktop notifications are available.
     pub notifications: bool,
+    /// An image can be put on the system clipboard.
+    ///
+    /// Separate from "there is a clipboard": every session pulpit runs in
+    /// has one for text, through the toolkit. This is about the pixels, and
+    /// a headless session or a compositor with no data-control protocol has
+    /// nowhere to put them.
+    pub image_clipboard: bool,
 }
 
 impl Default for Capabilities {
@@ -99,6 +106,9 @@ impl Default for Capabilities {
             accessibility_bridge: false,
             media_keys: true,
             notifications: false,
+            // Nothing to put a clipboard on: the null adapter must never
+            // touch the real one.
+            image_clipboard: false,
         }
     }
 }

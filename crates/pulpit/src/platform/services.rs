@@ -58,6 +58,19 @@ pub trait PlatformServices: Send + Sync {
     /// never the only record of a failure.
     fn notify(&self, notification: &Notification) -> Outcome;
 
+    /// Put an image on the system clipboard.
+    ///
+    /// Here rather than on the toolkit's clipboard because Iced's carries
+    /// text and nothing else. The default is [`Outcome::Unsupported`], so an
+    /// adapter that has not been taught this — and the null one, which must
+    /// never touch a real clipboard — reports a command to disable rather
+    /// than a copy that silently did nothing.
+    fn copy_image(&self, _image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
+        Outcome::Unsupported {
+            what: "copying an image to the clipboard",
+        }
+    }
+
     /// Begin inhibiting sleep and idle.
     fn inhibit(&self) -> InhibitState;
 
