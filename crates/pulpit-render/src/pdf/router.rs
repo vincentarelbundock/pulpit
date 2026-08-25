@@ -1,10 +1,11 @@
-//! Two backends in one worker (`SPEC-images.md` §45).
+//! Several backends in one worker (`SPEC-images.md` §45,
+//! `SPEC-reader-formats.md` §56.1).
 //!
 //! `select_backend()` used to choose once at startup, before any path was
 //! known. A worker holds several documents at a time — always two during a
 //! reload — and after the image tier they need not be the same kind, so the
 //! choice moves to `open` and is made per source: a directory routes to the
-//! image backend, a file to PDFium.
+//! image backend, a `.djvu` to djvulibre, anything else to PDFium.
 //!
 //! **This softens a documented invariant, deliberately.** A worker that
 //! cannot bind PDFium still prints [`crate::pdf::missing_pdfium_message`] and
@@ -12,6 +13,12 @@
 //! JPEG because a PDF library is absent is not defensible, and the reasoning
 //! behind the original rule (a deck silently rendering as blanks) does not
 //! apply to a format the worker can fully decode (§45.3, §45.4).
+//!
+//! DjVu generalises that to a standing rule. §56.1 requires binding be lazy
+//! and per-document *in both directions*: a missing djvulibre must not stop
+//! this worker opening a PDF, and a missing PDFium must not stop it opening a
+//! DjVu. Each route binds its own library on its own first open, and a
+//! failure fails that open alone (§65.2).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -35,18 +42,48 @@ use crate::pdf::{
 /// stays free of both PDFium and `std::process::exit`.
 pub type BindPdf = Box<dyn FnMut() -> Result<Box<dyn PdfBackend>> + Send>;
 
+/// How a DjVu backend is produced, the first time one is needed (§56.1).
+///
+/// Same shape as [`BindPdf`] and for the same reason: it keeps this module
+/// free of djvulibre, and lets a test exercise the routing on a machine that
+/// has no DjVu library at all — which is most of them, and is exactly the
+/// case §65.2 is about.
+pub type BindDjvu = Box<dyn FnMut() -> Result<Box<dyn PdfBackend>> + Send>;
+
+/// Bind the real djvulibre, discovered on the machine.
+///
+/// The `not(feature)` arm is not a stub: a build compiled without the backend
+/// must still refuse a `.djvu` *by name*, saying what is missing, rather than
+/// letting it fall through to PDFium and be reported as a damaged PDF
+/// (§61.1, §61.2).
+pub fn bind_system_djvu() -> Result<Box<dyn PdfBackend>> {
+    #[cfg(feature = "djvu")]
+    {
+        crate::djvu::DjvuBackend::bind().map(|backend| Box::new(backend) as Box<dyn PdfBackend>)
+    }
+    #[cfg(not(feature = "djvu"))]
+    {
+        Err(PdfError::Unavailable(crate::djvu::missing_djvu_message(
+            "this build was compiled without the djvu feature",
+        )))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
     Images(BackendDocumentId),
     Pdf(BackendDocumentId),
+    Djvu(BackendDocumentId),
 }
 
-/// Dispatches per [`BackendDocumentId`], so one worker can hold a deck and a
-/// folder of pictures at the same time.
+/// Dispatches per [`BackendDocumentId`], so one worker can hold a deck, a
+/// scanned book and a folder of pictures at the same time.
 pub struct RoutingBackend {
     images: ImageBackend,
     pdf: Option<Box<dyn PdfBackend>>,
     bind: BindPdf,
+    djvu: Option<Box<dyn PdfBackend>>,
+    bind_djvu: BindDjvu,
     routes: HashMap<u64, Route>,
     next_id: u64,
 }
@@ -57,14 +94,28 @@ impl RoutingBackend {
             images: ImageBackend::new(),
             pdf: None,
             bind,
+            djvu: None,
+            bind_djvu: Box::new(bind_system_djvu),
             routes: HashMap::new(),
             next_id: 0,
         }
     }
 
+    /// Replace how a DjVu backend is bound. Only tests ask, so that the
+    /// routing can be checked without djvulibre installed.
+    pub fn with_djvu(mut self, bind: BindDjvu) -> RoutingBackend {
+        self.bind_djvu = bind;
+        self
+    }
+
     /// Has a PDF backend been bound yet? Only diagnostics and tests ask.
     pub fn pdf_is_bound(&self) -> bool {
         self.pdf.is_some()
+    }
+
+    /// Has a DjVu backend been bound yet? Only diagnostics and tests ask.
+    pub fn djvu_is_bound(&self) -> bool {
+        self.djvu.is_some()
     }
 
     fn route(&self, document: BackendDocumentId) -> Result<Route> {
@@ -84,29 +135,47 @@ impl RoutingBackend {
                     "no PDF backend is bound in this worker".into(),
                 )),
             },
+            Route::Djvu(inner) => match self.djvu.as_deref() {
+                Some(backend) => Ok((backend, inner)),
+                None => Err(PdfError::Unavailable(
+                    "no DjVu backend is bound in this worker".into(),
+                )),
+            },
         }
     }
 }
 
 impl PdfBackend for RoutingBackend {
     fn name(&self) -> &'static str {
-        "images+pdf"
+        "images+pdf+djvu"
     }
 
     fn version(&self) -> String {
-        match self.pdf.as_deref() {
-            Some(pdf) => format!("{} / {}", self.images.version(), pdf.version()),
-            None => format!("{} / PDF backend not bound yet", self.images.version()),
-        }
+        let pdf = match self.pdf.as_deref() {
+            Some(pdf) => pdf.version(),
+            None => "PDF backend not bound yet".to_string(),
+        };
+        let djvu = match self.djvu.as_deref() {
+            Some(djvu) => djvu.version(),
+            None => "DjVu backend not bound yet".to_string(),
+        };
+        format!("{} / {pdf} / {djvu}", self.images.version())
     }
 
     fn open(&mut self, source: &Path) -> Result<BackendDocumentId> {
         self.next_id += 1;
         let outer = BackendDocumentId(self.next_id);
         // A directory source — or a bare image file, which resolves to one —
-        // is an image document; everything else is a PDF (§45.2).
+        // is an image document; a `.djvu` goes to djvulibre; everything else
+        // is a PDF (§45.2, §56.1).
         let route = if resolve_source(source).is_some() {
             Route::Images(self.images.open(source)?)
+        } else if crate::djvu::is_djvu(source) {
+            if self.djvu.is_none() {
+                self.djvu = Some((self.bind_djvu)()?);
+            }
+            let djvu = self.djvu.as_mut().expect("just bound");
+            Route::Djvu(djvu.open(source)?)
         } else {
             if self.pdf.is_none() {
                 self.pdf = Some((self.bind)()?);
@@ -124,6 +193,11 @@ impl PdfBackend for RoutingBackend {
             Some(Route::Pdf(inner)) => {
                 if let Some(pdf) = self.pdf.as_mut() {
                     pdf.close(inner);
+                }
+            }
+            Some(Route::Djvu(inner)) => {
+                if let Some(djvu) = self.djvu.as_mut() {
+                    djvu.close(inner);
                 }
             }
             None => {}
@@ -299,5 +373,95 @@ mod tests {
         assert!(router.open(Path::new("/decks/talk.pdf")).is_err());
         let folder = router.open(dir.path()).unwrap();
         assert_eq!(router.metadata(folder).unwrap().page_count, 1);
+    }
+
+    /// A router whose DjVu route is a stand-in, so the routing itself can be
+    /// checked on a machine with no djvulibre — which is most of them.
+    fn router_with_djvu(binds: Arc<AtomicUsize>) -> RoutingBackend {
+        RoutingBackend::new(Box::new(|| Ok(Box::new(FixtureBackend::new())))).with_djvu(Box::new(
+            move || {
+                binds.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FixtureBackend::new()) as Box<dyn PdfBackend>)
+            },
+        ))
+    }
+
+    /// §56.1: both extensions reach the DjVu route, and nothing else does.
+    #[test]
+    fn a_djvu_routes_to_the_djvu_backend_and_a_pdf_does_not() {
+        let binds = Arc::new(AtomicUsize::new(0));
+        let mut router = router_with_djvu(Arc::clone(&binds));
+
+        router.open(Path::new("fixture:pages=2")).unwrap();
+        assert_eq!(
+            binds.load(Ordering::SeqCst),
+            0,
+            "a PDF binds no DjVu library"
+        );
+        assert!(!router.djvu_is_bound());
+
+        router.open(Path::new("/books/scan.djvu")).unwrap();
+        router.open(Path::new("/books/other.djv")).unwrap();
+        assert_eq!(binds.load(Ordering::SeqCst), 1, "bound once, reused after");
+        assert!(router.djvu_is_bound());
+    }
+
+    /// §56.1 and §65.2, in both directions: a format's absence must never
+    /// break another format. This is the whole reason binding is per-route.
+    #[test]
+    fn a_missing_djvu_library_does_not_stop_a_pdf_or_an_image_opening() {
+        let mut router = RoutingBackend::new(Box::new(|| Ok(Box::new(FixtureBackend::new()))))
+            .with_djvu(Box::new(|| {
+                Err(PdfError::Unavailable("no djvulibre here".into()))
+            }));
+        let dir = tempfile::tempdir().unwrap();
+        write_png(&dir.path().join("a.png"));
+
+        assert!(router.open(Path::new("/books/scan.djvu")).is_err());
+        let deck = router.open(Path::new("fixture:pages=5")).unwrap();
+        let folder = router.open(dir.path()).unwrap();
+        assert_eq!(router.metadata(deck).unwrap().page_count, 5);
+        assert_eq!(router.metadata(folder).unwrap().page_count, 1);
+
+        // And a second DjVu still fails on its own rather than poisoning the
+        // worker: the failed bind was not cached as a bound backend.
+        assert!(router.open(Path::new("/books/again.djvu")).is_err());
+        assert_eq!(router.metadata(deck).unwrap().page_count, 5);
+    }
+
+    #[test]
+    fn a_missing_pdf_library_does_not_stop_a_djvu_opening() {
+        let binds = Arc::new(AtomicUsize::new(0));
+        let mut router = RoutingBackend::new(Box::new(|| {
+            Err(PdfError::Unavailable("no libpdfium".into()))
+        }))
+        .with_djvu(Box::new(move || {
+            binds.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FixtureBackend::new()) as Box<dyn PdfBackend>)
+        }));
+
+        assert!(router.open(Path::new("/decks/talk.pdf")).is_err());
+        let book = router.open(Path::new("/books/scan.djvu")).unwrap();
+        assert!(router.metadata(book).unwrap().page_count > 0);
+    }
+
+    /// Three kinds at once, each closed independently — the reload path holds
+    /// two documents by construction and they need not be the same kind.
+    #[test]
+    fn one_worker_holds_a_deck_a_book_and_a_folder() {
+        let mut router = router_with_djvu(Arc::new(AtomicUsize::new(0)));
+        let dir = tempfile::tempdir().unwrap();
+        write_png(&dir.path().join("a.png"));
+
+        let deck = router.open(Path::new("fixture:pages=7")).unwrap();
+        let book = router.open(Path::new("/books/scan.djvu")).unwrap();
+        let folder = router.open(dir.path()).unwrap();
+        assert_eq!(router.metadata(deck).unwrap().page_count, 7);
+        assert_eq!(router.metadata(folder).unwrap().page_count, 1);
+
+        router.close(book);
+        assert!(router.metadata(book).is_err());
+        assert_eq!(router.metadata(deck).unwrap().page_count, 7, "unaffected");
+        assert_eq!(router.metadata(folder).unwrap().page_count, 1, "unaffected");
     }
 }

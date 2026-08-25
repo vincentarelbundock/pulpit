@@ -108,3 +108,60 @@ Pulpit can display video and interactive content (ex: HTML+JS) on top of PDF sli
 + #link("https://mpv.io/")[The mpv video player.] 
 
 When displaying interactive content, Pulpit never uses your own browser session: it starts the browser hidden, in a private profile per deck, so your extensions, cookies, logins and history are untouched.
+
+== DjVu
+
+Pulpit reads DjVu books (`.djvu` and `.djv`) if
+#link("https://djvu.sourceforge.net/")[djvulibre] is installed. Pulpit does
+not ship a copy: DjVu is a capability of your machine rather than of the
+build you downloaded, so the same Pulpit reads DjVu on a computer that has
+the library and says so plainly on one that does not.
+
+Install it for your platform:
+
+```sh
+# macOS
+brew install djvulibre
+
+# Debian, Ubuntu, Mint
+sudo apt install libdjvulibre21
+
+# Fedora, RHEL, CentOS
+sudo dnf install djvulibre-libs
+
+# Arch, Manjaro
+sudo pacman -S djvulibre
+
+# openSUSE
+sudo zypper install libdjvulibre21
+
+# Alpine
+sudo apk add djvulibre-libs
+
+# Nix, NixOS — add djvulibre to your environment, or just:
+nix shell nixpkgs#djvulibre
+```
+
+On Windows there is no package to install: get the DjVuLibre binaries from
+#link("https://djvu.sourceforge.net/")[the DjVuLibre site] and put
+`libdjvulibre.dll` somewhere on your `PATH`, or beside `pulpit.exe`.
+
+Nothing needs configuring afterwards. Pulpit looks for the library each time
+it opens a DjVu, so it is found the next time you open a book — there is no
+setting to change and no rebuild. Opening a DjVu without the library gives
+you a message naming the format and repeating the install line for your
+platform, rather than complaining that the file is damaged.
+
+If the library is installed somewhere Pulpit's loader does not look, name it
+directly:
+
+```sh
+PULPIT_DJVU_PATH=/path/to/lib pulpit book.djvu
+```
+
+That variable takes either the directory holding the library or the library
+file itself.
+
+DjVu books are read-only in Pulpit — no annotations, forms, text selection,
+search or signing. The DjVu notes under #emph[Reading] explain why, and how to
+convert a scan to PDF if you need to mark it up.

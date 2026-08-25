@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "fingerprint": 495501787083045049,
-  "generation": "06e0604004a7f8b9-1349cde127705c16",
+  "fingerprint": 11169658485704456013,
+  "generation": "9b0299369ed7774d-1349cde127705c16",
   "completed_store": {},
   "stabilized_chunks": [
     {
@@ -300,8 +300,8 @@
     },
     {
       "label": "chunk-8",
-      "engine": "tex",
-      "code": "\\setbeameroption{show notes on second screen=right}",
+      "engine": "sh",
+      "code": "# macOS\nbrew install djvulibre\n\n# Debian, Ubuntu, Mint\nsudo apt install libdjvulibre21\n\n# Fedora, RHEL, CentOS\nsudo dnf install djvulibre-libs\n\n# Arch, Manjaro\nsudo pacman -S djvulibre\n\n# openSUSE\nsudo zypper install libdjvulibre21\n\n# Alpine\nsudo apk add djvulibre-libs\n\n# Nix, NixOS — add djvulibre to your environment, or just:\nnix shell nixpkgs#djvulibre",
       "script": true,
       "exec_options": {
         "eval": true,
@@ -342,6 +342,90 @@
     },
     {
       "label": "chunk-9",
+      "engine": "sh",
+      "code": "PULPIT_DJVU_PATH=/path/to/lib pulpit book.djvu",
+      "script": true,
+      "exec_options": {
+        "eval": true,
+        "error": false,
+        "store-get": [],
+        "store-set": [],
+        "fig_device_format": "svg",
+        "fig_device_dpi": 150,
+        "fig_device_width": 6.0,
+        "fig_device_height": null,
+        "fig_device_aspect": 0.618
+      },
+      "display_options": {
+        "echo": true,
+        "output": true,
+        "results": "render",
+        "results-location": "statement",
+        "warning": true,
+        "message": true,
+        "placeholder": true,
+        "fig-width": "70%",
+        "fig-height": null,
+        "fig-align": "center",
+        "fig-responsive": true,
+        "fig-link": null,
+        "fig-caption": null,
+        "fig-cap-location": null,
+        "fig-alt-text": null,
+        "fig-subcaptions": null,
+        "fig-layout-columns": null,
+        "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
+        "kind": null
+      },
+      "ordinal": 17,
+      "crossref_labels": []
+    },
+    {
+      "label": "chunk-10",
+      "engine": "tex",
+      "code": "\\setbeameroption{show notes on second screen=right}",
+      "script": true,
+      "exec_options": {
+        "eval": true,
+        "error": false,
+        "store-get": [],
+        "store-set": [],
+        "fig_device_format": "svg",
+        "fig_device_dpi": 150,
+        "fig_device_width": 6.0,
+        "fig_device_height": null,
+        "fig_device_aspect": 0.618
+      },
+      "display_options": {
+        "echo": true,
+        "output": true,
+        "results": "render",
+        "results-location": "statement",
+        "warning": true,
+        "message": true,
+        "placeholder": true,
+        "fig-width": "70%",
+        "fig-height": null,
+        "fig-align": "center",
+        "fig-responsive": true,
+        "fig-link": null,
+        "fig-caption": null,
+        "fig-cap-location": null,
+        "fig-alt-text": null,
+        "fig-subcaptions": null,
+        "fig-layout-columns": null,
+        "fig-layout-rows": null,
+        "tbl-caption": null,
+        "lst-caption": null,
+        "kind": null
+      },
+      "ordinal": 19,
+      "crossref_labels": []
+    },
+    {
+      "label": "chunk-11",
       "engine": "json",
       "code": "{\n  \"format_version\": 1,\n  \"name\": \"Conference Layout\",\n  \"design_ratio\": \"sixteen-nine\",\n  \"root\": {\n    \"type\": \"leaf\",\n    \"id\": 0,\n    \"widget\": {\n      \"kind\": \"timer\",\n      \"style\": { \"variant\": \"standard\", \"scale\": 1.0, \"alignment\": \"center\" },\n      \"config\": { \"timer\": { \"warning_minutes\": 5 } }\n    },\n    \"padding\": 8.0,\n    \"background\": \"none\",\n    \"border\": \"none\",\n    \"empty_behavior\": \"show-blank-panel\"\n  }\n}",
       "script": true,
@@ -379,7 +463,7 @@
         "lst-caption": null,
         "kind": null
       },
-      "ordinal": 17,
+      "ordinal": 21,
       "crossref_labels": []
     }
   ],

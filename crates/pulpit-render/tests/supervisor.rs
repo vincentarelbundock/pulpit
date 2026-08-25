@@ -624,3 +624,54 @@ fn a_folder_of_images_and_a_deck_are_both_held_by_one_worker() {
 
     supervisor.shutdown();
 }
+
+/// The presenter's render path for a DjVu, end to end through real worker
+/// processes (`SPEC-reader-formats.md` §55, §56.1).
+///
+/// The document worker is covered separately, in `pulpit`'s
+/// `document_worker.rs`; this is the other half — the router inside a spawned
+/// renderer picking the DjVu route and frames coming back over the pipe.
+///
+/// Skips with a message when djvulibre is absent (§63.2). Set
+/// `PULPIT_REQUIRE_DJVU=1` to make the skip a failure.
+#[test]
+fn renders_a_djvu_through_worker_processes() {
+    let book =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/djvu_fixture/book.djvu");
+    let mut supervisor = start(2);
+    supervisor.open(1, &book.display().to_string());
+
+    for (index, page) in [0usize, 1, 2].iter().enumerate() {
+        supervisor.submit(job(index as u64 + 1, 1, *page, Priority::Audience));
+    }
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        frames(events).len() == 3
+    });
+
+    let opened = events
+        .iter()
+        .any(|e| matches!(e, RenderEvent::Opened(o) if o.page_count == 3));
+    if !opened {
+        if std::env::var_os("PULPIT_REQUIRE_DJVU").is_some() {
+            panic!("PULPIT_REQUIRE_DJVU is set but the book did not open: {events:?}");
+        }
+        eprintln!(
+            "skipping: no djvulibre in the spawned workers, so the DjVu render path was not \
+             exercised. Set PULPIT_REQUIRE_DJVU=1 to make this a failure."
+        );
+        return;
+    }
+
+    let rendered = frames(&events);
+    assert_eq!(rendered.len(), 3, "all three pages came back: {events:?}");
+    for event in &events {
+        if let RenderEvent::Frame { job, frame, .. } = event {
+            assert_eq!(frame.width, job.width);
+            assert_eq!(frame.pixels.len(), 320 * 180 * 4);
+            assert!(
+                frame.pixels.iter().any(|b| *b != 0),
+                "the frame has content"
+            );
+        }
+    }
+}

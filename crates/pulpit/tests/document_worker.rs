@@ -702,3 +702,96 @@ fn a_folder_of_images_opens_in_a_document_worker_and_refuses_pdf_semantics() {
 
     session.close();
 }
+
+/// `SPEC-reader-formats.md` §60, end to end as a real child process: a DjVu
+/// opens in a document worker **without a PDF library**, its pages render at
+/// their true sizes, and every PDF semantic reports `Unsupported` rather than
+/// pretending to have an answer.
+///
+/// Skips with a message when djvulibre is absent (§63.2), like every other
+/// Class B test. `PULPIT_REQUIRE_DJVU=1` makes the skip a failure.
+#[test]
+fn a_djvu_opens_in_a_document_worker_and_refuses_pdf_semantics() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../pulpit-render/tests/djvu_fixture/book.djvu");
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+
+    let mut session = match DocumentSession::start(&command, &source) {
+        Ok(session) => session,
+        Err(error) => {
+            if std::env::var_os("PULPIT_REQUIRE_DJVU").is_some() {
+                panic!("PULPIT_REQUIRE_DJVU is set but the DjVu worker would not start: {error}");
+            }
+            eprintln!(
+                "skipping: no djvulibre on this machine, so the DjVu document worker was not \
+                 exercised. Set PULPIT_REQUIRE_DJVU=1 to make this a failure. ({error})"
+            );
+            return;
+        }
+    };
+
+    let DocumentResponse::Opened(info) = session
+        .request(DocumentRequest::Info)
+        .expect("the worker describes its book")
+    else {
+        panic!("expected document info")
+    };
+    assert_eq!(info.page_count, 3);
+    assert!(!info.has_form);
+    assert!(
+        info.level.is_view_only(),
+        "§60.2: the UI reads this rather than offering controls that refuse"
+    );
+    assert!(!info.level.allows_annotation());
+    assert!(!info.level.allows_form_filling());
+    // 120 pixels at 300dpi is 28.8pt, and the page arrives measured rather
+    // than rendered (§56.3).
+    assert!((info.first_page.width - 28.8).abs() < 0.01);
+
+    let DocumentResponse::Frame(frame) = session
+        .request(DocumentRequest::Render(DocumentRenderRequest {
+            page: PageIndex(1),
+            width: 24,
+            height: 36,
+            region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
+        }))
+        .expect("the page renders")
+    else {
+        panic!("expected a frame")
+    };
+    assert!(frame.is_consistent());
+    // Page 2 of the fixture is solid blue, and a page is paper: opaque.
+    assert_eq!(frame.pixels[3], 0xff);
+    assert!(
+        frame.pixels[2] > frame.pixels[0],
+        "page 2 is blue, but the first pixel came back {:?} — a red-dominant \
+         pixel here is a channel swap in the RGB24 expansion",
+        &frame.pixels[..4]
+    );
+
+    // §60.1, over the wire.
+    for request in [
+        DocumentRequest::ListAnnotations { page: PageIndex(0) },
+        DocumentRequest::ListFields,
+        DocumentRequest::Apply {
+            expected_revision: DocumentRevision::INITIAL,
+            transaction: stroke(),
+        },
+        DocumentRequest::SaveAs(SaveRequest {
+            destination: std::env::temp_dir().join("pulpit-djvu-should-not-exist.djvu"),
+            options: SaveOptions::verified(),
+        }),
+    ] {
+        match session.request(request) {
+            Err(SessionError::Refused(_)) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    session.close();
+}

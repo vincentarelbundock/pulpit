@@ -351,6 +351,15 @@ fn run_document_worker(source: PathBuf) {
         return;
     }
 
+    // A DjVu needs djvulibre and not PDFium, and the same ordering argument
+    // applies in both directions: a missing PDF library must not refuse a
+    // scanned book, and a missing DjVu library must not refuse a deck
+    // (`SPEC-reader-formats.md` §56.1, §65.2).
+    if pulpit_render::is_djvu(&source) {
+        run_djvu_document_worker(source);
+        return;
+    }
+
     #[cfg(feature = "pdfium")]
     {
         use pulpit_render::document::pdfium::PdfiumDocument;
@@ -437,6 +446,52 @@ fn run_image_document_worker(source: PathBuf) {
         tracing::error!(error = %e, "image document worker exiting");
         std::process::exit(1);
     }
+}
+
+/// Serve the document-worker role for a DjVu file (`SPEC-reader-formats.md`
+/// §60).
+///
+/// The same loop and the same protocol again; the engine turns pages and
+/// renders them and refuses every PDF semantic. A machine with no djvulibre
+/// exits here with the message that names the format and says what would
+/// install it — never with a complaint about a damaged file (§61.1, §61.2).
+#[cfg(feature = "djvu")]
+fn run_djvu_document_worker(source: PathBuf) {
+    use pulpit_render::document::worker::DocumentWorker;
+    use pulpit_render::document::PdfDocument;
+    use pulpit_render::DjvuDocument;
+
+    let engine = match DjvuDocument::open(&source) {
+        Ok(engine) => engine,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let mut worker = DocumentWorker::new();
+    // As with the image engine: nothing here writes an annotation, so the
+    // seed identifies nothing, but every engine gets one.
+    worker.adopt(PdfDocument::new(Box::new(engine), seed_from_process()));
+
+    if let Err(e) =
+        pulpit_render::document::session::serve_stdio(worker, std::io::stdin(), std::io::stdout())
+    {
+        tracing::error!(error = %e, "DjVu document worker exiting");
+        std::process::exit(1);
+    }
+}
+
+/// A build compiled without the DjVu backend still recognises the format and
+/// says what is missing, rather than handing the file to PDFium and reporting
+/// a scanned book as a damaged PDF (§61.1, §61.2).
+#[cfg(not(feature = "djvu"))]
+fn run_djvu_document_worker(source: PathBuf) {
+    let _ = source;
+    eprintln!(
+        "{}",
+        pulpit_render::missing_djvu_message("this build was compiled without the djvu feature")
+    );
+    std::process::exit(1);
 }
 
 /// Something this process has that no other does, for annotation identity.

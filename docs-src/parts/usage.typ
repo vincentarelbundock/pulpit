@@ -43,6 +43,30 @@ opened and rendered out of sight, and it replaces what is on screen only once
 a complete frame of it exists. Your page, timer and blanking survive the
 swap, and the page is clamped if the document got shorter.
 
+=== DjVu
+
+Pulpit also opens DjVu books, the format most scanned and archived books are
+distributed in. Both `.djvu` and `.djv` are recognised. Pages turn, render,
+zoom and fit exactly as a PDF's do, the overview grid works, and the reader
+remembers where you were.
+
+Two things are worth knowing before you open one.
+
+*You need djvulibre installed.* Pulpit does not carry a DjVu library of its
+own; it uses the one already on your machine, so the format works on a
+computer that has it and is refused, by name, on one that does not. The
+#link("#djvu")[installation section] gives the one-line install for each
+platform. Nothing needs configuring afterwards and nothing is rebuilt —
+Pulpit looks for the library each time it opens a DjVu, so installing it is
+enough.
+
+*A DjVu is read-only.* Annotating, filling forms, selecting text, searching
+and signing are PDF features, and Pulpit does not pretend to have them for
+other formats. A DjVu is shown as *View only*, and the tools that do not
+apply are not offered rather than refusing when you press them. To mark up a
+scan, convert it first: `ddjvu -format=pdf book.djvu book.pdf` ships with
+djvulibre and does it in one step.
+
 === Forms
 
 Pulpit fills AcroForm PDFs: text fields, check boxes, radio groups, drop-down

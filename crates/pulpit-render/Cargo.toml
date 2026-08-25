@@ -17,11 +17,16 @@ name = "pulpit-render-worker"
 path = "src/bin/worker.rs"
 
 [features]
-default = ["pdfium", "p12-keystore"]
+default = ["pdfium", "p12-keystore", "djvu"]
 # PDFium is loaded dynamically at run time; the binary is not linked in, so a
 # build without libpdfium present still succeeds and falls back with a clear
 # diagnostic (see `scripts/fetch-pdfium.sh`).
 pdfium = ["dep:pdfium-render"]
+# DjVu is loaded at run time through the system loader and is never bundled
+# (SPEC-reader-formats.md §55.3, §65.1), so this feature adds no build-time
+# native dependency — only the `dlopen` wrapper. It is on by default because
+# §55.4 makes DjVu a capability of the machine, not of the build.
+djvu = ["dep:libloading"]
 # p12-keystore provides PKCS#12 loading and decryption
 p12-keystore = ["dep:p12-keystore"]
 
@@ -34,6 +39,7 @@ memmap2 = { workspace = true }
 # and object streams during signature verification.
 flate2 = "1"
 image = { workspace = true }
+libloading = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

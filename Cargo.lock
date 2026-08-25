@@ -5015,6 +5015,7 @@ dependencies = [
  "flate2",
  "hex",
  "image",
+ "libloading 0.8.9",
  "memmap2",
  "p12-keystore",
  "p256",

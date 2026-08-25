@@ -8,8 +8,10 @@ main purpose is to say **which of those pulpit should do, which it should
 refuse, and why** — so that "why not EPUB?" has a written answer rather than
 being re-litigated.
 
-Nothing here is implemented. Sections marked **Not planned** are decisions,
-not backlog.
+**Class B DjVu (§55.5) is implemented**, bound to an installed djvulibre
+discovered at run time and never bundled. Nothing else in Class B is, and
+Class C is not started. Sections marked **Not planned** are decisions, not
+backlog.
 
 ---
 
@@ -93,7 +95,9 @@ asks what the session can do rather than what it is.
 
 **§55.5 DjVu.** Roughly 2MB, mature, page-oriented, and the format most likely
 to be worth doing: scanned books are exactly the "document" case document mode
-was built for. First candidate if Class B is ever started.
+was built for. **Implemented.** The renderer backend, the reader engine, the
+router’s DjVu route and the refusal message all bind an installed djvulibre,
+never a bundled one.
 
 **§55.6 XPS.** Page-oriented and structurally close to PDF. Low value —
 almost nothing produces XPS that does not also produce PDF — and it is listed
@@ -115,7 +119,8 @@ with a TeX installation can produce a PDF, which pulpit already opens.
 
 ## 56. The Class B backend contract
 
-Applies if and when any Class B format is implemented.
+Written for the first Class B format and now met by it: DjVu implements every
+clause below.
 
 **§56.1** Binding MUST be lazy and per-document, through §45.2's router. A
 missing DjVu library MUST NOT prevent the worker from opening a PDF or an
@@ -133,6 +138,30 @@ ready to be used.
 **§56.4** `render_into` SHOULD be overridden where the library can rasterise
 into a caller-supplied buffer, so the shared-memory mapping is written
 directly.
+
+**§56.5** A Class B backend MUST hold **one library context per process**
+where the library's own concurrency does not hold up under two.
+
+Measured, on djvulibre 3.5.30: two `ddjvu_context_t` alive in one process are
+fine while only one thread is inside the library, and driving two of them from
+two threads makes `ddjvu_document_create_by_filename_utf8` return null for
+perfectly good files in roughly one run in seven. A backend that reported "this
+file will not open" for a book that opens on the next attempt is worse than one
+that refuses to exist twice, so the second bind is refused by name. This is the
+invariant PDFium already carries, and it is what makes the worker *process*
+boundary mandatory rather than stylistic (§56.2).
+
+**§56.6** A Class B backend MUST NOT re-apply a page transform the library has
+already applied.
+
+Measured, on the same version: `ddjvu_document_get_pageinfo` — the call §56.3
+requires, because it answers without decoding — reports a rotated page's
+*turned* dimensions and returns the angle beside them. The header documents
+rotation as honoured by `ddjvu_page_render`, `ddjvu_page_get_width` and
+`ddjvu_page_get_height` and says nothing about `get_pageinfo`, which invites
+exactly the wrong conclusion; applying the angle again reports every rotated
+scan at the wrong aspect and letterboxes it. Each Class B library needs this
+checked against a rotated fixture rather than against its documentation.
 
 ---
 
@@ -275,9 +304,9 @@ If any of this is ever built, the order is fixed by risk, not appetite:
 reuses `SPEC-images.md` almost entirely — mostly a source adapter and §54.4's
 bounds.
 
-**§62.2** Class B DjVu second, and only if a real need appears. It is the
-proof that §55.3's discovered-not-bundled rule and §45.2's router work for a
-second native library, and it is the format with actual users.
+**§62.2** Class B DjVu second. **Done.** It is the proof that §55.3’s
+discovered-not-bundled rule and §45.2’s router work for a second native
+library, and §56.5 and §56.6 are what that proof cost.
 
 **§62.3** Class C last, if ever, and only for document mode. §57.2 is a real
 architectural conflict and it should not be attempted while anything else is
@@ -309,7 +338,7 @@ unverifiable.
 | `.cbz` `.cbt` | A | In scope, first |
 | `.cb7` | A | In scope if a pure-Rust decoder exists, else deferred |
 | `.cbr` | A | **Not planned** — unrar licence (§54.7) |
-| DjVu | B | Deferred; first Class B candidate if needed (§55.5) |
+| DjVu | B | **Implemented** — discovered djvulibre, view-only (§55.5, §56) |
 | XPS | B | Deferred; low value (§55.6) |
 | PostScript | B | Deferred; advise conversion to PDF instead (§55.7) |
 | DVI | B | **Not planned** — needs a TeX installation (§55.8) |

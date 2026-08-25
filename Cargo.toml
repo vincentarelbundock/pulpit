@@ -39,6 +39,9 @@ iced = "0.14"
 # box, and it adds no native dependency to the package.
 image = "0.25"
 libc = "0.2"
+# `dlopen` for djvulibre, which SPEC-reader-formats.md §55.3 requires be
+# discovered on the machine rather than linked in or bundled.
+libloading = "0.8"
 memmap2 = "0.9"
 notify = "8"
 regex = "1"

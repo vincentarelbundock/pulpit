@@ -8,8 +8,12 @@ repository.workspace = true
 description = "A Snappy and Snazzy PDF Projector"
 
 [features]
-default = ["pdfium", "p12-keystore"]
+default = ["pdfium", "p12-keystore", "djvu"]
 pdfium = ["pulpit-render/pdfium"]
+# DjVu through an installed djvulibre, discovered at run time and never
+# bundled (SPEC-reader-formats.md §55.3). No build-time native dependency, so
+# this is on by default: §55.4 makes DjVu a capability of the machine.
+djvu = ["pulpit-render/djvu"]
 p12-keystore = ["pulpit-render/p12-keystore"]
 
 [dependencies]

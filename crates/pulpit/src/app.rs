@@ -685,14 +685,23 @@ fn document_dialog() -> rfd::AsyncFileDialog {
 }
 
 /// What that dialog offers, as data, so the derivation is testable.
+///
+/// DjVu is offered whether or not djvulibre is installed on this machine, and
+/// that is deliberate: the picker describes what pulpit *reads*, and a machine
+/// without the library is told so by name when the file opens
+/// (`SPEC-reader-formats.md` §61.1). Hiding the filter instead would leave a
+/// presenter unable to select a book and with nothing explaining why.
 fn document_dialog_filters() -> Vec<(&'static str, Vec<&'static str>)> {
     let images: Vec<&'static str> = pulpit_render::images::IMAGE_EXTENSIONS.to_vec();
+    let djvu: Vec<&'static str> = pulpit_render::DJVU_EXTENSIONS.to_vec();
     let everything: Vec<&'static str> = std::iter::once("pdf")
+        .chain(djvu.iter().copied())
         .chain(images.iter().copied())
         .collect();
     vec![
         ("Documents and images", everything),
         ("PDF", vec!["pdf"]),
+        ("DjVu", djvu),
         ("Images", images),
     ]
 }
@@ -15242,6 +15251,7 @@ fn restored_fields(
 mod image_document_tests {
     use super::document_dialog_filters;
     use pulpit_render::images::IMAGE_EXTENSIONS;
+    use pulpit_render::DJVU_EXTENSIONS;
 
     /// §41.5 and §51.4: the dialog filters are *derived* from the one
     /// extension set, not restated beside it. Three hand-maintained copies
@@ -15261,7 +15271,24 @@ mod image_document_tests {
             .find(|(label, _)| *label == "Documents and images")
             .expect("a combined filter");
         assert_eq!(everything.1[0], "pdf");
-        assert_eq!(&everything.1[1..], IMAGE_EXTENSIONS);
+        let after_pdf = &everything.1[1..];
+        assert_eq!(&after_pdf[..DJVU_EXTENSIONS.len()], DJVU_EXTENSIONS);
+        assert_eq!(&after_pdf[DJVU_EXTENSIONS.len()..], IMAGE_EXTENSIONS);
+    }
+
+    /// The same rule for DjVu (`SPEC-reader-formats.md` §61.1): the picker
+    /// offers what pulpit reads, derived from the one extension set, and a
+    /// machine without djvulibre finds out by name when the file opens rather
+    /// than by the format quietly vanishing from the dialog.
+    #[test]
+    fn the_dialog_offers_djvu_from_the_one_extension_set() {
+        let filters = document_dialog_filters();
+        let djvu = filters
+            .iter()
+            .find(|(label, _)| *label == "DjVu")
+            .expect("a DjVu filter");
+        assert_eq!(djvu.1, DJVU_EXTENSIONS);
+        assert!(djvu.1.contains(&"djvu") && djvu.1.contains(&"djv"));
     }
 }
 
