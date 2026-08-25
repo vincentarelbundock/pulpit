@@ -10,6 +10,13 @@ scaling, the frame cache's byte bound and worker restart under memory pressure.
 It is third-party material — see `LICENSES/README.md` for its provenance and
 the terms it comes under.
 
+`peppercarrot.cbz` is the comic fixture: *Pepper&Carrot — Book 1: The Potion of
+Flight*, 27 pages, by David Revoy. It is free culture — **CC BY 4.0**, ©
+David Revoy, <https://www.peppercarrot.com/> — so unlike the stress-test deck
+it may be redistributed and adapted, provided the credit line travels with it:
+*"Pepper&Carrot" by David Revoy, licensed under Creative Commons Attribution
+4.0*. The full licence text is `LICENSES/PEPPERCARROT-LICENSE.txt`.
+
 ## `mosaic.pdf` — Typst and Mosaic
 
 `mosaic.typ` presents the same slides as `beamer.tex`. Its posters are

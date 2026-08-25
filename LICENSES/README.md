@@ -31,6 +31,7 @@ kind of obligation:
 | certomancer in test credentials generation, `tools/sign-oracle/` | MIT, © Matthias Valvekens | `certomancer-LICENSE.txt` |
 | Everything resolved from `Cargo.lock` | MIT / Apache-2.0 / BSD / ISC | generated, see below |
 | `examples/stress-test-730.pdf` | © Gerth Stølting Brodal, Aarhus University; no reuse grant | none — see below |
+| `examples/peppercarrot.cbz` | CC BY 4.0, © David Revoy | `PEPPERCARROT-LICENSE.txt` |
 
 ---
 
@@ -136,6 +137,28 @@ packages. Their `SHA256SUMS` file makes the recorded provenance verifiable.
 certomancer is used only for test infrastructure — credential generation in CI —
 and does not appear in the binary. The sign-oracle harness is not shipped and
 is run only in development and CI workflows.
+
+### `examples/peppercarrot.cbz`
+
+* What it is: *Pepper&Carrot — Book 1: The Potion of Flight*, a 27-page comic
+  album by David Revoy, packed as a CBZ of JPEG pages.
+* Upstream: <https://www.peppercarrot.com/>
+* Why it is here: a real comic album is the natural fixture for the CBZ
+  reader — tall portrait pages, full-bleed artwork and a page count large
+  enough to exercise the archive reader, page ordering and the frame cache in
+  a way the small synthetic decks cannot.
+* Licence: **CC BY 4.0**, © David Revoy
+* Full text: `PEPPERCARROT-LICENSE.txt`
+
+Pepper&Carrot is free culture: the licence permits redistribution and
+modification, including commercially, so long as credit is given. The credit
+line the author asks for is *"Pepper&Carrot" by David Revoy, licensed under
+Creative Commons Attribution 4.0*, and this entry, together with
+`PEPPERCARROT-LICENSE.txt` and the note in `examples/README.md`, is that
+credit. The file is unmodified apart from being repacked as a CBZ.
+
+It is **not** covered by Pulpit's MIT OR Apache-2.0 grant; it is covered by
+CC BY 4.0, which is a grant of its own and travels with the file.
 
 ### `examples/stress-test-730.pdf`
 
