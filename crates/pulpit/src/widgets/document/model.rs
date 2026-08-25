@@ -569,6 +569,10 @@ pub struct ReaderControls {
     /// Stroke width in page points.
     pub ink_width: f32,
     pub highlight_color: pulpit_core::annotation::InkColor,
+    /// What the select tool's band does with what it encloses. A mirror of
+    /// the palette's own, here for the same reason the colours are: the
+    /// toolbar is drawn from the controls alone.
+    pub select_kind: pulpit_core::annotation::SelectKind,
     pub text_color: pulpit_core::annotation::InkColor,
     /// The size placed text and notes are written at, in page points. The
     /// pen has a width control and type had nothing, which left the one
@@ -610,6 +614,7 @@ impl Default for ReaderControls {
             ink_color: pulpit_core::annotate::MarkStyle::default().color,
             ink_width: pulpit_core::annotate::MarkStyle::default().width,
             highlight_color: pulpit_core::annotate::MarkStyle::highlighter().color,
+            select_kind: pulpit_core::annotation::SelectKind::default(),
             text_color: pulpit_core::annotate::MarkStyle::default().color,
             text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),

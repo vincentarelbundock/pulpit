@@ -675,3 +675,108 @@ fn renders_a_djvu_through_worker_processes() {
         }
     }
 }
+
+/// `SPEC-reader-formats.md` §54, end to end through a real worker process: a
+/// comic archive opens, its entries are its pages in natural order over the
+/// full path, and it reports no source digest because it is one file.
+#[test]
+fn a_comic_archive_opens_and_renders_through_a_worker() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let path = dir.path().join("comic.cbz");
+    {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, colour) in [
+            ("ch-1/page-10.png", 90u8),
+            ("ch-1/page-02.png", 20),
+            ("ComicInfo.xml", 0),
+        ] {
+            writer.start_file(name, options).unwrap();
+            if name.ends_with(".png") {
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                image::RgbaImage::from_pixel(64, 32, image::Rgba([colour, colour, colour, 255]))
+                    .write_to(&mut bytes, image::ImageFormat::Png)
+                    .unwrap();
+                writer.write_all(bytes.get_ref()).unwrap();
+            } else {
+                writer.write_all(b"<ComicInfo/>").unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    let mut supervisor = start(1);
+    supervisor.open(3, &path.to_string_lossy());
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Opened(_) | RenderEvent::OpenFailed { .. }))
+    });
+    let opened = events
+        .iter()
+        .find_map(|e| match e {
+            RenderEvent::Opened(opened) => Some(opened.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the archive did not open: {events:?}"));
+
+    assert_eq!(opened.page_count, 2, "the XML is not a page");
+    assert_eq!(
+        opened.source_digest, None,
+        "§54.2: an archive is one file, so there is nothing to agree about"
+    );
+
+    // Page 1 is page-10.png, because the order is the sorted full path.
+    let mut picture = job(11, 1, 1, Priority::Audience);
+    picture.document = 3;
+    supervisor.submit(picture);
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        !frames(events).is_empty()
+    });
+    let pixels = events
+        .iter()
+        .find_map(|event| match event {
+            RenderEvent::Frame { job, frame, .. } if job.id == RequestId(11) => {
+                Some(frame.pixels.clone())
+            }
+            _ => None,
+        })
+        .expect("the page");
+    assert_eq!(&pixels[..4], &[90, 90, 90, 255]);
+
+    supervisor.shutdown();
+}
+
+/// §54.7 and §61.2, over the protocol: a format pulpit does not read fails
+/// the open with a message naming it, not with a corruption report.
+#[test]
+fn a_rar_comic_fails_its_open_by_name() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let path = dir.path().join("comic.cbr");
+    std::fs::write(&path, b"Rar!\x1a\x07\x00").unwrap();
+
+    let mut supervisor = start(1);
+    supervisor.open(4, &path.to_string_lossy());
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Opened(_) | RenderEvent::OpenFailed { .. }))
+    });
+    let reason = events
+        .iter()
+        .find_map(|e| match e {
+            RenderEvent::OpenFailed { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a refusal: {events:?}"));
+    assert!(reason.contains("RAR"), "{reason}");
+    assert!(
+        !reason.to_lowercase().contains("corrupt") && !reason.to_lowercase().contains("damaged"),
+        "{reason}"
+    );
+
+    supervisor.shutdown();
+}

@@ -47,8 +47,10 @@ use crate::pdf::{BackendDocumentId, PdfBackend, PdfError};
 use super::limits;
 use super::model::{
     AnnotationBeforeImage, AnnotationContents, AnnotationSummary, AnnotationSupport,
-    CompatibilityLevel, DocumentWarning, FieldFormat, FieldKind, FieldWidget, FormField,
-    OpenDocumentInfo, SaveOptions, TextSelection, TextSelectionResult,
+    CompatibilityLevel, DocumentDate, DocumentPermissions, DocumentProperties, DocumentWarning,
+    Encryption, FieldFormat, FieldKind, FieldWidget, FormField, InfoText, OpenDocumentInfo,
+    PageSizes, PdfVersion, SaveOptions, TextSelection, TextSelectionResult,
+    MAX_PAGES_MEASURED_FOR_PROPERTIES,
 };
 use super::{DocumentBackend, DocumentError, DocumentRevision, Result};
 
@@ -460,6 +462,50 @@ impl<'a> PdfiumDocument<'a> {
     /// one scan, and a stale answer is not a cost that can be paid back.
     fn forget_page_text(&self) {
         self.page_text.borrow_mut().clear();
+    }
+
+    /// The loaded text layer for one page, loading it if it is not the one
+    /// already held. `None` when the page has no text layer at all.
+    ///
+    /// The samples of one drag all land on the same page, so the loaded page
+    /// and its text layer are kept between them rather than rebuilt per
+    /// sample. A different page ends the previous one first. `doing` names
+    /// what the caller wanted the page for, so a load failure says which
+    /// request it defeated.
+    fn text_page_for(&self, page: PageIndex, doing: &str) -> Result<Option<FPDF_TEXTPAGE>> {
+        if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
+            self.release_text_page();
+            let bindings = self.backend.bindings();
+            let document = self
+                .backend
+                .document_handle(self.document)
+                .map_err(to_document_error)?;
+            let count = self.info.page_count;
+            if page.get() >= count {
+                return Err(DocumentError::NoSuchPage {
+                    page: page.get(),
+                    count,
+                });
+            }
+            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
+            if handle.is_null() {
+                return Err(DocumentError::Backend(format!(
+                    "cannot load page {} to {doing}",
+                    page.get()
+                )));
+            }
+            let text = unsafe { bindings.FPDFText_LoadPage(handle) };
+            if text.is_null() {
+                unsafe { bindings.FPDF_ClosePage(handle) };
+                return Ok(None);
+            }
+            *self.text_page.borrow_mut() = Some(TextPageCache {
+                page: page.get(),
+                handle,
+                text,
+            });
+        }
+        Ok(self.text_page.borrow().as_ref().map(|cache| cache.text))
     }
 
     fn release_text_page(&self) {
@@ -1190,6 +1236,105 @@ impl<'a> PdfiumDocument<'a> {
             first_page,
             has_form,
         })
+    }
+
+    /// What the document says about itself, for the properties view.
+    ///
+    /// Read on demand rather than at open: every call here is cheap, but a
+    /// presenter putting a deck on a projector never asks the question, and the
+    /// document worker answers one request at a time.
+    ///
+    /// Every string comes back through [`InfoText`], which bounds it and
+    /// flattens it. These are the same class of input as a form's script — the
+    /// producer of a file chose them — and they are shown verbatim in a dialog,
+    /// so nothing here is interpreted and nothing is unbounded.
+    fn read_properties(&self) -> Result<DocumentProperties> {
+        let bindings = self.backend.bindings();
+        let handle = self
+            .backend
+            .document_handle(self.document)
+            .map_err(to_document_error)?;
+        let info = self.info.clone();
+
+        let meta = |key: &'static str| -> Option<InfoText> {
+            let text = form_text(|buffer, length| unsafe {
+                bindings.FPDF_GetMetaText(handle, key, buffer as *mut std::ffi::c_void, length)
+            });
+            let mut value = InfoText::read(&text.text)?;
+            // A value PDFium reported as over-long is truncated whether or not
+            // the flattening happened to bring it back under the bound.
+            value.truncated |= text.truncated;
+            Some(value)
+        };
+        let date = |key: &'static str| -> Option<DocumentDate> {
+            let text = form_text(|buffer, length| unsafe {
+                bindings.FPDF_GetMetaText(handle, key, buffer as *mut std::ffi::c_void, length)
+            });
+            DocumentDate::read(&text.text)
+        };
+
+        // A negative revision is PDFium for "no security handler", which is an
+        // unencrypted document. Its permission word is all bits set, so the
+        // flags are only read where there is an encryption dictionary to have
+        // written them — the same rule `survey` follows.
+        let revision = unsafe { bindings.FPDF_GetSecurityHandlerRevision(handle) };
+        let (encryption, permissions) = if revision >= 0 {
+            let bits = unsafe { bindings.FPDF_GetDocPermissions(handle) } as u32;
+            (
+                Some(Encryption { revision }),
+                DocumentPermissions::from_bits(bits),
+            )
+        } else {
+            (None, DocumentPermissions::UNRESTRICTED)
+        };
+
+        let mut version: std::os::raw::c_int = 0;
+        let version = (unsafe { bindings.FPDF_GetFileVersion(handle, &mut version) } != 0
+            && version > 0)
+            .then_some(PdfVersion(version as u32));
+
+        Ok(DocumentProperties {
+            title: meta("Title"),
+            author: meta("Author"),
+            subject: meta("Subject"),
+            keywords: meta("Keywords"),
+            creator: meta("Creator"),
+            producer: meta("Producer"),
+            created: date("CreationDate"),
+            modified: date("ModDate"),
+            page_sizes: self.compare_page_sizes(&info),
+            page_count: info.page_count,
+            first_page: info.first_page,
+            version,
+            encryption,
+            permissions,
+            level: info.level,
+            warnings: info.warnings,
+        })
+    }
+
+    /// Whether every page is the size of the first one.
+    ///
+    /// Almost always free: the reader asked for every page's geometry when the
+    /// document opened, so these are cache hits. A document longer than the
+    /// bound, or one whose measurement fails, is reported as unmeasured rather
+    /// than assumed uniform — the presenter is told what was checked.
+    fn compare_page_sizes(&self, info: &OpenDocumentInfo) -> PageSizes {
+        if info.page_count <= 1 {
+            return PageSizes::Uniform;
+        }
+        if info.page_count > MAX_PAGES_MEASURED_FOR_PROPERTIES {
+            return PageSizes::Unmeasured;
+        }
+        for page in 1..info.page_count {
+            let Ok(geometry) = self.measure(PageIndex(page)) else {
+                return PageSizes::Unmeasured;
+            };
+            if !same_page_size(&geometry, &info.first_page) {
+                return PageSizes::Mixed;
+            }
+        }
+        PageSizes::Uniform
     }
 
     /// Measure a page's canonical geometry from its crop box and `/Rotate`.
@@ -3068,6 +3213,18 @@ fn form_string(
     Some(form_text(call).text)
 }
 
+/// Are two pages the same size on screen?
+///
+/// Compared as displayed — after `/Rotate` — because that is the question a
+/// presenter is asking: a landscape page among portrait ones is a different
+/// size whether the file achieved it by a crop box or by a rotation. The
+/// tolerance is a twentieth of a point, well under the smallest difference
+/// anybody lays out a document with and well over the noise of a float.
+fn same_page_size(page: &PageGeometry, first: &PageGeometry) -> bool {
+    const TOLERANCE: f32 = 0.05;
+    (page.width - first.width).abs() < TOLERANCE && (page.height - first.height).abs() < TOLERANCE
+}
+
 fn decode_utf16(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
         .as_chunks::<2>()
@@ -3283,6 +3440,10 @@ impl DocumentBackend for PdfiumDocument<'_> {
 
     fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
         PdfBackend::outline(self.backend, self.document).map_err(to_document_error)
+    }
+
+    fn properties(&self) -> Result<DocumentProperties> {
+        self.read_properties()
     }
 
     /// Every field in the document, gathered from the widget annotations that
@@ -3830,49 +3991,79 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ) -> Result<TextSelectionResult> {
         let geometry = self.geometry_of(page)?;
         let bindings = self.backend.bindings();
-
-        // The samples of one drag all land on the same page, so the loaded
-        // page and its text layer are kept between them rather than rebuilt
-        // per sample. A different page ends the previous one first.
-        if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
-            self.release_text_page();
-            let document = self
-                .backend
-                .document_handle(self.document)
-                .map_err(to_document_error)?;
-            let count = self.info.page_count;
-            if page.get() >= count {
-                return Err(DocumentError::NoSuchPage {
-                    page: page.get(),
-                    count,
-                });
-            }
-            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
-            if handle.is_null() {
-                return Err(DocumentError::Backend(format!(
-                    "cannot load page {} to select text on",
-                    page.get()
-                )));
-            }
-            let text = unsafe { bindings.FPDFText_LoadPage(handle) };
-            if text.is_null() {
-                // No text layer is an empty result, not a failure (§6.3).
-                unsafe { bindings.FPDF_ClosePage(handle) };
-                return Ok(TextSelectionResult::default());
-            }
-            *self.text_page.borrow_mut() = Some(TextPageCache {
-                page: page.get(),
-                handle,
-                text,
-            });
-        }
-
-        let cache = self.text_page.borrow();
-        let text = cache
-            .as_ref()
-            .expect("the text page was just loaded for this page")
-            .text;
+        // No text layer is an empty result, not a failure (§6.3).
+        let Some(text) = self.text_page_for(page, "select text on")? else {
+            return Ok(TextSelectionResult::default());
+        };
         Ok(resolve_selection(bindings, text, &geometry, selection))
+    }
+
+    fn area_text(&self, page: PageIndex, rect: pulpit_core::page::PageRect) -> Result<String> {
+        let geometry = self.geometry_of(page)?;
+        let bindings = self.backend.bindings();
+        // Unlike a selection, an area query says so when there is no text
+        // layer at all: a band pulled over a scan gets an explicit refusal
+        // rather than an empty clipboard that looks like a slip of the hand.
+        let Some(text_page) = self.text_page_for(page, "read the text of")? else {
+            return Err(DocumentError::Unsupported(
+                "have its text read: this page has no text layer".into(),
+            ));
+        };
+
+        // Page space is top-left and PDF user space is bottom-left, so the
+        // rectangle's top edge becomes the larger `y` and its bottom edge the
+        // smaller one. Taking `min`/`max` after the conversion rather than
+        // trusting the names is what keeps a rotated or flipped page from
+        // handing PDFium an inside-out box, which it answers with nothing.
+        let (left, top) = geometry.to_user_space(PagePoint::new(rect.left, rect.top));
+        let (right, bottom) = geometry.to_user_space(PagePoint::new(rect.right, rect.bottom));
+        let (left, right) = (left.min(right) as f64, left.max(right) as f64);
+        let (bottom, top) = (bottom.min(top) as f64, bottom.max(top) as f64);
+
+        // Asked for the length first, then for the text: PDFium answers a
+        // null buffer with the count it would need. The count is in UTF-16
+        // values and excludes the terminator, so the buffer is one longer.
+        let count = unsafe {
+            bindings.FPDFText_GetBoundedText(
+                text_page,
+                left,
+                top,
+                right,
+                bottom,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if count <= 0 {
+            return Ok(String::new());
+        }
+        let wanted = (count as usize).min(limits::MAX_TEXT_BYTES);
+        let mut buffer = vec![0u16; wanted + 1];
+        let written = unsafe {
+            bindings.FPDFText_GetBoundedText(
+                text_page,
+                left,
+                top,
+                right,
+                bottom,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
+        };
+        if written <= 0 {
+            return Ok(String::new());
+        }
+        // The terminator is included in the count when there was room for it,
+        // and a lone trailing NUL would travel to the clipboard otherwise.
+        buffer.truncate(written as usize);
+        while buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        // Lossy rather than an error: a document that hands back a split
+        // surrogate — which the bound text call is documented to do when it
+        // cuts — is a document to take the readable part of, not one to
+        // refuse to copy from.
+        Ok(String::from_utf16_lossy(&buffer))
     }
 
     fn find_text(

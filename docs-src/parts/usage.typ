@@ -12,6 +12,54 @@ the open file between them. `l` cycles through the layouts and `Shift+L`
 opens the library. The choice is the file's, not the application's, so a
 document you switch to Presenter opens that way next time.
 
+== Formats
+
+Pulpit opens several kinds of thing, and they all become the same thing once
+open: a document with a fixed number of pages, each with a fixed size.
+
+#table(
+  columns: 2,
+  table.header([What you open], [What you get]),
+  [`.pdf`], [The full reader: text, links, outline, search, annotations,
+    forms and signatures.],
+  [A folder of images], [Its pages are the images directly inside it, in
+    natural name order — `img2` before `img10`. Subfolders are ignored.],
+  [One image file], [The folder it sits in, opened on that image. Pulpit
+    says which folder it resolved to and how many pages that is, before you
+    navigate anywhere.],
+  [`.cbz`, `.cbt`], [A comic archive, read exactly like the folder it
+    contains — including chapter subfolders, which are flattened and read in
+    sorted path order. Nothing is unpacked to disk.],
+  [`.djvu`, `.djv`], [A DjVu book — the format most scanned and archived
+    books come in. Needs djvulibre installed on the machine; see below.],
+)
+
+Images are read by extension: `png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`,
+`tif`, `tiff`, `qoi`, `tga`, `ico`, `pnm`, `pgm`, `ppm` and `pbm`. An
+animated GIF or WebP shows its first frame — a presenter window is not a
+media player. SVG is not in the list: it is vector content needing a full
+renderer, which is a different decision.
+
+Anything that is not a PDF is *read-only*. There is no text layer to search
+or select, no annotations, no form fields and nothing to sign, and Pulpit
+dims those controls rather than letting you press one and be refused. Notes
+are always slides-only, whatever your default mapping is, so a photograph is
+never cut down the middle with half of it treated as speaker notes.
+
+Everything else about the application is unchanged: the overview grid is a
+contact sheet of the folder, aspect fit handles pages of different shapes,
+and a folder or archive that changes on disk reloads the way a rebuilt deck
+does. On a reload a page is identified by its *file name* rather than its
+number, so adding a picture earlier in the order does not change the one on
+the projector.
+
+`.cbr` is not supported and never will be: RAR needs the unrar library, whose
+licence this project cannot carry. `.cb7` is not supported yet. Both are
+refused by name, so you are told what the format is rather than that your
+file is damaged — repacking either as a `.cbz` opens here. PostScript, XPS,
+DVI, EPUB and the other reflowable formats are not supported; the reasoning
+for each is in the internals document.
+
 == Reading
 
 A PDF opens in the Reader: one continuous document, with a side rail for the
@@ -30,6 +78,14 @@ hand, answer immediately.
   where you were, which is not the same as turning back a page.
 - Where you were is remembered per document: page, zoom and side rail come
   back the next time you open that file.
+- *Properties…* in the hamburger says what the open file is: title, author,
+  subject and keywords, what produced it and when, page count and page size,
+  PDF version, and whether it is encrypted. Where a document is encrypted,
+  every permission it declares is listed as allowed or refused — which is
+  what decides whether an edit or a print will be taken. A key the document
+  left empty is left out rather than shown as a blank row, and the last
+  section says what Pulpit will do with the features the file declares:
+  transitions it cuts through, scripts it does not run.
 
 Several copies of Pulpit can run at once, so a file clicked while a window is
 already open gets a window of its own rather than being refused. Each copy
@@ -284,6 +340,29 @@ set rules, functions, tables, and other built-in Typst features render live
 after a short typing pause. Labels follow Typst's math syntax exactly: for
 example, multiplication is
 `$e=m c^2$`, with whitespace between variables.
+
+== The select band
+
+The select tool pulls a rectangle over the page, and its options say what the
+rectangle is for. The choice sits in the tool's own panel, next to where the
+highlighter keeps its colour, and it holds in both Reader and Presenter mode:
+
+- *Marks*, the default: hold every annotation the band encloses, to move,
+  resize or delete them together. The only kind that touches the document.
+- *Image*: copy the region to the clipboard as a picture. It is rendered
+  freshly at twice the page's own scale rather than lifted off the screen, so
+  what you paste does not depend on the zoom you happened to be reading at.
+- *Text*: copy the text the region covers. This bounds an area and takes what
+  falls inside it, which is how you get one column off a two-column page —
+  a different question from dragging through text, which follows the reading
+  order from one character to another.
+
+A band set to copy leaves the selection alone, and a band set to hold marks
+never reaches the clipboard. Copying an image needs a session that can carry
+one; on a headless session Pulpit says so rather than copying nothing.
+
+Table extraction — dropping row and column dividers over a region and getting
+it back as a spreadsheet — is deliberately not offered.
 
 Marks can be exported, and in Presenter mode `v` decides whether the room sees
 them or only you do.

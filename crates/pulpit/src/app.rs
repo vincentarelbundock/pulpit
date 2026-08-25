@@ -229,6 +229,9 @@ pub enum Message {
     CloseShortcuts,
     ShowAbout,
     CloseAbout,
+    /// Open the properties dialog, asking the document what it is.
+    ShowDocumentProperties,
+    CloseDocumentProperties,
     OpenDocumentation,
     /// Start immediately with the saved display and fullscreen choices.
     StartAudience,
@@ -544,6 +547,32 @@ type ThumbnailPlanInputs = (
     usize,
 );
 
+/// How much bigger than the page's own points an area copy is rendered.
+///
+/// The frame on screen is at whatever zoom the reader happens to be at, which
+/// is not a resolution anybody chose to paste at — so the crop is rendered
+/// fresh, and this is what it is rendered at. Two device pixels per page point
+/// is roughly 144 dpi: enough that a figure pasted into a document or a slide
+/// does not look softer than the text around it, and not so much that a band
+/// pulled across a whole page produces a frame measured in tens of megabytes.
+const AREA_COPY_SCALE: f32 = 2.0;
+
+/// The largest area copy that will be rendered, in device pixels on a side.
+///
+/// A bound rather than a scale that shrinks, because the two failures are not
+/// symmetrical: a copy that comes back a little smaller than asked for is
+/// still the picture the reader wanted, and one that asks a worker for a
+/// gigabyte is a worker that dies mid-talk.
+const AREA_COPY_MAX_EDGE: u32 = 8192;
+
+/// An area copy waiting on the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AreaCopy {
+    request: RequestId,
+    width: u32,
+    height: u32,
+}
+
 /// A mark the reader placed and is typing into (§8.5).
 ///
 /// Held in the application rather than in the gesture state because it is not
@@ -672,10 +701,11 @@ const MAX_RETAINED_MARKS: usize = 24;
 
 /// The "open a document" dialog, offering everything pulpit can open.
 ///
-/// The image filter is **derived from** `pulpit_render::images` rather than
-/// restated (`SPEC-images.md` §41.5). Picking one image opens the folder it
-/// is in, which is what makes a folder reachable through a file picker at
-/// all (§40.2), and the presenter is told so before anything moves (§40.3).
+/// The image and archive filters are **derived from** `pulpit_render::images`
+/// rather than restated (`SPEC-images.md` §41.5). Picking one image opens the
+/// folder it is in, which is what makes a folder reachable through a file
+/// picker at all (§40.2), and the presenter is told so before anything moves
+/// (§40.3). A comic archive is picked directly, being one file (§54.2).
 fn document_dialog() -> rfd::AsyncFileDialog {
     let mut dialog = rfd::AsyncFileDialog::new();
     for (label, extensions) in document_dialog_filters() {
@@ -692,17 +722,19 @@ fn document_dialog() -> rfd::AsyncFileDialog {
 /// (`SPEC-reader-formats.md` §61.1). Hiding the filter instead would leave a
 /// presenter unable to select a book and with nothing explaining why.
 fn document_dialog_filters() -> Vec<(&'static str, Vec<&'static str>)> {
-    let images: Vec<&'static str> = pulpit_render::images::IMAGE_EXTENSIONS.to_vec();
+    use pulpit_render::images::{ARCHIVE_EXTENSIONS, IMAGE_EXTENSIONS};
     let djvu: Vec<&'static str> = pulpit_render::DJVU_EXTENSIONS.to_vec();
+    let openable = pulpit_render::images::openable_extensions();
     let everything: Vec<&'static str> = std::iter::once("pdf")
         .chain(djvu.iter().copied())
-        .chain(images.iter().copied())
+        .chain(openable.iter().copied())
         .collect();
     vec![
-        ("Documents and images", everything),
+        ("Documents, images and comics", everything),
         ("PDF", vec!["pdf"]),
         ("DjVu", djvu),
-        ("Images", images),
+        ("Images", IMAGE_EXTENSIONS.to_vec()),
+        ("Comic archives", ARCHIVE_EXTENSIONS.to_vec()),
     ]
 }
 
@@ -1111,6 +1143,16 @@ pub struct App {
     pub shortcuts_open: bool,
     /// Whether the compact application information dialog is open.
     pub about_open: bool,
+    /// Whether the document properties dialog is open.
+    pub properties_open: bool,
+    /// What the document said about itself, once the worker has answered.
+    ///
+    /// `None` while the answer is outstanding, which is what the dialog draws
+    /// as "Reading…" rather than as a document with nothing in it. Dropped
+    /// when a document is put down: the next one's properties are its own.
+    pub document_properties: Option<Box<pulpit_render::document::DocumentProperties>>,
+    /// Why the properties could not be read, when they could not.
+    pub document_properties_failed: Option<String>,
     /// Whether the arrow beside Start has unrolled its alternate actions.
     pub audience_start_menu_open: bool,
     /// Intent, separate from the asynchronous Iced window lifecycle.
@@ -1269,6 +1311,17 @@ pub struct App {
     /// legitimately ask for a frame of exactly the thumbnail width, and
     /// misrouting that would leave the panel empty for ever.
     thumbnail_requests: std::collections::HashSet<RequestId>,
+    /// The area-image render in flight, if any: the request, and how big the
+    /// frame coming back is meant to be.
+    ///
+    /// One at a time. A second band drawn before the first has come back
+    /// supersedes it — the reader has said what they want more recently, and
+    /// two images racing to the clipboard would leave whichever finished last
+    /// there, which is not the one they asked for.
+    area_copy: Option<AreaCopy>,
+    /// Text a select band covered, on its way to the clipboard. Held here
+    /// because the answer arrives in the pump, which has no `Task` to return.
+    area_clipboard_text: Option<String>,
     /// The generation and page count the warming plan was made for.
     thumbnail_plan: Option<(pulpit_core::RenderGeneration, usize)>,
     /// The one width this document's thumbnails are rendered at, chosen when
@@ -1886,6 +1939,9 @@ impl App {
             recent_menu_open: false,
             shortcuts_open: false,
             about_open: false,
+            properties_open: false,
+            document_properties: None,
+            document_properties_failed: None,
             audience_start_menu_open: false,
             audience_started: false,
             presenter_window: None,
@@ -1945,6 +2001,8 @@ impl App {
             thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnail_requests: std::collections::HashSet::new(),
+            area_copy: None,
+            area_clipboard_text: None,
             thumbnail_plan: None,
             thumbnail_plan_width: THUMBNAIL_WIDTH,
             thumbnail_plan_inputs: None,
@@ -2878,12 +2936,14 @@ impl App {
                 if key.as_deref() == Some("Escape")
                     && (self.shortcuts_open
                         || self.about_open
+                        || self.properties_open
                         || self.menu_open
                         || self.audience_start_menu_open
                         || self.overview)
                 {
                     self.shortcuts_open = false;
                     self.about_open = false;
+                    self.properties_open = false;
                     self.menu_open = false;
                     self.audience_start_menu_open = false;
                     // Backing out of the overview returns to the slide that
@@ -3305,11 +3365,23 @@ impl App {
                 if self.presenter_interaction.pending_selection().is_some() {
                     self.ask_presenter_selection(true);
                 } else if self.annotations.band.is_some() {
-                    // A band makes nothing and deletes nothing on its own: it
-                    // closes on what it caught, and the delete key is what
-                    // takes them (§8.4).
-                    let held = self.annotations.finish_band().len();
-                    self.diagnostics.note(format!("holding {held} marks"));
+                    // The same band, and the same three things it can mean as
+                    // in document mode. A copying kind never reaches
+                    // `finish_band`, because that one gathers marks up and
+                    // this band was not drawn around marks.
+                    match self.take_presenter_area() {
+                        Some((page, rect, kind)) => {
+                            self.annotations.band = None;
+                            self.copy_area(page, rect, kind);
+                        }
+                        // A band makes nothing and deletes nothing on its own:
+                        // it closes on what it caught, and the delete key is
+                        // what takes them (§8.4).
+                        None => {
+                            let held = self.annotations.finish_band().len();
+                            self.diagnostics.note(format!("holding {held} marks"));
+                        }
+                    }
                 } else {
                     let finished = self.annotations.end_stroke();
                     self.commit_presenter_gesture(finished);
@@ -3532,6 +3604,17 @@ impl App {
             }
             Message::CloseAbout => {
                 self.about_open = false;
+                Task::none()
+            }
+            Message::ShowDocumentProperties => {
+                self.menu_open = false;
+                self.recent_menu_open = false;
+                self.properties_open = true;
+                self.ask_document_properties();
+                Task::none()
+            }
+            Message::CloseDocumentProperties => {
+                self.properties_open = false;
                 Task::none()
             }
             Message::OpenDocumentation => {
@@ -4927,6 +5010,12 @@ impl App {
             tasks.push(iced::clipboard::write(text));
         }
 
+        // 1b-i-bis. The text a select band covered, waiting on a `Task` for
+        //           the same reason.
+        if let Some(text) = self.area_clipboard_text.take() {
+            tasks.push(iced::clipboard::write(text));
+        }
+
         // 1b-ii. A Save As that stopped to let a field commit. The commit has
         //        landed, so the review and the file picker go on from here.
         if std::mem::take(&mut self.resume_save_after_form_commit) {
@@ -5437,6 +5526,14 @@ impl App {
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
                     self.latency.note_copy(frame.cpu_bytes());
                 }
+                // An area copy is not a frame anybody draws: it never entered
+                // `pending`, so it has to be taken before the lookup that
+                // would otherwise drop it as unwanted.
+                if self.area_copy.is_some_and(|copy| copy.request == job.id) {
+                    self.area_copy = None;
+                    self.area_image_ready(&frame);
+                    return;
+                }
                 let Some(key) = self.take_pending(job.id) else {
                     return;
                 };
@@ -5755,13 +5852,26 @@ impl App {
         // because everything below replaces the identity this position
         // belongs to.
         self.record_reading_position();
-        // An image document's source is the *directory* (§40.1), and an image
-        // file resolves to the one it is in (§40.2). Everything below — the
-        // manager, the watcher, the workers — is then handed the directory
-        // and treats it exactly as it treats a file.
+        // A comic archive pulpit deliberately does not read is refused *by
+        // name*, before anything is opened: "pulpit cannot read this kind of
+        // file" and "this file is damaged" are different facts, and telling a
+        // presenter the second sends them looking for a problem that does not
+        // exist (§54.7, §61.1, §61.2).
+        if let Some(message) = pulpit_render::images::unsupported_archive(&path) {
+            self.notify_error(
+                format!("pulpit cannot open {}", path.display()),
+                Some(message.to_string()),
+            );
+            return Task::none();
+        }
+        // An image document's source is the *directory* (§40.1) or the comic
+        // archive that replaces it (§54.1), and an image file resolves to the
+        // directory it is in (§40.2). Everything below — the manager, the
+        // watcher, the workers — is then handed that path and treats it
+        // exactly as it treats a PDF.
         let resolved = pulpit_render::images::resolve_source(&path);
         let path = match resolved.as_ref() {
-            Some(resolved) => resolved.directory.clone(),
+            Some(resolved) => resolved.path().to_path_buf(),
             None => path,
         };
         self.image_pages = resolved.map(crate::doc::ImageDocumentState::new);
@@ -5813,6 +5923,11 @@ impl App {
         self.reader_link = None;
         self.reader_wakeup = None;
         self.reader_journal = None;
+        // What the last document said about itself is not what this one says,
+        // and a dialog left open across an open would otherwise describe the
+        // file that is gone.
+        self.document_properties = None;
+        self.document_properties_failed = None;
         self.forget_per_document_edit_state();
 
         // A PDF without a deliberate per-file choice always opens for
@@ -6027,6 +6142,12 @@ impl App {
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
+        // Nothing will answer a properties question now, and a dialog waiting
+        // on one must say so rather than read "Reading…" for ever.
+        if self.document_properties.is_none() {
+            self.document_properties_failed =
+                Some("The document worker stopped, so this document cannot be read.".into());
+        }
         self.forget_per_document_edit_state();
     }
 
@@ -6124,6 +6245,11 @@ impl App {
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
+                    }
+                    // A properties dialog left open across an open describes
+                    // the document that is there now, not the one that was.
+                    if self.properties_open {
+                        self.ask_document_properties();
                     }
                 }
                 crate::reader_link::Told::Found { generation, chunk } => {
@@ -6279,6 +6405,17 @@ impl App {
                     }
                     self.form_changed(page, *result);
                 }
+                crate::reader_link::Told::Properties(properties) => {
+                    self.document_properties_failed = None;
+                    self.document_properties = Some(properties);
+                }
+                crate::reader_link::Told::PropertiesFailed { message } => {
+                    // Said in the dialog that asked for it and nowhere else: a
+                    // toast for a question the user is looking at the answer to
+                    // is a notice in the wrong place.
+                    tracing::debug!(%message, "the document would not describe itself");
+                    self.document_properties_failed = Some(message);
+                }
                 crate::reader_link::Told::Annotations { page, summaries } => {
                     self.reader.set_annotations(page, &summaries);
                     // …and if this is the page the projector is showing, the
@@ -6318,6 +6455,9 @@ impl App {
                                 .to_string(),
                         );
                     }
+                }
+                crate::reader_link::Told::AreaText { text, truncated } => {
+                    self.area_text_ready(text, truncated);
                 }
                 crate::reader_link::Told::Patched(frame) => {
                     self.reader_patch_landed(*frame);
@@ -7324,6 +7464,32 @@ impl App {
     fn ask_field_list(&mut self) {
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::ListFields);
+        }
+    }
+
+    /// Ask the document what it is, for the properties dialog.
+    ///
+    /// Asked once per document: the answer cannot change under a session that
+    /// only ever writes copies (A6), and reopening the dialog on a deck of
+    /// three hundred pages must not walk it again. A document with no worker —
+    /// one whose session was refused, or lost — is reported as unreadable
+    /// rather than left showing "Reading…" for ever.
+    fn ask_document_properties(&mut self) {
+        if self.document_properties.is_some() {
+            self.document_properties_failed = None;
+            return;
+        }
+        let asked = self
+            .reader_link
+            .as_mut()
+            .is_some_and(|link| link.ask(crate::reader_link::Ask::Properties));
+        if !asked {
+            self.document_properties_failed = Some(if self.state.document().is_some() {
+                "This document is open for presenting only, so it cannot be asked what it is."
+                    .into()
+            } else {
+                "No document is open.".into()
+            });
         }
     }
 
@@ -8427,6 +8593,9 @@ impl App {
                         // more and the answer is what commits.
                         self.ask_select_text(page, selection, true);
                     }
+                    crate::reader::Released::AwaitingArea { page, rect, kind } => {
+                        self.copy_area(page, rect, kind);
+                    }
                     crate::reader::Released::Nothing => {
                         self.ask_form_pointer(FormPointer::Up);
                     }
@@ -8502,6 +8671,11 @@ impl App {
                 // pen, whichever mode it was picked up in. The presenter's
                 // palette keeps the choice, so it also survives into the next
                 // session with the rest of the layout.
+                // …and so is the band's kind, for the same reason: one band,
+                // whichever mode the reader happened to set it in.
+                if let ReadCommand::SetSelectKind(kind) = command {
+                    self.annotation_controls.options.select_kind = kind;
+                }
                 if let ReadCommand::SetToolColor(tool, color) = command {
                     let options = &mut self.annotation_controls.options;
                     match tool {
@@ -10983,6 +11157,224 @@ impl App {
         false
     }
 
+    /// The presenter's open band, as a rectangle on a page, when the palette
+    /// is set to a kind that copies.
+    ///
+    /// `None` for the band's mark-gathering kind, for a slide that cannot be
+    /// placed on a page — an unmapped slide has no region to render or read —
+    /// and for a rectangle too small to have been meant, which is the same
+    /// floor document mode applies and for the same reason.
+    ///
+    /// The conversion is [`SlidePlacement::to_page`], the one the highlighter
+    /// already uses: the presenter's band is in normalised slide coordinates
+    /// and everything downstream of here is in canonical page points (A4).
+    fn take_presenter_area(
+        &self,
+    ) -> Option<(
+        pulpit_core::page::PageIndex,
+        pulpit_core::page::PageRect,
+        pulpit_core::annotation::SelectKind,
+    )> {
+        let kind = self.annotation_options().select_kind;
+        if !kind.copies() {
+            return None;
+        }
+        let (from, to) = self.annotations.band?;
+        let placement = self.slide_placement()?;
+        let from = placement.to_page(from);
+        let to = placement.to_page(to);
+        let rect = pulpit_core::page::PageRect::new(
+            from.x.min(to.x),
+            from.y.min(to.y),
+            from.x.max(to.x),
+            from.y.max(to.y),
+        );
+        (rect.width() >= crate::reader::MIN_AREA_SIZE
+            && rect.height() >= crate::reader::MIN_AREA_SIZE)
+            .then_some((placement.page, rect, kind))
+    }
+
+    /// A band was drawn with a copying kind: take the region off to whichever
+    /// engine can answer for it.
+    ///
+    /// Neither answer is immediate — one is a render and one is a worker
+    /// round trip — so nothing is reported here. What the reader sees is a
+    /// toast when the clipboard has actually been written, which is the only
+    /// moment at which "copied" is true.
+    fn copy_area(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+        kind: pulpit_core::annotation::SelectKind,
+    ) {
+        match kind {
+            // Not reachable: a band of this kind never produces an area.
+            pulpit_core::annotation::SelectKind::Marks => {}
+            pulpit_core::annotation::SelectKind::Image => self.copy_area_as_image(page, rect),
+            pulpit_core::annotation::SelectKind::Text => self.copy_area_as_text(page, rect),
+        }
+    }
+
+    /// Ask the renderer for the region, freshly drawn at [`AREA_COPY_SCALE`].
+    ///
+    /// A worker round trip rather than a read of what is already on screen,
+    /// for the reason given at [`AREA_COPY_SCALE`]: the picture on screen is
+    /// at the reader's zoom, and the reader's zoom is about reading.
+    fn copy_area_as_image(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+    ) {
+        // Asked before any work is done rather than discovered afterwards: a
+        // session with nowhere to put an image should say so instead of
+        // spending a render on one.
+        if !self.platform.capabilities.image_clipboard {
+            self.notify("This session cannot put an image on the clipboard.".into());
+            return;
+        }
+        let Some(geometry) = self.reader.page_geometry(page).copied() else {
+            return;
+        };
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return;
+        }
+        let Some((document, generation)) = self.reader_render_source() else {
+            return;
+        };
+
+        // The band is in canonical page points (A4) and a render region is a
+        // fraction of the page, so the conversion is a division. The *edges*
+        // are clamped first, before anything is divided: a band dragged off
+        // the side of the page is one the reader meant to reach the edge
+        // with, and clamping the offset and the width independently would
+        // leave the far edge past the page — a region the worker refuses as
+        // malformed, which is not what a slightly overshot drag deserves.
+        let left = rect.left.clamp(0.0, geometry.width);
+        let top = rect.top.clamp(0.0, geometry.height);
+        let right = rect.right.clamp(left, geometry.width);
+        let bottom = rect.bottom.clamp(top, geometry.height);
+        let (span_x, span_y) = (right - left, bottom - top);
+        if span_x <= 0.0 || span_y <= 0.0 {
+            // Entirely off the page: there is nothing there to draw.
+            return;
+        }
+        let region = pulpit_core::notes::Region::new(
+            left / geometry.width,
+            top / geometry.height,
+            span_x / geometry.width,
+            span_y / geometry.height,
+        );
+        // Both edges come down together when either is over the bound. Taking
+        // the two independently would paste a squashed picture, which is a
+        // worse answer than a smaller one.
+        let scale = AREA_COPY_SCALE
+            .min(AREA_COPY_MAX_EDGE as f32 / span_x)
+            .min(AREA_COPY_MAX_EDGE as f32 / span_y);
+        let width = ((span_x * scale).round() as u32).clamp(1, AREA_COPY_MAX_EDGE);
+        let height = ((span_y * scale).round() as u32).clamp(1, AREA_COPY_MAX_EDGE);
+
+        let Some(supervisor) = self.supervisor.as_mut() else {
+            return;
+        };
+        // The one already in flight is now for a rectangle the reader has
+        // moved on from.
+        if let Some(previous) = self.area_copy.take() {
+            supervisor.cancel(previous.request);
+            self.submitted_at.remove(&previous.request);
+        }
+        let id = supervisor.next_request_id();
+        supervisor.submit(RenderJob {
+            id,
+            generation,
+            document,
+            page: page.get(),
+            region,
+            width,
+            height,
+            // The reader is waiting on this with the pointer just up, so it
+            // outranks the pages being warmed in the margin. `Refined`
+            // because there is no coarse-then-fine here: one frame is drawn
+            // and it is the one that gets pasted.
+            priority: Priority::Presenter,
+            quality: pulpit_render::protocol::Quality::Refined,
+            // The document's own marks are part of the page as the reader
+            // sees it. Copying a page and getting it back without the
+            // highlighting they put on it would be a picture of a different
+            // document.
+            with_annotations: true,
+            region_name: String::new(),
+        });
+        self.area_copy = Some(AreaCopy {
+            request: id,
+            width,
+            height,
+        });
+        self.submitted_at.insert(id, Instant::now());
+    }
+
+    /// Ask the document worker for the text the region covers.
+    fn copy_area_as_text(
+        &mut self,
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
+    ) {
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::AreaText { page, rect });
+        }
+    }
+
+    /// The renderer answered an area copy: on to the clipboard.
+    fn area_image_ready(&mut self, frame: &pulpit_render::cache::Frame) {
+        let Some(image) = crate::platform::ClipboardImage::new(
+            frame.width,
+            frame.height,
+            frame.pixels.as_ref().clone(),
+        ) else {
+            // The renderer and this process disagree about how big a frame
+            // is, which is a bug rather than a thing the reader did.
+            self.notify("The copied region came back malformed.".into());
+            return;
+        };
+        let bytes = image.byte_len();
+        let outcome = self.platform.services.copy_image(&image);
+        match outcome.describe() {
+            Some(problem) => self.notify(problem),
+            None => {
+                tracing::debug!(
+                    width = frame.width,
+                    height = frame.height,
+                    bytes,
+                    "area copied to the clipboard"
+                );
+                self.notify_done(format!("Copied a {}×{} image.", frame.width, frame.height));
+            }
+        }
+    }
+
+    /// The worker answered an area-text query: to the clipboard, or an honest
+    /// word about why not.
+    fn area_text_ready(&mut self, text: String, truncated: bool) {
+        if text.trim().is_empty() {
+            // Not a failure and not silence. A band pulled over a figure
+            // resolves to no text, and the reader has to be told that rather
+            // than left to discover it at the paste.
+            self.notify("There is no text in that region.".into());
+            return;
+        }
+        let characters = text.chars().count();
+        // The pump has no `Task` to return, so the write waits for the tick,
+        // exactly as a field's copy does.
+        self.area_clipboard_text = Some(text);
+        if truncated {
+            self.notify(format!(
+                "Copied the first {characters} characters; the region held more than pulpit \
+                 will carry."
+            ));
+        } else {
+            self.notify_done(format!("Copied {characters} characters."));
+        }
+    }
+
     /// Put one text-selection query to the document worker, coalescing the
     /// drag's samples: one query in flight, one waiting, newest wins.
     ///
@@ -12364,6 +12756,15 @@ impl App {
                 if self.annotation_controls.wheel == Some(tool) {
                     self.annotation_controls.wheel = None;
                 }
+            }
+            // The band means one thing, whichever palette it was set from.
+            // Same reasoning as the pen's colour above, and unlike the
+            // pointer's mode it does have somewhere to go in document mode.
+            AnnotationCommand::SetSelectKind(kind) => {
+                self.annotation_controls.options.select_kind = kind;
+                let _ = self
+                    .reader
+                    .apply(&crate::widgets::event::ReadCommand::SetSelectKind(kind));
             }
             // Changing the pointer's mode while it is in hand changes what is
             // in hand: a presenter who asks for the spotlight mid-sentence
@@ -15250,36 +15651,42 @@ fn restored_fields(
 #[cfg(test)]
 mod image_document_tests {
     use super::document_dialog_filters;
-    use pulpit_render::images::IMAGE_EXTENSIONS;
+    use pulpit_render::images::{openable_extensions, ARCHIVE_EXTENSIONS, IMAGE_EXTENSIONS};
     use pulpit_render::DJVU_EXTENSIONS;
 
-    /// §41.5 and §51.4: the dialog filters are *derived* from the one
-    /// extension set, not restated beside it. Three hand-maintained copies
-    /// would drift, and a file that appears in the contact sheet but cannot
-    /// be picked in the dialog is invisible until it matters.
+    /// §41.5 and §51.4: the dialog filters are *derived* from the extension
+    /// sets, not restated beside them. Hand-maintained copies drift, and a
+    /// file that appears in the contact sheet but cannot be picked in the
+    /// dialog is invisible until it matters.
     #[test]
-    fn the_dialog_filters_come_from_the_one_extension_set() {
+    fn the_dialog_filters_come_from_the_extension_sets() {
         let filters = document_dialog_filters();
-        let images = filters
-            .iter()
-            .find(|(label, _)| *label == "Images")
-            .expect("an images filter");
-        assert_eq!(images.1, IMAGE_EXTENSIONS);
+        let of = |label: &str| {
+            filters
+                .iter()
+                .find(|(name, _)| *name == label)
+                .unwrap_or_else(|| panic!("a {label} filter"))
+                .1
+                .clone()
+        };
+        assert_eq!(of("Images"), IMAGE_EXTENSIONS);
+        assert_eq!(of("Comic archives"), ARCHIVE_EXTENSIONS);
 
-        let everything = filters
-            .iter()
-            .find(|(label, _)| *label == "Documents and images")
-            .expect("a combined filter");
-        assert_eq!(everything.1[0], "pdf");
-        let after_pdf = &everything.1[1..];
-        assert_eq!(&after_pdf[..DJVU_EXTENSIONS.len()], DJVU_EXTENSIONS);
-        assert_eq!(&after_pdf[DJVU_EXTENSIONS.len()..], IMAGE_EXTENSIONS);
+        let everything = of("Documents, images and comics");
+        assert_eq!(everything[0], "pdf");
+        assert_eq!(&everything[1..1 + DJVU_EXTENSIONS.len()], DJVU_EXTENSIONS);
+        assert_eq!(&everything[1 + DJVU_EXTENSIONS.len()..], openable_extensions());
+        assert!(
+            !everything.contains(&"cbr"),
+            "§54.7: a format pulpit refuses is not offered in the picker"
+        );
     }
 
     /// The same rule for DjVu (`SPEC-reader-formats.md` §61.1): the picker
-    /// offers what pulpit reads, derived from the one extension set, and a
-    /// machine without djvulibre finds out by name when the file opens rather
-    /// than by the format quietly vanishing from the dialog.
+    /// offers what pulpit reads, derived from the one extension set. DjVu is
+    /// offered on every machine, installed library or not — a machine
+    /// without one finds out by name when the book opens, rather than by the
+    /// format quietly vanishing from the dialog.
     #[test]
     fn the_dialog_offers_djvu_from_the_one_extension_set() {
         let filters = document_dialog_filters();

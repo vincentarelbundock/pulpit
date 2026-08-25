@@ -12,8 +12,8 @@
 use std::collections::{HashMap, HashSet};
 
 use pulpit_core::annotate::AnnotationInteraction;
-use pulpit_core::annotation::AnnotationTool;
-use pulpit_core::page::{PageGeometry, PageIndex, PagePoint};
+use pulpit_core::annotation::{AnnotationTool, SelectKind};
+use pulpit_core::page::{PageGeometry, PageIndex, PagePoint, PageRect};
 use pulpit_render::document::{
     CompatibilityLevel, DocumentRevision, DocumentTransaction, DocumentWarning, TextSelection,
 };
@@ -119,6 +119,14 @@ fn preview_of(
     (!preview.is_empty()).then_some((page, preview))
 }
 
+/// The smallest band, in page points, that is taken as a request to copy.
+///
+/// A band that gathers marks up has no floor — an empty one is how a reader
+/// says "none of these", which is a thing they mean. A band that copies does:
+/// it acts at once and there is nothing to take back, so a rectangle this
+/// small is read as a click that slipped rather than as a region.
+pub const MIN_AREA_SIZE: f32 = 8.0;
+
 /// What a pointer release produced.
 #[derive(Debug)]
 pub enum Released {
@@ -132,6 +140,18 @@ pub enum Released {
     AwaitingSelection {
         page: PageIndex,
         selection: TextSelection,
+    },
+    /// A band drawn with a copying [`SelectKind`], which the caller has to
+    /// take off to the engine and then to the clipboard.
+    ///
+    /// A separate answer from [`Released::Commit`] because nothing here
+    /// reaches the document: an area copy has no revision, no undo entry and
+    /// no dirty flag. It is the band's own version of what a crop is to the
+    /// zoom control — a rectangle that changes something outside the file.
+    AwaitingArea {
+        page: PageIndex,
+        rect: PageRect,
+        kind: SelectKind,
     },
 }
 
@@ -2669,6 +2689,23 @@ impl ReaderSession {
         Some((page, TextSelection::Range { anchor, head }))
     }
 
+    /// The region the open band wants copied, if it is a band that copies.
+    ///
+    /// `None` for the band's default kind, which gathers marks up and asks
+    /// the engine nothing, and `None` for a rectangle too small to have been
+    /// meant: a copying band is committed to on release, with no chooser to
+    /// take it back, so a slip of the hand must not put anything on the
+    /// clipboard. The threshold is [`MIN_AREA_SIZE`].
+    pub fn pending_area(&self) -> Option<(PageIndex, PageRect, SelectKind)> {
+        let kind = self.controls.select_kind;
+        if !kind.copies() {
+            return None;
+        }
+        let (page, rect) = self.interaction.marquee()?;
+        (rect.width() >= MIN_AREA_SIZE && rect.height() >= MIN_AREA_SIZE)
+            .then_some((page, rect, kind))
+    }
+
     /// The engine answered a selection query.
     ///
     /// Returns the transaction to commit when the answer was the one the
@@ -2726,6 +2763,14 @@ impl ReaderSession {
         if let Some((page, selection)) = self.pending_selection() {
             self.awaiting_selection = true;
             return Released::AwaitingSelection { page, selection };
+        }
+        // A band set to copy is the same question in a different currency: the
+        // rectangle is settled and what is inside it has to be fetched. It
+        // never reaches `finish_gesture`, because that one gathers marks up
+        // and a copying band leaves the selection exactly as it found it.
+        if let Some((page, rect, kind)) = self.pending_area() {
+            self.interaction.cancel();
+            return Released::AwaitingArea { page, rect, kind };
         }
         match self.finish_gesture() {
             Some(transaction) => Released::Commit(transaction),
@@ -3533,6 +3578,14 @@ impl ReaderSession {
                 // Read back after the engine's repair, so the slider shows the
                 // width strokes will actually take.
                 self.controls.ink_width = self.interaction.ink_style().width;
+                false
+            }
+            ReadCommand::SetSelectKind(kind) => {
+                self.controls.tool_overflow = tool_overflow;
+                // Changing what the band means does not disturb what it is
+                // currently holding: a reader who has gathered marks up and
+                // then switches to copying has not asked to put them down.
+                self.controls.select_kind = *kind;
                 false
             }
             ReadCommand::SetTextSize(size) => {
@@ -7427,6 +7480,104 @@ mod tests {
         assert!(
             session.selection().is_empty(),
             "the stroke runs out of the right-hand side of the band"
+        );
+    }
+
+    /// Drag a band of `kind` and hand back what the release produced.
+    fn band_of(
+        session: &mut ReaderSession,
+        kind: SelectKind,
+        from: (f32, f32),
+        to: (f32, f32),
+    ) -> Released {
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::SetSelectKind(kind));
+        session.pointer_moved(PageIndex(0), from.0, from.1);
+        assert!(session.pointer_pressed(), "the band opened");
+        session.pointer_moved(PageIndex(0), to.0, to.1);
+        session.pointer_released()
+    }
+
+    #[test]
+    fn a_copying_band_asks_for_its_region_instead_of_gathering_marks() {
+        // The kind is the whole difference: the same drag over the same marks
+        // means "hold these" or "copy this", and only the palette says which.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(100.0), stroke_at(200.0)]);
+
+        for kind in [SelectKind::Image, SelectKind::Text] {
+            let released = band_of(&mut session, kind, (20.0, 40.0), (500.0, 300.0));
+            let Released::AwaitingArea {
+                page,
+                rect,
+                kind: asked,
+            } = released
+            else {
+                panic!("a {kind:?} band must come up as a region to copy, got {released:?}");
+            };
+            assert_eq!(page, PageIndex(0));
+            assert_eq!(asked, kind);
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                (20.0, 40.0, 500.0, 300.0),
+                "the rectangle is the one that was dragged, normalised"
+            );
+            assert!(
+                session.selection().is_empty(),
+                "a band that copies leaves the selection exactly as it found it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_dragged_up_and_left_copies_the_same_region_as_one_dragged_down_and_right() {
+        let mut session = open(2);
+        let released = band_of(
+            &mut session,
+            SelectKind::Image,
+            (500.0, 300.0),
+            (20.0, 40.0),
+        );
+        let Released::AwaitingArea { rect, .. } = released else {
+            panic!("expected a region, got {released:?}");
+        };
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (20.0, 40.0, 500.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn a_band_too_small_to_have_been_meant_copies_nothing() {
+        // A copying band acts on release with nothing to take it back, so a
+        // click that slipped a couple of points must not reach the clipboard.
+        let mut session = open(2);
+        let released = band_of(
+            &mut session,
+            SelectKind::Image,
+            (100.0, 100.0),
+            (103.0, 104.0),
+        );
+        assert!(
+            matches!(released, Released::Nothing),
+            "expected the slip to be refused, got {released:?}"
+        );
+    }
+
+    #[test]
+    fn changing_the_kind_does_not_put_down_what_the_band_is_holding() {
+        // Switching what the band will do next is not a request to drop what
+        // it did last.
+        let mut session = open(2);
+        session.set_annotations(PageIndex(0), &[stroke_at(200.0)]);
+        band(&mut session, (20.0, 40.0), (500.0, 300.0));
+        assert_eq!(session.selection().len(), 1);
+
+        session.apply(&ReadCommand::SetSelectKind(SelectKind::Image));
+        assert_eq!(
+            session.selection().len(),
+            1,
+            "the mark is still held; only what the next band means has changed"
         );
     }
 

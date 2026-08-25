@@ -179,6 +179,7 @@ impl PlatformServices for WindowsServices {
             // Toasts need a registered AppUserModelID, which is a packaging
             // decision rather than a runtime one.
             notifications: false,
+            image_clipboard: true,
         }
     }
 
@@ -274,6 +275,12 @@ impl PlatformServices for WindowsServices {
         Outcome::Unsupported {
             what: "Desktop notifications",
         }
+    }
+
+    /// One clipboard library serves all three desktops; what differs is
+    /// whether the session offers a clipboard at all, which the outcome says.
+    fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
+        crate::platform::clipboard::copy_image(image)
     }
 
     fn inhibit(&self) -> InhibitState {

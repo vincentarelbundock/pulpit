@@ -126,6 +126,9 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
         DocumentRequest::SelectText { page, selection } => document
             .select_text(page, selection)
             .map(DocumentResponse::Selection),
+        DocumentRequest::AreaText { page, rect } => document
+            .area_text(page, rect)
+            .map(|(text, truncated)| DocumentResponse::AreaText { text, truncated }),
         DocumentRequest::FindText {
             query,
             from_page,
@@ -135,6 +138,9 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
             .map(DocumentResponse::Found),
         DocumentRequest::ListFields => document.fields().map(DocumentResponse::Fields),
         DocumentRequest::Outline => document.outline().map(DocumentResponse::Outline),
+        DocumentRequest::Properties => document
+            .properties()
+            .map(|properties| DocumentResponse::Properties(Box::new(properties))),
         DocumentRequest::Apply {
             expected_revision,
             transaction,

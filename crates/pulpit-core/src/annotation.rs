@@ -58,16 +58,78 @@ pub enum AnnotationTool {
     /// Document mode only, and never described as a cryptographic signature
     /// (§1 of `SPEC-document.md`).
     Stamp,
-    /// Drags a rubber band over the page, and holds everything it encloses.
+    /// Drags a rubber band over the page, and does one of three things with
+    /// what it encloses, according to the [`SelectKind`] it is set to.
     ///
     /// Picking up *one* mark needs no tool: the hand does that with nothing
-    /// armed at all. This is the tool for the thing the hand cannot do —
-    /// taking several marks at once, to delete them in one press (§8.4).
+    /// armed at all. This is the tool for the things the hand cannot do —
+    /// taking several marks at once to delete them in one press (§8.4), and
+    /// taking a region of the page itself off to the clipboard.
     ///
-    /// Offered in both modes. Presentation's band holds and deletes; moving
-    /// and resizing what it is holding stays document mode's, because a mark
-    /// dragged to a new place mid-talk is a mark the audience watches move.
+    /// Offered in both modes, and it behaves the same in both. A band that
+    /// copies a figure is a band the audience watches being drawn, exactly as
+    /// they watch one that gathers marks up; there is no reason for the two
+    /// windows to disagree about what a rectangle is.
     Select,
+}
+
+/// What [`AnnotationTool::Select`]'s band does with the region it encloses.
+///
+/// A mode inside one tool rather than three tools, for the same reason the
+/// pointer and the spotlight share a control: the gesture is identical — pull
+/// a rectangle over the page — and only the answer differs. Chosen in the
+/// tool's options, the way the highlighter's colour is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectKind {
+    /// Hold every annotation the band encloses, to move, resize or delete
+    /// them together. What the band has always done, and still the default:
+    /// it is the only one of the three that can edit the document.
+    #[default]
+    Marks,
+    /// Put the region on the clipboard as an image, rendered fresh at a
+    /// chosen scale rather than lifted off the screen. What is on screen is
+    /// at the zoom the reader happens to be using, which is not a resolution
+    /// anybody chose to paste at.
+    Image,
+    /// Put the text the region covers on the clipboard.
+    ///
+    /// A different question from the one a text drag asks: this one bounds an
+    /// area and takes what falls inside it, which is what gets one column out
+    /// of a two-column page.
+    Text,
+}
+
+impl SelectKind {
+    /// Every kind, in the order the options panel offers them: the one that
+    /// works on any page at all comes first.
+    pub const ALL: [SelectKind; 3] = [SelectKind::Marks, SelectKind::Image, SelectKind::Text];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectKind::Marks => "Marks",
+            SelectKind::Image => "Image",
+            SelectKind::Text => "Text",
+        }
+    }
+
+    /// What the option's tooltip says it will do with the rectangle.
+    pub fn description(self) -> &'static str {
+        match self {
+            SelectKind::Marks => "Hold the annotations inside the band",
+            SelectKind::Image => "Copy the region as an image",
+            SelectKind::Text => "Copy the text inside the region",
+        }
+    }
+
+    /// Does this kind put something on the clipboard rather than gather marks?
+    ///
+    /// The one question the gesture code asks: a band that copies never
+    /// touches the selection, and a band that holds marks never reaches the
+    /// clipboard.
+    pub fn copies(self) -> bool {
+        !matches!(self, SelectKind::Marks)
+    }
 }
 
 impl AnnotationTool {
@@ -107,14 +169,17 @@ impl AnnotationTool {
         AnnotationTool::Eraser,
     ];
 
-    /// Has this tool anything to configure — a colour, a size?
+    /// Has this tool anything to configure — a colour, a size, a mode?
     ///
-    /// The band and the stamp palette have neither: a rubber band is a shape
-    /// the hand makes, and what a stamp puts down is chosen from its own
-    /// palette rather than from a slider. A control that opens an options
-    /// panel with nothing in it teaches people not to open options panels.
+    /// The stamp palette has none of the three: what a stamp puts down is
+    /// chosen from its own palette rather than from a slider, and a control
+    /// that opens an options panel with nothing in it teaches people not to
+    /// open options panels. The band has no colour and no size — a rubber
+    /// band is a shape the hand makes — but it does have a [`SelectKind`],
+    /// which is the same sort of choice as the highlighter's colour and
+    /// belongs in the same place.
     pub fn has_options(self) -> bool {
-        !matches!(self, AnnotationTool::Select | AnnotationTool::Stamp)
+        !matches!(self, AnnotationTool::Stamp)
     }
 
     /// Does this tool make a durable PDF annotation when its gesture ends?
@@ -1457,6 +1522,34 @@ mod tests {
         }
         let _ = annotations.end_stroke();
         annotations
+    }
+
+    #[test]
+    fn only_the_bands_default_kind_touches_the_document() {
+        // What the gesture code branches on. The mark-gathering kind is the
+        // one that edits; the other two put something outside the process.
+        assert!(!SelectKind::Marks.copies());
+        assert!(SelectKind::Image.copies());
+        assert!(SelectKind::Text.copies());
+        assert_eq!(
+            SelectKind::default(),
+            SelectKind::Marks,
+            "the band must keep doing what it has always done until it is told otherwise"
+        );
+    }
+
+    #[test]
+    fn every_tool_but_the_stamp_has_a_panel_to_open() {
+        // A control that opens an options panel with nothing in it teaches
+        // people not to open options panels, so this is not cosmetic: it is
+        // what decides whether the arrow is drawn at all.
+        for tool in AnnotationTool::ALL {
+            assert!(
+                tool.has_options(),
+                "{tool:?} draws an options arrow with nothing behind it"
+            );
+        }
+        assert!(!AnnotationTool::Stamp.has_options());
     }
 
     #[test]

@@ -1,10 +1,18 @@
-//! The page table of an image directory: which files are pages, in what
-//! order, and a digest that says whether the directory has moved since.
+//! The page table of an image document: which files are pages, in what order,
+//! and — for a directory — a digest that says whether it has moved since.
 //!
-//! `SPEC-images.md` §40, §41 and §42. Everything here is pure apart from the
-//! one `read_dir` in [`list_directory`], which is what lets the application
-//! and the renderer worker derive the *same* table independently (§42.2)
-//! without either sending the other a four-thousand-entry list.
+//! `SPEC-images.md` §40, §41 and §42, plus `SPEC-reader-formats.md` §54. Two
+//! kinds of source produce the same table:
+//!
+//! * a **directory**, listed non-recursively, whose digest is what lets the
+//!   application and the renderer worker derive the same table independently
+//!   (§42.2) without either sending the other a four-thousand-entry list; and
+//! * a **comic archive** (`.cbz`, `.cbt`), which replaces the directory as the
+//!   source so the document is one file again — and therefore needs no digest
+//!   at all, because an archive is rewritten atomically or not at all (§54.2).
+//!
+//! Everything above the table treats the two identically, which is the whole
+//! point: an archive is a directory that happens to be one file.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -42,7 +50,7 @@ pub fn is_supported_image(path: &Path) -> bool {
         .any(|known| extension.eq_ignore_ascii_case(known))
 }
 
-/// Why a directory could not become a document.
+/// Why a directory or an archive could not become a document.
 #[derive(Debug, thiserror::Error)]
 pub enum ListError {
     #[error("cannot list {path}: {reason}")]
@@ -55,6 +63,20 @@ pub enum ListError {
          a single document can track"
     )]
     TooManyImages { path: String, count: usize },
+    /// §54.4, per entry.
+    #[error("{path} holds an entry, {entry}, that expands to {bytes} bytes")]
+    EntryTooLarge {
+        path: String,
+        entry: String,
+        bytes: u64,
+    },
+    /// §54.4, in total. The bound a zip bomb runs into: §47.2's pixel limit
+    /// is applied after decompression, far too late to help.
+    #[error("{path} expands to {bytes} bytes, more than pulpit will unpack")]
+    ArchiveTooLarge { path: String, bytes: u64 },
+    /// §54.7 and §61.1: refused **by name**, never as a damaged file.
+    #[error("{0}")]
+    UnsupportedFormat(&'static str),
 }
 
 /// One page of an image document, as the filesystem describes it.
@@ -69,29 +91,82 @@ pub struct ImageEntry {
     pub modified: Option<SystemTime>,
 }
 
-/// The ordered pages of one image directory.
+/// What an image document's pages come out of.
+///
+/// The one place the difference between a folder and a comic archive is
+/// spelled out; above the page table nothing else asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageSource {
+    /// A directory, listed non-recursively (§40.1).
+    Directory(PathBuf),
+    /// A comic archive, whose entries are the pages (§54.1).
+    Archive {
+        path: PathBuf,
+        kind: crate::images::archive::ArchiveKind,
+    },
+}
+
+impl PageSource {
+    /// The path the manager watches, the worker is told to open, and the
+    /// presenter sees — the directory itself, or the archive file.
+    pub fn path(&self) -> &Path {
+        match self {
+            PageSource::Directory(path) => path,
+            PageSource::Archive { path, .. } => path,
+        }
+    }
+
+    pub fn is_archive(&self) -> bool {
+        matches!(self, PageSource::Archive { .. })
+    }
+}
+
+/// Where one page's bytes are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageLocation<'a> {
+    /// A file on disk.
+    File(PathBuf),
+    /// An entry inside an archive, never extracted to disk (§54.5).
+    ArchiveEntry {
+        archive: &'a Path,
+        kind: crate::images::archive::ArchiveKind,
+        name: &'a OsStr,
+    },
+}
+
+/// The ordered pages of one image document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageTable {
-    directory: PathBuf,
+    source: PageSource,
     entries: Vec<ImageEntry>,
     digest: u64,
 }
 
 impl PageTable {
     /// Build a table from entries that are already in the order they should
-    /// be presented in. Only [`list_directory`] and tests construct one.
-    pub fn from_entries(directory: impl Into<PathBuf>, mut entries: Vec<ImageEntry>) -> PageTable {
+    /// be presented in. Only [`list_source`] and tests construct one.
+    pub fn from_entries(source: PageSource, mut entries: Vec<ImageEntry>) -> PageTable {
         entries.sort_by(|a, b| page_order(&a.name, &b.name));
         let digest = digest_of(&entries);
         PageTable {
-            directory: directory.into(),
+            source,
             entries,
             digest,
         }
     }
 
-    pub fn directory(&self) -> &Path {
-        &self.directory
+    /// A table over a directory, which is what most tests want.
+    pub fn over_directory(directory: impl Into<PathBuf>, entries: Vec<ImageEntry>) -> PageTable {
+        PageTable::from_entries(PageSource::Directory(directory.into()), entries)
+    }
+
+    pub fn source(&self) -> &PageSource {
+        &self.source
+    }
+
+    /// The document's own path: the directory, or the archive file.
+    pub fn path(&self) -> &Path {
+        self.source.path()
     }
 
     pub fn len(&self) -> usize {
@@ -111,9 +186,17 @@ impl PageTable {
         self.entries.get(page).map(|entry| entry.name.as_os_str())
     }
 
-    /// Where a page's file is.
-    pub fn path(&self, page: usize) -> Option<PathBuf> {
-        self.name(page).map(|name| self.directory.join(name))
+    /// Where one page's bytes are.
+    pub fn locate(&self, page: usize) -> Option<PageLocation<'_>> {
+        let name = self.name(page)?;
+        Some(match &self.source {
+            PageSource::Directory(directory) => PageLocation::File(directory.join(name)),
+            PageSource::Archive { path, kind } => PageLocation::ArchiveEntry {
+                archive: path,
+                kind: *kind,
+                name,
+            },
+        })
     }
 
     /// The index a name sits at, or `None` when the directory no longer holds
@@ -131,6 +214,21 @@ impl PageTable {
     /// the wrong picture on the projector.
     pub fn digest(&self) -> u64 {
         self.digest
+    }
+
+    /// The digest to compare across the process boundary, which an archive
+    /// deliberately does not have (§54.2).
+    ///
+    /// An archive is one file: it is rewritten atomically or it is not
+    /// rewritten, so the application and the worker cannot be looking at two
+    /// different versions of it the way they can with a directory. `None` on
+    /// both sides is agreement, and demanding a digest for an archive would
+    /// invent a disagreement that cannot happen.
+    pub fn source_digest(&self) -> Option<u64> {
+        match self.source {
+            PageSource::Directory(_) => Some(self.digest),
+            PageSource::Archive { .. } => None,
+        }
     }
 
     /// Translate a position from an older table to this one by **name**
@@ -205,7 +303,21 @@ pub fn list_directory(directory: &Path) -> Result<PageTable, ListError> {
             count: entries.len(),
         });
     }
-    Ok(PageTable::from_entries(directory, entries))
+    Ok(PageTable::over_directory(directory, entries))
+}
+
+/// List whatever kind of source this is as a page table.
+///
+/// The one entry point above the table: a directory and an archive answer the
+/// same question, and nothing that calls this needs to know which it got.
+pub fn list_source(source: &PageSource) -> Result<PageTable, ListError> {
+    match source {
+        PageSource::Directory(directory) => list_directory(directory),
+        PageSource::Archive { path, kind } => {
+            let entries = crate::images::archive::list_archive(path, *kind)?;
+            Ok(PageTable::from_entries(source.clone(), entries))
+        }
+    }
 }
 
 /// The count and digest of a directory, **without** the §40.5 cap.
@@ -253,11 +365,11 @@ fn read_entries(directory: &Path) -> Result<Vec<ImageEntry>, ListError> {
     Ok(entries)
 }
 
-/// What opening `path` means for an image document (§40.1, §40.2).
+/// What opening `path` means for an image document (§40.1, §40.2, §54.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSource {
-    /// The directory that *is* the document.
-    pub directory: PathBuf,
+    /// What the document's pages come out of.
+    pub source: PageSource,
     /// The file the presenter actually picked, when they picked a file rather
     /// than a folder. The initial committed page, and the reason §40.3 makes
     /// the resolution visible before any navigation happens.
@@ -269,18 +381,37 @@ impl ResolvedSource {
     pub fn was_widened(&self) -> bool {
         self.picked.is_some()
     }
+
+    /// The path everything above this hands around: the directory, or the
+    /// archive file.
+    pub fn path(&self) -> &Path {
+        self.source.path()
+    }
 }
 
-/// Does this path open as an image document, and as which directory?
+/// Does this path open as an image document, and out of what?
 ///
-/// A directory is itself the document. An image *file* resolves to its parent
-/// directory with that file as the initial page, which is what makes "open a
-/// screenshot, get an image viewer" work — and what §40.3 then has to say out
-/// loud. Anything else is not an image document.
+/// A directory is itself the document, and so is a comic archive (§54.1). An
+/// image *file* resolves to its parent directory with that file as the
+/// initial page, which is what makes "open a screenshot, get an image viewer"
+/// work — and what §40.3 then has to say out loud.
+///
+/// A `.cbr` or `.cb7` answers `None` here and is refused by name elsewhere
+/// (§54.7): this function's job is "can pulpit list it", and the message that
+/// says why not belongs where somebody can read it.
 pub fn resolve_source(path: &Path) -> Option<ResolvedSource> {
     if path.is_dir() {
         return Some(ResolvedSource {
-            directory: path.to_path_buf(),
+            source: PageSource::Directory(path.to_path_buf()),
+            picked: None,
+        });
+    }
+    if let Some(kind) = crate::images::archive::ArchiveKind::of(path) {
+        return Some(ResolvedSource {
+            source: PageSource::Archive {
+                path: path.to_path_buf(),
+                kind,
+            },
             picked: None,
         });
     }
@@ -292,9 +423,22 @@ pub fn resolve_source(path: &Path) -> Option<ResolvedSource> {
         _ => PathBuf::from("."),
     };
     Some(ResolvedSource {
-        directory,
+        source: PageSource::Directory(directory),
         picked: Some(path.file_name()?.to_os_string()),
     })
+}
+
+/// Everything pulpit opens as an image document, for a file dialog.
+///
+/// Derived from the two constants rather than restated, for the reason §41.5
+/// gives: a format added to one and forgotten in the other is invisible until
+/// somebody cannot pick their own file.
+pub fn openable_extensions() -> Vec<&'static str> {
+    IMAGE_EXTENSIONS
+        .iter()
+        .copied()
+        .chain(crate::images::archive::ARCHIVE_EXTENSIONS.iter().copied())
+        .collect()
 }
 
 /// Deterministic natural order over two file names (§40.4).
@@ -411,7 +555,7 @@ mod tests {
     // §51.1
     #[test]
     fn ten_sorts_after_two() {
-        let table = PageTable::from_entries(
+        let table = PageTable::over_directory(
             "/pictures",
             vec![
                 entry("img10.png", 1),
@@ -429,7 +573,7 @@ mod tests {
 
     #[test]
     fn case_is_folded_for_comparison_and_the_raw_name_breaks_the_tie() {
-        let table = PageTable::from_entries(
+        let table = PageTable::over_directory(
             "/pictures",
             vec![entry("b.png", 1), entry("A.png", 1), entry("a.png", 1)],
         );
@@ -454,11 +598,11 @@ mod tests {
 
     #[test]
     fn ordering_is_total_and_the_same_however_the_input_arrives() {
-        let one = PageTable::from_entries(
+        let one = PageTable::over_directory(
             "/p",
             vec![entry("c.png", 1), entry("a.png", 1), entry("b.png", 1)],
         );
-        let two = PageTable::from_entries(
+        let two = PageTable::over_directory(
             "/p",
             vec![entry("b.png", 1), entry("c.png", 1), entry("a.png", 1)],
         );
@@ -468,8 +612,8 @@ mod tests {
     // §51.2
     #[test]
     fn the_digest_is_stable_for_the_same_directory() {
-        let one = PageTable::from_entries("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
-        let two = PageTable::from_entries("/p", vec![entry("b.png", 20), entry("a.png", 10)]);
+        let one = PageTable::over_directory("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
+        let two = PageTable::over_directory("/p", vec![entry("b.png", 20), entry("a.png", 10)]);
         assert_eq!(one.digest(), two.digest());
     }
 
@@ -478,27 +622,27 @@ mod tests {
     /// the directory would never notice an export rewriting `slide03.png`.
     #[test]
     fn a_member_overwritten_in_place_moves_the_digest() {
-        let before = PageTable::from_entries("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
+        let before = PageTable::over_directory("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
 
         let mut rewritten = entry("b.png", 20);
         rewritten.modified = rewritten
             .modified
             .map(|time| time + std::time::Duration::from_secs(1));
-        let after = PageTable::from_entries("/p", vec![entry("a.png", 10), rewritten]);
+        let after = PageTable::over_directory("/p", vec![entry("a.png", 10), rewritten]);
         assert_ne!(
             before.digest(),
             after.digest(),
             "same names, same count, same lengths — only the mtime moved"
         );
 
-        let regrown = PageTable::from_entries("/p", vec![entry("a.png", 10), entry("b.png", 21)]);
+        let regrown = PageTable::over_directory("/p", vec![entry("a.png", 10), entry("b.png", 21)]);
         assert_ne!(before.digest(), regrown.digest(), "only the length moved");
     }
 
     #[test]
     fn adding_and_removing_a_member_moves_the_digest() {
-        let before = PageTable::from_entries("/p", vec![entry("a.png", 10)]);
-        let after = PageTable::from_entries("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
+        let before = PageTable::over_directory("/p", vec![entry("a.png", 10)]);
+        let after = PageTable::over_directory("/p", vec![entry("a.png", 10), entry("b.png", 20)]);
         assert_ne!(before.digest(), after.digest());
     }
 
@@ -570,16 +714,93 @@ mod tests {
     #[test]
     fn opening_a_file_resolves_to_its_parent_directory() {
         let resolved = resolve_source(Path::new("/pictures/talk/slide03.png")).unwrap();
-        assert_eq!(resolved.directory, Path::new("/pictures/talk"));
+        assert_eq!(resolved.path(), Path::new("/pictures/talk"));
         assert_eq!(resolved.picked.as_deref(), Some(OsStr::new("slide03.png")));
         assert!(resolved.was_widened());
         assert!(resolve_source(Path::new("/decks/talk.pdf")).is_none());
     }
 
+    /// §54.2: an archive replaces the directory as the source, so the document
+    /// is one file again — and it is not widened, because the presenter asked
+    /// for exactly the thing they got.
+    #[test]
+    fn a_comic_archive_is_the_document_and_is_one_file() {
+        for name in ["/comics/book.cbz", "/comics/book.CBT"] {
+            let resolved = resolve_source(Path::new(name)).unwrap();
+            assert_eq!(resolved.path(), Path::new(name));
+            assert!(resolved.source.is_archive(), "{name}");
+            assert!(!resolved.was_widened(), "{name}");
+        }
+        assert!(
+            resolve_source(Path::new("/comics/book.cbr")).is_none(),
+            "§54.7: a RAR is refused by name elsewhere, not listed here"
+        );
+    }
+
+    #[test]
+    fn an_archive_has_no_digest_to_compare() {
+        let table = PageTable::from_entries(
+            PageSource::Archive {
+                path: PathBuf::from("/comics/book.cbz"),
+                kind: crate::images::archive::ArchiveKind::Zip,
+            },
+            vec![entry("page-01.png", 10)],
+        );
+        assert_eq!(
+            table.source_digest(),
+            None,
+            "§54.2: one file, rewritten atomically or not at all"
+        );
+        assert_eq!(
+            PageTable::over_directory("/p", vec![entry("a.png", 10)]).source_digest(),
+            Some(PageTable::over_directory("/p", vec![entry("a.png", 10)]).digest())
+        );
+    }
+
+    #[test]
+    fn a_page_is_located_in_whichever_source_it_came_from() {
+        let folder = PageTable::over_directory("/p", vec![entry("a.png", 1)]);
+        assert_eq!(
+            folder.locate(0),
+            Some(PageLocation::File(PathBuf::from("/p/a.png")))
+        );
+
+        let archive = PageTable::from_entries(
+            PageSource::Archive {
+                path: PathBuf::from("/comics/book.cbz"),
+                kind: crate::images::archive::ArchiveKind::Zip,
+            },
+            vec![entry("ch1/a.png", 1)],
+        );
+        assert!(matches!(
+            archive.locate(0),
+            Some(PageLocation::ArchiveEntry { name, .. }) if name == OsStr::new("ch1/a.png")
+        ));
+        assert_eq!(archive.locate(1), None);
+    }
+
+    /// §41.5, widened: the dialog's list is derived from both constants, so a
+    /// format added to either is a format the picker offers.
+    #[test]
+    fn everything_openable_is_derived_from_the_two_constants() {
+        let openable = openable_extensions();
+        for extension in IMAGE_EXTENSIONS {
+            assert!(openable.contains(extension), "{extension}");
+        }
+        for extension in crate::images::archive::ARCHIVE_EXTENSIONS {
+            assert!(openable.contains(extension), "{extension}");
+        }
+        assert_eq!(
+            openable.len(),
+            IMAGE_EXTENSIONS.len() + crate::images::archive::ARCHIVE_EXTENSIONS.len()
+        );
+        assert!(!openable.contains(&"cbr"), "§54.7");
+    }
+
     #[test]
     fn a_bare_file_name_resolves_to_the_working_directory() {
         let resolved = resolve_source(Path::new("shot.png")).unwrap();
-        assert_eq!(resolved.directory, Path::new("."));
+        assert_eq!(resolved.path(), Path::new("."));
     }
 
     // §40.1, §40.5, §51.5

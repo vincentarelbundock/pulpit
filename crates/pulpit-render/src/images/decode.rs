@@ -88,6 +88,52 @@ pub fn dimensions(path: &Path) -> Result<(u32, u32), ImageFailure> {
         })
 }
 
+/// Pixel dimensions of an image already in memory, from its header alone.
+///
+/// The archive path (§54.5): an entry is never extracted to disk, so the
+/// bytes are here and only the header is parsed. Header-only still means what
+/// it means — no pixel data is decoded — even though getting to the header of
+/// a compressed entry meant inflating it.
+pub fn dimensions_of(bytes: &[u8], label: &str) -> Result<(u32, u32), ImageFailure> {
+    reader_over(bytes, label)?
+        .into_dimensions()
+        .map_err(|e| ImageFailure::Undecodable {
+            path: label.to_string(),
+            reason: e.to_string(),
+        })
+}
+
+/// Decode an image already in memory to RGBA8, under the same input bound as
+/// [`decode`] (§47.2).
+pub fn decode_bytes(bytes: &[u8], label: &str) -> Result<RgbaImage, ImageFailure> {
+    let (width, height) = dimensions_of(bytes, label)?;
+    if !within_input_bounds(width, height) {
+        return Err(ImageFailure::TooLarge {
+            path: label.to_string(),
+            width,
+            height,
+        });
+    }
+    let decoded = reader_over(bytes, label)?
+        .decode()
+        .map_err(|e| ImageFailure::Undecodable {
+            path: label.to_string(),
+            reason: e.to_string(),
+        })?;
+    Ok(decoded.into_rgba8())
+}
+
+type MemoryReader<'a> = image::ImageReader<std::io::Cursor<&'a [u8]>>;
+
+fn reader_over<'a>(bytes: &'a [u8], label: &str) -> Result<MemoryReader<'a>, ImageFailure> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| ImageFailure::Unreadable {
+            path: label.to_string(),
+            reason: e.to_string(),
+        })
+}
+
 /// Is an image of this size worth decoding at all?
 pub fn within_input_bounds(width: u32, height: u32) -> bool {
     width > 0
@@ -121,6 +167,53 @@ pub fn decode(path: &Path) -> Result<RgbaImage, ImageFailure> {
         reason: e.to_string(),
     })?;
     Ok(decoded.into_rgba8())
+}
+
+/// How a page names itself in a diagnostic: a path, or `archive!entry`.
+pub fn label_of(location: &crate::images::table::PageLocation<'_>) -> String {
+    use crate::images::table::PageLocation;
+    match location {
+        PageLocation::File(path) => path.display().to_string(),
+        PageLocation::ArchiveEntry { archive, name, .. } => {
+            format!("{}!{}", archive.display(), name.to_string_lossy())
+        }
+    }
+}
+
+/// Pixel dimensions of one page, wherever it lives (§46.1, §54.5).
+pub fn dimensions_at(
+    location: &crate::images::table::PageLocation<'_>,
+) -> Result<(u32, u32), ImageFailure> {
+    use crate::images::table::PageLocation;
+    match location {
+        PageLocation::File(path) => dimensions(path),
+        PageLocation::ArchiveEntry {
+            archive,
+            kind,
+            name,
+        } => {
+            let bytes = crate::images::archive::read_entry(archive, *kind, name)?;
+            dimensions_of(&bytes, &label_of(location))
+        }
+    }
+}
+
+/// Decode one page, wherever it lives.
+pub fn decode_at(
+    location: &crate::images::table::PageLocation<'_>,
+) -> Result<RgbaImage, ImageFailure> {
+    use crate::images::table::PageLocation;
+    match location {
+        PageLocation::File(path) => decode(path),
+        PageLocation::ArchiveEntry {
+            archive,
+            kind,
+            name,
+        } => {
+            let bytes = crate::images::archive::read_entry(archive, *kind, name)?;
+            decode_bytes(&bytes, &label_of(location))
+        }
+    }
 }
 
 /// Which decoded image a cache entry is.

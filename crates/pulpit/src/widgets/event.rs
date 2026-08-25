@@ -251,6 +251,12 @@ pub enum ReadCommand {
     ),
     /// Set the pen's stroke width, in page points.
     SetInkWidth(f32),
+    /// Set what the select tool's band does with the region it encloses.
+    ///
+    /// The band's counterpart to [`ReadCommand::SetToolColor`]: the same sort
+    /// of choice, made in the same panel, and it names no tool because only
+    /// one tool has it.
+    SetSelectKind(pulpit_core::annotation::SelectKind),
     /// The pointer moved over the page surface, in canonical page points on
     /// the page it is over (A4).
     PageCursor {
@@ -460,6 +466,8 @@ pub enum AnnotationCommand {
     OpenColorWheel(Option<pulpit_core::annotation::AnnotationTool>),
     /// Choose what the pointer control does: a dot, or a lit circle.
     SetPointerSpotlight(bool),
+    /// Choose what the select control's band does with what it encloses.
+    SetSelectKind(pulpit_core::annotation::SelectKind),
     /// Take back the most recent edit — a stroke drawn, or a sweep erased.
     Undo,
     /// Put back the most recently taken-back edit.

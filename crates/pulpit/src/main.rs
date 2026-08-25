@@ -243,11 +243,12 @@ fn explain_missing_libraries(text: &str) {
 
 fn print_help() {
     println!(
-        "pulpit [OPTIONS] [FILE.pdf | IMAGE | DIRECTORY]\n\
+        "pulpit [OPTIONS] [FILE.pdf | IMAGE | DIRECTORY | COMIC.cbz]\n\
          \n\
          A directory is presented as a document whose pages are the images\n\
          directly inside it, in natural name order. Naming one image opens\n\
-         the directory it is in, starting on that image.\n\
+         the directory it is in, starting on that image. A .cbz or .cbt comic\n\
+         archive is read the same way, without being unpacked to disk.\n\
          \n\
          Options:\n\
            --layouts         open the layout library\n\
@@ -343,10 +344,13 @@ fn run_document_worker(source: PathBuf) {
         )
         .init();
 
-    // A folder of images needs no PDF library at all, and must not be refused
-    // because one is missing (SPEC-images.md §45.3). Checked before the
-    // binding below, which is the whole point of the ordering.
-    if pulpit_render::images::resolve_source(&source).is_some() {
+    // A folder of images or a comic archive needs no PDF library at all, and
+    // must not be refused because one is missing (SPEC-images.md §45.3,
+    // SPEC-reader-formats.md §56.1). Checked before the binding below, which
+    // is the whole point of the ordering.
+    if pulpit_render::images::unsupported_archive(&source).is_some()
+        || pulpit_render::images::resolve_source(&source).is_some()
+    {
         run_image_document_worker(source);
         return;
     }

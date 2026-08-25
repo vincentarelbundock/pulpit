@@ -11,9 +11,9 @@
 //! `replace_document` keeps its index semantics unchanged.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use pulpit_render::images::{list_directory, ListError, PageTable, ResolvedSource};
+use pulpit_render::images::{list_source, ListError, PageSource, PageTable, ResolvedSource};
 
 /// Where the presentation should sit after a document is promoted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub struct Positions {
 /// One open image document, from the application's side.
 #[derive(Debug)]
 pub struct ImageDocumentState {
-    directory: PathBuf,
+    source: PageSource,
     /// The table the *active* document was listed with. `None` until the
     /// first promote.
     active: Option<PageTable>,
@@ -48,7 +48,7 @@ pub struct ImageDocumentState {
 impl ImageDocumentState {
     pub fn new(resolved: ResolvedSource) -> ImageDocumentState {
         ImageDocumentState {
-            directory: resolved.directory,
+            source: resolved.source,
             active: None,
             candidate: None,
             picked: resolved.picked,
@@ -57,8 +57,9 @@ impl ImageDocumentState {
         }
     }
 
-    pub fn directory(&self) -> &Path {
-        &self.directory
+    /// The document's own path: the folder, or the comic archive.
+    pub fn path(&self) -> &Path {
+        self.source.path()
     }
 
     /// True when the document is larger than what the presenter picked, and
@@ -80,7 +81,7 @@ impl ImageDocumentState {
             .map(PageTable::len)?;
         Some(format!(
             "Showing {} — {pages} image{}",
-            self.directory.display(),
+            self.path().display(),
             if pages == 1 { "" } else { "s" }
         ))
     }
@@ -91,7 +92,7 @@ impl ImageDocumentState {
     /// worker's are as close together in time as they can be. They can still
     /// disagree, and [`Self::agrees_with`] is what notices (§42.3).
     pub fn list_candidate(&mut self) -> Result<usize, ListError> {
-        let table = list_directory(&self.directory)?;
+        let table = list_source(&self.source)?;
         let count = table.len();
         self.candidate = Some(table);
         Ok(count)
@@ -99,13 +100,19 @@ impl ImageDocumentState {
 
     /// Does the worker's digest match the application's own listing?
     ///
-    /// A worker that reports no digest at all is answering about something
-    /// that is not a directory — an old binary, or a routing mistake — and
-    /// that is a disagreement too.
+    /// For a directory that is the §42.3 comparison. For a comic archive both
+    /// sides answer `None` and agree, because an archive is one file that is
+    /// rewritten atomically or not at all (§54.2) — there is no window in
+    /// which the two listings can differ, and demanding a digest would invent
+    /// a disagreement that cannot happen.
+    ///
+    /// A directory whose worker reports no digest is a mismatch all the same:
+    /// it means the far side is answering about something other than the
+    /// folder this one listed.
     pub fn agrees_with(&self, worker: Option<u64>) -> bool {
-        match (self.candidate.as_ref(), worker) {
-            (Some(table), Some(digest)) => table.digest() == digest,
-            _ => false,
+        match self.candidate.as_ref() {
+            Some(table) => table.source_digest() == worker,
+            None => false,
         }
     }
 
@@ -186,9 +193,10 @@ impl ImageDocumentState {
 mod tests {
     use super::*;
     use pulpit_render::images::{ImageEntry, PageTable};
+    use std::path::PathBuf;
 
     fn table(names: &[&str]) -> PageTable {
-        PageTable::from_entries(
+        PageTable::over_directory(
             "/pictures/talk",
             names
                 .iter()
@@ -203,7 +211,7 @@ mod tests {
 
     fn state(picked: Option<&str>) -> ImageDocumentState {
         ImageDocumentState::new(ResolvedSource {
-            directory: PathBuf::from("/pictures/talk"),
+            source: PageSource::Directory(PathBuf::from("/pictures/talk")),
             picked: picked.map(OsString::from),
         })
     }

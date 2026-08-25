@@ -550,6 +550,61 @@ fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
     assert!(empty.is_empty());
 }
 
+/// The other text question, the one a rubber band asks: what is *inside* this
+/// rectangle, rather than what lies between these two characters.
+#[test]
+fn a_rectangle_answers_with_the_text_inside_it() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("area-text");
+    let path = source(&directory);
+    let document = open(backend, &path);
+
+    // The same run of 96-point text the selection test aims at, boxed
+    // generously: a band is drawn around text by eye, not to its metrics.
+    let covered = document
+        .area_text(
+            PageIndex(0),
+            pulpit_core::page::PageRect::new(200.0, 120.0, 700.0, 300.0),
+        )
+        .expect("the page has a text layer");
+    assert!(
+        !covered.0.trim().is_empty(),
+        "no text came back from a rectangle drawn over some"
+    );
+    assert!(!covered.1, "a short run of text was not truncated");
+
+    // The same text the character-range query finds, so the two ways of
+    // asking agree about what is on the page.
+    let geometry = document.page_geometry(PageIndex(0)).unwrap();
+    let at = geometry.from_user_space(320.0, 200.0);
+    let word = document
+        .select_text(PageIndex(0), TextSelection::Word { at })
+        .expect("the page has a text layer");
+    assert!(
+        covered.0.contains(word.text.trim()),
+        "the rectangle missed the word the range query found: {:?} does not contain {:?}",
+        covered.0,
+        word.text
+    );
+
+    // A rectangle over bare page is an empty answer rather than an error: the
+    // page has a text layer, this corner of it simply has nothing in it.
+    let empty = document
+        .area_text(
+            PageIndex(0),
+            pulpit_core::page::PageRect::new(0.0, 0.0, 20.0, 20.0),
+        )
+        .expect("an empty region is not a failure");
+    assert!(
+        empty.0.trim().is_empty(),
+        "found {:?} in a corner with nothing in it",
+        empty.0
+    );
+}
+
 /// A7, and the reason document mode renders through the engine that holds the
 /// document rather than through the render worker pool: the frame drawn after
 /// a commit contains the commit.
@@ -1006,4 +1061,87 @@ fn a_text_mark_fits_the_box_measured_for_it() {
         "the measured box clips the text: {tight} pixels of ink in it against \
          {roomy} in a box three times the size"
     );
+}
+
+#[test]
+fn a_document_reports_what_it_says_about_itself() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("properties");
+    let path = directory.join("described.pdf");
+    // The fixture writer puts its argument in `/Keywords` and names itself in
+    // `/Producer`, which is enough to prove the `/Info` read is a real one.
+    write_pdf(&path, 3, Some("notes: after")).unwrap();
+    let document = open(backend, &path);
+
+    let properties = document
+        .properties()
+        .expect("the document describes itself");
+    assert_eq!(
+        properties
+            .keywords
+            .as_ref()
+            .map(|value| value.text.as_str()),
+        Some("notes: after")
+    );
+    assert_eq!(
+        properties
+            .producer
+            .as_ref()
+            .map(|value| value.text.as_str()),
+        Some("pulpit fixtures")
+    );
+    // Absent keys are absent, not empty: the fixture writes no title.
+    assert!(properties.title.is_none());
+    assert!(properties.author.is_none());
+    assert!(properties.created.is_none());
+
+    assert_eq!(properties.page_count, 3);
+    // Every fixture page is the same size, and the scan says so rather than
+    // leaving the question unmeasured.
+    assert_eq!(
+        properties.page_sizes,
+        pulpit_render::document::PageSizes::Uniform
+    );
+    assert_eq!(properties.first_page.width, 720.0);
+
+    // A version PDFium could read, and no encryption dictionary — so nothing
+    // the file itself refuses.
+    assert!(
+        properties.version.is_some(),
+        "the header declares a version"
+    );
+    assert!(properties.encryption.is_none());
+    assert!(properties.permissions.is_unrestricted());
+}
+
+#[test]
+fn a_documents_own_strings_cannot_lay_out_the_dialog_that_shows_them() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("properties-hostile");
+    let path = directory.join("hostile.pdf");
+    // Newlines and control characters in an `/Info` string, which is exactly
+    // as attacker-controlled as a form's script: the engine flattens them, so
+    // a producer cannot push a permission row off the dialog.
+    write_pdf(&path, 1, Some("first\nsecond\r\nthird\u{7}")).unwrap();
+    let document = open(backend, &path);
+
+    let properties = document
+        .properties()
+        .expect("the document describes itself");
+    let keywords = properties.keywords.expect("the fixture wrote keywords");
+    assert!(!keywords.text.contains('\n'), "{:?}", keywords.text);
+    assert!(!keywords.text.contains('\r'), "{:?}", keywords.text);
+    assert!(
+        !keywords.text.chars().any(char::is_control),
+        "{:?}",
+        keywords.text
+    );
+    assert_eq!(keywords.text, "first second third");
+    assert!(!keywords.truncated);
 }

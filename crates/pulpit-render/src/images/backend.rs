@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use pulpit_core::PageSize;
 
 use crate::images::decode::{self, DecodedCache, DecodedKey, ImageFailure};
-use crate::images::table::{list_directory, resolve_source, PageTable};
+use crate::images::table::{list_source, resolve_source, PageSource, PageTable};
 use crate::pdf::{
     BackendDocumentId, CancelSignal, DocumentMetadata, PdfBackend, PdfError, RenderRequest,
     RenderedPage, Result,
@@ -60,12 +60,49 @@ impl ImageBackend {
             .ok_or_else(|| PdfError::Render("unknown document".into()))
     }
 
-    fn page_path(&self, document: BackendDocumentId, page: usize) -> Result<std::path::PathBuf> {
-        let table = self.look_up(document)?;
-        table.path(page).ok_or(PdfError::PageOutOfRange {
-            page,
-            count: table.len(),
-        })
+    /// Measure every page, in whichever way the source makes cheapest.
+    ///
+    /// A directory answers per file; an archive is walked **once** (§54.5),
+    /// because reading its entries one at a time is quadratic in the page
+    /// count on the path that runs before the first frame appears.
+    fn measure_pages(&self, table: &PageTable) -> Vec<PageSize> {
+        let of = |(width, height): (u32, u32)| PageSize {
+            width: width as f32,
+            height: height as f32,
+        };
+        let measured: Vec<Option<PageSize>> = match table.source() {
+            PageSource::Archive { path, kind } => {
+                let sizes = crate::images::archive::measure_entries(path, *kind);
+                table
+                    .entries()
+                    .iter()
+                    .map(|entry| sizes.get(&entry.name).copied().map(of))
+                    .collect()
+            }
+            PageSource::Directory(_) => (0..table.len())
+                .map(|page| {
+                    table
+                        .locate(page)
+                        .and_then(|at| decode::dimensions_at(&at).ok())
+                        .map(of)
+                })
+                .collect(),
+        };
+        // A page that could not be measured takes the first page's size
+        // rather than truncating the vector, exactly as `collect_page_sizes`
+        // does: a hole in the middle would silently turn every later page's
+        // lookup into a fallback.
+        let mut sizes: Vec<PageSize> = Vec::with_capacity(measured.len());
+        for size in measured {
+            match size.or_else(|| sizes.first().copied()) {
+                Some(size) => sizes.push(size),
+                // The first page itself is unmeasurable: there is nothing to
+                // fall back to, and the caller reads an empty vector as
+                // "unknown".
+                None => return Vec::new(),
+            }
+        }
+        sizes
     }
 
     /// The decoded page, from the cache when it is there.
@@ -92,7 +129,7 @@ impl ImageBackend {
             .entries()
             .get(page)
             .ok_or_else(|| ImageFailure::Unreadable {
-                path: table.directory().display().to_string(),
+                path: table.path().display().to_string(),
                 reason: format!("no page {page}"),
             })?;
         let key = DecodedKey {
@@ -109,8 +146,11 @@ impl ImageBackend {
         if cancel.is_cancelled() {
             return Err(ImageFailure::Cancelled);
         }
-        let path = table.directory().join(&entry.name);
-        let image = Arc::new(decode::decode(&path)?);
+        let at = table.locate(page).ok_or_else(|| ImageFailure::Unreadable {
+            path: table.path().display().to_string(),
+            reason: format!("no page {page}"),
+        })?;
+        let image = Arc::new(decode::decode_at(&at)?);
         if let Ok(mut cache) = self.cache.lock() {
             cache.insert(key, Arc::clone(&image));
         }
@@ -128,16 +168,26 @@ impl PdfBackend for ImageBackend {
     }
 
     fn open(&mut self, source: &Path) -> Result<BackendDocumentId> {
-        // The document is the *directory* (§40.1). An image file resolves to
-        // its parent, which is what makes opening a screenshot an image
-        // viewer; the application says so out loud before any navigation
-        // happens (§40.3).
+        // The document is the *directory* (§40.1), or the comic archive that
+        // replaces it (§54.1). An image file resolves to its parent, which is
+        // what makes opening a screenshot an image viewer; the application
+        // says so out loud before any navigation happens (§40.3).
+        //
+        // A `.cbr` or `.cb7` is refused by name here too, not only in the
+        // application: a worker handed one directly must say what the format
+        // is rather than report a damaged archive (§54.7, §61.2).
+        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+            return Err(PdfError::Open {
+                path: source.display().to_string(),
+                reason: message.to_string(),
+            });
+        }
         let resolved = resolve_source(source).ok_or_else(|| PdfError::Open {
             path: source.display().to_string(),
-            reason: "not a directory and not a supported image".into(),
+            reason: "not a directory, a comic archive or a supported image".into(),
         })?;
-        let table = list_directory(&resolved.directory).map_err(|e| PdfError::Open {
-            path: resolved.directory.display().to_string(),
+        let table = list_source(&resolved.source).map_err(|e| PdfError::Open {
+            path: resolved.path().display().to_string(),
             reason: e.to_string(),
         })?;
         self.next_id += 1;
@@ -154,12 +204,7 @@ impl PdfBackend for ImageBackend {
 
     fn metadata(&self, document: BackendDocumentId) -> Result<DocumentMetadata> {
         let table = self.look_up(document)?;
-        let (page_sizes, sampled) = crate::pdf::collect_page_sizes(self, document, table.len());
-        debug_assert!(
-            !sampled,
-            "the page table is capped at the tracked bound (§40.5), so a \
-             sampled answer is impossible"
-        );
+        let page_sizes = self.measure_pages(table);
         Ok(DocumentMetadata {
             page_count: table.len(),
             first_page_size: page_sizes.first().copied().unwrap_or(PageSize {
@@ -175,15 +220,21 @@ impl PdfBackend for ImageBackend {
             // §46.5. No `.pdfpc` sidecar, no embedded attachment, no metadata
             // text — and nothing synthesised from file names.
             metadata_text: String::new(),
-            source_digest: Some(table.digest()),
+            // Present for a directory, absent for an archive, which is one
+            // file and needs no agreement check (§42.3, §54.2).
+            source_digest: table.source_digest(),
         })
     }
 
     fn page_size(&self, document: BackendDocumentId, page: usize) -> Result<PageSize> {
-        let path = self.page_path(document, page)?;
+        let table = self.look_up(document)?;
+        let at = table.locate(page).ok_or(PdfError::PageOutOfRange {
+            page,
+            count: table.len(),
+        })?;
         // Header-only (§46.1): a folder of high-resolution photographs must
         // not stall on pixel data nobody has asked for yet.
-        let (width, height) = decode::dimensions(&path)?;
+        let (width, height) = decode::dimensions_at(&at)?;
         Ok(PageSize {
             width: width as f32,
             height: height as f32,
@@ -378,5 +429,161 @@ mod tests {
             .unwrap();
         backend.close(document);
         assert_eq!(backend.cache.lock().unwrap().bytes_used(), 0);
+    }
+
+    /// A comic archive holding two differently-shaped pages, one per
+    /// chapter folder, plus things that are not pages.
+    fn write_comic(path: &Path, kind: crate::images::ArchiveKind) {
+        use std::io::Write;
+        let page = |width: u32, height: u32, colour: [u8; 4]| {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(width, height, image::Rgba(colour))
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .unwrap();
+            bytes.into_inner()
+        };
+        let contents: Vec<(&str, Vec<u8>)> = vec![
+            ("ch-1/page-10.png", page(30, 20, [90, 90, 90, 255])),
+            ("ch-1/page-02.png", page(20, 30, [20, 20, 20, 255])),
+            ("ComicInfo.xml", b"<ComicInfo/>".to_vec()),
+        ];
+        match kind {
+            crate::images::ArchiveKind::Zip => {
+                let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+                let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+                for (name, bytes) in &contents {
+                    writer.start_file(*name, options).unwrap();
+                    writer.write_all(bytes).unwrap();
+                }
+                writer.finish().unwrap();
+            }
+            crate::images::ArchiveKind::Tar => {
+                let mut builder = tar::Builder::new(std::fs::File::create(path).unwrap());
+                for (name, bytes) in &contents {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(bytes.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    builder
+                        .append_data(&mut header, name, bytes.as_slice())
+                        .unwrap();
+                }
+                builder.finish().unwrap();
+            }
+        }
+    }
+
+    /// `SPEC-reader-formats.md` §54.1: an archive is presented exactly as a
+    /// directory — sorted entries, one image per page — and §54.3's flattening
+    /// means the order is the sorted full path.
+    #[test]
+    fn a_comic_archive_is_a_document_whose_pages_are_its_entries() {
+        for (name, kind) in [
+            ("comic.cbz", crate::images::ArchiveKind::Zip),
+            ("comic.cbt", crate::images::ArchiveKind::Tar),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+            write_comic(&path, kind);
+
+            let mut backend = ImageBackend::new();
+            let document = backend.open(&path).unwrap();
+            let metadata = backend.metadata(document).unwrap();
+
+            assert_eq!(metadata.page_count, 2, "{name}: the XML is not a page");
+            // page-02 before page-10: natural sort over the full path.
+            assert_eq!(metadata.page_sizes[0].width, 20.0, "{name}");
+            assert_eq!(metadata.page_sizes[1].width, 30.0, "{name}");
+            assert!(!metadata.page_sizes_sampled, "{name}");
+            assert!(metadata.metadata_text.is_empty(), "{name}");
+            assert_eq!(
+                metadata.source_digest, None,
+                "{name}: §54.2 — one file, so there is nothing to agree about"
+            );
+
+            let frame = backend
+                .render(&request(document, 1), &crate::pdf::NeverCancel)
+                .unwrap();
+            assert_eq!(&frame.pixels[..4], &[90, 90, 90, 255], "{name}");
+        }
+    }
+
+    /// §54.5: nothing is extracted to disk. The archive is opened, its pages
+    /// render, and the directory it sits in gains no files.
+    #[test]
+    fn an_archive_is_never_unpacked_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbz");
+        write_comic(&path, crate::images::ArchiveKind::Zip);
+
+        let mut backend = ImageBackend::new();
+        let document = backend.open(&path).unwrap();
+        backend
+            .render(&request(document, 0), &crate::pdf::NeverCancel)
+            .unwrap();
+
+        let left_behind: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect();
+        assert_eq!(left_behind, [std::ffi::OsString::from("comic.cbz")]);
+    }
+
+    /// §54.7 and §61.2: refused by name, and not as a damaged file.
+    #[test]
+    fn a_rar_comic_is_refused_by_name_rather_than_as_a_broken_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbr");
+        std::fs::write(&path, b"Rar!\x1a\x07\x00").unwrap();
+
+        let mut backend = ImageBackend::new();
+        let error = backend.open(&path).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("RAR"), "{text}");
+        assert!(
+            !text.to_lowercase().contains("corrupt") && !text.to_lowercase().contains("damaged"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_page_that_will_not_decode_stays_in_an_archive_table_too() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbz");
+        {
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let mut good = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(8, 8, image::Rgba([7, 7, 7, 255]))
+                .write_to(&mut good, image::ImageFormat::Png)
+                .unwrap();
+            writer.start_file("page-01.png", options).unwrap();
+            writer.write_all(good.get_ref()).unwrap();
+            writer.start_file("page-02.png", options).unwrap();
+            writer.write_all(b"not a png at all").unwrap();
+            writer.start_file("page-03.png", options).unwrap();
+            writer.write_all(good.get_ref()).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut backend = ImageBackend::new();
+        let document = backend.open(&path).unwrap();
+        assert_eq!(
+            backend.metadata(document).unwrap().page_count,
+            3,
+            "§49.2: still counted, so its neighbours keep their indices"
+        );
+        assert!(backend
+            .render(&request(document, 1), &crate::pdf::NeverCancel)
+            .is_err());
+        assert_eq!(
+            &backend
+                .render(&request(document, 2), &crate::pdf::NeverCancel)
+                .unwrap()
+                .pixels[..4],
+            &[7, 7, 7, 255]
+        );
     }
 }

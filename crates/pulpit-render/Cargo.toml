@@ -41,6 +41,7 @@ flate2 = "1"
 image = { workspace = true }
 libloading = { workspace = true, optional = true }
 serde = { workspace = true }
+tar = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

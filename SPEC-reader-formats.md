@@ -8,10 +8,11 @@ main purpose is to say **which of those pulpit should do, which it should
 refuse, and why** — so that "why not EPUB?" has a written answer rather than
 being re-litigated.
 
-**Class B DjVu (§55.5) is implemented**, bound to an installed djvulibre
-discovered at run time and never bundled. Nothing else in Class B is, and
-Class C is not started. Sections marked **Not planned** are decisions, not
-backlog.
+**Class A (§54) and Class B DjVu (§55.5) are implemented.** `.cbz` and
+`.cbt` are read; `.cbr` and `.cb7` are refused by name. DjVu is bound to an
+installed djvulibre, discovered at run time and never bundled. Nothing else
+in Class B is, Class C is not started, and sections marked **Not planned**
+are decisions rather than backlog.
 
 ---
 

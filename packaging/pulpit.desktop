@@ -2,12 +2,20 @@
 Type=Application
 Name=pulpit
 GenericName=PDF Presenter
-Comment=Present PDF slides with dependable multi-monitor behaviour
+Comment=Present PDF slides, image folders and comic archives with dependable multi-monitor behaviour
 Exec=pulpit %f
 TryExec=pulpit
 Icon=pulpit
 Terminal=false
 Categories=Office;Presentation;Viewer;
-MimeType=application/pdf;
-Keywords=presentation;slides;projector;beamer;pdf;
+# Every format pulpit opens, so a file manager offers it for each. Offered,
+# not claimed: nothing here asks to be the default handler, because a
+# presenter should not displace somebody's PDF reader or image viewer.
+#
+# The image types are what makes "open a screenshot, get an image viewer"
+# reachable by double-click; pulpit resolves the file to the folder around it
+# and says so. inode/directory is here for the same reason, from the other
+# end: a folder of images *is* a document.
+MimeType=application/pdf;application/vnd.comicbook+zip;application/x-cbz;application/x-cbt;inode/directory;image/png;image/jpeg;image/gif;image/bmp;image/webp;image/tiff;image/x-targa;image/x-tga;image/vnd.microsoft.icon;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;
+Keywords=presentation;slides;projector;beamer;pdf;images;comic;cbz;cbt;
 StartupNotify=true

@@ -21,7 +21,7 @@ Application (iced daemon, one update loop)
 ├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
-├── images::PageTable        a directory of pictures as pages   pulpit-render
+├── images::PageTable        a folder or comic archive as pages pulpit-render
 ├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
 └── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
@@ -551,10 +551,11 @@ the first edit no snapshot exists and none is taken: pages render from the
 presentation's own document, already open in every pool worker.
 
 What stayed in the document worker is everything that is not rendering: the
-annotation transactions, the undo history, text selection, the outline — and
-form filling entirely, because a focused field's uncommitted state lives in
-PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and exists in
-no saved copy.
+annotation transactions, the undo history, text selection (both ways of asking:
+from one character to another, and everything inside a rectangle), the outline
+— and form filling entirely, because a focused field's uncommitted state
+lives in PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and
+exists in no saved copy.
 
 == The fold: what came from pdfform
 
@@ -898,7 +899,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents],
+  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -970,9 +971,17 @@ the strength of the parts that were — said the event loop was innocent.
 (`Stable` → `Connector` → `Geometric` → `None`), whether arbitrary placement
 and safe un-fullscreening are possible, whether appearance
 and high contrast can be read, whether sleep can be inhibited, and whether
-native dialogs, menus, an accessibility bridge, media keys and notifications
-exist. `report()` renders it for the diagnostics bundle and the settings page;
-`limitations()` yields the ones worth telling the presenter about.
+native dialogs, menus, an accessibility bridge, media keys, notifications and
+an image clipboard exist. `report()` renders it for the diagnostics bundle and
+the settings page; `limitations()` yields the ones worth telling the presenter
+about.
+
+The image clipboard is the one service that reaches past the toolkit: Iced's
+clipboard carries text and nothing else, so `PlatformServices::copy_image`
+goes through `arboard` instead. It is a capability rather than an assumption
+because a headless session and a compositor with no data-control protocol both
+have nowhere to put the pixels, and the select tool's image kind has to be able
+to say so before it spends a render on one.
 
 The X11 adapter claims placement; the Wayland adapter does not, on any
 compositor. The UI adapts on the resulting capability claim alone — never on
@@ -1340,6 +1349,19 @@ uses compact subsets of that same model, so advertised keys cannot drift from
 input handling. Hardware aliases from presenter remotes are resolved
 separately and do not become visual clutter in the keyboard reference.
 
+*Properties…* is one of its file commands, and it opens a dialog rather than a
+rail view: the rail holds per-page navigation, while what a document _is_ is
+one question about the whole file, asked once and closed. The answer is a
+`DocumentRequest::Properties` round trip made when the dialog opens rather
+than at open, since a presenter putting a deck on a projector never asks it.
+Every string in it is written by whoever produced the file, so it crosses the
+wire through `InfoText`, which bounds it to `MAX_INFO_TEXT_BYTES` and
+collapses its control characters and line structure — the same treatment
+`AnnotationContents` gives `/Contents`, for the same reason. A key the
+document left empty is reported as absent rather than as an empty string, so
+the dialog can leave the row out instead of drawing a blank one, and the page
+scan reports `Unmeasured` rather than claiming a uniformity it did not check.
+
 === Media Transport
 
 Play, pause and scrub whatever video or animation is on the slide the
@@ -1542,11 +1564,42 @@ In priority order:
   `notes.honour_metadata_contract` is on.
 + Your *default mapping* (`notes.default_mapping`).
 
-An image document is outside that order entirely: it is pinned to
-`SlidesOnly`, consults no default and records no per-document choice
-(`SPEC-images.md` §46.4). A presenter whose default is a `SplitPage` mapping
-would otherwise have every photograph cut down the middle with its right half
-treated as speaker notes.
+An image document — a folder, or a `.cbz` / `.cbt` comic archive — is outside
+that order entirely: it is pinned to `SlidesOnly`, consults no default and
+records no per-document choice (`SPEC-images.md` §46.4, `SPEC-reader-formats.md`
+§59.4). A presenter whose default is a `SplitPage` mapping would otherwise have
+every photograph cut down the middle with its right half treated as speaker
+notes.
+
+= Formats other than PDF
+
+`SPEC-reader-formats.md` is the authoritative account of which formats pulpit
+reads, which it refuses, and why each decision was made. The short version:
+
+- **Class A, archives of images** — `.cbz` and `.cbt` are implemented. They
+  are pure Rust, add no native dependency, and reuse the image page table
+  entirely: an archive is a directory that happens to be one file. `.cb7`
+  waits on a maintained pure-Rust 7z decoder; `.cbr` is *not planned*, because
+  unrar's licence is not one this project will carry or ship.
+- **Class B, paginated formats behind native libraries** — DjVu, XPS,
+  PostScript and DVI fit `PdfBackend` as it stands, so the architecture is not
+  what blocks them. The cost is a pinned native library on five platforms and
+  its CVE surface, forever. If any is ever done it MUST bind an *installed*
+  library and report `Unsupported` naming it when absent; PDFium is the single
+  bundled exception and it is the reason the application exists.
+- **Class C, reflowable formats** — EPUB and the rest have no page count until
+  a viewport is chosen, and the presenter and audience windows are different
+  sizes, so "page 7" would name different content in each. That is a rule 3
+  violation rather than a missing feature. Not planned for the presenter.
+
+Two rules from that document bear on code outside it. A format's absence must
+never break another format, which is what `pdf::router::RoutingBackend` and
+lazy PDFium binding buy. And a refusal must never be reported as a corrupt
+file: "pulpit cannot read this kind of file" and "this file is damaged" are
+different facts, and telling a presenter the second when the first is true
+sends them looking for a problem that does not exist. The router refuses a
+`.cbr` *before* routing, precisely so it cannot fall through to PDFium and
+come back as a damaged PDF.
 
 == The metadata contract (Typst/Mosaic)
 

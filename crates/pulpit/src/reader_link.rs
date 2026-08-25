@@ -64,6 +64,12 @@ pub enum Ask {
     /// described and again after a commit, because PDFium is the sole author
     /// of a value and a list this process patched would be a second opinion.
     ListFields,
+    /// What the document says about itself, for the properties dialog.
+    ///
+    /// Asked when the dialog is opened rather than when the document is
+    /// described: it is a question a presenter putting a deck on a projector
+    /// never asks, and the worker answers one request at a time.
+    Properties,
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -72,6 +78,13 @@ pub enum Ask {
         page: pulpit_core::page::PageIndex,
         selection: pulpit_render::document::TextSelection,
         finalising: bool,
+    },
+    /// Read the text inside a rectangle on one page. Read-only: it never
+    /// moves the revision (§6.3). Not coalesced the way a selection is —
+    /// there is one of these per band, asked when the pointer comes up.
+    AreaText {
+        page: pulpit_core::page::PageIndex,
+        rect: pulpit_core::page::PageRect,
     },
     /// Find a string in a run of pages. Read-only, and carried with the
     /// generation it belongs to: the answer to a query the user has already
@@ -163,9 +176,21 @@ pub enum Told {
     },
     /// The document's fields as the engine now holds them.
     Fields(Vec<pulpit_render::document::FormField>),
+    /// What the document says about itself.
+    Properties(Box<pulpit_render::document::DocumentProperties>),
+    /// …or the reason it would not say. Its own case, like a refused snapshot,
+    /// because a dialog is waiting on this particular answer.
+    PropertiesFailed {
+        message: String,
+    },
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
+    },
+    /// The text a band covered, on its way to the clipboard.
+    AreaText {
+        text: String,
+        truncated: bool,
     },
     /// Hits for one run of pages, or the reason there will not be any.
     ///
@@ -607,6 +632,16 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
             Ok(DocumentResponse::Fields(fields)) => Told::Fields(fields),
             other => unexpected(other, "a field list"),
         }],
+        Ask::Properties => vec![match session.request(DocumentRequest::Properties) {
+            Ok(DocumentResponse::Properties(properties)) => Told::Properties(properties),
+            // A refusal is an answer: the dialog is waiting on this one, and a
+            // generic failure would leave it reading "Reading…" for as long as
+            // it stayed open.
+            Err(error) if !error.is_worker_loss() => Told::PropertiesFailed {
+                message: error.to_string(),
+            },
+            other => unexpected(other, "document properties"),
+        }],
         Ask::SelectText {
             page,
             selection,
@@ -617,6 +652,25 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 other => unexpected(other, "a text selection"),
             },
         ],
+        Ask::AreaText { page, rect } => {
+            vec![
+                match session.request(DocumentRequest::AreaText { page, rect }) {
+                    Ok(DocumentResponse::AreaText { text, truncated }) => {
+                        Told::AreaText { text, truncated }
+                    }
+                    // A backend or a page with no text layer answers this way,
+                    // and it is a fact about the region rather than a lost
+                    // worker: the band gets told there was no text in it.
+                    Ok(DocumentResponse::Failed(
+                        pulpit_render::document::protocol::DocumentFailure::Unsupported(_),
+                    )) => Told::AreaText {
+                        text: String::new(),
+                        truncated: false,
+                    },
+                    other => unexpected(other, "the text in an area"),
+                },
+            ]
+        }
         Ask::FindText {
             generation,
             query,

@@ -6,7 +6,7 @@
 //! is nothing honest to map them onto. The UI reflects that rather than
 //! offering controls that refuse when pressed (§48.3).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 use pulpit_core::annotate::{AnnotationDraft, AnnotationId};
@@ -19,12 +19,19 @@ use crate::document::model::{
 };
 use crate::document::{DocumentBackend, DocumentError, Result};
 use crate::images::decode::{self, DecodedCache, DecodedKey};
-use crate::images::table::{list_directory, resolve_source, PageTable};
+use crate::images::table::{list_source, resolve_source, PageSource, PageTable};
 
-/// One open image directory, for the document worker.
+/// One open image document — a folder or a comic archive — for the document
+/// worker.
 pub struct ImageDocument {
     table: PageTable,
     info: OpenDocumentInfo,
+    /// Every page's geometry, measured once at open.
+    ///
+    /// The reader asks for geometries in runs as it lays the column out, and
+    /// answering each from the source would re-walk an archive per page. One
+    /// pass at open is the same total work, done once.
+    geometry: Vec<PageGeometry>,
     cache: Mutex<DecodedCache>,
 }
 
@@ -36,31 +43,34 @@ fn unsupported(what: &str) -> DocumentError {
 
 impl ImageDocument {
     /// Open `source` as an image document. A file resolves to its parent
-    /// directory (§40.2), exactly as the renderer's backend does.
+    /// directory (§40.2) and a comic archive is the document itself (§54.1),
+    /// exactly as the renderer's backend does.
     pub fn open(source: &Path) -> Result<ImageDocument> {
+        // §54.7 and §61.2: a format pulpit does not read is named, not
+        // reported as a damaged archive.
+        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+            return Err(DocumentError::Unsupported(message.to_string()));
+        }
         let resolved = resolve_source(source).ok_or_else(|| {
             DocumentError::Backend(format!(
-                "{} is neither a directory nor a supported image",
+                "{} is not a directory, a comic archive or a supported image",
                 source.display()
             ))
         })?;
-        let table = list_directory(&resolved.directory)
-            .map_err(|e| DocumentError::Backend(e.to_string()))?;
-        let first_page = table
-            .path(0)
-            .and_then(|path| decode::dimensions(&path).ok())
-            .map(|(width, height)| PageGeometry::upright(width as f32, height as f32))
-            .unwrap_or_default();
+        let table =
+            list_source(&resolved.source).map_err(|e| DocumentError::Backend(e.to_string()))?;
+        let geometry = measure(&table);
         Ok(ImageDocument {
             info: OpenDocumentInfo {
                 page_count: table.len(),
                 // §48: it renders and turns its pages, and nothing else.
                 level: CompatibilityLevel::ViewOnly,
                 warnings: Vec::new(),
-                first_page,
+                first_page: geometry.first().copied().unwrap_or_default(),
                 has_form: false,
             },
             table,
+            geometry,
             cache: Mutex::new(DecodedCache::default()),
         })
     }
@@ -69,18 +79,47 @@ impl ImageDocument {
         &self.table
     }
 
-    pub fn directory(&self) -> &Path {
-        self.table.directory()
+    /// The document's own path: the folder, or the archive file.
+    pub fn path(&self) -> &Path {
+        self.table.path()
     }
+}
 
-    fn page_path(&self, page: PageIndex) -> Result<PathBuf> {
-        self.table
-            .path(page.get())
-            .ok_or(DocumentError::NoSuchPage {
-                page: page.get(),
-                count: self.table.len(),
+/// Every page's geometry, in one pass over the source.
+fn measure(table: &PageTable) -> Vec<PageGeometry> {
+    let sizes: Vec<Option<PageGeometry>> = match table.source() {
+        PageSource::Archive { path, kind } => {
+            let measured = crate::images::archive::measure_entries(path, *kind);
+            table
+                .entries()
+                .iter()
+                .map(|entry| {
+                    measured
+                        .get(&entry.name)
+                        .map(|(width, height)| PageGeometry::upright(*width as f32, *height as f32))
+                })
+                .collect()
+        }
+        PageSource::Directory(_) => (0..table.len())
+            .map(|page| {
+                table
+                    .locate(page)
+                    .and_then(|at| decode::dimensions_at(&at).ok())
+                    .map(|(width, height)| PageGeometry::upright(width as f32, height as f32))
             })
+            .collect(),
+    };
+    // A page that will not decode keeps its place and takes a plausible
+    // shape, so the column lays out and the failure shows up where it
+    // belongs — in that page's own render (§49).
+    let mut geometry: Vec<PageGeometry> = Vec::with_capacity(sizes.len());
+    for size in sizes {
+        let resolved = size
+            .or_else(|| geometry.first().copied())
+            .unwrap_or_default();
+        geometry.push(resolved);
     }
+    geometry
 }
 
 impl DocumentBackend for ImageDocument {
@@ -89,11 +128,13 @@ impl DocumentBackend for ImageDocument {
     }
 
     fn page_geometry(&self, page: PageIndex) -> Result<PageGeometry> {
-        let path = self.page_path(page)?;
-        // Header-only, like every other size read on this path (§46.1).
-        let (width, height) =
-            decode::dimensions(&path).map_err(|e| DocumentError::Backend(e.to_string()))?;
-        Ok(PageGeometry::upright(width as f32, height as f32))
+        self.geometry
+            .get(page.get())
+            .copied()
+            .ok_or(DocumentError::NoSuchPage {
+                page: page.get(),
+                count: self.geometry.len(),
+            })
     }
 
     fn render_page(
@@ -123,9 +164,15 @@ impl DocumentBackend for ImageDocument {
         let image = match cached {
             Some(image) => image,
             None => {
-                let path = self.table.directory().join(&entry.name);
+                let at = self
+                    .table
+                    .locate(page.get())
+                    .ok_or(DocumentError::NoSuchPage {
+                        page: page.get(),
+                        count: self.table.len(),
+                    })?;
                 let decoded = std::sync::Arc::new(
-                    decode::decode(&path).map_err(|e| DocumentError::Backend(e.to_string()))?,
+                    decode::decode_at(&at).map_err(|e| DocumentError::Backend(e.to_string()))?,
                 );
                 if let Ok(mut cache) = self.cache.lock() {
                     cache.insert(key, std::sync::Arc::clone(&decoded));
@@ -138,7 +185,7 @@ impl DocumentBackend for ImageDocument {
     }
 
     fn source(&self) -> Option<&Path> {
-        Some(self.table.directory())
+        Some(self.table.path())
     }
 
     // Everything below is a PDF semantic. `Unsupported` rather than an empty
@@ -315,5 +362,62 @@ mod tests {
         let dir = folder();
         let document = ImageDocument::open(&dir.path().join("b.png")).unwrap();
         assert_eq!(document.page_count(), 2);
+    }
+
+    /// `SPEC-reader-formats.md` §54: a comic archive reaches the reader the
+    /// same way a folder does, and answers the same way — including refusing
+    /// every PDF semantic (§60.1).
+    #[test]
+    fn a_comic_archive_opens_in_the_reader_and_turns_its_pages() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbz");
+        {
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            for (name, width, height, colour) in [
+                ("ch-1/page-02.png", 20u32, 30u32, [4u8, 5, 6, 255]),
+                ("ch-1/page-10.png", 30, 20, [8, 9, 10, 255]),
+            ] {
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                image::RgbaImage::from_pixel(width, height, image::Rgba(colour))
+                    .write_to(&mut bytes, image::ImageFormat::Png)
+                    .unwrap();
+                writer.start_file(name, options).unwrap();
+                writer.write_all(bytes.get_ref()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let document = ImageDocument::open(&path).unwrap();
+        assert_eq!(document.page_count(), 2);
+        assert!(document.info().level.is_view_only());
+        assert_eq!(document.source(), Some(path.as_path()));
+        // page-02 before page-10, by natural sort over the full entry path.
+        assert_eq!(document.page_geometry(PageIndex(0)).unwrap().width, 20.0);
+        assert_eq!(document.page_geometry(PageIndex(1)).unwrap().width, 30.0);
+
+        let mut rgba = vec![0u8; 4 * 4 * 4];
+        document
+            .render_page(PageIndex(1), Region::FULL, 4, 4, None, &mut rgba)
+            .unwrap();
+        assert_eq!(&rgba[..4], &[8, 9, 10, 255]);
+
+        assert!(matches!(
+            document.find_text(&pulpit_core::search::Query::new("x", false, false), 0..2),
+            Err(DocumentError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_rar_comic_is_refused_by_name_in_the_reader_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbr");
+        std::fs::write(&path, b"Rar!\x1a\x07\x00").unwrap();
+        let Err(error) = ImageDocument::open(&path) else {
+            panic!("§54.7: a RAR is refused, not opened");
+        };
+        assert!(matches!(error, DocumentError::Unsupported(_)));
+        assert!(error.to_string().contains("RAR"), "{error}");
     }
 }

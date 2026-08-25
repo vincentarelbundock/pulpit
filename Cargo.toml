@@ -48,6 +48,9 @@ regex = "1"
 rfd = "0.15"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+# Reads `.cbt` comic archives (SPEC-reader-formats.md §54.6). Pure Rust, no
+# native dependency, and it only ever reads: nothing here writes a tar.
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 thiserror = "2"
 toml = "0.8"

@@ -77,6 +77,11 @@ Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command"
   Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithList\{#AppExe}"; \
   ValueType: string; ValueName: ""; ValueData: ""; Flags: uninsdeletekey
+; The comic archives Pulpit reads, on the same terms: offered, not claimed.
+Root: HKCU; Subkey: "Software\Classes\.cbz\OpenWithList\{#AppExe}"; \
+  ValueType: string; ValueName: ""; ValueData: ""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\.cbt\OpenWithList\{#AppExe}"; \
+  ValueType: string; ValueName: ""; ValueData: ""; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; \

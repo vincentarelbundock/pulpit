@@ -6,6 +6,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **DjVu books open.** `.djvu` and `.djv` are read the way a PDF is: pages
+  turn, render, zoom and fit, the overview grid is a contact sheet of the
+  book, and pulpit remembers where you were. Scanned books are exactly the
+  case document mode was built for, and they were the one common format it
+  could not open.
+
+  DjVu is a capability of your machine rather than of the build you
+  downloaded. Pulpit carries no DjVu library of its own and never will —
+  PDFium is the single exception, because it is the reason the application
+  exists. It looks for an installed djvulibre each time it opens a book, so
+  installing one is the whole setup: nothing is configured and nothing is
+  rebuilt. A machine without one is told the file is a DjVu and how to
+  install the library for its platform, which is a different thing from being
+  told the file is damaged. A missing DjVu library never stops a PDF or a
+  folder of images opening, and a missing PDFium never stops a DjVu.
+
+  A DjVu is read-only: no annotations, form fields, text selection, search or
+  signing. Those are PDF semantics, and pulpit refuses them by name rather
+  than faking them. A book shows as *View only* and the tools that do not
+  apply are not offered, rather than refusing when pressed. To mark up a
+  scan, convert it first — `ddjvu -format=pdf book.djvu book.pdf` ships with
+  djvulibre.
+
+- **There is somewhere to find out what a document is.** *Properties…* in the
+  hamburger opens a dialog holding the file's own account of itself: title,
+  author, subject and keywords, what created it and what converted it, when it
+  was made and last changed, its page count, its page size named as the sheet
+  it is, and the PDF version it declares. A key the document left empty is
+  left out rather than shown as a blank row, and a date that does not parse is
+  shown as the document wrote it rather than dropped.
+
+  The permissions are the part that decides things: where a file is encrypted,
+  its handler is named and each of the eight operations it declares is listed
+  as allowed or refused — in words, not by colour — so it is clear before an
+  edit or a print is attempted whether the document will take it. A last
+  section says what pulpit will do with what it found: the compatibility
+  level, every standing warning, and the capability findings a presenter would
+  rather read before the talk than meet as a toast during it.
+
+  The strings in there were written by whoever produced the file, so they are
+  bounded and flattened on the way out of the engine exactly as an
+  annotation's text is: no producer can lay out the dialog that shows them.
+  Nothing is asked of the document until the dialog is opened, so a deck going
+  onto a projector pays nothing for it.
+
+- **The select band can copy the page, not only pick marks off it.** The
+  rubber band now has a kind, chosen in its own options the way the
+  highlighter's colour is: *Marks* holds the annotations it encloses, as it
+  always has; *Image* copies the region to the clipboard as a picture; *Text*
+  copies the text the region covers. The image is rendered fresh at twice the
+  page's own scale rather than lifted off the screen, so what you paste does
+  not depend on the zoom you happened to be reading at, and the text query
+  bounds an area rather than following the reading order — which is how one
+  column comes off a two-column page. The kind is one setting across both
+  modes, like the pen's colour, and a session that cannot carry an image on
+  its clipboard says so instead of copying nothing. Table extraction is
+  deliberately not offered.
+
 ### Fixed
 
 - **Text written on a slide is kept.** A label typed at the lectern was drawn
