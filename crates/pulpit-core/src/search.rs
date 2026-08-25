@@ -1542,4 +1542,92 @@ mod tests {
         assert!(state.query().is_empty());
         assert!(after.is_current_for(generation) && after != generation);
     }
+
+    /// A hit is a page number and a set of rectangles on that page, so what
+    /// was found in the document that has just been rebuilt says nothing
+    /// true about the one that replaced it — and a rebuild that added pages
+    /// has pages nobody has looked at.
+    #[test]
+    fn reopening_a_rebuilt_document_keeps_the_query_and_drops_what_it_found() {
+        let mut state = SearchState::new();
+        state.open(10);
+        let generation = state.set_query(query("pdf"));
+        let (_, pages) = state.next_request().expect("a scan starts");
+        state.accept(
+            generation,
+            HitChunk {
+                from_page: pages.start,
+                to_page: pages.end,
+                hits: vec![page_hit(1, 0)],
+                truncated: false,
+            },
+        );
+        assert_eq!(state.hits().len(), 1);
+
+        // The file was rebuilt: same search, longer document.
+        let reopened = state.open(12);
+        assert_eq!(
+            state.query().text(),
+            "pdf",
+            "the query survives a rebuild; retyping it on every recompile is \
+             its own bug"
+        );
+        assert!(
+            state.hits().is_empty(),
+            "the old marks are not this document's"
+        );
+        assert!(state.current().is_none());
+        assert!(
+            reopened != generation,
+            "a new generation, so chunks in flight for the old document land nowhere"
+        );
+        assert!(state.scanning(), "the rebuilt document is looked at again");
+
+        // And the pages the rebuild added are covered by the new scan.
+        let mut covered = vec![0usize; 12];
+        while state.scanning() {
+            let mut answered = false;
+            while let Some((generation, pages)) = state.next_request() {
+                for page in pages.clone() {
+                    covered[page] += 1;
+                }
+                state.accept(
+                    generation,
+                    HitChunk {
+                        from_page: pages.start,
+                        to_page: pages.end,
+                        hits: Vec::new(),
+                        truncated: false,
+                    },
+                );
+                answered = true;
+            }
+            assert!(answered, "the rescan stalled");
+        }
+        assert!(covered.iter().all(|times| *times == 1), "{covered:?}");
+    }
+
+    /// A stale answer for the document that is gone must not be absorbed into
+    /// the results for the document that replaced it.
+    #[test]
+    fn a_chunk_for_the_previous_document_lands_nowhere() {
+        let mut state = SearchState::new();
+        state.open(10);
+        let generation = state.set_query(query("pdf"));
+        let (_, pages) = state.next_request().expect("a scan starts");
+        state.open(10);
+        assert!(
+            !state.accept(
+                generation,
+                HitChunk {
+                    from_page: pages.start,
+                    to_page: pages.end,
+                    hits: vec![page_hit(1, 0)],
+                    truncated: false,
+                },
+            ),
+            "the worker had not noticed the document changed"
+        );
+        assert!(state.hits().is_empty());
+    }
 }

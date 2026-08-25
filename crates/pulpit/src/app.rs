@@ -5499,6 +5499,10 @@ impl App {
                     self.settings.remember_recent(info.path.clone());
                     self.persist();
                     self.invalidate_renders();
+                    // The deck under the search is not the deck the hits were
+                    // found in. Their rectangles describe where the words
+                    // used to be.
+                    self.rescan_search_after_document_change();
                 }
                 DocAction::DiscardCandidate { document } => {
                     if let Some(supervisor) = self.supervisor.as_mut() {
@@ -5567,6 +5571,11 @@ impl App {
         // the declared answer for a file with no record at all.
         self.set_outline_collapsed(true, false);
         self.search_workspace = false;
+        // A *different* file, not a rebuild of this one: the query belonged to
+        // the document being put down. Hiding the rail while keeping its hits
+        // left the previous document's marks to be drawn over this one's pages
+        // the moment it was reopened.
+        self.search.clear();
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -5846,6 +5855,11 @@ impl App {
                     self.wash_cache.borrow_mut().clear();
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
+                    // Page numbers meaning something else now applies to the
+                    // search as much as to a repaint: this is the first point
+                    // at which the new document's page count is known, so it
+                    // is where a live query is put back over it.
+                    self.rescan_search_after_document_change();
                     // What the form contains, for the navigator. Asked only
                     // where there is a form: a deck of slides would spend a
                     // round trip on the serial worker to be told "none".
@@ -10331,39 +10345,29 @@ impl App {
         self.keyboard_region == KeyboardRegion::SearchResults
     }
 
-    /// Point the search at the open document under a new query.
-    fn restart_search(&mut self, query: pulpit_core::search::Query) {
-        self.search_scroll = 0.0;
-        // A toggle or a fresh query goes out at once. Only `Type` holds it
-        // back, and it arms the delay itself after this returns.
-        self.search_settle_at = None;
-        // The page count comes from whichever half is open. In document mode
-        // the reader knows it; in presentation mode the deck does.
-        let pages = if self.reader.is_open() {
+    /// How many pages the search has to cover.
+    ///
+    /// From whichever half is open: in document mode the reader knows it, in
+    /// presentation mode the deck does.
+    fn searchable_page_count(&self) -> usize {
+        if self.reader.is_open() {
             self.reader.page_count()
         } else {
             self.state
                 .document()
                 .map(|document| document.pdf_pages)
                 .unwrap_or(0)
-        };
-        self.search.open(pages);
-        let invalid = query.validate().err();
-        let generation = self.search.set_query(query);
-        if self.search.query().is_empty() {
-            return;
         }
-        if let Some(problem) = invalid {
-            self.search.fail(
-                generation,
-                pulpit_core::search::SearchProblem::InvalidPattern(problem),
-            );
-            return;
-        }
-        // Notes and bookmarks are already in this process, so they are
-        // searched now rather than asked for: the box has results before the
-        // first round trip, which in a long deck is the difference between
-        // "instant" and "a second of nothing".
+    }
+
+    /// Run the query over the notes and the outline, which are in this
+    /// process and need no round trip.
+    ///
+    /// In the presenter this is often the more useful half — "which slide was
+    /// the one about X" is usually answered by what the speaker wrote — and
+    /// having it before the first chunk arrives is what makes the box feel
+    /// instant on a long deck.
+    fn absorb_local_hits(&mut self) {
         let mut found = Vec::new();
         if let Some(document) = self.state.document() {
             if let Some(notes) = document.text_notes.as_ref() {
@@ -10381,6 +10385,53 @@ impl App {
             }
         }
         self.search.absorb(found);
+    }
+
+    /// The document under the search changed, so what was found in the old one
+    /// is no longer true of this one.
+    ///
+    /// A hit is a page number and a set of rectangles on that page. When a
+    /// deck is rebuilt those rectangles describe where the words used to be:
+    /// the results list points at text that has moved and the overlay marks
+    /// bare paper. The page count moves too, so a rebuild that added pages
+    /// would never scan them.
+    ///
+    /// So the query is kept and everything found for it is thrown away and
+    /// looked for again. Keeping the query is the point — a deck is rebuilt
+    /// while you are looking for something in it, and being made to type it
+    /// again on every recompile is its own bug.
+    fn rescan_search_after_document_change(&mut self) {
+        // `open` restarts under a new generation, so chunks already in flight
+        // for the old document land nowhere.
+        self.search.open(self.searchable_page_count());
+        if self.search.query().is_empty() {
+            return;
+        }
+        self.search_scroll = 0.0;
+        self.absorb_local_hits();
+    }
+
+    /// Point the search at the open document under a new query.
+    fn restart_search(&mut self, query: pulpit_core::search::Query) {
+        self.search_scroll = 0.0;
+        // A toggle or a fresh query goes out at once. Only `Type` holds it
+        // back, and it arms the delay itself after this returns.
+        self.search_settle_at = None;
+        let pages = self.searchable_page_count();
+        self.search.open(pages);
+        let invalid = query.validate().err();
+        let generation = self.search.set_query(query);
+        if self.search.query().is_empty() {
+            return;
+        }
+        if let Some(problem) = invalid {
+            self.search.fail(
+                generation,
+                pulpit_core::search::SearchProblem::InvalidPattern(problem),
+            );
+            return;
+        }
+        self.absorb_local_hits();
     }
 
     /// Show a hit: put its page on screen in whichever view is mounted.
