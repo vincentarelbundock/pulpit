@@ -101,6 +101,17 @@ impl PdfBackend for RoutingBackend {
     }
 
     fn open(&mut self, source: &Path) -> Result<BackendDocumentId> {
+        // Before anything is routed: a comic archive pulpit does not read is
+        // neither an image document nor a PDF, and falling through to the PDF
+        // backend would report a perfectly good `.cbr` as a damaged PDF —
+        // exactly the mistake §61.2 forbids. Refused here, by name
+        // (`SPEC-reader-formats.md` §54.7, §61.1).
+        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+            return Err(PdfError::Open {
+                path: source.display().to_string(),
+                reason: message.to_string(),
+            });
+        }
         self.next_id += 1;
         let outer = BackendDocumentId(self.next_id);
         // A directory source — or a bare image file, which resolves to one —
@@ -286,6 +297,30 @@ mod tests {
         router.close(folder);
         assert!(router.metadata(folder).is_err());
         assert_eq!(router.metadata(deck).unwrap().page_count, 7, "unaffected");
+    }
+
+    /// The regression that made this check belong to the router rather than
+    /// to the image backend: `resolve_source` says no to a `.cbr`, so without
+    /// this it fell through to the PDF backend and was reported as a damaged
+    /// PDF — a perfectly good comic, described as broken (§61.2).
+    #[test]
+    fn a_comic_format_pulpit_refuses_never_reaches_the_pdf_backend() {
+        let binds = Arc::new(AtomicUsize::new(0));
+        let mut router = router(Arc::clone(&binds));
+        for name in ["/comics/book.cbr", "/comics/book.cb7"] {
+            let error = router.open(Path::new(name)).unwrap_err().to_string();
+            assert!(error.contains(".cbz"), "{name}: {error}");
+            assert!(
+                !error.to_lowercase().contains("corrupt")
+                    && !error.to_lowercase().contains("damaged"),
+                "{name}: {error}"
+            );
+        }
+        assert_eq!(
+            binds.load(Ordering::SeqCst),
+            0,
+            "and it does not even ask for a PDF library first"
+        );
     }
 
     #[test]

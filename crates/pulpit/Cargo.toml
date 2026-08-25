@@ -81,5 +81,7 @@ winresource = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# Writes the fixture pictures the image-directory tests present.
+# Writes the fixture pictures and comic archives the image-document tests
+# present. Both are read back through pulpit-render's own code paths.
 image = { workspace = true }
+zip = { workspace = true }

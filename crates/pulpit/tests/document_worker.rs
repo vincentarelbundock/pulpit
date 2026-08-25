@@ -702,3 +702,87 @@ fn a_folder_of_images_opens_in_a_document_worker_and_refuses_pdf_semantics() {
 
     session.close();
 }
+
+/// `SPEC-reader-formats.md` §54 and §56.1, end to end as a real child
+/// process: a comic archive opens in a document worker **without a PDF
+/// library**, its pages render in sorted-full-path order, and nothing is
+/// unpacked to disk.
+#[test]
+fn a_comic_archive_opens_in_a_document_worker_without_a_pdf_library() {
+    use std::io::Write;
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let source = directory.path().join("comic.cbz");
+    {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, width, height) in [
+            ("ch-1/page-10.png", 30u32, 20u32),
+            ("ch-1/page-02.png", 20, 30),
+            ("ComicInfo.xml", 0, 0),
+        ] {
+            writer.start_file(name, options).unwrap();
+            if name.ends_with(".png") {
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                image::RgbaImage::from_pixel(width, height, image::Rgba([2, 3, 4, 255]))
+                    .write_to(&mut bytes, image::ImageFormat::Png)
+                    .unwrap();
+                writer.write_all(bytes.get_ref()).unwrap();
+            } else {
+                writer.write_all(b"<ComicInfo/>").unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+
+    let mut session = DocumentSession::start(&command, &source)
+        .expect("a comic archive needs no PDF library to open (§56.1)");
+
+    let DocumentResponse::Opened(info) = session
+        .request(DocumentRequest::Info)
+        .expect("the worker describes its archive")
+    else {
+        panic!("expected document info")
+    };
+    assert_eq!(info.page_count, 2, "the XML is not a page");
+    assert!(info.level.is_view_only(), "§60.1");
+    // page-02 before page-10: natural sort over the full entry path (§54.3).
+    assert_eq!(info.first_page.width, 20.0);
+
+    let DocumentResponse::Frame(frame) = session
+        .request(DocumentRequest::Render(DocumentRenderRequest {
+            page: PageIndex(1),
+            width: 15,
+            height: 10,
+            region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
+        }))
+        .expect("the page renders")
+    else {
+        panic!("expected a frame")
+    };
+    assert!(frame.is_consistent());
+    assert_eq!(&frame.pixels[..4], &[2, 3, 4, 255]);
+
+    // §54.2 and §54.5: the archive is still one file, and nothing was
+    // unpacked beside it.
+    let beside: Vec<_> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect();
+    assert_eq!(beside, [std::ffi::OsString::from("comic.cbz")]);
+
+    // §60.1, over the wire.
+    match session.request(DocumentRequest::ListFields) {
+        Err(SessionError::Refused(_)) => {}
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    session.close();
+}

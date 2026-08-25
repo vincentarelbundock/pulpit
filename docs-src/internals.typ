@@ -21,7 +21,7 @@ Application (iced daemon, one update loop)
 ├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
-├── images::PageTable        a directory of pictures as pages   pulpit-render
+├── images::PageTable        a folder or comic archive as pages pulpit-render
 ├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
 └── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
@@ -1542,11 +1542,42 @@ In priority order:
   `notes.honour_metadata_contract` is on.
 + Your *default mapping* (`notes.default_mapping`).
 
-An image document is outside that order entirely: it is pinned to
-`SlidesOnly`, consults no default and records no per-document choice
-(`SPEC-images.md` §46.4). A presenter whose default is a `SplitPage` mapping
-would otherwise have every photograph cut down the middle with its right half
-treated as speaker notes.
+An image document — a folder, or a `.cbz` / `.cbt` comic archive — is outside
+that order entirely: it is pinned to `SlidesOnly`, consults no default and
+records no per-document choice (`SPEC-images.md` §46.4, `SPEC-reader-formats.md`
+§59.4). A presenter whose default is a `SplitPage` mapping would otherwise have
+every photograph cut down the middle with its right half treated as speaker
+notes.
+
+= Formats other than PDF
+
+`SPEC-reader-formats.md` is the authoritative account of which formats pulpit
+reads, which it refuses, and why each decision was made. The short version:
+
+- **Class A, archives of images** — `.cbz` and `.cbt` are implemented. They
+  are pure Rust, add no native dependency, and reuse the image page table
+  entirely: an archive is a directory that happens to be one file. `.cb7`
+  waits on a maintained pure-Rust 7z decoder; `.cbr` is *not planned*, because
+  unrar's licence is not one this project will carry or ship.
+- **Class B, paginated formats behind native libraries** — DjVu, XPS,
+  PostScript and DVI fit `PdfBackend` as it stands, so the architecture is not
+  what blocks them. The cost is a pinned native library on five platforms and
+  its CVE surface, forever. If any is ever done it MUST bind an *installed*
+  library and report `Unsupported` naming it when absent; PDFium is the single
+  bundled exception and it is the reason the application exists.
+- **Class C, reflowable formats** — EPUB and the rest have no page count until
+  a viewport is chosen, and the presenter and audience windows are different
+  sizes, so "page 7" would name different content in each. That is a rule 3
+  violation rather than a missing feature. Not planned for the presenter.
+
+Two rules from that document bear on code outside it. A format's absence must
+never break another format, which is what `pdf::router::RoutingBackend` and
+lazy PDFium binding buy. And a refusal must never be reported as a corrupt
+file: "pulpit cannot read this kind of file" and "this file is damaged" are
+different facts, and telling a presenter the second when the first is true
+sends them looking for a problem that does not exist. The router refuses a
+`.cbr` *before* routing, precisely so it cannot fall through to PDFium and
+come back as a damaged PDF.
 
 == The metadata contract (Typst/Mosaic)
 

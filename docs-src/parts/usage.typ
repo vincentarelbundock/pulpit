@@ -12,6 +12,52 @@ the open file between them. `l` cycles through the layouts and `Shift+L`
 opens the library. The choice is the file's, not the application's, so a
 document you switch to Presenter opens that way next time.
 
+== Formats
+
+Pulpit opens three kinds of thing, and they all become the same thing once
+open: a document with a fixed number of pages, each with a fixed size.
+
+#table(
+  columns: 2,
+  table.header([What you open], [What you get]),
+  [`.pdf`], [The full reader: text, links, outline, search, annotations,
+    forms and signatures.],
+  [A folder of images], [Its pages are the images directly inside it, in
+    natural name order — `img2` before `img10`. Subfolders are ignored.],
+  [One image file], [The folder it sits in, opened on that image. Pulpit
+    says which folder it resolved to and how many pages that is, before you
+    navigate anywhere.],
+  [`.cbz`, `.cbt`], [A comic archive, read exactly like the folder it
+    contains — including chapter subfolders, which are flattened and read in
+    sorted path order. Nothing is unpacked to disk.],
+)
+
+Images are read by extension: `png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`,
+`tif`, `tiff`, `qoi`, `tga`, `ico`, `pnm`, `pgm`, `ppm` and `pbm`. An
+animated GIF or WebP shows its first frame — a presenter window is not a
+media player. SVG is not in the list: it is vector content needing a full
+renderer, which is a different decision.
+
+Anything that is not a PDF is *read-only*. There is no text layer to search
+or select, no annotations, no form fields and nothing to sign, and Pulpit
+dims those controls rather than letting you press one and be refused. Notes
+are always slides-only, whatever your default mapping is, so a photograph is
+never cut down the middle with half of it treated as speaker notes.
+
+Everything else about the application is unchanged: the overview grid is a
+contact sheet of the folder, aspect fit handles pages of different shapes,
+and a folder or archive that changes on disk reloads the way a rebuilt deck
+does. On a reload a page is identified by its *file name* rather than its
+number, so adding a picture earlier in the order does not change the one on
+the projector.
+
+`.cbr` is not supported and never will be: RAR needs the unrar library, whose
+licence this project cannot carry. `.cb7` is not supported yet. Both are
+refused by name, so you are told what the format is rather than that your
+file is damaged — repacking either as a `.cbz` opens here. PostScript, DjVu,
+XPS, DVI, EPUB and the other reflowable formats are not supported; the
+reasoning for each is in the internals document.
+
 == Reading
 
 A PDF opens in the Reader: one continuous document, with a side rail for the

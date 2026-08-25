@@ -78,6 +78,7 @@ are to be simple, fast, and minimalist.
     [Reader],
     [Read it, mark it up, fill it in, sign it.],
     (
+      [PDF, image folders, `.cbz` and `.cbt`],
       [Continuous scroll, two-page view],
       [Outline, thumbnails, full-text search],
       [Remembers your place in every file],

@@ -672,10 +672,11 @@ const MAX_RETAINED_MARKS: usize = 24;
 
 /// The "open a document" dialog, offering everything pulpit can open.
 ///
-/// The image filter is **derived from** `pulpit_render::images` rather than
-/// restated (`SPEC-images.md` §41.5). Picking one image opens the folder it
-/// is in, which is what makes a folder reachable through a file picker at
-/// all (§40.2), and the presenter is told so before anything moves (§40.3).
+/// The image and archive filters are **derived from** `pulpit_render::images`
+/// rather than restated (`SPEC-images.md` §41.5). Picking one image opens the
+/// folder it is in, which is what makes a folder reachable through a file
+/// picker at all (§40.2), and the presenter is told so before anything moves
+/// (§40.3). A comic archive is picked directly, being one file (§54.2).
 fn document_dialog() -> rfd::AsyncFileDialog {
     let mut dialog = rfd::AsyncFileDialog::new();
     for (label, extensions) in document_dialog_filters() {
@@ -686,14 +687,16 @@ fn document_dialog() -> rfd::AsyncFileDialog {
 
 /// What that dialog offers, as data, so the derivation is testable.
 fn document_dialog_filters() -> Vec<(&'static str, Vec<&'static str>)> {
-    let images: Vec<&'static str> = pulpit_render::images::IMAGE_EXTENSIONS.to_vec();
+    use pulpit_render::images::{ARCHIVE_EXTENSIONS, IMAGE_EXTENSIONS};
+    let openable = pulpit_render::images::openable_extensions();
     let everything: Vec<&'static str> = std::iter::once("pdf")
-        .chain(images.iter().copied())
+        .chain(openable.iter().copied())
         .collect();
     vec![
-        ("Documents and images", everything),
+        ("Documents, images and comics", everything),
         ("PDF", vec!["pdf"]),
-        ("Images", images),
+        ("Images", IMAGE_EXTENSIONS.to_vec()),
+        ("Comic archives", ARCHIVE_EXTENSIONS.to_vec()),
     ]
 }
 
@@ -5746,13 +5749,26 @@ impl App {
         // because everything below replaces the identity this position
         // belongs to.
         self.record_reading_position();
-        // An image document's source is the *directory* (§40.1), and an image
-        // file resolves to the one it is in (§40.2). Everything below — the
-        // manager, the watcher, the workers — is then handed the directory
-        // and treats it exactly as it treats a file.
+        // A comic archive pulpit deliberately does not read is refused *by
+        // name*, before anything is opened: "pulpit cannot read this kind of
+        // file" and "this file is damaged" are different facts, and telling a
+        // presenter the second sends them looking for a problem that does not
+        // exist (§54.7, §61.1, §61.2).
+        if let Some(message) = pulpit_render::images::unsupported_archive(&path) {
+            self.notify_error(
+                format!("pulpit cannot open {}", path.display()),
+                Some(message.to_string()),
+            );
+            return Task::none();
+        }
+        // An image document's source is the *directory* (§40.1) or the comic
+        // archive that replaces it (§54.1), and an image file resolves to the
+        // directory it is in (§40.2). Everything below — the manager, the
+        // watcher, the workers — is then handed that path and treats it
+        // exactly as it treats a PDF.
         let resolved = pulpit_render::images::resolve_source(&path);
         let path = match resolved.as_ref() {
-            Some(resolved) => resolved.directory.clone(),
+            Some(resolved) => resolved.path().to_path_buf(),
             None => path,
         };
         self.image_pages = resolved.map(crate::doc::ImageDocumentState::new);
@@ -15241,27 +15257,33 @@ fn restored_fields(
 #[cfg(test)]
 mod image_document_tests {
     use super::document_dialog_filters;
-    use pulpit_render::images::IMAGE_EXTENSIONS;
+    use pulpit_render::images::{openable_extensions, ARCHIVE_EXTENSIONS, IMAGE_EXTENSIONS};
 
-    /// §41.5 and §51.4: the dialog filters are *derived* from the one
-    /// extension set, not restated beside it. Three hand-maintained copies
-    /// would drift, and a file that appears in the contact sheet but cannot
-    /// be picked in the dialog is invisible until it matters.
+    /// §41.5 and §51.4: the dialog filters are *derived* from the extension
+    /// sets, not restated beside them. Hand-maintained copies drift, and a
+    /// file that appears in the contact sheet but cannot be picked in the
+    /// dialog is invisible until it matters.
     #[test]
-    fn the_dialog_filters_come_from_the_one_extension_set() {
+    fn the_dialog_filters_come_from_the_extension_sets() {
         let filters = document_dialog_filters();
-        let images = filters
-            .iter()
-            .find(|(label, _)| *label == "Images")
-            .expect("an images filter");
-        assert_eq!(images.1, IMAGE_EXTENSIONS);
+        let of = |label: &str| {
+            filters
+                .iter()
+                .find(|(name, _)| *name == label)
+                .unwrap_or_else(|| panic!("a {label} filter"))
+                .1
+                .clone()
+        };
+        assert_eq!(of("Images"), IMAGE_EXTENSIONS);
+        assert_eq!(of("Comic archives"), ARCHIVE_EXTENSIONS);
 
-        let everything = filters
-            .iter()
-            .find(|(label, _)| *label == "Documents and images")
-            .expect("a combined filter");
-        assert_eq!(everything.1[0], "pdf");
-        assert_eq!(&everything.1[1..], IMAGE_EXTENSIONS);
+        let everything = of("Documents, images and comics");
+        assert_eq!(everything[0], "pdf");
+        assert_eq!(&everything[1..], openable_extensions());
+        assert!(
+            !everything.contains(&"cbr"),
+            "§54.7: a format pulpit refuses is not offered in the picker"
+        );
     }
 }
 

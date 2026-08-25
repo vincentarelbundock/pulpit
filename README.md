@@ -9,6 +9,10 @@ problem — not as polish.
 
 > **pulpit: A Snappy and Snazzy PDF Projector**
 
+It opens PDFs, folders of images, and `.cbz` / `.cbt` comic archives. Anything
+that is not a PDF is read-only: pages turn and render, and the controls that
+need a PDF underneath them are dimmed rather than refusing when pressed.
+
 Installation, keys, layouts, and internals are documented on the website:
 <https://vincentarelbundock.github.io/pulpit>
 
