@@ -369,6 +369,13 @@ fn grid_target(
         // row, over a whole screenful.
         "PageUp" => (current > 0).then(|| current.saturating_sub(page)),
         "PageDown" => (current < last).then(|| (current + page).min(last)),
+        // The ends of the grid, which the grid owns for the same reason it
+        // owns the arrows: while the menu is open these are the presenter
+        // looking over the deck, so they move the selection rather than
+        // falling through to First and Last and moving the audience behind
+        // it. Already at the end the press is absorbed.
+        "Home" => (current > 0).then_some(0),
+        "End" => (current < last).then_some(last),
         _ => return None,
     })
 }
@@ -15298,7 +15305,33 @@ mod grid_navigation_tests {
     #[test]
     fn a_key_the_grid_does_not_own_falls_through() {
         assert_eq!(grid_target("b", 3, COUNT, COLUMNS, PAGE_ROWS), None);
-        assert_eq!(grid_target("Home", 3, COUNT, COLUMNS, PAGE_ROWS), None);
+        assert_eq!(grid_target("Escape", 3, COUNT, COLUMNS, PAGE_ROWS), None);
+    }
+
+    #[test]
+    fn the_end_keys_move_the_selection_to_the_ends_of_the_grid() {
+        assert_eq!(
+            grid_target("Home", 7, COUNT, COLUMNS, PAGE_ROWS),
+            Some(Some(0))
+        );
+        assert_eq!(
+            grid_target("End", 7, COUNT, COLUMNS, PAGE_ROWS),
+            Some(Some(COUNT - 1))
+        );
+    }
+
+    #[test]
+    fn an_end_key_at_the_end_it_names_stays_put() {
+        // Absorbed rather than passed on: `Some(None)` is what keeps the
+        // audience from moving behind the open menu.
+        assert_eq!(
+            grid_target("Home", 0, COUNT, COLUMNS, PAGE_ROWS),
+            Some(None)
+        );
+        assert_eq!(
+            grid_target("End", COUNT - 1, COUNT, COLUMNS, PAGE_ROWS),
+            Some(None)
+        );
     }
 
     #[test]
