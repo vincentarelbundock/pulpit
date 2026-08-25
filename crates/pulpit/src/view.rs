@@ -150,6 +150,9 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         // widget.
         layer(app.alarm_controls.open, || alarms_dialog(app)),
         layer(app.about_open, about_overlay),
+        // What the open document is. A dialog, not a rail view: one question
+        // about the whole file, asked once and closed.
+        layer(app.properties_open, || document_properties_dialog(app)),
         // The timer menu is the same kind of overlay, for the same reason.
         layer(app.timer_controls.open, || timer_dialog(app)),
         // The same rule for a document: what a previous run left unsaved is
@@ -1221,6 +1224,11 @@ fn menu(app: &App) -> Element<'_, Message> {
             shortcut(Action::ReloadDocument),
             Message::Do(Action::ReloadDocument),
         ));
+        if app.state.document().is_some() {
+            // Beside Reload and Show in file manager: what a document *is* is
+            // a question about the file that is open, not about the view of it.
+            items = items.push(entry("Properties…", None, Message::ShowDocumentProperties));
+        }
         if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
             items = items.push(entry("Show in file manager", None, Message::RevealDocument));
         }
@@ -1547,6 +1555,208 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
         corner = corner.push(container(close).padding(gap::S));
     }
     stack![surface, corner.width(Length::Fill)].into()
+}
+
+/// What the open document *is*: its own description of itself.
+///
+/// A dialog rather than a rail view. The rail holds per-page navigation and is
+/// read while moving through a document; this is one question about the whole
+/// file, asked once and closed.
+///
+/// Every string in here was written by whoever produced the file. They are
+/// drawn as text and nothing else — no markup, no links, no layout of their
+/// own — and they arrive already bounded and flattened by
+/// `pulpit_render::document::InfoText`, which is where that guarantee is made
+/// rather than here.
+fn document_properties_dialog(app: &App) -> Element<'_, Message> {
+    use pulpit_render::document::PageSizes;
+
+    let dismiss = Some(Message::CloseDocumentProperties);
+    let mut body = Column::new()
+        .spacing(gap::M)
+        .push(theme::typography::title("Document properties"));
+
+    // The file itself, which pulpit knows whether or not a worker answers.
+    if let Some(path) = app.documents.active().map(|document| &document.path) {
+        body = body.push(properties_row(
+            "File",
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+        ));
+    }
+
+    let Some(properties) = app.document_properties.as_deref() else {
+        // Two honest states, and neither of them is a table of blanks: the
+        // answer is on its way, or it is not coming and this says why.
+        body = body.push(match &app.document_properties_failed {
+            Some(reason) => theme::typography::note(reason.clone()),
+            None => theme::typography::note("Reading…"),
+        });
+        return panel(body, dismiss);
+    };
+
+    // What the document says it is. Absent keys are left out entirely: an
+    // empty row would read as a document that filled the key in with nothing.
+    let mut described = Column::new().spacing(gap::S);
+    let mut said_anything = false;
+    for (label, value) in [
+        ("Title", properties.title.as_ref()),
+        ("Author", properties.author.as_ref()),
+        ("Subject", properties.subject.as_ref()),
+        ("Keywords", properties.keywords.as_ref()),
+    ] {
+        if let Some(value) = value {
+            said_anything = true;
+            described = described.push(properties_row(label, value.to_string()));
+        }
+    }
+    if !said_anything {
+        described = described.push(theme::typography::note(
+            "This document does not say what it is.",
+        ));
+    }
+    body = body.push(dialog_section("Description", described));
+    body = body.push(rule());
+
+    let mut made = Column::new().spacing(gap::S);
+    for (label, value) in [
+        ("Created with", properties.creator.as_ref()),
+        ("Converted by", properties.producer.as_ref()),
+    ] {
+        if let Some(value) = value {
+            made = made.push(properties_row(label, value.to_string()));
+        }
+    }
+    for (label, value) in [
+        ("Created", properties.created.as_ref()),
+        ("Modified", properties.modified.as_ref()),
+    ] {
+        if let Some(value) = value {
+            made = made.push(properties_row(label, value.to_string()));
+        }
+    }
+    if let Some(version) = properties.version {
+        made = made.push(properties_row("PDF version", version.to_string()));
+    }
+    if made_is_empty(properties) {
+        made = made.push(theme::typography::note(
+            "This document does not say where it came from.",
+        ));
+    }
+    body = body.push(dialog_section("Origin", made));
+    body = body.push(rule());
+
+    let mut pages = Column::new()
+        .spacing(gap::S)
+        .push(properties_row("Pages", properties.page_count.to_string()));
+    let size = pulpit_render::document::describe_page_size(&properties.first_page);
+    pages = pages.push(properties_row(
+        "Page size",
+        match properties.page_sizes {
+            PageSizes::Uniform => size,
+            // Named for what it is rather than hidden: a deck that mixes
+            // orientations is the thing a presenter most wants warning of.
+            PageSizes::Mixed => format!("{size} (first page; others differ)"),
+            PageSizes::Unmeasured => format!("{size} (first page)"),
+        },
+    ));
+    body = body.push(dialog_section("Pages", pages));
+    body = body.push(rule());
+
+    // The permissions, which decide whether editing and printing are refused.
+    let mut access = Column::new().spacing(gap::S);
+    match &properties.encryption {
+        Some(encryption) => {
+            access = access.push(properties_row(
+                "Encryption",
+                format!(
+                    "{} (security handler revision {})",
+                    encryption.label(),
+                    encryption.revision
+                ),
+            ));
+            for (label, allowed) in properties.permissions.each() {
+                access = access.push(
+                    row![
+                        container(theme::typography::caption(label).color(theme::ambient::muted()))
+                            .width(Length::Fixed(PROPERTIES_LABEL_WIDTH)),
+                        // A word, not a colour alone: "allowed" and "refused"
+                        // are legible to a reader who cannot tell the two
+                        // apart by hue.
+                        theme::typography::body(if allowed { "Allowed" } else { "Refused" }).color(
+                            if allowed {
+                                theme::ambient::text()
+                            } else {
+                                theme::ambient::alert()
+                            }
+                        ),
+                    ]
+                    .spacing(gap::M),
+                );
+            }
+        }
+        None => {
+            access = access.push(theme::typography::body("Not encrypted."));
+            access = access.push(theme::typography::note(
+                "A document without an encryption dictionary declares no permissions, \
+                 so nothing here is refused by the file itself.",
+            ));
+        }
+    }
+    body = body.push(dialog_section("Encryption and permissions", access));
+    body = body.push(rule());
+
+    // What pulpit will do with it, which is a fact about the document as much
+    // as the pages are: a presenter would rather learn before the talk that a
+    // deck's transitions will be cut than during it.
+    let mut handling = Column::new()
+        .spacing(gap::S)
+        .push(properties_row("Support", properties.level.label().into()));
+    for warning in &properties.warnings {
+        handling = handling.push(theme::typography::note(warning.message()));
+    }
+    if let Some(findings) = app
+        .documents
+        .active()
+        .and_then(|document| app.capabilities.get(&document.id.0))
+    {
+        for finding in &findings.findings {
+            handling = handling.push(theme::typography::note(finding.describe()));
+        }
+    }
+    body = body.push(dialog_section("What pulpit will do with it", handling));
+
+    panel(body, dismiss)
+}
+
+/// Whether the Origin section has anything in it, asked before the section is
+/// built so an empty one can say so rather than be a heading over nothing.
+fn made_is_empty(properties: &pulpit_render::document::DocumentProperties) -> bool {
+    properties.creator.is_none()
+        && properties.producer.is_none()
+        && properties.created.is_none()
+        && properties.modified.is_none()
+        && properties.version.is_none()
+}
+
+/// The width of the label column in the properties dialog. Fixed, so the
+/// values line up into a column a reader can scan rather than being pushed
+/// around by the length of the label beside them.
+const PROPERTIES_LABEL_WIDTH: f32 = 140.0;
+
+/// One `label: value` line of the properties dialog.
+///
+/// The value wraps rather than being cut: a producer string is the document's
+/// own words, and half of one is worse than three lines of it.
+fn properties_row<'a>(label: &'static str, value: String) -> Element<'a, Message> {
+    row![
+        container(theme::typography::caption(label).color(theme::ambient::muted()))
+            .width(Length::Fixed(PROPERTIES_LABEL_WIDTH)),
+        theme::typography::body(value).width(Length::Fill),
+    ]
+    .spacing(gap::M)
+    .into()
 }
 
 fn about_overlay() -> Element<'static, Message> {

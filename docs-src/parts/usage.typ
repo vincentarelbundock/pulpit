@@ -76,6 +76,14 @@ hand, answer immediately.
   where you were, which is not the same as turning back a page.
 - Where you were is remembered per document: page, zoom and side rail come
   back the next time you open that file.
+- *Properties…* in the hamburger says what the open file is: title, author,
+  subject and keywords, what produced it and when, page count and page size,
+  PDF version, and whether it is encrypted. Where a document is encrypted,
+  every permission it declares is listed as allowed or refused — which is
+  what decides whether an edit or a print will be taken. A key the document
+  left empty is left out rather than shown as a blank row, and the last
+  section says what Pulpit will do with the features the file declares:
+  transitions it cuts through, scripts it does not run.
 
 Several copies of Pulpit can run at once, so a file clicked while a window is
 already open gets a window of its own rather than being refused. Each copy

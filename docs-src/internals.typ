@@ -1340,6 +1340,19 @@ uses compact subsets of that same model, so advertised keys cannot drift from
 input handling. Hardware aliases from presenter remotes are resolved
 separately and do not become visual clutter in the keyboard reference.
 
+*Properties…* is one of its file commands, and it opens a dialog rather than a
+rail view: the rail holds per-page navigation, while what a document _is_ is
+one question about the whole file, asked once and closed. The answer is a
+`DocumentRequest::Properties` round trip made when the dialog opens rather
+than at open, since a presenter putting a deck on a projector never asks it.
+Every string in it is written by whoever produced the file, so it crosses the
+wire through `InfoText`, which bounds it to `MAX_INFO_TEXT_BYTES` and
+collapses its control characters and line structure — the same treatment
+`AnnotationContents` gives `/Contents`, for the same reason. A key the
+document left empty is reported as absent rather than as an empty string, so
+the dialog can leave the row out instead of drawing a blank one, and the page
+scan reports `Unmeasured` rather than claiming a uniformity it did not check.
+
 === Media Transport
 
 Play, pause and scrub whatever video or animation is on the slide the

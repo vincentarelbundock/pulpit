@@ -1007,3 +1007,86 @@ fn a_text_mark_fits_the_box_measured_for_it() {
          {roomy} in a box three times the size"
     );
 }
+
+#[test]
+fn a_document_reports_what_it_says_about_itself() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("properties");
+    let path = directory.join("described.pdf");
+    // The fixture writer puts its argument in `/Keywords` and names itself in
+    // `/Producer`, which is enough to prove the `/Info` read is a real one.
+    write_pdf(&path, 3, Some("notes: after")).unwrap();
+    let document = open(backend, &path);
+
+    let properties = document
+        .properties()
+        .expect("the document describes itself");
+    assert_eq!(
+        properties
+            .keywords
+            .as_ref()
+            .map(|value| value.text.as_str()),
+        Some("notes: after")
+    );
+    assert_eq!(
+        properties
+            .producer
+            .as_ref()
+            .map(|value| value.text.as_str()),
+        Some("pulpit fixtures")
+    );
+    // Absent keys are absent, not empty: the fixture writes no title.
+    assert!(properties.title.is_none());
+    assert!(properties.author.is_none());
+    assert!(properties.created.is_none());
+
+    assert_eq!(properties.page_count, 3);
+    // Every fixture page is the same size, and the scan says so rather than
+    // leaving the question unmeasured.
+    assert_eq!(
+        properties.page_sizes,
+        pulpit_render::document::PageSizes::Uniform
+    );
+    assert_eq!(properties.first_page.width, 720.0);
+
+    // A version PDFium could read, and no encryption dictionary — so nothing
+    // the file itself refuses.
+    assert!(
+        properties.version.is_some(),
+        "the header declares a version"
+    );
+    assert!(properties.encryption.is_none());
+    assert!(properties.permissions.is_unrestricted());
+}
+
+#[test]
+fn a_documents_own_strings_cannot_lay_out_the_dialog_that_shows_them() {
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("properties-hostile");
+    let path = directory.join("hostile.pdf");
+    // Newlines and control characters in an `/Info` string, which is exactly
+    // as attacker-controlled as a form's script: the engine flattens them, so
+    // a producer cannot push a permission row off the dialog.
+    write_pdf(&path, 1, Some("first\nsecond\r\nthird\u{7}")).unwrap();
+    let document = open(backend, &path);
+
+    let properties = document
+        .properties()
+        .expect("the document describes itself");
+    let keywords = properties.keywords.expect("the fixture wrote keywords");
+    assert!(!keywords.text.contains('\n'), "{:?}", keywords.text);
+    assert!(!keywords.text.contains('\r'), "{:?}", keywords.text);
+    assert!(
+        !keywords.text.chars().any(char::is_control),
+        "{:?}",
+        keywords.text
+    );
+    assert_eq!(keywords.text, "first second third");
+    assert!(!keywords.truncated);
+}

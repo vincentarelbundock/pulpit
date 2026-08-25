@@ -229,6 +229,9 @@ pub enum Message {
     CloseShortcuts,
     ShowAbout,
     CloseAbout,
+    /// Open the properties dialog, asking the document what it is.
+    ShowDocumentProperties,
+    CloseDocumentProperties,
     OpenDocumentation,
     /// Start immediately with the saved display and fullscreen choices.
     StartAudience,
@@ -1105,6 +1108,16 @@ pub struct App {
     pub shortcuts_open: bool,
     /// Whether the compact application information dialog is open.
     pub about_open: bool,
+    /// Whether the document properties dialog is open.
+    pub properties_open: bool,
+    /// What the document said about itself, once the worker has answered.
+    ///
+    /// `None` while the answer is outstanding, which is what the dialog draws
+    /// as "Reading…" rather than as a document with nothing in it. Dropped
+    /// when a document is put down: the next one's properties are its own.
+    pub document_properties: Option<Box<pulpit_render::document::DocumentProperties>>,
+    /// Why the properties could not be read, when they could not.
+    pub document_properties_failed: Option<String>,
     /// Whether the arrow beside Start has unrolled its alternate actions.
     pub audience_start_menu_open: bool,
     /// Intent, separate from the asynchronous Iced window lifecycle.
@@ -1880,6 +1893,9 @@ impl App {
             recent_menu_open: false,
             shortcuts_open: false,
             about_open: false,
+            properties_open: false,
+            document_properties: None,
+            document_properties_failed: None,
             audience_start_menu_open: false,
             audience_started: false,
             presenter_window: None,
@@ -2872,12 +2888,14 @@ impl App {
                 if key.as_deref() == Some("Escape")
                     && (self.shortcuts_open
                         || self.about_open
+                        || self.properties_open
                         || self.menu_open
                         || self.audience_start_menu_open
                         || self.overview)
                 {
                     self.shortcuts_open = false;
                     self.about_open = false;
+                    self.properties_open = false;
                     self.menu_open = false;
                     self.audience_start_menu_open = false;
                     // Backing out of the overview returns to the slide that
@@ -3526,6 +3544,17 @@ impl App {
             }
             Message::CloseAbout => {
                 self.about_open = false;
+                Task::none()
+            }
+            Message::ShowDocumentProperties => {
+                self.menu_open = false;
+                self.recent_menu_open = false;
+                self.properties_open = true;
+                self.ask_document_properties();
+                Task::none()
+            }
+            Message::CloseDocumentProperties => {
+                self.properties_open = false;
                 Task::none()
             }
             Message::OpenDocumentation => {
@@ -5820,6 +5849,11 @@ impl App {
         self.reader_link = None;
         self.reader_wakeup = None;
         self.reader_journal = None;
+        // What the last document said about itself is not what this one says,
+        // and a dialog left open across an open would otherwise describe the
+        // file that is gone.
+        self.document_properties = None;
+        self.document_properties_failed = None;
         self.forget_per_document_edit_state();
 
         // A PDF without a deliberate per-file choice always opens for
@@ -6034,6 +6068,12 @@ impl App {
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
+        // Nothing will answer a properties question now, and a dialog waiting
+        // on one must say so rather than read "Reading…" for ever.
+        if self.document_properties.is_none() {
+            self.document_properties_failed =
+                Some("The document worker stopped, so this document cannot be read.".into());
+        }
         self.forget_per_document_edit_state();
     }
 
@@ -6131,6 +6171,11 @@ impl App {
                     // is what A9 requires of the signature one in particular.
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
+                    }
+                    // A properties dialog left open across an open describes
+                    // the document that is there now, not the one that was.
+                    if self.properties_open {
+                        self.ask_document_properties();
                     }
                 }
                 crate::reader_link::Told::Found { generation, chunk } => {
@@ -6285,6 +6330,17 @@ impl App {
                         self.form_move_answered();
                     }
                     self.form_changed(page, *result);
+                }
+                crate::reader_link::Told::Properties(properties) => {
+                    self.document_properties_failed = None;
+                    self.document_properties = Some(properties);
+                }
+                crate::reader_link::Told::PropertiesFailed { message } => {
+                    // Said in the dialog that asked for it and nowhere else: a
+                    // toast for a question the user is looking at the answer to
+                    // is a notice in the wrong place.
+                    tracing::debug!(%message, "the document would not describe itself");
+                    self.document_properties_failed = Some(message);
                 }
                 crate::reader_link::Told::Annotations { page, summaries } => {
                     self.reader.set_annotations(page, &summaries);
@@ -7331,6 +7387,32 @@ impl App {
     fn ask_field_list(&mut self) {
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::ListFields);
+        }
+    }
+
+    /// Ask the document what it is, for the properties dialog.
+    ///
+    /// Asked once per document: the answer cannot change under a session that
+    /// only ever writes copies (A6), and reopening the dialog on a deck of
+    /// three hundred pages must not walk it again. A document with no worker —
+    /// one whose session was refused, or lost — is reported as unreadable
+    /// rather than left showing "Reading…" for ever.
+    fn ask_document_properties(&mut self) {
+        if self.document_properties.is_some() {
+            self.document_properties_failed = None;
+            return;
+        }
+        let asked = self
+            .reader_link
+            .as_mut()
+            .is_some_and(|link| link.ask(crate::reader_link::Ask::Properties));
+        if !asked {
+            self.document_properties_failed = Some(if self.state.document().is_some() {
+                "This document is open for presenting only, so it cannot be asked what it is."
+                    .into()
+            } else {
+                "No document is open.".into()
+            });
         }
     }
 

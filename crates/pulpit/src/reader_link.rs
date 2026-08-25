@@ -64,6 +64,12 @@ pub enum Ask {
     /// described and again after a commit, because PDFium is the sole author
     /// of a value and a list this process patched would be a second opinion.
     ListFields,
+    /// What the document says about itself, for the properties dialog.
+    ///
+    /// Asked when the dialog is opened rather than when the document is
+    /// described: it is a question a presenter putting a deck on a projector
+    /// never asks, and the worker answers one request at a time.
+    Properties,
     /// Resolve a text selection. Read-only: it never moves the revision
     /// (§6.3). `finalising` marks the query a release is waiting on, so the
     /// answer that commits a highlight is told apart from the ones that only
@@ -163,6 +169,13 @@ pub enum Told {
     },
     /// The document's fields as the engine now holds them.
     Fields(Vec<pulpit_render::document::FormField>),
+    /// What the document says about itself.
+    Properties(Box<pulpit_render::document::DocumentProperties>),
+    /// …or the reason it would not say. Its own case, like a refused snapshot,
+    /// because a dialog is waiting on this particular answer.
+    PropertiesFailed {
+        message: String,
+    },
     Selection {
         result: pulpit_render::document::TextSelectionResult,
         finalising: bool,
@@ -606,6 +619,16 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
         Ask::ListFields => vec![match session.request(DocumentRequest::ListFields) {
             Ok(DocumentResponse::Fields(fields)) => Told::Fields(fields),
             other => unexpected(other, "a field list"),
+        }],
+        Ask::Properties => vec![match session.request(DocumentRequest::Properties) {
+            Ok(DocumentResponse::Properties(properties)) => Told::Properties(properties),
+            // A refusal is an answer: the dialog is waiting on this one, and a
+            // generic failure would leave it reading "Reading…" for as long as
+            // it stayed open.
+            Err(error) if !error.is_worker_loss() => Told::PropertiesFailed {
+                message: error.to_string(),
+            },
+            other => unexpected(other, "document properties"),
         }],
         Ask::SelectText {
             page,

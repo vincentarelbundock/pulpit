@@ -13,14 +13,15 @@ use serde::{Deserialize, Serialize};
 
 use super::limits::{self, LimitExceeded};
 use super::model::{
-    AnnotationSummary, Applied, DocumentRevision, DocumentTransaction, DocumentUndo, FormField,
-    OpenDocumentInfo, SaveOptions, SavedDocument, TextSelection, TextSelectionResult,
+    AnnotationSummary, Applied, DocumentProperties, DocumentRevision, DocumentTransaction,
+    DocumentUndo, FormField, OpenDocumentInfo, SaveOptions, SavedDocument, TextSelection,
+    TextSelectionResult,
 };
 
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 5;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 6;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -308,6 +309,14 @@ pub enum DocumentRequest {
     ListFields,
     /// The document's bookmark tree, for the outline rail.
     Outline,
+    /// What the document says about itself: its `/Info` strings, its version,
+    /// its encryption and permissions, and the shape of its pages.
+    ///
+    /// Asked when a properties view is opened and not before. Each part of the
+    /// answer is one cheap call, but the answer is a question about the
+    /// *document*, which lives here rather than in the application, and a
+    /// presenter opening a deck never asks it.
+    Properties,
     /// Raw input forwarded to the form-fill environment (§8.6).
     FormEvent {
         page: PageIndex,
@@ -741,6 +750,7 @@ pub enum DocumentResponse {
     Found(HitChunk),
     Fields(Vec<FormField>),
     Outline(pulpit_core::navigation::Outline),
+    Properties(Box<DocumentProperties>),
     Form(Box<FormEventResult>),
     Applied(Box<Applied>),
     Saved(SavedDocument),
@@ -852,6 +862,7 @@ impl DocumentRequest {
             | DocumentRequest::FindText { .. }
             | DocumentRequest::ListFields
             | DocumentRequest::Outline
+            | DocumentRequest::Properties
             | DocumentRequest::SaveAs(_)
             | DocumentRequest::Close => false,
         }
@@ -940,6 +951,21 @@ impl DocumentResponse {
             ),
             DocumentResponse::PageGeometries(pages) => {
                 limits::within("page geometries", pages.len(), MAX_PAGE_GEOMETRIES)
+            }
+            // The strings a document wrote about itself, checked against the
+            // bound the engine cut them to. The worker has just parsed a
+            // hostile file and is supervised rather than trusted: a title long
+            // enough to be a denial of service is refused here, before
+            // anything is drawn with it.
+            DocumentResponse::Properties(properties) => {
+                for value in properties.strings() {
+                    limits::within(
+                        "an /Info string",
+                        value.text.len(),
+                        limits::MAX_INFO_TEXT_BYTES,
+                    )?;
+                }
+                Ok(())
             }
             DocumentResponse::Frame(frame) => {
                 if frame.is_consistent() {

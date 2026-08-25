@@ -105,6 +105,16 @@ pub const MAX_FIELD_OPTIONS: usize = 4_096;
 /// The most widgets one field may have across the document.
 pub const MAX_FIELD_WIDGETS: usize = 1_024;
 
+/// The most bytes one `/Info` string — a title, an author, a producer — may
+/// carry into the properties view.
+///
+/// These are document-controlled strings shown verbatim, so they are bounded
+/// on the way out of the engine exactly as an annotation's `/Contents` is, and
+/// the cut is *reported* rather than made silently. A title runs to a line;
+/// four kilobytes is a page of prose and past anything a real producer writes
+/// into one of these keys.
+pub const MAX_INFO_TEXT_BYTES: usize = 4 * 1024;
+
 /// The most entries the recovery journal keeps before it is compacted.
 ///
 /// A session's worth of edits, bounded so a runaway loop cannot fill a disk
@@ -141,6 +151,9 @@ const _: () = {
     assert!(MAX_POINTS_PER_TRANSACTION >= MAX_POINTS_PER_INK);
     assert!(MAX_OPERATIONS_PER_TRANSACTION >= 32);
     assert!(MAX_FIELD_VALUE_BYTES >= 1_024);
+    // A title or an author is a line of text; a bound below that would cut
+    // real ones and report every ordinary document as truncated.
+    assert!(MAX_INFO_TEXT_BYTES >= 256);
     // A read that could not reach the carrying limit would truncate every
     // value at the buffer rather than at the bound, which is the bug this
     // constant exists to prevent.

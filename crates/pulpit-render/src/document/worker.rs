@@ -135,6 +135,9 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
             .map(DocumentResponse::Found),
         DocumentRequest::ListFields => document.fields().map(DocumentResponse::Fields),
         DocumentRequest::Outline => document.outline().map(DocumentResponse::Outline),
+        DocumentRequest::Properties => document
+            .properties()
+            .map(|properties| DocumentResponse::Properties(Box::new(properties))),
         DocumentRequest::Apply {
             expected_revision,
             transaction,

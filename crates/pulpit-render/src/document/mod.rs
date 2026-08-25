@@ -37,12 +37,14 @@ use pulpit_core::page::{PageGeometry, PageIndex, PageRect};
 use pulpit_core::search::HitChunk;
 
 pub use limits::LimitExceeded;
+pub use model::describe_page_size;
 pub use model::{
     AnnotationBeforeImage, AnnotationContents, AnnotationSummary, AnnotationSupport, Applied,
-    AppliedEffect, CompatibilityLevel, DocumentCommand, DocumentRevision, DocumentTransaction,
-    DocumentUndo, DocumentWarning, FieldFormat, FieldKind, FieldWidget, FormField,
-    OpenDocumentInfo, SaveOptions, SavedDocument, TextSelection, TextSelectionResult,
-    UndoOperation,
+    AppliedEffect, CivilTime, CompatibilityLevel, DocumentCommand, DocumentDate,
+    DocumentPermissions, DocumentProperties, DocumentRevision, DocumentTransaction, DocumentUndo,
+    DocumentWarning, Encryption, FieldFormat, FieldKind, FieldWidget, FormField, InfoText,
+    OpenDocumentInfo, PageSizes, PdfVersion, SaveOptions, SavedDocument, TextSelection,
+    TextSelectionResult, UndoOperation, MAX_PAGES_MEASURED_FOR_PROPERTIES,
 };
 
 /// Why a document operation failed.
@@ -165,6 +167,16 @@ pub trait DocumentBackend {
     /// which is also what a document without bookmarks looks like.
     fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
         Ok(pulpit_core::navigation::Outline::default())
+    }
+
+    /// What the document says about itself, for the properties view.
+    ///
+    /// The default is the shape of the document and nothing else, which is the
+    /// honest answer for a backend with no `/Info` dictionary to read: a
+    /// folder of images has no title, no producer and no PDF version, and
+    /// blanks invented for them would read as a document that left them empty.
+    fn properties(&self) -> Result<DocumentProperties> {
+        Ok(DocumentProperties::from_info(self.info()))
     }
 
     /// Write a field, returning the value the document actually took.
@@ -389,6 +401,23 @@ impl<'a> PdfDocument<'a> {
     /// The document's bookmark tree, for the outline rail.
     pub fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
         self.backend.outline()
+    }
+
+    /// What the document says about itself, for the properties view.
+    ///
+    /// Bounded here as well as in the backend: every string is
+    /// document-controlled, and this is the boundary the answer leaves the
+    /// engine through.
+    pub fn properties(&self) -> Result<DocumentProperties> {
+        let properties = self.backend.properties()?;
+        for value in properties.strings() {
+            limits::within(
+                "an /Info string",
+                value.text.len(),
+                limits::MAX_INFO_TEXT_BYTES,
+            )?;
+        }
+        Ok(properties)
     }
 
     pub fn fields(&self) -> Result<Vec<FormField>> {

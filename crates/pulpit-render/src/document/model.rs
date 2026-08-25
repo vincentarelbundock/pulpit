@@ -187,6 +187,508 @@ impl DocumentWarning {
     }
 }
 
+/// One string a document wrote about itself — a title, an author, a producer.
+///
+/// Bounded and reported the way [`AnnotationContents`] bounds `/Contents`, and
+/// for the same reason: these are attacker-controlled strings that end up on
+/// screen. Nothing here is interpreted — no markup, no escapes, no line
+/// structure. Control characters are turned into spaces and runs of whitespace
+/// collapsed, so a producer cannot lay a title out across the dialog or pad one
+/// with a screenful of newlines to push a permission row out of sight.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct InfoText {
+    pub text: String,
+    /// True when the value was cut to fit [`limits::MAX_INFO_TEXT_BYTES`], so a
+    /// properties view can say so rather than show a silently shortened line.
+    pub truncated: bool,
+}
+
+impl InfoText {
+    /// Take one raw `/Info` string, or `None` when the document has nothing to
+    /// say under that key.
+    ///
+    /// An absent key and a key holding only spaces are the same answer — the
+    /// document did not say — and both are reported as absent so the view can
+    /// leave the row out rather than draw an empty one.
+    pub fn read(raw: &str) -> Option<InfoText> {
+        let mut text = String::with_capacity(raw.len());
+        let mut pending_space = false;
+        for character in raw.chars() {
+            if character.is_whitespace() || character.is_control() {
+                pending_space = !text.is_empty();
+                continue;
+            }
+            if pending_space {
+                text.push(' ');
+                pending_space = false;
+            }
+            text.push(character);
+        }
+        if text.is_empty() {
+            return None;
+        }
+        if text.len() <= limits::MAX_INFO_TEXT_BYTES {
+            return Some(InfoText {
+                text,
+                truncated: false,
+            });
+        }
+        // On a character boundary, never inside one: the bound is in bytes and
+        // the string is UTF-8.
+        let mut cut = limits::MAX_INFO_TEXT_BYTES;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        Some(InfoText {
+            text,
+            truncated: true,
+        })
+    }
+}
+
+impl std::fmt::Display for InfoText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)?;
+        if self.truncated {
+            f.write_str("…")?;
+        }
+        Ok(())
+    }
+}
+
+/// A date a document wrote about itself, as far as it can be believed.
+///
+/// The raw string is kept whatever happens: a `/CreationDate` that does not
+/// parse is still what the file says, and showing it is more honest than
+/// dropping the row and implying the document gave no date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentDate {
+    pub raw: InfoText,
+    /// The parts of `D:YYYYMMDDHHmmSSOHH'mm'` that were present and in range.
+    pub parsed: Option<CivilTime>,
+}
+
+impl DocumentDate {
+    /// Read a PDF date string (`D:20240115103000+01'00'`), keeping the raw
+    /// text whether or not the shape is one this understands.
+    pub fn read(raw: &str) -> Option<DocumentDate> {
+        let text = InfoText::read(raw)?;
+        Some(DocumentDate {
+            parsed: CivilTime::parse(&text.text),
+            raw: text,
+        })
+    }
+}
+
+impl std::fmt::Display for DocumentDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.parsed {
+            Some(time) => write!(f, "{time}"),
+            None => write!(f, "{}", self.raw),
+        }
+    }
+}
+
+/// A wall-clock date and time as a document wrote it down, with no attempt to
+/// resolve it against a real calendar.
+///
+/// Deliberately not a timestamp. The domain crates read no clock and pulpit
+/// carries no time-zone database; what a `/ModDate` records is the local time
+/// its producer believed it was, and turning that into an instant would be an
+/// invention. It is displayed as it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CivilTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    /// Minutes east of UTC, when the document said. `None` is a date with no
+    /// offset, which the specification calls local time of unknown zone.
+    pub offset_minutes: Option<i16>,
+}
+
+impl CivilTime {
+    /// `D:YYYYMMDDHHmmSSOHH'mm'`, with everything after the year optional.
+    ///
+    /// Defaults are the specification's: an absent field is the smallest legal
+    /// value. Anything malformed answers `None` rather than a date built from
+    /// the digits that did parse — a half-read date is a wrong one.
+    pub fn parse(raw: &str) -> Option<CivilTime> {
+        let digits = raw.strip_prefix("D:").unwrap_or(raw);
+        let digits = digits.as_bytes();
+        if digits.len() < 4 || !digits[..4].iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let field = |at: usize, default: u8| -> Option<u8> {
+            if digits.len() < at + 2 {
+                return Some(default);
+            }
+            let pair = &digits[at..at + 2];
+            if !pair.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            Some((pair[0] - b'0') * 10 + (pair[1] - b'0'))
+        };
+        let year = digits[..4]
+            .iter()
+            .fold(0u16, |value, digit| value * 10 + u16::from(digit - b'0'));
+        let month = field(4, 1)?;
+        let day = field(6, 1)?;
+        let hour = field(8, 0)?;
+        let minute = field(10, 0)?;
+        let second = field(12, 0)?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        // 60 for a leap second, which a producer may legally have written.
+        if hour > 23 || minute > 59 || second > 60 {
+            return None;
+        }
+        let offset_minutes = match digits.get(14) {
+            None => None,
+            Some(b'Z') => Some(0),
+            Some(sign @ (b'+' | b'-')) => {
+                let sign = if *sign == b'-' { -1 } else { 1 };
+                let hours = i16::from(field(15, 0)?);
+                // The minutes are written after an apostrophe, and some
+                // producers leave it — and them — out entirely.
+                let minutes = match digits.get(17) {
+                    Some(b'\'') => i16::from(field(18, 0)?),
+                    Some(byte) if byte.is_ascii_digit() => i16::from(field(17, 0)?),
+                    _ => 0,
+                };
+                if hours > 23 || minutes > 59 {
+                    return None;
+                }
+                Some(sign * (hours * 60 + minutes))
+            }
+            Some(_) => return None,
+        };
+        Some(CivilTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            offset_minutes,
+        })
+    }
+}
+
+impl std::fmt::Display for CivilTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )?;
+        match self.offset_minutes {
+            None => Ok(()),
+            Some(0) => f.write_str(" UTC"),
+            Some(offset) => write!(
+                f,
+                " UTC{}{:02}:{:02}",
+                if offset < 0 { '-' } else { '+' },
+                offset.abs() / 60,
+                offset.abs() % 60
+            ),
+        }
+    }
+}
+
+/// What a document's own permission flags allow, once it is encrypted.
+///
+/// The bit numbers are the specification's, counted from one. An unencrypted
+/// document has no permission flags at all and every one of these is true —
+/// which is not the same as a document that grants everything, and the
+/// properties view says which case it is looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPermissions {
+    /// Bit 3.
+    pub print: bool,
+    /// Bit 4: change the content.
+    pub modify: bool,
+    /// Bit 5: copy text and graphics out.
+    pub copy: bool,
+    /// Bit 6: add or change annotations, and fill existing fields.
+    pub annotate: bool,
+    /// Bit 9: fill form fields even where bit 6 is clear.
+    pub fill_forms: bool,
+    /// Bit 10: extract text for accessibility.
+    pub accessibility: bool,
+    /// Bit 11: insert, rotate or delete pages.
+    pub assemble: bool,
+    /// Bit 12: print at full resolution rather than a degraded image.
+    pub print_high_quality: bool,
+}
+
+impl Default for DocumentPermissions {
+    fn default() -> Self {
+        DocumentPermissions::UNRESTRICTED
+    }
+}
+
+impl DocumentPermissions {
+    /// What an unencrypted document allows: everything, because it declared
+    /// nothing.
+    pub const UNRESTRICTED: DocumentPermissions = DocumentPermissions {
+        print: true,
+        modify: true,
+        copy: true,
+        annotate: true,
+        fill_forms: true,
+        accessibility: true,
+        assemble: true,
+        print_high_quality: true,
+    };
+
+    /// Read the flags out of `/P`, whose bits are numbered from one.
+    pub fn from_bits(bits: u32) -> DocumentPermissions {
+        let allowed = |bit: u32| bits & (1 << (bit - 1)) != 0;
+        DocumentPermissions {
+            print: allowed(3),
+            modify: allowed(4),
+            copy: allowed(5),
+            annotate: allowed(6),
+            fill_forms: allowed(9),
+            accessibility: allowed(10),
+            assemble: allowed(11),
+            print_high_quality: allowed(12),
+        }
+    }
+
+    /// Every operation, with what the document says about it. In the order a
+    /// reader wants to scan them: what pulpit is about to do first.
+    pub fn each(&self) -> [(&'static str, bool); 8] {
+        [
+            ("Annotate", self.annotate),
+            ("Fill form fields", self.fill_forms),
+            ("Change the content", self.modify),
+            ("Print", self.print),
+            ("Print at full resolution", self.print_high_quality),
+            ("Copy text out", self.copy),
+            ("Extract for accessibility", self.accessibility),
+            ("Insert, rotate or delete pages", self.assemble),
+        ]
+    }
+
+    pub fn is_unrestricted(&self) -> bool {
+        *self == DocumentPermissions::UNRESTRICTED
+    }
+}
+
+/// How a document is encrypted, when it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Encryption {
+    /// PDFium's security-handler revision. Negative means no handler, which is
+    /// why an [`Encryption`] only exists for a document that has one.
+    pub revision: i32,
+}
+
+impl Encryption {
+    /// What the revision number implies about the algorithm, said as loosely
+    /// as it is actually known: the revision names the handler, and the
+    /// handler's `/CF` decides the cipher, which is not read here.
+    pub fn label(&self) -> &'static str {
+        match self.revision {
+            2 => "40-bit RC4",
+            3 => "128-bit RC4",
+            4 => "128-bit, RC4 or AES",
+            5 | 6 => "256-bit AES",
+            _ => "an unrecognised security handler",
+        }
+    }
+}
+
+/// The PDF version a document declares in its header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfVersion(pub u32);
+
+impl std::fmt::Display for PdfVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.0 / 10, self.0 % 10)
+    }
+}
+
+/// A page's size, in the units a person asks the question in.
+///
+/// Millimetres first because that is what paper is sold in, the paper's name
+/// when it has one, and points last because that is what the file says and
+/// what a producer's own dialog will show. `/UserUnit` is applied: a page that
+/// scales its points is physically that much larger, and reporting the raw
+/// numbers would describe a sheet nobody could print.
+pub fn describe_page_size(page: &PageGeometry) -> String {
+    let unit = if page.user_unit > 0.0 {
+        page.user_unit
+    } else {
+        1.0
+    };
+    let (width, height) = (page.width * unit, page.height * unit);
+    let millimetres = |points: f32| points * 25.4 / 72.0;
+    let (width_mm, height_mm) = (millimetres(width), millimetres(height));
+    let orientation = if (width - height).abs() < 1.0 {
+        "square"
+    } else if width > height {
+        "landscape"
+    } else {
+        "portrait"
+    };
+    match paper_name(width_mm, height_mm) {
+        Some(name) => format!(
+            "{width_mm:.0} × {height_mm:.0} mm ({name} {orientation}), {width:.0} × {height:.0} pt"
+        ),
+        None => format!(
+            "{width_mm:.0} × {height_mm:.0} mm ({orientation}), {width:.0} × {height:.0} pt"
+        ),
+    }
+}
+
+/// The name of a standard sheet this size, when there is one.
+///
+/// Named in either orientation, and only within a couple of millimetres:
+/// producers round their page boxes, and a document two tenths of a millimetre
+/// off A4 is A4. Anything else is reported by its measurements rather than
+/// forced into the nearest name.
+fn paper_name(width_mm: f32, height_mm: f32) -> Option<&'static str> {
+    /// How far off a nominal size a sheet may be and still be called by its
+    /// name.
+    const TOLERANCE: f32 = 2.0;
+    const SHEETS: [(&str, f32, f32); 11] = [
+        ("A0", 841.0, 1189.0),
+        ("A1", 594.0, 841.0),
+        ("A2", 420.0, 594.0),
+        ("A3", 297.0, 420.0),
+        ("A4", 210.0, 297.0),
+        ("A5", 148.0, 210.0),
+        ("A6", 105.0, 148.0),
+        ("B5", 176.0, 250.0),
+        ("Letter", 216.0, 279.0),
+        ("Legal", 216.0, 356.0),
+        ("Tabloid", 279.0, 432.0),
+    ];
+    let (short, long) = if width_mm <= height_mm {
+        (width_mm, height_mm)
+    } else {
+        (height_mm, width_mm)
+    };
+    SHEETS
+        .iter()
+        .find(|(_, sheet_short, sheet_long)| {
+            (short - sheet_short).abs() <= TOLERANCE && (long - sheet_long).abs() <= TOLERANCE
+        })
+        .map(|(name, _, _)| *name)
+}
+
+/// Whether every page of a document is the size of its first one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageSizes {
+    /// Every page measured the same as the first.
+    Uniform,
+    /// At least one page is a different size or rotation.
+    Mixed,
+    /// Not established. A document longer than
+    /// [`MAX_PAGES_MEASURED_FOR_PROPERTIES`] is not walked to answer a
+    /// question nobody is waiting on, and a backend that measures nothing
+    /// says so rather than claiming uniformity it did not check.
+    #[default]
+    Unmeasured,
+}
+
+/// How many pages the properties scan will measure before it stops and reports
+/// [`PageSizes::Unmeasured`].
+///
+/// The measurements are almost always already cached — the reader asked for
+/// every page's geometry when the document opened — so this bounds the case
+/// where they are not: a thousand-page document whose properties are opened
+/// before its layout finished.
+pub const MAX_PAGES_MEASURED_FOR_PROPERTIES: usize = 4_096;
+
+/// What a document *is*: everything the properties view shows.
+///
+/// Read on demand rather than at open. It is one cheap call per key, but it is
+/// a question about the document and the document lives in a worker, so it
+/// costs a round trip — and a presenter opening a deck never asks it. Every
+/// string here has been through [`InfoText`], and every field is optional
+/// because a document that said nothing must be reported as having said
+/// nothing rather than as an empty row.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DocumentProperties {
+    pub title: Option<InfoText>,
+    pub author: Option<InfoText>,
+    pub subject: Option<InfoText>,
+    pub keywords: Option<InfoText>,
+    /// The application that produced the original document.
+    pub creator: Option<InfoText>,
+    /// The one that converted it to PDF.
+    pub producer: Option<InfoText>,
+    pub created: Option<DocumentDate>,
+    pub modified: Option<DocumentDate>,
+    pub page_count: usize,
+    /// The first page's geometry, and what the rest of the document does with
+    /// it.
+    ///
+    /// Measured rather than assumed: a document that mixes portrait and
+    /// landscape is reported as mixed instead of being described by its first
+    /// page, which is the case a presenter most wants to know about.
+    pub first_page: PageGeometry,
+    pub page_sizes: PageSizes,
+    /// Absent for a document that is not a PDF at all — a folder of images —
+    /// or one whose header could not be read.
+    pub version: Option<PdfVersion>,
+    pub encryption: Option<Encryption>,
+    pub permissions: DocumentPermissions,
+    pub level: CompatibilityLevel,
+    pub warnings: Vec<DocumentWarning>,
+}
+
+impl DocumentProperties {
+    /// Every document-controlled string in here, for the one place that has to
+    /// check them all: the protocol's bound on an answer from a worker that
+    /// has just parsed a hostile file.
+    ///
+    /// A method rather than a list written out at the call site, so a field
+    /// added above cannot be forgotten by the check.
+    pub fn strings(&self) -> impl Iterator<Item = &InfoText> {
+        [
+            self.title.as_ref(),
+            self.author.as_ref(),
+            self.subject.as_ref(),
+            self.keywords.as_ref(),
+            self.creator.as_ref(),
+            self.producer.as_ref(),
+            self.created.as_ref().map(|date| &date.raw),
+            self.modified.as_ref().map(|date| &date.raw),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// What can be said about a document from its [`OpenDocumentInfo`] alone.
+    ///
+    /// The honest answer for a backend with no `/Info` dictionary to read —
+    /// a folder of images, or the fixture. It reports the shape of the
+    /// document and claims nothing about its metadata.
+    pub fn from_info(info: &OpenDocumentInfo) -> DocumentProperties {
+        DocumentProperties {
+            page_count: info.page_count,
+            first_page: info.first_page,
+            page_sizes: if info.page_count <= 1 {
+                PageSizes::Uniform
+            } else {
+                PageSizes::Unmeasured
+            },
+            level: info.level,
+            warnings: info.warnings.clone(),
+            ..DocumentProperties::default()
+        }
+    }
+}
+
 /// What the engine knows about an open document up front.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenDocumentInfo {
@@ -1141,6 +1643,141 @@ mod tests {
         assert!(hit.editable);
         assert_eq!(hit.width, summary.style.width);
         assert!(summary.editable());
+    }
+
+    #[test]
+    fn an_info_string_is_collapsed_to_one_line_and_never_laid_out() {
+        // A producer cannot push a permission row off the dialog with
+        // newlines, and cannot draw anything with control characters.
+        let value = InfoText::read("  Quarterly\n\n\treport\u{7}  ").expect("some text");
+        assert_eq!(value.text, "Quarterly report");
+        assert!(!value.truncated);
+        assert_eq!(value.to_string(), "Quarterly report");
+    }
+
+    #[test]
+    fn a_key_that_says_nothing_is_absent_rather_than_empty() {
+        assert!(InfoText::read("").is_none());
+        assert!(InfoText::read(" \n\t ").is_none());
+        assert!(InfoText::read("\u{0}\u{1}").is_none());
+    }
+
+    #[test]
+    fn a_long_info_string_is_cut_at_the_bound_and_says_so() {
+        let long = "é".repeat(limits::MAX_INFO_TEXT_BYTES);
+        let value = InfoText::read(&long).expect("some text");
+        assert!(value.truncated);
+        assert!(value.text.len() <= limits::MAX_INFO_TEXT_BYTES);
+        // Cut on a character boundary: the string is still valid UTF-8 and
+        // ends in a whole character.
+        assert!(value.text.chars().all(|character| character == 'é'));
+        assert!(value.to_string().ends_with('…'));
+    }
+
+    #[test]
+    fn a_pdf_date_is_read_as_the_local_time_its_producer_wrote() {
+        let date = DocumentDate::read("D:20240115103005+01'30'").expect("a date");
+        let time = date.parsed.expect("a parsed date");
+        assert_eq!(time.year, 2024);
+        assert_eq!(time.month, 1);
+        assert_eq!(time.day, 15);
+        assert_eq!(time.offset_minutes, Some(90));
+        assert_eq!(date.to_string(), "2024-01-15 10:30:05 UTC+01:30");
+        // The optional tail, the two shorthands, and no offset at all.
+        assert_eq!(
+            DocumentDate::read("D:2024").expect("a date").to_string(),
+            "2024-01-01 00:00:00"
+        );
+        assert_eq!(
+            DocumentDate::read("D:20240115103005Z")
+                .expect("a date")
+                .to_string(),
+            "2024-01-15 10:30:05 UTC"
+        );
+        assert_eq!(
+            DocumentDate::read("D:20240115103005-0500")
+                .expect("a date")
+                .to_string(),
+            "2024-01-15 10:30:05 UTC-05:00"
+        );
+    }
+
+    #[test]
+    fn a_date_that_does_not_parse_is_shown_as_the_document_wrote_it() {
+        // Never a date assembled from the digits that happened to parse: a
+        // half-read date is a wrong one, and the raw string is at least true.
+        for raw in ["yesterday", "D:2024AB15", "D:20241315", "D:20240100"] {
+            let date = DocumentDate::read(raw).expect("a raw string");
+            assert!(date.parsed.is_none(), "{raw}");
+            assert_eq!(date.to_string(), raw);
+        }
+        assert!(DocumentDate::read("  ").is_none());
+    }
+
+    #[test]
+    fn permissions_are_read_from_the_specifications_bit_numbers() {
+        // Bit 6 clear is the one `survey` already turns into
+        // `MutationForbidden`; the properties view names the other seven.
+        let permissions = DocumentPermissions::from_bits(!(1u32 << 5));
+        assert!(!permissions.annotate);
+        assert!(permissions.print && permissions.modify && permissions.fill_forms);
+        assert!(!permissions.is_unrestricted());
+        assert!(DocumentPermissions::from_bits(!0).is_unrestricted());
+        assert!(DocumentPermissions::UNRESTRICTED.is_unrestricted());
+        // Print is bit 3, and nothing else is on when only it is.
+        let print_only = DocumentPermissions::from_bits(1 << 2);
+        assert!(print_only.print);
+        assert_eq!(
+            print_only
+                .each()
+                .iter()
+                .filter(|(_, allowed)| *allowed)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_backend_with_no_metadata_reports_the_shape_and_claims_nothing_else() {
+        let info = OpenDocumentInfo {
+            page_count: 12,
+            level: CompatibilityLevel::ViewOnly,
+            warnings: vec![DocumentWarning::Encrypted],
+            first_page: PageGeometry::upright(612.0, 792.0),
+            has_form: false,
+        };
+        let properties = DocumentProperties::from_info(&info);
+        assert_eq!(properties.page_count, 12);
+        assert_eq!(properties.level, CompatibilityLevel::ViewOnly);
+        assert_eq!(properties.warnings, info.warnings);
+        assert!(properties.title.is_none() && properties.producer.is_none());
+        assert!(properties.version.is_none() && properties.encryption.is_none());
+        // Not measured, rather than claimed uniform.
+        assert_eq!(properties.page_sizes, PageSizes::Unmeasured);
+        assert!(properties.permissions.is_unrestricted());
+    }
+
+    #[test]
+    fn a_page_is_described_in_millimetres_by_name_and_in_points() {
+        let a4 = describe_page_size(&PageGeometry::upright(595.0, 842.0));
+        assert_eq!(a4, "210 × 297 mm (A4 portrait), 595 × 842 pt");
+        // The same sheet turned over is still A4.
+        let landscape = describe_page_size(&PageGeometry::upright(842.0, 595.0));
+        assert!(landscape.contains("A4 landscape"), "{landscape}");
+        // US Letter, and a size with no name at all.
+        assert!(describe_page_size(&PageGeometry::upright(612.0, 792.0)).contains("Letter"));
+        let odd = describe_page_size(&PageGeometry::upright(400.0, 400.0));
+        assert_eq!(odd, "141 × 141 mm (square), 400 × 400 pt");
+    }
+
+    #[test]
+    fn a_user_unit_makes_the_page_physically_larger() {
+        // A drawing that scales its points is that much bigger on paper, and
+        // saying otherwise would describe a sheet nobody could print.
+        let mut oversized = PageGeometry::upright(595.0, 842.0);
+        oversized.user_unit = 2.0;
+        let described = describe_page_size(&oversized);
+        assert!(described.starts_with("420 × 594 mm (A2"), "{described}");
     }
 
     #[test]

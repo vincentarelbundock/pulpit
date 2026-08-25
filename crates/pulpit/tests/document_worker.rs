@@ -700,6 +700,28 @@ fn a_folder_of_images_opens_in_a_document_worker_and_refuses_pdf_semantics() {
         }
     }
 
+    // Properties are *not* among the refusals: a folder of images still has a
+    // page count and a page size, and the properties view says so. What it
+    // must not do is invent the metadata a PDF would have carried.
+    let DocumentResponse::Properties(properties) = session
+        .request(DocumentRequest::Properties)
+        .expect("a folder describes what it is")
+    else {
+        panic!("expected document properties")
+    };
+    assert_eq!(properties.page_count, 2);
+    assert_eq!(properties.first_page.width, 40.0);
+    assert!(properties.title.is_none() && properties.producer.is_none());
+    assert!(properties.version.is_none(), "a folder is not a PDF");
+    assert!(properties.encryption.is_none());
+    assert!(properties.level.is_view_only());
+    // The folder backend measures no page but the first, so the honest answer
+    // is that it did not check — never "uniform", which these two are not.
+    assert_eq!(
+        properties.page_sizes,
+        pulpit_render::document::PageSizes::Unmeasured
+    );
+
     session.close();
 }
 

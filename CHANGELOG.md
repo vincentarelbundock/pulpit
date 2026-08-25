@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **There is somewhere to find out what a document is.** *Properties…* in the
+  hamburger opens a dialog holding the file's own account of itself: title,
+  author, subject and keywords, what created it and what converted it, when it
+  was made and last changed, its page count, its page size named as the sheet
+  it is, and the PDF version it declares. A key the document left empty is
+  left out rather than shown as a blank row, and a date that does not parse is
+  shown as the document wrote it rather than dropped.
+
+  The permissions are the part that decides things: where a file is encrypted,
+  its handler is named and each of the eight operations it declares is listed
+  as allowed or refused — in words, not by colour — so it is clear before an
+  edit or a print is attempted whether the document will take it. A last
+  section says what pulpit will do with what it found: the compatibility
+  level, every standing warning, and the capability findings a presenter would
+  rather read before the talk than meet as a toast during it.
+
+  The strings in there were written by whoever produced the file, so they are
+  bounded and flattened on the way out of the engine exactly as an
+  annotation's text is: no producer can lay out the dialog that shows them.
+  Nothing is asked of the document until the dialog is opened, so a deck going
+  onto a projector pays nothing for it.
+
 ### Fixed
 
 - **Text written on a slide is kept.** A label typed at the lectern was drawn
