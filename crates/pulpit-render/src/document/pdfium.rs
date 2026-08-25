@@ -143,6 +143,19 @@ pub struct PdfiumDocument<'a> {
     /// [`PdfiumDocument::close`]: no handle survives an edit, and a selection
     /// never observes a half-changed page.
     text_page: RefCell<Option<TextPageCache>>,
+    /// Each page's text layer, extracted once and kept for the next query.
+    ///
+    /// Searching is not one question but a stream of them: every keystroke in
+    /// the box rescans the document, and the expensive half of scanning a page
+    /// is building its text layer, not looking through it. Held here, the
+    /// second query over a five-hundred-page deck asks PDFium for nothing at
+    /// all on the pages that do not match, and only for rectangles on those
+    /// that do.
+    ///
+    /// A cache of a read, like [`Self::text_page`]: dropped whenever the
+    /// document changes under it, and bounded so a very long document cannot
+    /// turn a search into a memory problem.
+    page_text: RefCell<crate::pdf::search::PageTextCache<usize>>,
 }
 
 /// A loaded page and its text layer, held across the samples of one drag.
@@ -230,6 +243,7 @@ impl<'a> PdfiumDocument<'a> {
             located: RefCell::new(HashMap::new()),
             form: None,
             text_page: RefCell::new(None),
+            page_text: RefCell::new(Default::default()),
         };
         engine.info = engine.survey()?;
         engine.open_form_environment();
@@ -438,6 +452,16 @@ impl<'a> PdfiumDocument<'a> {
     /// Takes `&self` because it is called from the read path as well as before
     /// every mutation, and closing a cache entry is not a change to the
     /// document.
+    /// Forget every page's extracted text.
+    ///
+    /// Called before a change rather than after one, and unconditionally: what
+    /// a mark or a field edit does to a page's text layer is PDFium's business
+    /// to decide, not this cache's to predict. Re-extracting is the cost of
+    /// one scan, and a stale answer is not a cost that can be paid back.
+    fn forget_page_text(&self) {
+        self.page_text.borrow_mut().clear();
+    }
+
     fn release_text_page(&self) {
         let Some(cache) = self.text_page.borrow_mut().take() else {
             return;
@@ -1195,6 +1219,106 @@ impl<'a> PdfiumDocument<'a> {
     /// A page's geometry, measured if this is the first time it is asked for.
     fn geometry_of(&self, page: PageIndex) -> Result<PageGeometry> {
         self.measure(page)
+    }
+
+    /// Every hit for one prepared query on one page.
+    ///
+    /// Three cases, in the order they cost anything:
+    ///
+    /// * the page's text is cached and does not match — no PDFium call at all,
+    ///   which is what most pages of most queries are;
+    /// * the page's text is cached and matches — the page is opened for its
+    ///   rectangles, and its text and geometry are already known;
+    /// * the page has never been read — it is opened once, and its text,
+    ///   geometry, matches and rectangles all come out of that one visit.
+    fn find_on_one_page(
+        &self,
+        page: usize,
+        query: &pulpit_core::search::PreparedQuery<'_>,
+    ) -> Result<Vec<pulpit_core::search::Hit>> {
+        let bindings = self.backend.bindings();
+        let cached = self.page_text.borrow().get(&page);
+        if let Some(text) = cached {
+            let found = text.matches(query, limits::MAX_HITS_PER_SEARCH);
+            if found.is_empty() {
+                return Ok(Vec::new());
+            }
+            let geometry = self.geometry_of(PageIndex(page))?;
+            return self
+                .backend
+                .on_page(self.document, page, |handle| {
+                    let text_page = unsafe { bindings.FPDFText_LoadPage(handle) };
+                    if text_page.is_null() {
+                        return Ok(Vec::new());
+                    }
+                    let hits = crate::pdf::search::hits_from_matches(
+                        PageIndex(page),
+                        &text,
+                        &found,
+                        |start, length| {
+                            crate::pdf::search::quads_of(
+                                bindings,
+                                text_page,
+                                &geometry,
+                                start,
+                                length,
+                                limits::MAX_QUADS_PER_HIT,
+                            )
+                        },
+                    );
+                    unsafe { bindings.FPDFText_ClosePage(text_page) };
+                    Ok(hits)
+                })
+                .map_err(to_document_error);
+        }
+
+        // Never read. One visit does everything, including the measurement:
+        // asking `geometry_of` first would load the page a second time, which
+        // on a first scan doubled the cost of the whole document.
+        let known_geometry = self.geometry.borrow().get(&page).copied();
+        let (hits, text, geometry) = self
+            .backend
+            .on_page(self.document, page, |handle| {
+                let geometry = known_geometry
+                    .unwrap_or_else(|| crate::pdf::search::geometry_of(bindings, handle));
+                let text_page = unsafe { bindings.FPDFText_LoadPage(handle) };
+                if text_page.is_null() {
+                    // A page with no text layer — a scan, a poster — is not a
+                    // failure. It simply has nothing to find, and remembering
+                    // that it has nothing is worth as much as remembering
+                    // what a page does say.
+                    return Ok((
+                        Vec::new(),
+                        crate::pdf::search::PageText::default(),
+                        geometry,
+                    ));
+                }
+                let text = crate::pdf::search::PageText::extract(bindings, text_page);
+                let found = text.matches(query, limits::MAX_HITS_PER_SEARCH);
+                let hits = crate::pdf::search::hits_from_matches(
+                    PageIndex(page),
+                    &text,
+                    &found,
+                    |start, length| {
+                        crate::pdf::search::quads_of(
+                            bindings,
+                            text_page,
+                            &geometry,
+                            start,
+                            length,
+                            limits::MAX_QUADS_PER_HIT,
+                        )
+                    },
+                );
+                unsafe { bindings.FPDFText_ClosePage(text_page) };
+                Ok((hits, text, geometry))
+            })
+            .map_err(to_document_error)?;
+        if geometry.is_valid() {
+            self.geometry.borrow_mut().insert(page, geometry);
+        }
+        self.page_text.borrow_mut().insert(page, text);
+        Ok(hits)
     }
 
     /// Run `f` over every annotation on a page, in `/Annots` order.
@@ -3003,6 +3127,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
 
     fn create(&mut self, id: &AnnotationId, draft: &AnnotationDraft) -> Result<AnnotationSummary> {
         self.release_text_page();
+        self.forget_page_text();
         let page = draft.page();
         // Where it is about to be, so the first lookup after it is made — the
         // undo of this very create, most often — does not walk the document.
@@ -3056,6 +3181,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
 
     fn replace(&mut self, id: &AnnotationId, draft: &AnnotationDraft) -> Result<AnnotationSummary> {
         self.release_text_page();
+        self.forget_page_text();
         let (page, index) = self.locate(id)?;
         if draft.page() != page {
             return Err(DocumentError::Backend(
@@ -3093,6 +3219,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
 
     fn delete(&mut self, id: &AnnotationId) -> Result<AnnotationBeforeImage> {
         self.release_text_page();
+        self.forget_page_text();
         let before = self.before_image(id)?;
         let (page, index) = self.locate(id)?;
         let bindings = self.backend.bindings();
@@ -3210,6 +3337,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
     /// the selection of a checkbox edits nothing at all — silently — which is
     /// why the dispatch is on [`FieldKind`] rather than one path for all.
     fn set_field(&mut self, name: &str, value: &str, selected: &[u32]) -> Result<String> {
+        self.forget_page_text();
         self.form_handle()
             .ok_or_else(|| DocumentError::Backend("this document has no fillable form".into()))?;
 
@@ -3283,6 +3411,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
     ) -> Result<crate::document::protocol::FormEventResult> {
         use crate::document::protocol::{FormEventResult, FormInputEvent};
 
+        self.forget_page_text();
         let Some(form) = self.form_handle() else {
             return Err(DocumentError::Backend(
                 "this document has no fillable form".into(),
@@ -3760,31 +3889,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
             return Ok(chunk);
         }
         let prepared = query.prepare();
-        let bindings = self.backend.bindings();
         for page in pages {
-            let geometry = self.geometry_of(PageIndex(page))?;
-            let hits = self
-                .backend
-                .on_page(self.document, page, |handle| {
-                    let text_page = unsafe { bindings.FPDFText_LoadPage(handle) };
-                    if text_page.is_null() {
-                        // A page with no text layer — a scan, a poster — is
-                        // not a failure. It simply has nothing to find.
-                        return Ok(Vec::new());
-                    }
-                    let hits = crate::pdf::search::find_on_page(
-                        bindings,
-                        text_page,
-                        &geometry,
-                        PageIndex(page),
-                        &prepared,
-                        limits::MAX_HITS_PER_SEARCH,
-                        limits::MAX_QUADS_PER_HIT,
-                    );
-                    unsafe { bindings.FPDFText_ClosePage(text_page) };
-                    Ok(hits)
-                })
-                .map_err(to_document_error)?;
+            let hits = self.find_on_one_page(page, &prepared)?;
             chunk.hits.extend(hits);
             if chunk.hits.len() >= limits::MAX_HITS_PER_SEARCH {
                 chunk.hits.truncate(limits::MAX_HITS_PER_SEARCH);

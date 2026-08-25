@@ -761,6 +761,15 @@ fn finding_text_reports_hits_with_the_geometry_to_draw_them() {
     assert!(nothing.hits.is_empty());
     assert!(!nothing.truncated);
 
+    // The same query again is answered from the cached page text rather than
+    // by rebuilding every text layer, and must answer it identically: the
+    // second keystroke of a search is not allowed to find a different
+    // document from the first.
+    let again = document
+        .find_text(&query, 0..3)
+        .expect("a repeated query is answered from the cache");
+    assert_eq!(again.hits, chunk.hits, "the cached answer drifted");
+
     // A range that walks off the end of the document stops there.
     let clamped = document
         .find_text(&query, 2..99)

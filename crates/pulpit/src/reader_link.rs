@@ -444,7 +444,32 @@ fn serve(
     told: Sender<Told>,
     wakeup: WakeupSink,
 ) {
-    while let Ok(ask) = asks.recv() {
+    // Work already posted, read ahead of time so a search can see whether it
+    // has been superseded before it is run. Order is otherwise preserved
+    // exactly: this queue is drained before the channel is read again.
+    let mut queued: std::collections::VecDeque<Ask> = std::collections::VecDeque::new();
+    loop {
+        let ask = match queued.pop_front() {
+            Some(ask) => ask,
+            None => match asks.recv() {
+                Ok(ask) => ask,
+                Err(_) => break,
+            },
+        };
+        // A scan whose query the reader has already typed past is thirty-two
+        // pages of PDF the newer query then waits behind. Its answer would be
+        // dropped on arrival for its generation; drop it here instead, and
+        // answer cheaply so that one answer still comes back for one ask.
+        let ask = match superseded(ask, &asks, &mut queued) {
+            Ok(stale) => {
+                if told.send(stale).is_err() {
+                    return;
+                }
+                wakeup.ring();
+                continue;
+            }
+            Err(ask) => ask,
+        };
         let answers = handle(&mut session, ask);
         let fatal = answers
             .iter()
@@ -462,6 +487,54 @@ fn serve(
         }
     }
     session.close();
+}
+
+/// Answer a search that a newer one has already replaced, without running it.
+///
+/// Returns `Ok(answer)` when `ask` is a [`Ask::FindText`] and a *later*
+/// generation of search is already posted behind it, and `Err(ask)` — the
+/// work, to be done — otherwise. Only a later generation supersedes: several
+/// chunks of the same scan are in flight at once by design, and dropping one
+/// of those would leave a run of pages unread.
+///
+/// Everything read out of the channel to decide this is left in `queued`, in
+/// the order it was posted. Nothing is reordered and nothing is lost.
+fn superseded(
+    ask: Ask,
+    asks: &Receiver<Ask>,
+    queued: &mut std::collections::VecDeque<Ask>,
+) -> Result<Told, Ask> {
+    let Ask::FindText { generation, .. } = &ask else {
+        return Err(ask);
+    };
+    let generation = *generation;
+    queued.extend(asks.try_iter());
+    let replaced = queued.iter().any(|later| match later {
+        Ask::FindText {
+            generation: newer, ..
+        } => *newer > generation,
+        _ => false,
+    });
+    if !replaced {
+        return Err(ask);
+    }
+    let Ask::FindText {
+        from_page, to_page, ..
+    } = ask
+    else {
+        unreachable!("the ask was matched as a search above");
+    };
+    // An empty chunk under a generation the application has already left
+    // behind: it is dropped by the model on arrival, and the ask is answered.
+    Ok(Told::Found {
+        generation,
+        chunk: pulpit_core::search::HitChunk {
+            from_page,
+            to_page,
+            hits: Vec::new(),
+            truncated: false,
+        },
+    })
 }
 
 fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
@@ -775,6 +848,53 @@ mod tests {
             told_sender,
             ask_receiver,
         )
+    }
+
+    fn find(generation: u64, from_page: usize) -> Ask {
+        Ask::FindText {
+            generation: pulpit_core::search::SearchGeneration(generation),
+            query: pulpit_core::search::Query::new("pdf", false, false),
+            from_page,
+            to_page: from_page + 4,
+        }
+    }
+
+    #[test]
+    fn a_search_the_reader_has_typed_past_is_answered_without_being_run() {
+        let (sender, receiver) = std::sync::mpsc::channel::<Ask>();
+        let mut queued = std::collections::VecDeque::new();
+        // A newer query is already posted behind this one.
+        sender.send(find(8, 0)).unwrap();
+        sender.send(Ask::ListFields).unwrap();
+
+        let answer = superseded(find(7, 0), &receiver, &mut queued)
+            .expect("a search behind a newer one is not worth running");
+        match answer {
+            Told::Found { generation, chunk } => {
+                assert_eq!(generation, pulpit_core::search::SearchGeneration(7));
+                assert!(chunk.hits.is_empty(), "a dropped scan found nothing");
+            }
+            other => panic!("expected an empty answer, got {other:?}"),
+        }
+        // Everything read ahead to decide that is still there, in order.
+        assert!(matches!(queued.pop_front(), Some(Ask::FindText { .. })));
+        assert!(matches!(queued.pop_front(), Some(Ask::ListFields)));
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn the_other_chunks_of_the_same_scan_are_not_dropped_as_stale() {
+        let (sender, receiver) = std::sync::mpsc::channel::<Ask>();
+        let mut queued = std::collections::VecDeque::new();
+        // Three chunks of one query are in flight together by design.
+        sender.send(find(7, 4)).unwrap();
+        sender.send(find(7, 8)).unwrap();
+
+        assert!(
+            superseded(find(7, 0), &receiver, &mut queued).is_err(),
+            "a chunk of the current scan is work, not a stale answer"
+        );
+        assert_eq!(queued.len(), 2, "and the ones behind it are still queued");
     }
 
     #[test]

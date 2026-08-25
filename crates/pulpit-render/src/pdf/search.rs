@@ -6,22 +6,23 @@
 //! implementations — a match the reader can highlight and one the presenter
 //! cannot would be two answers to one question.
 //!
-//! PDFium's own search is used rather than pulling the page's text across and
-//! matching in Rust: it is the same code that produced the character indices
-//! the rectangles are addressed by, so a match and its geometry cannot
-//! disagree about where on the page the text is.
+//! The page's text is pulled out of PDFium once and matched by
+//! [`pulpit_core::search`], the same matcher that runs over speaker notes and
+//! bookmark titles. That is one implementation for a document rather than
+//! three, and the geometry still cannot disagree with the match: every hit's
+//! character offsets are mapped back through the text PDFium itself produced,
+//! so the rectangles are addressed by the indices they were built from.
+//!
+//! Extracting the text is also the expensive half — `FPDF_LoadPage` parses a
+//! content stream and `FPDFText_LoadPage` lays out every glyph on it — so the
+//! result is worth keeping. [`PageText`] is what a backend caches: after the
+//! first query, a page with no match for the second costs no PDFium call at
+//! all, and a page that does match pays only for its rectangles.
 
 use pdfium_render::prelude::{PdfiumLibraryBindings, FPDF_PAGE, FPDF_TEXTPAGE};
 
 use pulpit_core::page::{PageGeometry, PageIndex, PageQuad, PageRect, PageRotation};
 use pulpit_core::search::{Hit, HitSource, IndexedText, PreparedQuery, TextMatch};
-
-/// PDFium's own search flags: `FPDF_MATCHCASE` and `FPDF_MATCHWHOLEWORD`.
-const MATCH_CASE: std::os::raw::c_ulong = 0x0000_0001;
-const MATCH_WHOLE_WORD: std::os::raw::c_ulong = 0x0000_0002;
-
-/// How much of the surrounding line a hit carries, in characters either side.
-const CONTEXT_CHARS: i32 = pulpit_core::search::CONTEXT_CHARS as i32;
 
 /// One page's canonical geometry, read from its crop box and rotation (A4).
 ///
@@ -135,125 +136,168 @@ pub(crate) fn text_of(
     }
 }
 
-/// Every occurrence of `query` on one page, with the geometry to draw it.
-pub(crate) fn find_on_page(
-    bindings: &dyn PdfiumLibraryBindings,
-    text_page: FPDF_TEXTPAGE,
-    geometry: &PageGeometry,
-    page: PageIndex,
-    query: &PreparedQuery<'_>,
-    most_hits: usize,
-    most_quads: usize,
-) -> Vec<Hit> {
-    let options = query.query();
-    let needle = options.text().trim();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    if options.regex {
-        return find_regex_on_page(
-            bindings, text_page, geometry, page, query, most_hits, most_quads,
-        );
-    }
-    let mut flags = 0;
-    if options.case_sensitive {
-        flags |= MATCH_CASE;
-    }
-    if options.whole_word {
-        flags |= MATCH_WHOLE_WORD;
-    }
-
-    let search = unsafe { bindings.FPDFText_FindStart_str(text_page, needle, flags, 0) };
-    if search.is_null() {
-        return Vec::new();
-    }
-
-    let count = unsafe { bindings.FPDFText_CountChars(text_page) }.max(0);
-    let mut hits = Vec::new();
-    while unsafe { bindings.FPDFText_FindNext(search) } != 0 {
-        let start = unsafe { bindings.FPDFText_GetSchResultIndex(search) };
-        let length = unsafe { bindings.FPDFText_GetSchCount(search) };
-        if start < 0 || length <= 0 {
-            continue;
-        }
-        let quads = quads_of(bindings, text_page, geometry, start, length, most_quads);
-        // The match plus a window either side, taken from the page rather
-        // than reconstructed, so the results list shows the document's own
-        // words — ligatures, dashes and all.
-        let context_start = (start - CONTEXT_CHARS).max(0);
-        let context_end = (start + length + CONTEXT_CHARS).min(count);
-        let context = text_of(
-            bindings,
-            text_page,
-            context_start,
-            context_end - context_start,
-            (CONTEXT_CHARS as usize) * 4 + length as usize,
-        );
-        let found = TextMatch {
-            offset: (start - context_start) as usize,
-            len: length as usize,
-        };
-        hits.push(Hit::from_text(
-            page,
-            HitSource::PageText,
-            hits.len(),
-            &context,
-            found,
-            quads,
-        ));
-        if hits.len() >= most_hits {
-            break;
-        }
-    }
-    unsafe { bindings.FPDFText_FindClose(search) };
-    hits
+/// One page's text layer, pulled out of PDFium once.
+///
+/// Cheap to hold — a slide's worth of text is a page of prose at most — and
+/// it is what makes the second query over a document nearly free: matching
+/// happens against this, and PDFium is only asked again for the rectangles of
+/// the pages that actually matched.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PageText {
+    text: String,
+    /// Character offset to UTF-16 offset, one entry per character plus a
+    /// final total. PDFium addresses UTF-16 code units; [`TextMatch`]
+    /// deliberately addresses Rust characters so snippets stay
+    /// Unicode-correct, and this is the map between them.
+    utf16_offsets: Vec<usize>,
 }
 
-/// Regex needs the page's text rather than PDFium's literal finder. Text stays
-/// inside the worker; only bounded hits cross IPC, exactly as literal search.
-fn find_regex_on_page(
-    bindings: &dyn PdfiumLibraryBindings,
-    text_page: FPDF_TEXTPAGE,
-    geometry: &PageGeometry,
+impl PageText {
+    /// Read a whole text page. Bounded by what PDFium says it holds.
+    pub(crate) fn extract(bindings: &dyn PdfiumLibraryBindings, text_page: FPDF_TEXTPAGE) -> Self {
+        let count = unsafe { bindings.FPDFText_CountChars(text_page) }.max(0);
+        let text = text_of(
+            bindings,
+            text_page,
+            0,
+            count,
+            count.saturating_add(1) as usize,
+        );
+        Self::from_text(text)
+    }
+
+    fn from_text(text: String) -> Self {
+        let utf16_offsets = std::iter::once(0)
+            .chain(text.chars().scan(0, |offset, character| {
+                *offset += character.len_utf16();
+                Some(*offset)
+            }))
+            .collect();
+        PageText {
+            text,
+            utf16_offsets,
+        }
+    }
+
+    /// How much memory this page's text is holding, for a bounded cache.
+    pub(crate) fn weight(&self) -> usize {
+        self.text.len() + self.utf16_offsets.len() * std::mem::size_of::<usize>()
+    }
+
+    /// Every match on this page, without asking PDFium anything.
+    ///
+    /// The overwhelmingly common answer is "none", and that answer now costs
+    /// a string scan rather than a page load.
+    pub(crate) fn matches(&self, query: &PreparedQuery<'_>, most: usize) -> Vec<TextMatch> {
+        let mut found = query.matches_in(&self.text);
+        found.truncate(most);
+        found
+    }
+
+    /// The UTF-16 range PDFium addresses a character match by.
+    fn utf16_range(&self, found: TextMatch) -> Option<(i32, i32)> {
+        let start = *self.utf16_offsets.get(found.offset)?;
+        let end = *self.utf16_offsets.get(found.offset + found.len)?;
+        Some((start as i32, end.saturating_sub(start) as i32))
+    }
+}
+
+/// Extracted page text, bounded by total size rather than by page count.
+///
+/// A deck of picture slides holds almost nothing; a book of dense pages fills
+/// the budget and then keeps what it has. Dropping the *whole* cache when it
+/// is full, rather than evicting one page, keeps this a few lines instead of
+/// an LRU: the budget is large enough that a document either fits or is one no
+/// cache was going to help twice.
+///
+/// Keyed by whatever identifies a page to its holder — a page number for an
+/// engine that has one document, a document and page for a backend that has
+/// several.
+#[derive(Debug)]
+pub(crate) struct PageTextCache<K> {
+    pages: std::collections::HashMap<K, std::sync::Arc<PageText>>,
+    weight: usize,
+    budget: usize,
+}
+
+impl<K: std::hash::Hash + Eq> Default for PageTextCache<K> {
+    fn default() -> Self {
+        PageTextCache {
+            pages: std::collections::HashMap::new(),
+            weight: 0,
+            // Enough for a very long book of prose, small beside one frame.
+            budget: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq> PageTextCache<K> {
+    pub(crate) fn get(&self, key: &K) -> Option<std::sync::Arc<PageText>> {
+        self.pages.get(key).cloned()
+    }
+
+    pub(crate) fn insert(&mut self, key: K, text: PageText) -> std::sync::Arc<PageText> {
+        let weight = text.weight();
+        if self.weight.saturating_add(weight) > self.budget {
+            self.clear();
+        }
+        let text = std::sync::Arc::new(text);
+        if self.pages.insert(key, text.clone()).is_none() {
+            self.weight = self.weight.saturating_add(weight);
+        }
+        text
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pages.clear();
+        self.weight = 0;
+    }
+
+    /// Forget every page whose key the predicate rejects — one document
+    /// closing, and not the others open beside it.
+    pub(crate) fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.pages.retain(|key, text| {
+            let kept = keep(key);
+            if !kept {
+                self.weight = self.weight.saturating_sub(text.weight());
+            }
+            kept
+        });
+    }
+}
+
+/// Turn matches into hits, asking `quads` for the geometry of each one.
+///
+/// The geometry is a closure so that a caller holding a cached [`PageText`]
+/// decides *when* to open the page: a page with no matches never needs one.
+pub(crate) fn hits_from_matches(
     page: PageIndex,
-    query: &PreparedQuery<'_>,
-    most_hits: usize,
-    most_quads: usize,
+    text: &PageText,
+    found: &[TextMatch],
+    mut quads: impl FnMut(i32, i32) -> Vec<PageQuad>,
 ) -> Vec<Hit> {
-    let count = unsafe { bindings.FPDFText_CountChars(text_page) }.max(0);
-    let text = text_of(
-        bindings,
-        text_page,
-        0,
-        count,
-        count.saturating_add(1) as usize,
-    );
-    let utf16_offsets: Vec<usize> = std::iter::once(0)
-        .chain(text.chars().scan(0, |offset, character| {
-            *offset += character.len_utf16();
-            Some(*offset)
-        }))
-        .collect();
-    let indexed = IndexedText::new(&text);
-    query
-        .matches_in(&text)
-        .into_iter()
-        .take(most_hits)
+    if found.is_empty() {
+        return Vec::new();
+    }
+    // The context windows are cut from the page's own characters, so the
+    // results list shows the document's words — ligatures, dashes and all.
+    let indexed = IndexedText::new(&text.text);
+    found
+        .iter()
         .enumerate()
-        .map(|(ordinal, found)| {
-            // PDFium addresses UTF-16 code units. `TextMatch` deliberately
-            // addresses Rust characters so snippets remain Unicode-correct.
-            let start = utf16_offsets[found.offset];
-            let end = utf16_offsets[found.offset + found.len];
-            let quads = quads_of(
-                bindings,
-                text_page,
+        .map(|(ordinal, matched)| {
+            let geometry = match text.utf16_range(*matched) {
+                Some((start, length)) => quads(start, length),
+                None => Vec::new(),
+            };
+            Hit::from_indexed_text(
+                page,
+                HitSource::PageText,
+                ordinal,
+                &indexed,
+                *matched,
                 geometry,
-                start as i32,
-                end.saturating_sub(start) as i32,
-                most_quads,
-            );
-            Hit::from_indexed_text(page, HitSource::PageText, ordinal, &indexed, found, quads)
+            )
         })
         .collect()
 }

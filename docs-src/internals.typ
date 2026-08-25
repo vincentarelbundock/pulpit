@@ -360,6 +360,32 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   a helper thread; backends without a listener use a one-second helper-thread
   fallback. Work merely being in flight does not keep the 50 ms animation
   tick alive or rebuild both window trees.
++ *A search is a stream of questions, not one question.* Every keystroke in
+  the find box restarts the document scan, so each of the four things that
+  made one scan slow was paid once per letter. All four are fixed in kind
+  rather than tuned: typing is held for 120 ms before a scan starts, so a word
+  is one scan and not six; a running scan is `is_live`, and the next chunk is
+  released the moment its answer lands rather than on the next tick, so the
+  scan runs at the worker's rate and not the timer's; three chunks are
+  outstanding at once and the first covers four pages rather than
+  thirty-two, so the first hits arrive in a round trip; and a scan starts at
+  the page the reader is on and wraps, because the hit somebody searching from
+  page 300 wants is usually near page 300. A chunk whose generation the reader
+  has already typed past is answered empty by `reader_link::superseded`
+  instead of being run — but only when a *newer* generation is queued behind
+  it, never when it is one of several chunks of the current scan.
++ *A page's text is extracted once, not once per query.* `FPDF_LoadPage` plus
+  `FPDFText_LoadPage` — parsing a content stream and laying out every glyph on
+  it — is the expensive half of searching a page, and re-paying it per
+  keystroke made a long deck feel like a slow application. `pdf::search::PageText`
+  holds the extracted text and its character-to-UTF-16 offset map behind a
+  size-bounded cache in both PDFium backends, and matching runs through
+  `pulpit_core::search`, the same matcher used for notes and bookmark titles.
+  So the second query over a document asks PDFium for nothing at all on the
+  pages that do not match, and only for rectangles on those that do. The
+  geometry contract is unchanged: hit offsets are mapped back through the text
+  PDFium itself produced, so a mark and its match cannot disagree. The cache
+  is dropped whole before any mutation, and per document on close.
 + *A picture is compared by identity, never by its pixels.* Iced's image
   handle derives equality, and its pixel buffer compares by content, so a
   single `==` between two audience frames memcmps thirty megabytes. Anything

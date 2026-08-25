@@ -130,6 +130,16 @@ pub struct PdfiumBackend {
     forms: HashMap<u64, FormBinding>,
     next_id: u64,
     library_path: Option<PathBuf>,
+    /// Each page's text layer, extracted once and kept for the next query.
+    ///
+    /// The presenter searches through this backend, and a search is not one
+    /// question but a stream of them: every keystroke rescans the deck, and
+    /// the expensive half of scanning a page is building its text layer
+    /// rather than looking through it. See [`crate::pdf::search`].
+    ///
+    /// Interior mutability because searching is a read, and a read must not
+    /// need the exclusive borrow that renders take.
+    page_text: std::cell::RefCell<crate::pdf::search::PageTextCache<(u64, usize)>>,
 }
 
 /// A form-fill environment and the handle PDFium gave back for it.
@@ -268,6 +278,7 @@ impl PdfiumBackend {
                         paths: HashMap::new(),
                         next_id: 0,
                         library_path: Some(candidate),
+                        page_text: Default::default(),
                     });
                 }
                 Err(e) => errors.push(format!("{}: {e}", candidate.display())),
@@ -283,6 +294,7 @@ impl PdfiumBackend {
                     paths: HashMap::new(),
                     next_id: 0,
                     library_path: None,
+                    page_text: Default::default(),
                 })
             }
             Err(e) => {
@@ -321,6 +333,83 @@ impl PdfiumBackend {
         f: impl FnOnce(FPDF_PAGE) -> Result<T>,
     ) -> Result<T> {
         self.with_page(document, page, f)
+    }
+
+    /// Every hit for one prepared query on one page of one document.
+    ///
+    /// A page whose text is known and does not match costs no PDFium call at
+    /// all — which, on the second query over a deck, is nearly every page. One
+    /// that does match, or has never been read, is opened once and gives up
+    /// its geometry, its text and its rectangles in that one visit.
+    fn find_on_one_page(
+        &self,
+        document: BackendDocumentId,
+        page: usize,
+        query: &pulpit_core::search::PreparedQuery<'_>,
+    ) -> Result<Vec<pulpit_core::search::Hit>> {
+        let key = (document.0, page);
+        if let Some(text) = self.page_text.borrow().get(&key) {
+            let found = text.matches(query, MAX_HITS_PER_SEARCH);
+            if found.is_empty() {
+                return Ok(Vec::new());
+            }
+            return self.with_page(document, page, |handle| {
+                let text_page = unsafe { self.bindings.FPDFText_LoadPage(handle) };
+                if text_page.is_null() {
+                    return Ok(Vec::new());
+                }
+                let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
+                let hits = crate::pdf::search::hits_from_matches(
+                    pulpit_core::page::PageIndex(page),
+                    &text,
+                    &found,
+                    |start, length| {
+                        crate::pdf::search::quads_of(
+                            self.bindings.as_ref(),
+                            text_page,
+                            &geometry,
+                            start,
+                            length,
+                            MAX_QUADS_PER_HIT,
+                        )
+                    },
+                );
+                unsafe { self.bindings.FPDFText_ClosePage(text_page) };
+                Ok(hits)
+            });
+        }
+
+        let (hits, text) = self.with_page(document, page, |handle| {
+            let text_page = unsafe { self.bindings.FPDFText_LoadPage(handle) };
+            if text_page.is_null() {
+                // A slide with no text layer — a picture, a poster — is not a
+                // failure. It simply has nothing to find, and remembering that
+                // is worth as much as remembering what a page does say.
+                return Ok((Vec::new(), crate::pdf::search::PageText::default()));
+            }
+            let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
+            let text = crate::pdf::search::PageText::extract(self.bindings.as_ref(), text_page);
+            let found = text.matches(query, MAX_HITS_PER_SEARCH);
+            let hits = crate::pdf::search::hits_from_matches(
+                pulpit_core::page::PageIndex(page),
+                &text,
+                &found,
+                |start, length| {
+                    crate::pdf::search::quads_of(
+                        self.bindings.as_ref(),
+                        text_page,
+                        &geometry,
+                        start,
+                        length,
+                        MAX_QUADS_PER_HIT,
+                    )
+                },
+            );
+            unsafe { self.bindings.FPDFText_ClosePage(text_page) };
+            Ok((hits, text))
+        })?;
+        self.page_text.borrow_mut().insert(key, text);
+        Ok(hits)
     }
 
     fn handle(&self, document: BackendDocumentId) -> Result<FPDF_DOCUMENT> {
@@ -810,6 +899,11 @@ impl PdfBackend for PdfiumBackend {
 
     fn close(&mut self, document: BackendDocumentId) {
         self.paths.remove(&document.0);
+        // The text of a document nobody has open is not worth the memory, and
+        // an id is reused only after this backend has forgotten the last one.
+        self.page_text
+            .borrow_mut()
+            .retain(|(open, _)| *open != document.0);
         // Before the document, and in this order: PDFium's environment holds
         // the document, and closing the document first leaves it holding a
         // dangling one.
@@ -1076,26 +1170,7 @@ impl PdfBackend for PdfiumBackend {
         }
         let prepared = query.prepare();
         for page in pages {
-            let found = self.with_page(document, page, |handle| {
-                let text_page = unsafe { self.bindings.FPDFText_LoadPage(handle) };
-                if text_page.is_null() {
-                    // A slide with no text layer — a picture, a poster — is
-                    // not a failure. It simply has nothing to find.
-                    return Ok(Vec::new());
-                }
-                let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
-                let found = crate::pdf::search::find_on_page(
-                    self.bindings.as_ref(),
-                    text_page,
-                    &geometry,
-                    pulpit_core::page::PageIndex(page),
-                    &prepared,
-                    MAX_HITS_PER_SEARCH,
-                    MAX_QUADS_PER_HIT,
-                );
-                unsafe { self.bindings.FPDFText_ClosePage(text_page) };
-                Ok(found)
-            })?;
+            let found = self.find_on_one_page(document, page, &prepared)?;
             hits.extend(found);
             if hits.len() >= MAX_HITS_PER_SEARCH {
                 hits.truncate(MAX_HITS_PER_SEARCH);

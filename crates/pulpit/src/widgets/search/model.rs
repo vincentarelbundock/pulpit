@@ -77,15 +77,30 @@ mod tests {
         let mut state = SearchState::new();
         state.open(pages);
         let generation = state.set_query(Query::new("needle", false, false));
-        state.accept(
-            generation,
-            HitChunk {
-                from_page: 0,
-                to_page: if done { pages } else { 1 },
-                hits,
-                truncated: false,
-            },
-        );
+        // Answers follow requests: a chunk nobody asked for is a retry, and
+        // the model counts its pages only once.
+        let mut answered = false;
+        while let Some((generation, pages)) = state.next_request() {
+            let to = if done || !answered {
+                pages.end
+            } else {
+                pages.start
+            };
+            state.accept(
+                generation,
+                HitChunk {
+                    from_page: pages.start,
+                    to_page: to,
+                    hits: if answered { Vec::new() } else { hits.clone() },
+                    truncated: false,
+                },
+            );
+            answered = true;
+            if !done {
+                break;
+            }
+        }
+        let _ = generation;
         state
     }
 

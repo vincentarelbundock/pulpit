@@ -32,12 +32,38 @@ pub const MAX_HITS: usize = 2_048;
 /// How many characters of surrounding text a hit carries for its list entry.
 pub const CONTEXT_CHARS: usize = 40;
 
-/// How many pages one worker request covers.
+/// How many pages one worker request covers, at most.
 ///
 /// Small enough that the first hits appear while a long document is still
 /// being scanned, and that cancelling a superseded query wastes little work;
 /// large enough that a hundred-page deck is a handful of round trips.
 pub const PAGES_PER_CHUNK: usize = 32;
+
+/// How many pages the *first* request of a scan covers.
+///
+/// The first chunk decides whether the box feels instant, so it is small:
+/// four pages come back in a round trip rather than in a scan. Each
+/// subsequent request doubles, up to [`PAGES_PER_CHUNK`], so a long document
+/// still costs a handful of trips rather than a hundred.
+pub const FIRST_CHUNK_PAGES: usize = 4;
+
+/// How many requests may be outstanding at once.
+///
+/// One in flight means every chunk pays a full round trip before the next is
+/// even asked for, and the scan runs at the latency of the link rather than
+/// at the speed of the worker. Three keeps the worker fed without making a
+/// superseded query expensive to abandon.
+pub const MAX_CHUNKS_IN_FLIGHT: usize = 3;
+
+/// How many pages the request after `issued` earlier ones covers.
+fn chunk_pages(issued: usize) -> usize {
+    match 1usize.checked_shl(issued.min(16) as u32) {
+        Some(factor) => FIRST_CHUNK_PAGES
+            .saturating_mul(factor)
+            .min(PAGES_PER_CHUNK),
+        None => PAGES_PER_CHUNK,
+    }
+}
 
 /// A monotonically increasing search generation.
 ///
@@ -513,12 +539,29 @@ pub struct SearchState {
     generation: SearchGeneration,
     hits: std::sync::Arc<Vec<Hit>>,
     cursor: Option<usize>,
-    /// The next page to ask the worker about; `page_count` when the scan of
-    /// the page text is done.
-    frontier: usize,
+    /// Where this scan began, and where it will wrap back around to.
+    ///
+    /// A scan starts at the page the reader is on rather than at the front of
+    /// the document: the hit somebody searching from page 300 wants is
+    /// usually near page 300, and making them wait for pages 1 to 299 first
+    /// is making them wait for the answer they did not ask for.
+    start: usize,
+    /// The page the *next* scan will begin at, remembered across restarts so
+    /// every keystroke of one query scans outwards from the same place.
+    origin: usize,
+    /// How many pages have been asked about, counted from `start` and
+    /// wrapping. Drives what to request next.
+    requested: usize,
+    /// How many pages have been answered for. Drives progress, and is what
+    /// "still scanning" means: a page that has been asked about but not
+    /// answered has not been searched.
+    scanned: usize,
+    /// How many requests this scan has issued, which sets the size of the
+    /// next one.
+    issued: usize,
     page_count: usize,
-    /// A request is out for the pages starting here.
-    in_flight: Option<usize>,
+    /// Requests that are out, by the page each one starts at.
+    in_flight: Vec<usize>,
     problem: Option<SearchProblem>,
 }
 
@@ -551,7 +594,7 @@ impl SearchState {
     /// True while page text is still being scanned, so a view can say "42 so
     /// far" rather than "42".
     pub fn scanning(&self) -> bool {
-        self.frontier < self.page_count
+        self.scanned < self.page_count
     }
 
     /// How far through the document the scan is, as a fraction.
@@ -559,7 +602,7 @@ impl SearchState {
         if self.page_count == 0 {
             return 1.0;
         }
-        (self.frontier as f32 / self.page_count as f32).clamp(0.0, 1.0)
+        (self.scanned as f32 / self.page_count as f32).clamp(0.0, 1.0)
     }
 
     /// The hit the user is on, if any.
@@ -576,6 +619,15 @@ impl SearchState {
     pub fn open(&mut self, page_count: usize) -> SearchGeneration {
         self.page_count = page_count;
         self.restart()
+    }
+
+    /// Scan outwards from `page` rather than from the front of the document.
+    ///
+    /// Takes effect at the next restart, so that the page a search was opened
+    /// on stays the origin for every keystroke of it rather than following the
+    /// cursor as hits are stepped through.
+    pub fn begin_at(&mut self, page: PageIndex) {
+        self.origin = page.0;
     }
 
     /// Set the query. Returns the generation the caller must stamp on the
@@ -602,29 +654,57 @@ impl SearchState {
         self.hits = std::sync::Arc::new(Vec::new());
         self.cursor = None;
         self.problem = None;
-        self.in_flight = None;
-        self.frontier = if self.query.is_empty() {
+        self.in_flight.clear();
+        self.issued = 0;
+        self.start = if self.page_count == 0 {
+            0
+        } else {
+            self.origin.min(self.page_count - 1)
+        };
+        let done = if self.query.is_empty() {
             self.page_count
         } else {
             0
         };
+        self.requested = done;
+        self.scanned = done;
         self.generation.advance()
+    }
+
+    /// Mark the scan finished, whatever is left unasked. Used when the answer
+    /// cannot get better: the hit bound was reached, or the worker failed.
+    fn finish(&mut self) {
+        self.requested = self.page_count;
+        self.scanned = self.page_count;
+        self.in_flight.clear();
     }
 
     /// The next range of pages to ask a worker for, if any, marked in flight.
     ///
-    /// Returns `None` when the scan is done, when one request is already out,
-    /// or when there is nothing to look for.
+    /// Returns `None` when every page has been asked about, when the link is
+    /// already carrying as much as it should, or when there is nothing to look
+    /// for. Call it until it says `None`: several requests may be outstanding,
+    /// which is what keeps the worker busy instead of the link.
     pub fn next_request(&mut self) -> Option<(SearchGeneration, std::ops::Range<usize>)> {
-        if self.query.is_empty() || self.in_flight.is_some() || !self.scanning() {
+        if self.query.is_empty() || self.page_count == 0 {
+            return None;
+        }
+        if self.in_flight.len() >= MAX_CHUNKS_IN_FLIGHT || self.requested >= self.page_count {
             return None;
         }
         if self.hits.len() >= MAX_HITS {
             return None;
         }
-        let from = self.frontier;
-        let to = (from + PAGES_PER_CHUNK).min(self.page_count);
-        self.in_flight = Some(from);
+        let from = (self.start + self.requested) % self.page_count;
+        // A chunk never wraps: the worker is asked for a run of pages, and
+        // "300 to 12" is not one. The wrap simply falls on a chunk boundary.
+        let pages = chunk_pages(self.issued)
+            .min(self.page_count - self.requested)
+            .min(self.page_count - from);
+        let to = from + pages;
+        self.requested += pages;
+        self.issued += 1;
+        self.in_flight.push(from);
         Some((self.generation, from..to))
     }
 
@@ -638,14 +718,20 @@ impl SearchState {
             return false;
         }
         self.merge_hits(chunk.hits);
+        // Only a chunk that was actually out counts towards the scan: a
+        // retried request arriving twice must not report its pages searched
+        // twice, or a scan would finish before it had read the document.
+        let outstanding = self.in_flight.iter().position(|at| *at == chunk.from_page);
+        if let Some(at) = outstanding {
+            self.in_flight.remove(at);
+            self.scanned = self
+                .scanned
+                .saturating_add(chunk.to_page.saturating_sub(chunk.from_page))
+                .min(self.page_count);
+        }
         if chunk.truncated || self.hits.len() >= MAX_HITS {
             self.problem = Some(SearchProblem::TooManyHits);
-            self.frontier = self.page_count;
-        } else {
-            self.frontier = self.frontier.max(chunk.to_page).min(self.page_count);
-        }
-        if self.in_flight == Some(chunk.from_page) {
-            self.in_flight = None;
+            self.finish();
         }
         if self.cursor.is_none() && !self.hits.is_empty() {
             self.cursor = Some(0);
@@ -660,8 +746,7 @@ impl SearchState {
             return false;
         }
         self.problem = Some(problem);
-        self.frontier = self.page_count;
-        self.in_flight = None;
+        self.finish();
         true
     }
 
@@ -1230,51 +1315,118 @@ mod tests {
     }
 
     #[test]
-    fn requests_walk_the_document_one_chunk_at_a_time() {
+    fn requests_start_small_and_grow_so_the_first_hits_arrive_first() {
         let mut state = SearchState::new();
-        state.open(70);
+        state.open(200);
         let generation = state.set_query(query("pdf"));
 
-        let (gen, range) = state.next_request().unwrap();
+        let (gen, first) = state.next_request().unwrap();
         assert_eq!(gen, generation);
-        assert_eq!(range, 0..PAGES_PER_CHUNK);
-        // One request at a time: nothing else goes out until it is answered.
+        assert_eq!(first, 0..FIRST_CHUNK_PAGES, "the first trip is a short one");
+        assert_eq!(
+            state.next_request().unwrap().1,
+            FIRST_CHUNK_PAGES..FIRST_CHUNK_PAGES * 3,
+            "the second doubles"
+        );
+        assert_eq!(
+            state.next_request().unwrap().1,
+            FIRST_CHUNK_PAGES * 3..FIRST_CHUNK_PAGES * 7
+        );
+        // Three is as many as the link carries at once.
         assert!(state.next_request().is_none());
 
         state.accept(
             generation,
             HitChunk {
                 from_page: 0,
-                to_page: PAGES_PER_CHUNK,
+                to_page: FIRST_CHUNK_PAGES,
                 hits: Vec::new(),
                 truncated: false,
             },
         );
-        assert_eq!(
-            state.next_request().unwrap().1,
-            PAGES_PER_CHUNK..PAGES_PER_CHUNK * 2
+        assert!(
+            state.next_request().is_some(),
+            "answering one frees the slot for the next"
         );
-        state.accept(
-            generation,
-            HitChunk {
-                from_page: PAGES_PER_CHUNK,
-                to_page: PAGES_PER_CHUNK * 2,
-                hits: Vec::new(),
-                truncated: false,
-            },
-        );
-        assert_eq!(state.next_request().unwrap().1, PAGES_PER_CHUNK * 2..70);
-        state.accept(
-            generation,
-            HitChunk {
-                from_page: PAGES_PER_CHUNK * 2,
-                to_page: 70,
-                hits: Vec::new(),
-                truncated: false,
-            },
-        );
-        assert!(!state.scanning());
-        assert!(state.next_request().is_none());
+    }
+
+    #[test]
+    fn a_scan_covers_every_page_exactly_once() {
+        for pages in [1usize, 7, 70, 200] {
+            for origin in [0usize, 1, 3, 50] {
+                if origin >= pages {
+                    continue;
+                }
+                let mut state = SearchState::new();
+                state.open(pages);
+                state.begin_at(PageIndex(origin));
+                let generation = state.set_query(query("pdf"));
+
+                let mut covered = vec![0usize; pages];
+                let mut guard = 0;
+                while state.scanning() {
+                    guard += 1;
+                    assert!(guard < 1_000, "the scan of {pages} pages did not converge");
+                    let mut answered = false;
+                    while let Some((_, range)) = state.next_request() {
+                        assert!(range.start < range.end, "an empty request asks nothing");
+                        assert!(range.end <= pages, "a request walked off the document");
+                        for page in range.clone() {
+                            covered[page] += 1;
+                        }
+                        state.accept(
+                            generation,
+                            HitChunk {
+                                from_page: range.start,
+                                to_page: range.end,
+                                hits: Vec::new(),
+                                truncated: false,
+                            },
+                        );
+                        answered = true;
+                    }
+                    assert!(answered, "the scan stalled with pages left to read");
+                }
+                assert!(
+                    covered.iter().all(|times| *times == 1),
+                    "{pages} pages from {origin} were covered {covered:?}"
+                );
+                assert!(state.next_request().is_none());
+                assert_eq!(state.progress(), 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_scan_begins_at_the_page_the_reader_is_on_and_wraps() {
+        let mut state = SearchState::new();
+        state.open(100);
+        state.begin_at(PageIndex(60));
+        state.set_query(query("pdf"));
+        assert_eq!(state.next_request().unwrap().1.start, 60);
+
+        // …and the origin outlives the restart a keystroke causes, so the
+        // second letter does not scan from somewhere else.
+        state.set_query(query("pdfium"));
+        assert_eq!(state.next_request().unwrap().1.start, 60);
+    }
+
+    #[test]
+    fn a_chunk_that_arrives_twice_does_not_count_its_pages_twice() {
+        let mut state = SearchState::new();
+        state.open(100);
+        let generation = state.set_query(query("pdf"));
+        let (_, range) = state.next_request().unwrap();
+        let chunk = HitChunk {
+            from_page: range.start,
+            to_page: range.end,
+            hits: Vec::new(),
+            truncated: false,
+        };
+        assert!(state.accept(generation, chunk.clone()));
+        let after = state.progress();
+        assert!(state.accept(generation, chunk));
+        assert_eq!(state.progress(), after, "a retry re-read no pages");
     }
 
     #[test]

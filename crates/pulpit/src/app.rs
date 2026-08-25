@@ -37,6 +37,11 @@ const TICK: Duration = Duration::from_millis(50);
 /// deadlines and resume detection, slow enough that an idle talk barely
 /// wakes the CPU.
 const SETTLED_TICK: Duration = Duration::from_millis(250);
+/// How long the search box waits for typing to stop before it scans.
+///
+/// Two ticks: short enough that it reads as "while I was still typing", long
+/// enough that a fast typist starts one scan rather than one per letter.
+const SEARCH_SETTLE: Duration = Duration::from_millis(120);
 /// Per-message answer budget. A form can cause follow-up asks while answers
 /// are handled, so bounding the drain prevents a busy document from owning an
 /// event-loop turn indefinitely.
@@ -1335,6 +1340,13 @@ pub struct App {
     /// rail restores this exact view unless a result was explicitly chosen.
     search_origin: Option<SearchOrigin>,
     /// Vertical offset of the page-grouped result stream.
+    /// When the typed query stops being a keystroke and becomes a scan.
+    ///
+    /// The query itself is set immediately — the field, the toggles and the
+    /// notes hits are all live as you type — but the document scan waits for
+    /// the typing to settle. Without it "needle" is six full scans, five of
+    /// which the sixth invalidates while the worker is still running them.
+    search_settle_at: Option<Instant>,
     pub search_scroll: f32,
     pub search_viewport: std::rc::Rc<std::cell::Cell<f32>>,
     /// The thread talking to this document's worker, when document mode is
@@ -1898,6 +1910,7 @@ impl App {
             opening_signed_copy: None,
             signing_temp: None,
             search_origin: None,
+            search_settle_at: None,
             search_scroll: 0.0,
             search_viewport: std::rc::Rc::new(std::cell::Cell::new(600.0)),
             reader_render: ReaderRenderState::default(),
@@ -2088,6 +2101,12 @@ impl App {
             || self.needs_reconcile
             // Work held back rather than sent has no worker answer to ring a
             // doorbell. The tick that releases it must keep running.
+            //
+            // A running scan is exactly that: the next chunk is released by
+            // `pump_search`, so at the settled tick a five-hundred-page deck
+            // spent seconds waiting for a timer rather than for the worker.
+            || self.search.scanning()
+            || self.search_settle_at.is_some()
             || self.selection_query.is_waiting()
             || self.form_move.is_waiting()
             || self.form_flow.is_waiting()
@@ -5196,6 +5215,10 @@ impl App {
             } => {
                 if searchable {
                     self.search.accept(generation, chunk);
+                    // The slot this answer freed is refilled now rather than
+                    // on the next tick: waiting for the timer is what made a
+                    // long scan take seconds it spent doing nothing.
+                    self.pump_search();
                 } else {
                     self.search.fail(
                         generation,
@@ -5861,6 +5884,10 @@ impl App {
                     // generation and drops what belongs to a query the
                     // reader has already typed past.
                     self.search.accept(generation, chunk);
+                    // Refill the slot in this turn. A chunk answered and the
+                    // next one asked for on the following tick is a scan that
+                    // runs at the tick rate rather than the worker's.
+                    self.pump_search();
                 }
                 crate::reader_link::Told::CannotSearch {
                     generation,
@@ -10028,6 +10055,12 @@ impl App {
                 );
                 query.regex = self.search.query().regex;
                 self.restart_search(query);
+                // A keystroke, not a decision: hold the document scan until
+                // the typing settles. The toggles below do not wait, because
+                // pressing one *is* the decision.
+                if self.search.scanning() {
+                    self.search_settle_at = Some(self.now + SEARCH_SETTLE);
+                }
                 Task::none()
             }
             FindCommand::ToggleCaseSensitive
@@ -10218,6 +10251,11 @@ impl App {
         } else {
             Some(SearchOrigin::Presenter(self.current_place()))
         };
+        // Scan outwards from the page in front of the reader. Somebody who
+        // opens the box on page 300 is looking for something near page 300,
+        // and a scan that starts at page one makes them wait for 299 pages of
+        // answers they did not ask for.
+        self.search.begin_at(self.showing_page());
         self.search_workspace = true;
         self.keyboard_region = KeyboardRegion::SearchInput;
         self.search_focus_pending = true;
@@ -10296,6 +10334,9 @@ impl App {
     /// Point the search at the open document under a new query.
     fn restart_search(&mut self, query: pulpit_core::search::Query) {
         self.search_scroll = 0.0;
+        // A toggle or a fresh query goes out at once. Only `Type` holds it
+        // back, and it arms the delay itself after this returns.
+        self.search_settle_at = None;
         // The page count comes from whichever half is open. In document mode
         // the reader knows it; in presentation mode the deck does.
         let pages = if self.reader.is_open() {
@@ -10511,6 +10552,29 @@ impl App {
     /// under a paired notes mapping those are not the same number. Resolved by
     /// asking the mapping in force rather than by arithmetic on it, so a
     /// swapped or split deck lands on the slide the reader meant.
+    /// The physical page in front of the presenter, in whichever mode is up.
+    ///
+    /// The inverse of [`App::slide_showing`]: a deck slide is a page of the
+    /// PDF, and search counts in pages because that is what a worker reads.
+    fn showing_page(&self) -> pulpit_core::page::PageIndex {
+        if self.uses_document_viewer() {
+            return self.reader.controls().page;
+        }
+        let pdf_pages = self
+            .state
+            .document()
+            .map(|document| document.pdf_pages)
+            .unwrap_or(0);
+        let slide = self.state.committed();
+        let page = self
+            .state
+            .mapping()
+            .audience_source(slide, pdf_pages)
+            .map(|source| source.pdf_page)
+            .unwrap_or(slide);
+        pulpit_core::page::PageIndex(page)
+    }
+
     fn slide_showing(&self, page: usize) -> usize {
         let pdf_pages = self
             .state
@@ -10532,9 +10596,29 @@ impl App {
     ///
     /// Called from the tick, like every other round trip: a scan must not
     /// start inside a draw.
+    /// Send whatever the scan is ready to ask for, up to what the link
+    /// carries at once.
+    ///
+    /// Called on the tick *and* the moment a chunk lands, so the next request
+    /// leaves in the same event-loop turn as the answer that freed its slot
+    /// rather than one tick later.
     fn pump_search(&mut self) {
+        // Typing that has not settled yet is not a scan. The query is already
+        // set, so a chunk for the previous one that is still in flight will be
+        // discarded on arrival either way.
+        if let Some(settle_at) = self.search_settle_at {
+            if self.now < settle_at {
+                return;
+            }
+            self.search_settle_at = None;
+        }
+        while self.pump_one_search_chunk() {}
+    }
+
+    /// One request, or false when there is nothing to ask or nobody to ask.
+    fn pump_one_search_chunk(&mut self) -> bool {
         let Some((generation, pages)) = self.search.next_request() else {
-            return;
+            return false;
         };
         let query = self.search.query().clone();
         let sent = self
@@ -10550,7 +10634,7 @@ impl App {
             })
             .unwrap_or(false);
         if sent {
-            return;
+            return true;
         }
         // No document worker — presentation mode, where the render pool holds
         // the deck. It searches through the same matcher over the same text
@@ -10558,7 +10642,7 @@ impl App {
         let asked = self.state.document().map(|document| document.id.0);
         if let (Some(document), Some(supervisor)) = (asked, self.supervisor.as_mut()) {
             supervisor.request_find_text(document, generation, self.search.query().clone(), pages);
-            return;
+            return true;
         }
         // Nothing open that can answer. Notes and bookmarks have already been
         // searched in this process; saying "no page text here" once is better
@@ -10569,6 +10653,7 @@ impl App {
                 "the page text of this document is not available".into(),
             ),
         );
+        false
     }
 
     /// Put one text-selection query to the document worker, coalescing the
