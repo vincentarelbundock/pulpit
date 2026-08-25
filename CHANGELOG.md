@@ -4,6 +4,46 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.9] — 2026-08-25
+
+### Changed
+
+- **Search is fast enough to type into.** Every keystroke in the find box
+  restarts the document scan, so each of the things that made one scan slow
+  was being paid once per letter — and on a long deck that read as an
+  application thinking rather than a search running.
+
+  A running scan now keeps the fast tick, and the next run of pages is asked
+  for the moment the previous answer lands rather than on the following tick;
+  a five-hundred-page deck used to spend seconds waiting for a timer instead
+  of for the worker. Typing settles for a tenth of a second before a scan
+  starts, so a word is one scan and not six, while the box, its options and
+  the hits from your speaker notes stay live as you type. Three runs of pages
+  are in flight at once and the first covers four pages rather than
+  thirty-two, so the first hits arrive in a round trip. The scan starts at the
+  page you are on and wraps: the hit somebody searching from page 300 wants is
+  usually near page 300, not on page 1. A scan whose query you have already
+  typed past is dropped rather than run to completion in front of the one you
+  are waiting for.
+
+  Underneath, each page's text is extracted once and kept. Building a page's
+  text layer is the expensive half of searching it, and it was being rebuilt
+  for every query; the second query over a document now asks the PDF engine
+  for nothing at all on the pages that do not match, and only for the
+  rectangles it draws on the pages that do. Searching a document you are
+  reading is unchanged in what it finds — page text, notes and bookmark titles
+  now go through one matcher rather than three — and every mark still lands on
+  the text it matched.
+
+### Fixed
+
+- **Windows: a second copy can name the one that is running, and a released
+  claim cleans up after itself.** The file a running instance uses to claim
+  the projector was opened in a way that locked the instance out of reading
+  its own record. A second copy was refused correctly but could only say that
+  *something* held the claim, never which process, and an instance that closed
+  cleanly left its claim file behind for good.
+
 ## [0.0.8] — 2026-08-24
 
 ### Changed
