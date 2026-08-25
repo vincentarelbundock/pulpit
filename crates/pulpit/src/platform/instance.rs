@@ -45,7 +45,8 @@ pub struct InstanceLock {
 
 impl Drop for InstanceLock {
     fn drop(&mut self) {
-        // flock releases when `_file` closes, so the unlink is only tidiness.
+        // The lock releases when `_file` closes — with flock on Unix, with the
+        // handle itself on Windows — so the unlink is only tidiness.
         // It still has to be tidiness about *our* file: `remove_file` deletes
         // by path, not by inode, so unlinking unconditionally lets a departing
         // process delete the file a newly started one has just created. The
@@ -70,14 +71,26 @@ pub fn acquire(path: &Path) -> Instance {
     }
 
     // Open or create the lock file. On Windows the open itself is the lock:
-    // denying every kind of sharing is what makes `is_claimed` answerable
-    // there, since there is no flock to ask.
+    // denying *write* sharing is what makes `is_claimed` answerable there,
+    // since there is no flock to ask.
+    //
+    // Reading and deleting are shared, and both are load-bearing rather than
+    // generous. Denying every kind of sharing — which this did — locked the
+    // holder out of its own record: `read_pid` opens the file, so the pid
+    // could not be read back while anybody held it. A second copy could
+    // therefore never name the copy that was running, and the release in
+    // `Drop` could never recognise the file as its own, so a claim released
+    // cleanly left its file behind for good. Sharing deletion is what lets
+    // that release remove the file while the handle proving it is ours is
+    // still open.
+    #[cfg(windows)]
+    const SHARE_READ_AND_DELETE: u32 = 0x0000_0001 | 0x0000_0004;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0);
+        options.share_mode(SHARE_READ_AND_DELETE);
     }
     let file = match options.open(path) {
         Ok(f) => f,
@@ -193,8 +206,10 @@ pub fn is_claimed(path: &Path) -> bool {
         if !path.exists() {
             return false;
         }
-        // The holder opens its claim denying every kind of sharing, so an
-        // open that succeeds proves there is no holder.
+        // The holder opens its claim denying write sharing, so an open that
+        // asks to write and succeeds proves there is no holder. The probe
+        // shares nothing itself, which is what keeps two simultaneous probes
+        // from both answering "free".
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
