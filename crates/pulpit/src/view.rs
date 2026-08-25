@@ -1700,6 +1700,7 @@ fn interaction(interaction: crate::widgets::WidgetEvent) -> Message {
         crate::widgets::WidgetEvent::Alarm(command) => Message::Alarm(command),
         crate::widgets::WidgetEvent::Timer(command) => Message::Timer(command),
         crate::widgets::WidgetEvent::ToggleTimer => Message::Nav(Nav::ToggleTimer),
+        crate::widgets::WidgetEvent::ResetTimer => Message::Nav(Nav::ResetTimer),
         crate::widgets::WidgetEvent::Transport(request) => Message::Transport(request),
         crate::widgets::WidgetEvent::EndPresentation => Message::Do(Action::Quit),
         crate::widgets::WidgetEvent::Chrome(command) => {

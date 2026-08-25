@@ -3072,6 +3072,17 @@ impl ReaderSession {
         }
     }
 
+    /// Forget that the surface reported its own height.
+    ///
+    /// Said by the application when the tree the page is mounted in has
+    /// changed. Until some surface reports again, the layout's own
+    /// measurement of the cell is the best account of it there is; leaving
+    /// the departed surface's report in charge is how a fit stayed sized
+    /// for the window it was made in.
+    pub fn retire_reported_viewport(&mut self) {
+        self.viewport_reported = false;
+    }
+
     /// The page surface was replaced by another mount with its own geometry.
     ///
     /// Fullscreen and the ordinary reader layout use different scrollable
@@ -3083,7 +3094,7 @@ impl ReaderSession {
         let anchor = self
             .reading_position()
             .map(|(page, _zoom, fraction)| (page, fraction));
-        self.viewport_reported = false;
+        self.retire_reported_viewport();
         self.set_cell(width, height);
         if let Some((page, fraction)) = anchor {
             self.restore_position(page, None, fraction);
@@ -4734,6 +4745,37 @@ mod tests {
                 session.column.offset_of(PageIndex(4)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn a_remount_that_never_reports_still_fits_the_new_cell() {
+        // A page fitted to its window gives its scrollable nothing to
+        // scroll, and a scrollable with nothing to scroll publishes no
+        // viewport at all. Fullscreen would then be fitted to the window it
+        // was entered from, so the application retires the old surface's
+        // report and the layout's own measurement takes the cell back.
+        let mut session = open(1);
+        session.apply(&ReadCommand::ScrollTo {
+            offset: 0.0,
+            offset_x: 0.0,
+            viewport: 400.0,
+        });
+        session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
+        assert!(
+            (session.scale - 400.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
+
+        // The fullscreen cell, arriving with no word from the surface.
+        session.retire_reported_viewport();
+        session.set_cell(1_000.0, 800.0);
+
+        assert!(
+            (session.scale - 800.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub enum WidgetEvent {
     /// last cursor position against the page's link annotations.
     SlidePressed,
     ToggleTimer,
+    /// Put the timer back to the beginning.
+    ResetTimer,
     EndPresentation,
     /// Something the presenter asked of the annotation palette.
     Annotate(AnnotationCommand),

@@ -64,7 +64,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
             );
             column![
                 block,
-                timer_row(&timer_controls, reading.overtime, live, on)
+                timer_row(&timer_controls, reading.overtime, timing.running, live, on)
             ]
             .spacing(2)
             .align_x(iced::Alignment::Center)
@@ -115,21 +115,29 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     .into()
 }
 
-/// Height reserved under a reading for the line of controls beneath it.
+/// Height reserved under a reading for the caption and controls beneath it.
 ///
-/// Enough for text at [`FOOTER_TEXT`] with the padding around a button: the
-/// line is read and pressed mid-talk, so it is sized to be legible from
-/// standing rather than squeezed to leave the digits another point or two.
-const FOOTER_ROW: f32 = 30.0;
+/// Two lines now, not one: the words say what the reading is doing and the
+/// controls sit in a row of their own under them, so a glance finds the state
+/// and the hand finds the buttons in the same place every time. Enough for
+/// text at [`FOOTER_TEXT`] over a button holding a glyph at [`FOOTER_ICON`],
+/// with the padding around it — the line is read and pressed mid-talk, so it
+/// is sized to be legible from standing rather than squeezed to leave the
+/// digits another point or two.
+const FOOTER_ROW: f32 = 46.0;
 
 /// The size of the text in that line.
 const FOOTER_TEXT: f32 = theme::type_scale::BODY;
+
+/// The size of the glyphs in it, which sit beside those words.
+const FOOTER_ICON: f32 = FOOTER_TEXT * 0.85;
 
 /// The line under the timer: which way it is running, and the way in to
 /// change that. It is the clock's alarm line for the other half of the pair.
 fn timer_row<Message: Clone + 'static>(
     controls: &TimerControls,
     overtime: bool,
+    running: bool,
     live: bool,
     on: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
@@ -157,54 +165,120 @@ fn timer_row<Message: Clone + 'static>(
             }
             control
         };
-        return container(
+        return footer(
+            "overtime".to_string(),
+            colour,
             row![
-                text("overtime").size(FOOTER_TEXT).color(colour),
                 answer(
                     format!("+{}m", controls.snooze_minutes),
                     TimerCommand::Snooze
                 ),
                 answer("Dismiss".to_string(), TimerCommand::Dismiss),
-            ]
-            .spacing(theme::space::S)
-            .align_y(iced::Alignment::Center),
-        )
-        .center_x(Length::Fill)
-        .into();
+            ],
+        );
     }
 
-    let mut control = button(settings_label(caption, colour, live))
+    footer(
+        caption,
+        colour,
+        row![
+            transport(running, live, on),
+            reset(live, on),
+            settings(WidgetEvent::Timer(TimerCommand::Open(true)), live, on),
+        ],
+    )
+}
+
+/// A caption with its controls in a row beneath it.
+///
+/// The words and the buttons are two lines rather than one so that the
+/// controls sit in the same place whatever the caption says: a timer that
+/// changes from "counting up" to "counting down · 20:00" would otherwise
+/// slide its own buttons sideways under the presenter's finger.
+fn footer<'a, Message: Clone + 'a>(
+    caption: String,
+    colour: iced::Color,
+    controls: iced::widget::Row<'a, Message>,
+) -> Element<'a, Message> {
+    container(
+        column![
+            text(caption).size(FOOTER_TEXT).color(colour),
+            controls
+                .spacing(theme::space::XS)
+                .align_y(iced::Alignment::Center),
+        ]
+        .spacing(2)
+        .align_x(iced::Alignment::Center),
+    )
+    .center_x(Length::Fill)
+    .into()
+}
+
+/// Start the timer, or hold it where it is.
+///
+/// The same press either way — the keyboard's `t` is one key, not two — so
+/// the glyph is the whole of what says which of the two the press will do:
+/// `play` while the timer is stopped, `pause` while it is running.
+fn transport<Message: Clone + 'static>(
+    running: bool,
+    live: bool,
+    on: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let glyph = if running {
+        theme::Icon::Pause
+    } else {
+        theme::Icon::Play
+    };
+    icon_button(glyph, WidgetEvent::ToggleTimer, live, on)
+}
+
+/// Back to zero, whether the timer is running or stopped.
+fn reset<Message: Clone + 'static>(
+    live: bool,
+    on: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    icon_button(theme::Icon::Reset, WidgetEvent::ResetTimer, live, on)
+}
+
+/// One glyph in the footer line, drawn at the size of the words beside it.
+///
+/// Small on purpose: the digits are what the room reads, and these two are
+/// for the hand that is already on the machine. Inert in the editor, like
+/// every other control here, so a layout can be arranged without starting
+/// anybody's talk.
+fn icon_button<Message: Clone + 'static>(
+    glyph: theme::Icon,
+    event: WidgetEvent,
+    live: bool,
+    on: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let colour = if live {
+        theme::ambient::text()
+    } else {
+        theme::ambient::muted()
+    };
+    let mut control = button(theme::icon::tinted(glyph, FOOTER_ICON, colour))
         .padding(theme::space::XS)
         .style(theme::ambient::tool_button);
     if live {
-        control = control.on_press(on(WidgetEvent::Timer(TimerCommand::Open(true))));
+        control = control.on_press(on(event));
     }
-    container(control).center_x(Length::Fill).into()
+    control.into()
 }
 
-/// A reading that is also a way in to its settings, and says so.
+/// The way in to a reading's settings.
 ///
 /// The gear is the whole of the difference between a caption and a control: a
 /// line of text that opens a panel when pressed is indistinguishable from a
 /// line of text that does nothing, and a presenter mid-talk will not go
 /// hunting. Inert in the editor, where nothing opens, so the designer is not
 /// promised a panel it will not get.
-fn settings_label<'a, Message: 'a>(
-    caption: String,
-    colour: iced::Color,
+fn settings<Message: Clone + 'static>(
+    event: WidgetEvent,
     live: bool,
-) -> Element<'a, Message> {
-    let label = text(caption).size(FOOTER_TEXT).color(colour);
-    if !live {
-        return label.into();
-    }
-    row![
-        label,
-        theme::icon::tinted(theme::Icon::Gear, FOOTER_TEXT * 0.85, colour)
-    ]
-    .spacing(theme::space::XS)
-    .align_y(iced::Alignment::Center)
-    .into()
+    on: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    icon_button(theme::Icon::Gear, event, live, on)
 }
 
 /// The line under the clock: what is coming, and the way in to the popup.
@@ -238,31 +312,28 @@ fn alarm_row<Message: Clone + 'static>(
             }
             control
         };
-        return container(
+        return footer(
+            format!("● {name}"),
+            theme::ambient::alert(),
             row![
-                text(format!("● {name}"))
-                    .size(FOOTER_TEXT)
-                    .color(theme::ambient::alert()),
                 answer("Snooze", AlarmCommand::Snooze),
                 answer("Dismiss", AlarmCommand::Dismiss),
-            ]
-            .spacing(theme::space::S)
-            .align_y(iced::Alignment::Center),
-        )
-        .center_x(Length::Fill)
-        .into();
+            ],
+        );
     }
 
     // Otherwise the line names what is coming, and is the way in to the list.
     if let Some(alarm) = &snoozed {
         let caption = format!("snoozed · {}", options.format_alarm(alarm.at));
-        let mut control = button(settings_label(caption, theme::ambient::muted(), live))
-            .padding(theme::space::XS)
-            .style(theme::ambient::tool_button);
-        if live {
-            control = control.on_press(on(WidgetEvent::Alarm(AlarmCommand::Open(true))));
-        }
-        return container(control).center_x(Length::Fill).into();
+        return footer(
+            caption,
+            theme::ambient::muted(),
+            row![settings(
+                WidgetEvent::Alarm(AlarmCommand::Open(true)),
+                live,
+                on
+            )],
+        );
     }
 
     let (caption, command, colour) = match (&ringing, &next) {
@@ -283,13 +354,11 @@ fn alarm_row<Message: Clone + 'static>(
 
     // Inert in the editor: the designer draws the same controls without them
     // doing anything, so a layout can be arranged without setting cues.
-    let mut control = button(settings_label(caption, colour, live))
-        .padding(theme::space::XS)
-        .style(theme::ambient::tool_button);
-    if live {
-        control = control.on_press(on(WidgetEvent::Alarm(command)));
-    }
-    container(control).center_x(Length::Fill).into()
+    footer(
+        caption,
+        colour,
+        row![settings(WidgetEvent::Alarm(command), live, on)],
+    )
 }
 
 /// A large reading, centred in the space it was given.

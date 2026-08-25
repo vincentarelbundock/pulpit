@@ -1175,6 +1175,15 @@ pub struct App {
     /// mounted since the session last heard from one, and its offset is a
     /// birth certificate, not news about where the reader is.
     reader_surface_seen: u32,
+    /// The surface generation the reader's *cell* was last sized for.
+    ///
+    /// Kept apart from `reader_surface_seen` because the two answer different
+    /// questions. A scroll report may never come: `iced`'s scrollable stays
+    /// silent while its content fits inside it, which at "fit page" is
+    /// exactly what the content does. So a remount also retires the reported
+    /// height here, where the layout's own measurement is applied every tick,
+    /// and the gate above is left armed for the report if one does arrive.
+    reader_surface_sized: u32,
     /// A slide the grid was asked to show before it knew its own shape.
     ///
     /// The shape is only known after the grid has laid itself out, so on the
@@ -1855,6 +1864,7 @@ impl App {
             overview_grid: std::cell::Cell::new(OverviewGrid::default()),
             reader_surface_shape: std::cell::Cell::new(SurfaceShape::default()),
             reader_surface_seen: 0,
+            reader_surface_sized: 0,
             overview_reveal: None,
             thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
             thumbnail_queue: std::collections::VecDeque::new(),
@@ -2062,6 +2072,10 @@ impl App {
             // would arrive in about five steps and read as a stutter rather
             // than a fade.
             || self.alarm_controls.ringing.is_some()
+            // …and so is the timer's overrun, which pulses from the same
+            // helper for the same reason. Left off this list it faded in
+            // about five steps and read as a stutter rather than a fade.
+            || self.timer_controls.overtime_since.is_some()
             || self.outline_animation.is_animating(self.now)
             || self.search_animation.is_animating(self.now)
             || self.search_focus_pending
@@ -2161,7 +2175,18 @@ impl App {
             _ => None,
         });
         let closes = window::close_events().map(Message::WindowClosed);
-        let resizes = window::resize_events().map(|(id, size)| Message::Resized { id, size });
+        // A window reports the size it *opened* at once, as `Opened`, and
+        // then only reports again when something resizes it. Listening for
+        // `Resized` alone leaves the presenter fitting pages to the size the
+        // window asked for rather than the one it got — for the whole session
+        // on a tiling compositor, which places the window and then leaves it
+        // alone. Both events carry the same fact, so both become one message.
+        let resizes = iced::event::listen_with(|event, _status, id| match event {
+            iced::Event::Window(
+                iced::window::Event::Opened { size, .. } | iced::window::Event::Resized(size),
+            ) => Some(Message::Resized { id, size }),
+            _ => None,
+        });
         let mut subscriptions = vec![ticks, keys, closes, resizes];
         subscriptions.push(topology_snapshots(
             self.coordinator.backend.clone(),
@@ -6159,6 +6184,18 @@ impl App {
         // pass draws, and asking it to send a message about its own size is
         // how a layout loop starts.
         if let Some(cell) = self.page_surface_size() {
+            // A surface that has reported its own height outranks this
+            // estimate — but only its own. A remount puts a different
+            // surface there, and that one may never report at all (a page
+            // fitted to the window gives its scrollable nothing to scroll,
+            // and `iced` publishes no viewport for a surface that does not
+            // scroll). Retiring the old surface's report here is what lets
+            // the fullscreen cell be fitted to at all in that case.
+            let generation = self.reader_surface_shape.get().generation;
+            if generation != self.reader_surface_sized {
+                self.reader_surface_sized = generation;
+                self.reader.retire_reported_viewport();
+            }
             self.reader.set_cell(cell.0, cell.1);
         }
         self.reask_resized_patches();
