@@ -4,6 +4,42 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Text written on a slide is kept.** A label typed at the lectern was drawn
+  on the screen and then thrown away at the next page turn: nothing ever
+  committed it, so it never reached the file. It now becomes an annotation in
+  the document when it is finished, exactly as a stroke does — and it is
+  finished by Enter, by starting another label, by reaching for another tool
+  and by pressing undo, each of which used to lose it silently. Escape still
+  makes nothing, which is what escape is for.
+
+- **A highlight made while presenting stays on the screen.** The mark was
+  committed correctly and then drawn by nobody: a slide is rendered without
+  annotations, and the overlay knew how to draw ink and nothing else. It now
+  draws every kind the document holds for the page — highlights, notes and
+  labels as well as ink — so a mark made in either mode, or one that was in
+  the PDF before pulpit opened it, is on the slide and on the projector.
+
+### Changed
+
+- **Both modes offer the same annotation tools.** Presentation gains the
+  sticky note and the rubber band, so every mark document mode can make can be
+  made at the lectern; the pointer and the spotlight stay presentation's,
+  because they make no mark at all. The band holds what it encloses and the
+  delete key takes all of it in one press — one undo, however many marks.
+  Moving and resizing a held mark stays document mode's.
+
+  The tool digits now mean the same thing in both modes: 1 holds, 2 draws, 3
+  highlights, 4 writes, 5 leaves a note, 6 erases, and 7 points. A colour
+  chosen for a tool in one mode is that tool's colour in the other.
+
+  The eraser and "clear this slide" reach every mark on the slide rather than
+  only the ink, so a highlight or a note on the page can be taken back from
+  presentation too.
+
 ## [0.0.9] — 2026-08-25
 
 ### Changed

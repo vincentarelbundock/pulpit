@@ -442,7 +442,14 @@ impl Coordinator {
                 id,
                 revision,
                 source: mark.text.clone(),
-                width_pt: ((1.0 - mark.position.0) * 1000.0).max(20.0),
+                // A label being written is set to the room left between it and
+                // the edge of the page; one read back out of the document is
+                // set to the box the annotation occupies, so that its lines
+                // break where they broke when it was made.
+                width_pt: match mark.fit {
+                    Some((width, _)) => (width * 1000.0).max(20.0),
+                    None => ((1.0 - mark.position.0) * 1000.0).max(20.0),
+                },
                 size_pt: mark.size * 1000.0,
                 rgb: ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8),
             };

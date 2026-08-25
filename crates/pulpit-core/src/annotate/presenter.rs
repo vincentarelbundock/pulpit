@@ -23,9 +23,9 @@
 use crate::annotate::draft::{AnnotationDraft, InkDraft, MarkStyle};
 use crate::annotate::id::AnnotationId;
 use crate::annotate::stroke::InkPoint;
-use crate::annotation::{InkColor, InkStroke, StrokeKind};
+use crate::annotation::{InkColor, InkStroke, StrokeKind, TextMark};
 use crate::notes::Region;
-use crate::page::{PageGeometry, PageIndex, PagePoint};
+use crate::page::{PageGeometry, PageIndex, PagePoint, PageRect};
 
 /// Where a slide sits on a page, and how big that page is.
 ///
@@ -164,6 +164,138 @@ pub fn stroke_to_draft(stroke: &InkStroke, placement: &SlidePlacement) -> Option
             }
         },
     }))
+}
+
+/// Where a presenter's text label goes on the page, and how big it is there.
+///
+/// The label is Typst markup, so how much room it needs is not something this
+/// crate can answer: that is the compiler's, and the compiler lives in the
+/// application. What is resolved here is everything that depends on the
+/// slide-to-page mapping, which is this module's whole job — where the
+/// top-left corner lands, how big a point of type is on the paper, and how
+/// much room there is to the right of the mark before the slide's edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextPlacement {
+    /// The label's top-left corner, in page points.
+    pub at: PagePoint,
+    /// The type size, in page points.
+    pub size_pt: f32,
+    /// The room from `at` to the right edge of the slide, in page points,
+    /// which is the width the markup is set to.
+    pub width_pt: f32,
+}
+
+/// A presenter's text label as page geometry, ready to be compiled.
+///
+/// `None` when the placement cannot carry it, when the label is off the slide,
+/// or when it says nothing — an empty label is a box other viewers draw and
+/// nobody meant to make (§8.5).
+pub fn text_placement(mark: &TextMark, placement: &SlidePlacement) -> Option<TextPlacement> {
+    if !placement.is_usable() || mark.text.trim().is_empty() || !placement.contains(mark.position) {
+        return None;
+    }
+    let width_pt = placement.to_page_width(1.0 - mark.position.0);
+    let size_pt = placement.to_page_width(mark.size);
+    if width_pt <= 0.0 || size_pt <= 0.0 {
+        return None;
+    }
+    Some(TextPlacement {
+        at: placement.to_page(mark.position),
+        size_pt,
+        width_pt,
+    })
+}
+
+/// The rectangle a compiled label occupies on the page.
+///
+/// The compiled picture's width and height are in the same points the type
+/// size was given in, so both go on the page unscaled. They are deliberately
+/// *not* re-derived through the slide's vertical scale: a split-page slide is
+/// squeezed more one way than the other, and a picture squeezed with it would
+/// be type taller than it is wide. A label has one size for the same reason a
+/// pen has one width (`to_page_width`).
+pub fn text_rect(at: PagePoint, width_pt: f32, height_pt: f32) -> PageRect {
+    PageRect::new(at.x, at.y, at.x + width_pt, at.y + height_pt)
+}
+
+/// The inverse: a committed Typst mark as the label a slide draws.
+///
+/// This is how presentation shows a text mark that is in the document —
+/// including one made in document mode, and one that was in the file before
+/// pulpit opened it. Like [`ink_to_stroke`], it is a *view* of the annotation
+/// (A1) rather than a second copy of it.
+///
+/// The label comes back with a `fit`: the box the annotation occupies, in
+/// slide fractions. What a PDF records is the box, not the type size the
+/// markup was set at, so putting the compiled picture back in the box it
+/// claims is the only reading that cannot drift.
+///
+/// `id` is the local drawing identity the caller assigns; the annotation's own
+/// name goes in `annotation`.
+pub fn stamp_to_text(
+    id: u64,
+    annotation: AnnotationId,
+    page: PageIndex,
+    rect: PageRect,
+    source: &str,
+    color: InkColor,
+    placement: &SlidePlacement,
+) -> Option<TextMark> {
+    if !placement.is_usable() || placement.page != page || source.trim().is_empty() {
+        return None;
+    }
+    let corner = placement.to_slide(PagePoint::new(rect.left, rect.top));
+    let far = placement.to_slide(PagePoint::new(rect.right, rect.bottom));
+    // A mark on the other half of a split page belongs to the other slide.
+    if !placement.contains(corner) {
+        return None;
+    }
+    let fit = (far.0 - corner.0, far.1 - corner.1);
+    if fit.0 <= 0.0 || fit.1 <= 0.0 {
+        return None;
+    }
+    Some(TextMark {
+        id,
+        position: corner,
+        text: source.to_string(),
+        // The size the markup is *set* at when it is compiled again. The
+        // picture is drawn into `fit` whatever this comes out as, so it only
+        // decides where lines break — but a size wildly unlike the one the
+        // mark was made at would break them somewhere else and be stretched
+        // into the box, so it is estimated from the box rather than guessed.
+        // A one-line mark's box is its type size plus a line's leading and the
+        // compiler's gutter, which is where the fraction comes from; a mark of
+        // several lines compiles smaller than its box and is scaled up to it.
+        size: placement.to_slide_width((rect.bottom - rect.top) * 0.625),
+        color,
+        // A note is drawn as its icon, never as a label, so nothing that comes
+        // back through here is one.
+        note: false,
+        annotation: Some(annotation),
+        fit: Some(fit),
+    })
+}
+
+/// A committed highlight as the runs a slide draws.
+///
+/// The quads are the engine's answer about where the *text* is, in page
+/// points; the slide draws them as fractions. Every corner goes through
+/// `to_slide` rather than a bounding box of two, for the reason
+/// `quad_to_slide` gives.
+pub fn highlight_to_runs(
+    page: PageIndex,
+    quads: &[crate::page::PageQuad],
+    placement: &SlidePlacement,
+) -> Option<Vec<[(f32, f32); 4]>> {
+    if !placement.is_usable() || placement.page != page || quads.is_empty() {
+        return None;
+    }
+    let runs: Vec<_> = quads
+        .iter()
+        .map(|quad| placement.quad_to_slide(quad))
+        .filter(|run| run.iter().any(|corner| placement.contains(*corner)))
+        .collect();
+    (!runs.is_empty()).then_some(runs)
 }
 
 /// Which presenter tool a committed style reads as.
@@ -498,5 +630,112 @@ mod tests {
         // Unclamped, so it reads as off the slide rather than as text jammed
         // against the right edge.
         assert!(run.iter().all(|corner| corner.0 > 1.0), "{run:?}");
+    }
+
+    fn label(position: (f32, f32), text: &str) -> TextMark {
+        TextMark {
+            id: 1,
+            position,
+            text: text.to_string(),
+            size: 0.025,
+            color: InkColor::Black,
+            note: false,
+            annotation: None,
+            fit: None,
+        }
+    }
+
+    #[test]
+    fn a_label_is_placed_and_sized_in_page_points() {
+        let geometry = letter();
+        let placement = full(&geometry);
+        let placed = text_placement(&label((0.25, 0.5), "a thought"), &placement)
+            .expect("a label on the slide");
+        assert!((placed.at.x - 153.0).abs() < 1e-3, "{:?}", placed.at);
+        assert!((placed.at.y - 396.0).abs() < 1e-3, "{:?}", placed.at);
+        // Type size follows the page's width, like a pen's width does.
+        assert!((placed.size_pt - 0.025 * 612.0).abs() < 1e-3, "{placed:?}");
+        // And the markup is set to the room that is left to the right of it.
+        assert!((placed.width_pt - 0.75 * 612.0).abs() < 1e-3, "{placed:?}");
+    }
+
+    #[test]
+    fn a_label_on_half_a_page_is_set_to_half_the_type_size() {
+        let geometry = letter();
+        let left = SlidePlacement::new(PageIndex(0), Region::left_half(), &geometry);
+        let placed = text_placement(&label((0.5, 0.5), "a thought"), &left).expect("a label");
+        // The slide is half the paper across, so a mark sized against the
+        // slide is half as many points on the paper as it would be on a whole
+        // page. Anything else and a split deck's labels come out double size.
+        assert!((placed.size_pt - 0.025 * 306.0).abs() < 1e-3, "{placed:?}");
+        assert!((placed.at.x - 153.0).abs() < 1e-3, "{:?}", placed.at);
+    }
+
+    #[test]
+    fn an_empty_label_is_not_an_annotation() {
+        let geometry = letter();
+        let placement = full(&geometry);
+        assert!(text_placement(&label((0.5, 0.5), "   \n "), &placement).is_none());
+        assert!(text_placement(&label((1.4, 0.5), "off the slide"), &placement).is_none());
+    }
+
+    #[test]
+    fn a_committed_label_comes_back_in_the_box_it_claims() {
+        let geometry = letter();
+        let placement = full(&geometry);
+        let placed = text_placement(&label((0.25, 0.5), "a thought"), &placement).expect("a label");
+        let rect = text_rect(placed.at, 90.0, 24.0);
+        let back = stamp_to_text(
+            7,
+            named("the-label"),
+            PageIndex(3),
+            rect,
+            "a thought",
+            InkColor::Black,
+            &placement,
+        )
+        .expect("a mark on this slide");
+        assert_eq!(back.id, 7);
+        assert_eq!(back.annotation, Some(named("the-label")));
+        assert!((back.position.0 - 0.25).abs() < 1e-4, "{back:?}");
+        assert!((back.position.1 - 0.5).abs() < 1e-4, "{back:?}");
+        let fit = back.fit.expect("a box");
+        assert!((fit.0 - 90.0 / 612.0).abs() < 1e-4, "{fit:?}");
+        assert!((fit.1 - 24.0 / 792.0).abs() < 1e-4, "{fit:?}");
+    }
+
+    #[test]
+    fn a_label_on_the_other_half_of_a_split_page_is_not_adopted() {
+        let geometry = letter();
+        let left = SlidePlacement::new(PageIndex(0), Region::left_half(), &geometry);
+        let rect = PageRect::new(400.0, 100.0, 500.0, 124.0);
+        assert!(stamp_to_text(
+            1,
+            named("elsewhere"),
+            PageIndex(0),
+            rect,
+            "not here",
+            InkColor::Black,
+            &left,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_highlight_comes_back_as_the_runs_it_covers() {
+        let geometry = letter();
+        let placement = full(&geometry);
+        let quad = crate::page::PageQuad::from_rect(PageRect {
+            left: 153.0,
+            top: 198.0,
+            right: 459.0,
+            bottom: 218.0,
+        });
+        let runs = highlight_to_runs(PageIndex(3), &[quad], &placement).expect("a run");
+        assert_eq!(runs.len(), 1);
+        assert!((runs[0][0].0 - 0.25).abs() < 1e-4, "{runs:?}");
+        // Another page's highlight is not this slide's.
+        assert!(highlight_to_runs(PageIndex(4), &[quad], &placement).is_none());
+        assert!(highlight_to_runs(PageIndex(3), &[], &placement).is_none());
     }
 }

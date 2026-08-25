@@ -1423,8 +1423,11 @@ fn shortcut_group<'a>(
 }
 
 const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
-const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 5];
-const SHORTCUT_TABLE_RIGHT: &[usize] = &[2, 3, 4];
+// Balanced by row count rather than by subject: the annotation group grew when
+// presentation gained document mode's tools, and the split that used to even
+// out now leaves one column noticeably longer than the other.
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 2, 5];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[1, 3, 4];
 const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {

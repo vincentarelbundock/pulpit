@@ -54,8 +54,11 @@ pub enum Action {
     // Annotations. Arming a tool is a toggle: the same key puts it down
     // again, so the presenter never has to find an "off" control while the
     // room is watching.
+    AnnotateSelect,
     AnnotateInk,
     AnnotateHighlighter,
+    AnnotateText,
+    AnnotateNote,
     AnnotateEraser,
     /// The dot, or the lit circle: which of the two depends on the mode the
     /// pointer control is in, so one key covers both — which is also why a
@@ -146,8 +149,11 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
     ShortcutGroup {
         title: "Annotate",
         actions: &[
+            Action::AnnotateSelect,
             Action::AnnotateInk,
             Action::AnnotateHighlighter,
+            Action::AnnotateText,
+            Action::AnnotateNote,
             Action::AnnotateEraser,
             Action::AnnotatePointer,
             Action::UndoAnnotation,
@@ -196,7 +202,7 @@ pub const PRESENTING_ACTIONS: [Action; 3] =
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 43] = [
+    pub const ALL: [Action; 46] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -217,8 +223,11 @@ impl Action {
         Action::CycleLayout,
         Action::ShowLayouts,
         Action::ShowShortcuts,
+        Action::AnnotateSelect,
         Action::AnnotateInk,
         Action::AnnotateHighlighter,
+        Action::AnnotateText,
+        Action::AnnotateNote,
         Action::AnnotateEraser,
         Action::AnnotatePointer,
         Action::UndoAnnotation,
@@ -264,8 +273,11 @@ impl Action {
             Action::CycleLayout => "Next layout",
             Action::ShowLayouts => "Layouts",
             Action::ShowShortcuts => "Keyboard shortcuts",
+            Action::AnnotateSelect => "Hold marks with a rubber band",
             Action::AnnotateInk => "Draw on the page",
             Action::AnnotateHighlighter => "Highlight on the page",
+            Action::AnnotateText => "Write on the page",
+            Action::AnnotateNote => "Leave a note on the page",
             Action::AnnotateEraser => "Erase annotations",
             Action::AnnotatePointer => "Point at the page",
             Action::UndoAnnotation => "Undo the last stroke",
@@ -547,13 +559,20 @@ impl Default for Keymap {
                 named("l", Action::CycleLayout),
                 with("l", Mods::shift(), Action::ShowLayouts),
                 with("/", Mods::shift(), Action::ShowShortcuts),
-                // The four tools sit under the digits, in the order the
-                // palette draws them; the marks they make are cleared and
-                // taken back from the keys beside them.
-                named("1", Action::AnnotateInk),
-                named("2", Action::AnnotateHighlighter),
-                named("3", Action::AnnotateEraser),
-                named("4", Action::AnnotatePointer),
+                // The tools sit under the digits, in the order the palette
+                // draws them — which is the order document mode's own digits
+                // arm them in, so a digit means the same tool in both modes.
+                // The marks they make are cleared and taken back from the keys
+                // beside them.
+                named("1", Action::AnnotateSelect),
+                named("2", Action::AnnotateInk),
+                named("3", Action::AnnotateHighlighter),
+                named("4", Action::AnnotateText),
+                named("5", Action::AnnotateNote),
+                named("6", Action::AnnotateEraser),
+                // The pointer has no document-mode counterpart to line up
+                // with, so it takes the digit after them.
+                named("7", Action::AnnotatePointer),
                 // Editing convention first, then the familiar Vim undo.
                 with("z", Mods::ctrl(), Action::UndoAnnotation),
                 named("u", Action::UndoAnnotation),
@@ -1063,8 +1082,11 @@ mod tests {
         // rather than over the annotation corner of it.
         let keymap = Keymap::default();
         let annotation = [
+            Action::AnnotateSelect,
             Action::AnnotateInk,
             Action::AnnotateHighlighter,
+            Action::AnnotateText,
+            Action::AnnotateNote,
             Action::AnnotateEraser,
             Action::AnnotatePointer,
             Action::UndoAnnotation,

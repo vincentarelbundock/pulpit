@@ -1818,6 +1818,24 @@ impl ReaderSession {
         PatchOutcome::Taken
     }
 
+    /// Whether a page's annotations have to be asked for, recording the ask.
+    ///
+    /// The reader's own window asks through [`Self::annotations_wanted`]; the
+    /// presenter's slide is not in that window and asks through this. Both go
+    /// through the same bookkeeping, so a page already in flight is asked for
+    /// once — which is what stops an edit landing during a page turn from
+    /// queueing a second list nobody reads.
+    pub fn must_ask_annotations(&mut self, page: PageIndex) -> bool {
+        if !self.open
+            || self.annotations.contains_key(&page)
+            || self.annotation_requests.contains(&page)
+        {
+            return false;
+        }
+        self.annotation_requests.insert(page);
+        true
+    }
+
     /// What is on a page, for hit-testing. Replaced wholesale, because the
     /// list *is* the document's `/Annots` order and a merge would invent one.
     pub fn set_annotations(

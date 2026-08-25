@@ -552,12 +552,24 @@ type ThumbnailPlanInputs = (
 /// beside the reader's other facets because the page surface draws it.
 pub use crate::widgets::context::ComposingMark;
 
+/// Which overlay mark an answer from the worker gives its name to.
+///
+/// The presenter's overlay draws a completed mark immediately and learns what
+/// annotation it *is* when the worker answers (A1). Which mark that is depends
+/// on what was committed, and the two are drawn from different lists, so the
+/// pending edit has to say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresenterMark {
+    Stroke,
+    Text,
+}
+
 /// One mutation sent to the document worker, waiting to be confirmed.
 struct PendingEdit {
     kind: AppliedKind,
-    /// Whether the answer to this names a mark the presenter just drew, so
-    /// the overlay stroke can be told which annotation it is showing.
-    names_a_presenter_mark: bool,
+    /// The mark the presenter just made that this answer names, if any, so the
+    /// overlay can be told which annotation it is showing.
+    names: Option<PresenterMark>,
     /// The transaction, for the journal. `None` for an undo or a redo, whose
     /// journal entry is written from the answer instead.
     transaction: Option<pulpit_render::document::DocumentTransaction>,
@@ -2699,10 +2711,14 @@ impl App {
                             self.annotations.type_text("\n");
                         }
                         Some("Enter") => {
-                            self.annotations.finish_text();
+                            let finished = self.annotations.finish_text();
+                            self.commit_presenter_text(finished);
                         }
+                        // Escape is the way out of a label, and the way out
+                        // makes nothing — the same answer document mode gives
+                        // (§8.5). Enter is how a label is kept.
                         Some("Escape") => {
-                            self.annotations.finish_text();
+                            self.annotations.cancel_text();
                         }
                         Some("Backspace") => {
                             self.annotations.backspace_text();
@@ -2727,6 +2743,24 @@ impl App {
                         self.composing_mark = None;
                     }
                     return Task::none();
+                }
+                // Marks the presenter's band is holding answer to delete and
+                // to escape, the same two keys document mode's selection
+                // answers to (§8.4). Only while something is held, so both
+                // keys keep every other meaning they have the rest of the
+                // time.
+                if !self.annotations.selected.is_empty() {
+                    match key.as_deref() {
+                        Some("Delete") | Some("Backspace") => {
+                            self.delete_held_marks();
+                            return Task::none();
+                        }
+                        Some("Escape") => {
+                            self.annotations.clear_selection();
+                            return Task::none();
+                        }
+                        _ => {}
+                    }
                 }
                 // The overview is a grid, so while it is open the arrow keys
                 // move about that grid: left and right along a row, up and
@@ -3261,6 +3295,12 @@ impl App {
                 // answer is what commits (§7.2).
                 if self.presenter_interaction.pending_selection().is_some() {
                     self.ask_presenter_selection(true);
+                } else if self.annotations.band.is_some() {
+                    // A band makes nothing and deletes nothing on its own: it
+                    // closes on what it caught, and the delete key is what
+                    // takes them (§8.4).
+                    let held = self.annotations.finish_band().len();
+                    self.diagnostics.note(format!("holding {held} marks"));
                 } else {
                     let finished = self.annotations.end_stroke();
                     self.commit_presenter_gesture(finished);
@@ -4569,7 +4609,10 @@ impl App {
             Action::CycleLayout => self.cycle_layout(),
             Action::ShowLayouts => self.update(Message::ShowLibrary),
             Action::ShowShortcuts => self.update(Message::ToggleShortcuts),
+            Action::AnnotateSelect => self.arm_from_key(AnnotationTool::Select),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
+            Action::AnnotateText => self.arm_from_key(AnnotationTool::Text),
+            Action::AnnotateNote => self.arm_from_key(AnnotationTool::Note),
             Action::AnnotateHighlighter => self.arm_from_key(AnnotationTool::Highlighter),
             Action::AnnotateEraser => self.arm_from_key(AnnotationTool::Eraser),
             // The key arms whichever of the two the pointer control is set
@@ -6138,17 +6181,36 @@ impl App {
                     // the overlay stroke is what makes the two one thing: the
                     // eraser can delete it, a page turn can recognise it, and
                     // document mode is editing the same annotation.
-                    if pending
-                        .as_ref()
-                        .is_some_and(|pending| pending.names_a_presenter_mark)
-                    {
+                    if let Some(names) = pending.as_ref().and_then(|pending| pending.names) {
                         for effect in &applied.effects {
                             if let pulpit_render::document::AppliedEffect::Annotation(summary) =
                                 effect
                             {
-                                self.annotations.name_stroke(summary.id.clone());
+                                match names {
+                                    PresenterMark::Stroke => {
+                                        self.annotations.name_stroke(summary.id.clone())
+                                    }
+                                    PresenterMark::Text => {
+                                        self.annotations.name_text(summary.id.clone())
+                                    }
+                                }
                             }
                         }
+                    }
+
+                    // An edit drops the annotation list of every page it
+                    // touched, and the slide is not in the reader's window, so
+                    // nothing else would ask for it again. Without this a
+                    // highlight or a label committed at the lectern would be
+                    // in the file and on nobody's screen until the next page
+                    // turn: the slide's pixels are drawn without annotations,
+                    // and the overlay draws what the list says.
+                    if applied
+                        .dirty_pages
+                        .iter()
+                        .any(|page| self.slide_placement().is_some_and(|at| at.page == *page))
+                    {
+                        self.request_marks_for_this_slide();
                     }
 
                     // Journalled now that the worker has confirmed it, and
@@ -8102,7 +8164,7 @@ impl App {
                 let epoch = self.reader.history_epoch();
                 self.reader_pending.push_back(PendingEdit {
                     kind,
-                    names_a_presenter_mark: false,
+                    names: None,
                     transaction: None,
                     // Not knowable until the answer says what came back.
                     urgency: crate::reader::RasterUrgency::Deferred,
@@ -8427,6 +8489,25 @@ impl App {
                     });
                 }
                 let needs_render = self.reader.apply(&command);
+                // A colour chosen here is the colour at the lectern too: one
+                // pen, whichever mode it was picked up in. The presenter's
+                // palette keeps the choice, so it also survives into the next
+                // session with the rest of the layout.
+                if let ReadCommand::SetToolColor(tool, color) = command {
+                    let options = &mut self.annotation_controls.options;
+                    match tool {
+                        pulpit_core::annotation::AnnotationTool::Ink => options.ink_color = color,
+                        pulpit_core::annotation::AnnotationTool::Highlighter => {
+                            options.highlight_color = color
+                        }
+                        pulpit_core::annotation::AnnotationTool::Text
+                        | pulpit_core::annotation::AnnotationTool::Note => {
+                            options.text_color = color
+                        }
+                        _ => {}
+                    }
+                    self.persist();
+                }
                 if matches!(command, ReadCommand::SetOutlineView(_))
                     && self.keyboard_region == KeyboardRegion::Outline
                     && !self.reader.focus_nearest_outline_item()
@@ -8607,7 +8688,7 @@ impl App {
                     let expected = self.expected_revision();
                     self.reader_pending.push_back(PendingEdit {
                         kind: AppliedKind::Undo,
-                        names_a_presenter_mark: false,
+                        names: None,
                         transaction: None,
                         urgency: crate::reader::RasterUrgency::Deferred,
                         // Replay takes nothing off a stack: the history is
@@ -11057,11 +11138,155 @@ impl App {
         let transaction = pulpit_render::document::DocumentTransaction::from_annotations(commands);
         if self.commit_to_document(transaction) {
             if let Some(pending) = self.reader_pending.back_mut() {
-                pending.names_a_presenter_mark = expects_a_name;
+                pending.names = expects_a_name.then_some(PresenterMark::Stroke);
             }
         } else if expects_a_name {
             self.warn_marks_are_not_kept();
         }
+    }
+
+    /// A finished presenter label becomes an annotation in the open document,
+    /// exactly as a finished stroke does.
+    ///
+    /// A label is Typst markup, and Typst markup has no lossless standard
+    /// encoding, so it goes into the file the way document mode's does (§7.4):
+    /// a `/Stamp` whose appearance is the compiled picture and whose
+    /// namespaced entry is the source. Other viewers show what the room saw;
+    /// pulpit reopens the markup.
+    ///
+    /// Compiled here rather than through the closed-world worker for the
+    /// reason `commit_composed_mark` gives — this is one mark on a release,
+    /// not a stream of edits being debounced — and in the same closed world:
+    /// no files, no packages, no network, no clock (§12).
+    fn commit_presenter_text(&mut self, finished: Option<pulpit_core::annotation::TextMark>) {
+        use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, MarkStyle, StampDraft};
+
+        let Some(mark) = finished else {
+            return;
+        };
+        // A label that already names an annotation came out of the document
+        // and is going back into it unchanged; there is nothing to create.
+        if mark.annotation.is_some() || mark.text.trim().is_empty() {
+            return;
+        }
+        let Some(placement) = self.slide_placement() else {
+            self.warn_marks_are_not_kept();
+            return;
+        };
+        let Some(placed) = pulpit_core::annotate::presenter::text_placement(&mark, &placement)
+        else {
+            self.warn_marks_are_not_kept();
+            return;
+        };
+        let Some(geometry) = self.reader.page_geometry(placement.page).cloned() else {
+            self.warn_marks_are_not_kept();
+            return;
+        };
+        // A note is not a picture: what it holds is its text, and every viewer
+        // draws the icon and opens the popup itself. So it goes through the
+        // same `place` document mode's note goes through, and the Typst
+        // compiler is not involved at all.
+        if mark.note {
+            let outcome = self.presenter_interaction.place(
+                placement.page,
+                placed.at,
+                pulpit_core::annotate::PlacedMark::Note {
+                    text: mark.text.clone(),
+                },
+                &geometry,
+            );
+            match outcome {
+                pulpit_core::annotate::GestureOutcome::Commit(commands) => {
+                    let transaction =
+                        pulpit_render::document::DocumentTransaction::from_annotations(commands);
+                    if self.commit_to_document(transaction) {
+                        if let Some(pending) = self.reader_pending.back_mut() {
+                            pending.names = Some(PresenterMark::Text);
+                        }
+                    } else {
+                        self.warn_marks_are_not_kept();
+                    }
+                }
+                pulpit_core::annotate::GestureOutcome::Nothing => self.warn_marks_are_not_kept(),
+            }
+            return;
+        }
+        let (red, green, blue) = mark.color.rgb();
+        let colour = (
+            (red * 255.0) as u8,
+            (green * 255.0) as u8,
+            (blue * 255.0) as u8,
+        );
+        let rendered = match crate::typst_annotation::rasterise(
+            &mark.text,
+            placed.width_pt,
+            placed.size_pt,
+            colour,
+            2.0,
+        ) {
+            Ok(rendered) => rendered,
+            // The compile failure is the markup's, and the message is Typst's
+            // own — which is the useful one. The label stays on the screen for
+            // the length of the slide, so the presenter can see what did not
+            // go in.
+            Err(error) => {
+                self.notify(format!("That does not compile: {error}"));
+                return;
+            }
+        };
+        let draft = AnnotationDraft::Stamp(StampDraft {
+            page: placement.page,
+            rect: pulpit_core::annotate::presenter::text_rect(
+                placed.at,
+                rendered.width_pt,
+                rendered.height_pt,
+            ),
+            mark: pulpit_core::annotate::StampMark::Image {
+                pixel_width: rendered.pixel_width,
+                pixel_height: rendered.pixel_height,
+                rgba: rendered.rgba,
+            },
+            style: MarkStyle {
+                color: mark.color,
+                font_size: placed.size_pt,
+                ..MarkStyle::default()
+            },
+            source: Some(mark.text.clone()),
+        });
+        if draft.validate(&geometry).is_err() {
+            self.warn_marks_are_not_kept();
+            return;
+        }
+        let transaction = pulpit_render::document::DocumentTransaction::from_annotations([
+            AnnotationCommand::Create(draft),
+        ]);
+        if self.commit_to_document(transaction) {
+            if let Some(pending) = self.reader_pending.back_mut() {
+                pending.names = Some(PresenterMark::Text);
+            }
+        } else {
+            self.warn_marks_are_not_kept();
+        }
+    }
+
+    /// Delete every mark the presenter's band is holding, in one transaction.
+    ///
+    /// One press, one revision, one undo (§8.4) — a band over eleven marks is
+    /// one thing the presenter did, and taking it back is one press.
+    fn delete_held_marks(&mut self) {
+        use pulpit_core::annotate::AnnotationCommand;
+
+        let held = self.annotations.take_selection();
+        if held.is_empty() {
+            return;
+        }
+        self.commit_to_document(
+            pulpit_render::document::DocumentTransaction::from_annotations(
+                held.into_iter()
+                    .map(|id| AnnotationCommand::Delete { id })
+                    .collect::<Vec<_>>(),
+            ),
+        );
     }
 
     /// Say once, per document, that marks made here are not being kept.
@@ -11091,7 +11316,12 @@ impl App {
     fn clear_marks_on_this_slide(&mut self) {
         use pulpit_core::annotate::AnnotationCommand;
 
-        self.annotations.settle();
+        // The label being typed goes with the rest rather than being
+        // committed: this gesture is "take everything off this slide", and
+        // committing a mark in order to delete it in the same breath would
+        // put a mark in the file and an entry in the journal for nothing.
+        self.annotations.cancel_text();
+        let _ = self.annotations.settle();
         let ids: Vec<_> = self
             .annotations
             .strokes
@@ -11103,6 +11333,17 @@ impl App {
                     .iter()
                     .filter_map(|mark| mark.annotation.clone()),
             )
+            // Everything on the slide, not only what presentation can make:
+            // a highlight or a note the reader put on this page is a mark on
+            // this slide, and "clear" that left it there would be a button
+            // that does not do what it says.
+            .chain(
+                self.annotations
+                    .highlights
+                    .iter()
+                    .map(|highlight| highlight.id.clone()),
+            )
+            .chain(self.annotations.notes.iter().map(|note| note.id.clone()))
             .collect();
         self.annotations.clear();
         if ids.is_empty() {
@@ -11126,6 +11367,11 @@ impl App {
         let Some(placement) = self.slide_placement() else {
             return;
         };
+        // Through the reader's bookkeeping, so the slide's page and the
+        // reader's window cannot ask for the same list twice.
+        if !self.reader.must_ask_annotations(placement.page) {
+            return;
+        }
         if let Some(link) = self.reader_link.as_mut() {
             link.ask(crate::reader_link::Ask::ListAnnotations {
                 page: placement.page,
@@ -11152,30 +11398,86 @@ impl App {
             // existed to avoid and this must not reintroduce.
             return;
         }
-        let strokes = self
-            .reader
-            .annotations_on(page)
-            .filter(|summary| {
-                // Ink is what a slide draws. A highlight over text, a note, a
-                // stamp: those are document marks, and the presenter's overlay
-                // has no way to draw them that would not be a second, worse
-                // rendering of what the page already shows.
-                summary.kind == pulpit_core::annotate::AnnotationKind::Ink
-                    && !summary.geometry_elided
-            })
-            .filter_map(|summary| {
-                presenter::ink_to_stroke(
-                    summary.id.clone(),
-                    page,
-                    &summary.path,
-                    summary.style.color,
-                    summary.style.width,
-                    presenter::kind_of(&summary.style),
-                    &placement,
-                )
-            })
-            .collect();
+        use pulpit_core::annotate::AnnotationKind;
+
+        // Every kind the overlay can draw, not only ink. A slide's pixels are
+        // rendered *without* annotations — that is what keeps an unfinished
+        // gesture and a committed mark from being drawn twice — so a mark the
+        // overlay does not draw is a mark presentation does not show at all.
+        // A highlight made at the lectern used to vanish the moment the sweep
+        // was released for exactly this reason.
+        let mut strokes = Vec::new();
+        let mut highlights = Vec::new();
+        let mut notes = Vec::new();
+        let mut texts = Vec::new();
+        for summary in self.reader.annotations_on(page) {
+            match summary.kind {
+                AnnotationKind::Ink if !summary.geometry_elided => {
+                    strokes.extend(presenter::ink_to_stroke(
+                        summary.id.clone(),
+                        page,
+                        &summary.path,
+                        summary.style.color,
+                        summary.style.width,
+                        presenter::kind_of(&summary.style),
+                        &placement,
+                    ));
+                }
+                AnnotationKind::Highlight if !summary.geometry_elided => {
+                    if let Some(runs) =
+                        presenter::highlight_to_runs(page, &summary.quads, &placement)
+                    {
+                        highlights.push(pulpit_core::annotation::HighlightMark {
+                            runs,
+                            color: summary.style.color,
+                            opacity: summary.style.opacity,
+                            id: summary.id.clone(),
+                        });
+                    }
+                }
+                AnnotationKind::Note => {
+                    let corner = placement.to_slide(pulpit_core::page::PagePoint::new(
+                        summary.bounds.left,
+                        summary.bounds.top,
+                    ));
+                    let far = placement.to_slide(pulpit_core::page::PagePoint::new(
+                        summary.bounds.right,
+                        summary.bounds.bottom,
+                    ));
+                    if placement.contains(corner) {
+                        notes.push(pulpit_core::annotation::NoteMark {
+                            position: corner,
+                            size: ((far.0 - corner.0).max(0.0), (far.1 - corner.1).max(0.0)),
+                            color: summary.style.color,
+                            id: summary.id.clone(),
+                        });
+                    }
+                }
+                // A Typst mark is a label, and the slide draws it as one: the
+                // overlay compiles the source it carries. A stamp with no
+                // source is a picture somebody dropped in, which the overlay
+                // has no copy of and does not pretend to draw.
+                AnnotationKind::Stamp | AnnotationKind::FreeText => {
+                    let Some(source) = summary.contents.pulpit_source.as_deref() else {
+                        continue;
+                    };
+                    texts.extend(presenter::stamp_to_text(
+                        0,
+                        summary.id.clone(),
+                        page,
+                        summary.bounds,
+                        source,
+                        summary.style.color,
+                        &placement,
+                    ));
+                }
+                _ => {}
+            }
+        }
         self.annotations.adopt(strokes);
+        self.annotations.adopt_highlights(highlights);
+        self.annotations.adopt_notes(notes);
+        self.annotations.adopt_texts(texts);
     }
 
     /// The revision the next mutation should expect (§6.2).
@@ -11236,7 +11538,7 @@ impl App {
         let urgency = self.reader.retain_commit(&transaction);
         self.reader_pending.push_back(PendingEdit {
             kind: AppliedKind::Edit,
-            names_a_presenter_mark: false,
+            names: None,
             transaction: Some(transaction.clone()),
             urgency,
             reversal: None,
@@ -11719,10 +12021,15 @@ impl App {
                 self.annotations
                     .extend_erase(point, self.annotation_options().eraser_radius);
             }
-            Some(AnnotationTool::Text) => {}
-            // Document-mode tools. A live slide is not a document surface, so
-            // the pointer stays with links and media overlays here.
-            Some(AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select) => {}
+            Some(AnnotationTool::Select) => {
+                self.annotations.extend_band(point);
+            }
+            // A label and a note are placed by the press and filled from the
+            // keyboard; the pointer has nothing more to say to either.
+            Some(AnnotationTool::Text | AnnotationTool::Note) => {}
+            // The stamp palette is document mode's, so the pointer stays with
+            // links and media overlays for it.
+            Some(AnnotationTool::Stamp) => {}
             None => {}
         }
     }
@@ -11756,14 +12063,28 @@ impl App {
                 self.annotations
                     .begin_erase(point, self.annotation_options().eraser_radius);
             }
-            AnnotationTool::Text => {
+            // A label and a note are typed the same way: the press chooses the
+            // spot, the keyboard fills it, and what it becomes is decided at
+            // the commit. Starting a second one is how the first is most often
+            // finished, and a label finished that way is committed like any
+            // other.
+            AnnotationTool::Text | AnnotationTool::Note => {
                 let options = self.annotation_options();
-                self.annotations
-                    .begin_text(point, options.text_size, options.text_color);
+                let (_, closed) = self.annotations.begin_text(
+                    point,
+                    options.text_size,
+                    options.text_color,
+                    tool == AnnotationTool::Note,
+                );
+                self.commit_presenter_text(closed);
             }
-            // Document-mode tools. The presenter palette cannot arm one
-            // (`AnnotationTool::ALL`), so the press is not the annotations'.
-            AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select => return false,
+            AnnotationTool::Select => {
+                self.annotations.begin_band(point);
+            }
+            // The stamp palette — a check, a cross, a signature mark — is
+            // document mode's, and the presenter palette draws no control for
+            // it, so the press is not the annotations'.
+            AnnotationTool::Stamp => return false,
         }
         true
     }
@@ -11949,7 +12270,8 @@ impl App {
             AnnotationCommand::Arm(tool) => {
                 self.annotation_controls.open = None;
                 self.annotation_controls.overflow = false;
-                self.annotations.arm(tool);
+                let closed = self.annotations.arm(tool);
+                self.commit_presenter_text(closed);
                 match tool {
                     Some(tool) => self
                         .diagnostics
@@ -12009,12 +12331,25 @@ impl App {
                     AnnotationTool::Pointer => {
                         self.annotation_controls.options.pointer_color = color
                     }
-                    AnnotationTool::Text => self.annotation_controls.options.text_color = color,
+                    AnnotationTool::Text | AnnotationTool::Note => {
+                        self.annotation_controls.options.text_color = color
+                    }
                     AnnotationTool::Spotlight
                     | AnnotationTool::Eraser
-                    | AnnotationTool::Note
                     | AnnotationTool::Stamp
                     | AnnotationTool::Select => {}
+                }
+                // …and it is the colour in document mode too. The pen is one
+                // pen: a presenter who reaches for red at the lectern and then
+                // opens the same file to read it should not have to say red
+                // again. The pointer is the exception with nowhere to go —
+                // document mode has no pointer to colour.
+                if tool != AnnotationTool::Pointer {
+                    let _ = self
+                        .reader
+                        .apply(&crate::widgets::event::ReadCommand::SetToolColor(
+                            tool, color,
+                        ));
                 }
                 // A colour chosen from the wheel is the wheel finished.
                 if self.annotation_controls.wheel == Some(tool) {
@@ -12031,8 +12366,14 @@ impl App {
                     Some(AnnotationTool::Pointer | AnnotationTool::Spotlight)
                 );
                 if pointing {
-                    self.annotations
+                    // Nothing can be being typed: the tool armed is the
+                    // pointer's. The label is committed anyway rather than
+                    // dropped, because "cannot happen" is not a reason to
+                    // throw a mark away.
+                    let closed = self
+                        .annotations
                         .arm(Some(self.annotation_controls.options.pointer_tool()));
+                    self.commit_presenter_text(closed);
                 }
             }
             // Undo and redo are the *document's*, in both modes. There is one
@@ -12045,9 +12386,13 @@ impl App {
             AnnotationCommand::Undo | AnnotationCommand::Redo => {
                 let redoing = matches!(command, AnnotationCommand::Redo);
                 if self.annotations.has_open_gesture() {
-                    self.annotations.settle();
+                    let closed = self.annotations.settle();
                     let finished = self.annotations.strokes.last().cloned();
                     self.commit_presenter_gesture(finished);
+                    // A label being typed when undo was pressed is committed
+                    // first, so that the undo takes back the label rather than
+                    // whatever was made before it.
+                    self.commit_presenter_text(closed);
                 }
                 // The reader's own handler is the one place that sends an
                 // undo, so presentation goes through it rather than growing a

@@ -48,8 +48,10 @@ pub enum AnnotationTool {
     Text,
     /// Places a sticky note: an icon on the page with text behind it.
     ///
-    /// Document mode only. A presenter has no use for a mark that has to be
-    /// opened to be read, but a reader annotating a paper does.
+    /// Offered in both modes. The note itself is for the reader — a mark that
+    /// has to be opened to be read is not one an audience can read — but a
+    /// presenter making a note *for afterwards*, out of something that came up
+    /// in the room, is the same gesture and lands in the same file.
     Note,
     /// Places a check, a cross or a visible signature.
     ///
@@ -62,31 +64,40 @@ pub enum AnnotationTool {
     /// armed at all. This is the tool for the thing the hand cannot do —
     /// taking several marks at once, to delete them in one press (§8.4).
     ///
-    /// Document mode only: presenter marks last as long as the slide does, so
-    /// there is nothing to come back to and edit.
+    /// Offered in both modes. Presentation's band holds and deletes; moving
+    /// and resizing what it is holding stays document mode's, because a mark
+    /// dragged to a new place mid-talk is a mark the audience watches move.
     Select,
 }
 
 impl AnnotationTool {
-    /// The tools the palette offers a control for, in the order it draws
-    /// them. [`AnnotationTool::Spotlight`] is absent because it is armed from
-    /// the pointer control's options rather than from a button of its own.
-    pub const ALL: [AnnotationTool; 5] = [
+    /// The tools the presenter's palette offers a control for, in the order it
+    /// draws them. [`AnnotationTool::Spotlight`] is absent because it is armed
+    /// from the pointer control's options rather than from a button of its own.
+    ///
+    /// The same marks as [`AnnotationTool::DOCUMENT`], in the same order, plus
+    /// the pointer. Every mark a presenter makes is an annotation in the open
+    /// document (A1), so a tool that document mode has and presentation does
+    /// not is not a restraint on what goes into the file — it is only a mark
+    /// the presenter has to stop and change mode to make. What presentation
+    /// has and document mode does not is the pointer, which makes no mark at
+    /// all: it is a thing you do to a slide in front of an audience, and there
+    /// is nothing to keep afterwards.
+    pub const ALL: [AnnotationTool; 7] = [
         AnnotationTool::Pointer,
+        AnnotationTool::Select,
         AnnotationTool::Ink,
         AnnotationTool::Highlighter,
-        AnnotationTool::Eraser,
         AnnotationTool::Text,
+        AnnotationTool::Note,
+        AnnotationTool::Eraser,
     ];
 
     /// The tools a document layout's `AnnotationTools` widget offers, in the
     /// order it draws them.
     ///
-    /// A different list from [`AnnotationTool::ALL`], not a superset of it:
-    /// the pointer and the spotlight are things you do to a slide in front of
-    /// an audience, and selecting an existing mark to edit it is a thing you
-    /// do to a document that keeps its marks. Each mode shows the tools it can
-    /// honour rather than greying out the other's.
+    /// [`AnnotationTool::ALL`] without the pointer, for the reason given
+    /// there.
     pub const DOCUMENT: [AnnotationTool; 6] = [
         AnnotationTool::Select,
         AnnotationTool::Ink,
@@ -95,6 +106,16 @@ impl AnnotationTool {
         AnnotationTool::Note,
         AnnotationTool::Eraser,
     ];
+
+    /// Has this tool anything to configure — a colour, a size?
+    ///
+    /// The band and the stamp palette have neither: a rubber band is a shape
+    /// the hand makes, and what a stamp puts down is chosen from its own
+    /// palette rather than from a slider. A control that opens an options
+    /// panel with nothing in it teaches people not to open options panels.
+    pub fn has_options(self) -> bool {
+        !matches!(self, AnnotationTool::Select | AnnotationTool::Stamp)
+    }
 
     /// Does this tool make a durable PDF annotation when its gesture ends?
     pub fn makes_an_annotation(self) -> bool {
@@ -370,6 +391,56 @@ pub struct TextMark {
     /// confirmed it. `None` while it is still being typed (A1).
     #[serde(default)]
     pub annotation: Option<crate::annotate::AnnotationId>,
+    /// Whether this label becomes a sticky note rather than a mark on the
+    /// page.
+    ///
+    /// The two are typed the same way — a spot is chosen and the keyboard goes
+    /// into it — and differ only in what they become when the typing ends, so
+    /// they share the gesture and part company at the commit.
+    #[serde(default)]
+    pub note: bool,
+    /// The box the committed annotation occupies, in slide fractions, for a
+    /// label read back out of the document.
+    ///
+    /// `None` for one being written here and now, which is drawn at the size
+    /// it was set at. A PDF records the box a mark fills, not the type size
+    /// the markup was set in, so a mark that came back from the file is drawn
+    /// into the box it claims rather than at a size nothing recorded.
+    #[serde(default)]
+    pub fit: Option<(f32, f32)>,
+}
+
+/// A committed highlight, as the slide draws it.
+///
+/// The runs are the engine's answer about where the marked *text* is, mapped
+/// into slide fractions. It is a view of the annotation (A1): the marks live
+/// in the document, and this is what the overlay puts on the screen for them,
+/// because a slide's pixels are rendered without annotations so that an
+/// unfinished gesture and a committed mark are never drawn twice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HighlightMark {
+    /// The four corners of each run, clockwise from upper-left.
+    pub runs: Vec<[(f32, f32); 4]>,
+    pub color: InkColor,
+    pub opacity: f32,
+    /// The annotation this shows. Always named: nothing puts an uncommitted
+    /// highlight here, because the sweep in progress is `selection`.
+    pub id: crate::annotate::AnnotationId,
+}
+
+/// A committed sticky note, as the slide draws it: an icon and nothing else.
+///
+/// The text behind a note is deliberately not drawn. A note is a mark that has
+/// to be opened to be read, which is why the presenter palette does not make
+/// one; what the slide owes it is an honest indication that it is there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteMark {
+    /// The icon's top-left corner, in slide fractions.
+    pub position: (f32, f32),
+    /// The icon's size, as a fraction of the slide's width and height.
+    pub size: (f32, f32),
+    pub color: InkColor,
+    pub id: crate::annotate::AnnotationId,
 }
 
 impl InkStroke {
@@ -406,6 +477,15 @@ pub struct Annotations {
     pub strokes: Vec<InkStroke>,
     #[serde(default)]
     pub texts: Vec<TextMark>,
+    /// The committed highlights on this slide, read back out of the document.
+    ///
+    /// Separate from `strokes` because a highlight is not a stroke: it is the
+    /// runs of text it covers, and the document is what knows where those are.
+    #[serde(default)]
+    pub highlights: Vec<HighlightMark>,
+    /// The committed sticky notes on this slide, likewise.
+    #[serde(default)]
+    pub notes: Vec<NoteMark>,
     /// Where the pointer dot is, when the pointer tool is armed and the
     /// pointer is over the page.
     pub pointer: Option<(f32, f32)>,
@@ -421,6 +501,19 @@ pub struct Annotations {
     /// can draw them without knowing about pages (A1).
     #[serde(skip)]
     pub selection: Option<SlideSelection>,
+    /// The rubber band being dragged, as the two corners the drag has reached,
+    /// in slide fractions.
+    ///
+    /// Transient like `selection`: it is what the hand is doing, and it never
+    /// survives the release that turns it into a held set of marks.
+    #[serde(skip)]
+    pub band: Option<((f32, f32), (f32, f32))>,
+    /// The marks the band is holding, by the annotation each one is.
+    ///
+    /// Held rather than copied: what a selection *is* is a list of names, and
+    /// the marks themselves stay where they are — in the document (A1).
+    #[serde(skip)]
+    pub selected: Vec<crate::annotate::AnnotationId>,
     /// The armed tool, or `None` when the pointer belongs to links and media
     /// overlays as it normally does.
     pub tool: Option<AnnotationTool>,
@@ -458,6 +551,10 @@ impl Default for Annotations {
         Self {
             strokes: Vec::new(),
             texts: Vec::new(),
+            highlights: Vec::new(),
+            notes: Vec::new(),
+            band: None,
+            selected: Vec::new(),
             pointer: None,
             spotlight: None,
             tool: None,
@@ -671,6 +768,32 @@ impl Annotations {
             }
             !hit
         });
+        // A highlight and a note are marks on this slide like any other, and
+        // an eraser that reached only the ones made in presentation would be
+        // an eraser that could not take back the mark the presenter just made
+        // with the highlighter.
+        self.highlights.retain(|highlight| {
+            let hit = highlight
+                .runs
+                .iter()
+                .any(|run| quad_hit(point, run, radius));
+            if hit {
+                took = true;
+                self.erased.push(highlight.id.clone());
+            }
+            !hit
+        });
+        self.notes.retain(|note| {
+            let hit = point.0 >= note.position.0 - radius
+                && point.0 <= note.position.0 + note.size.0 + radius
+                && point.1 >= note.position.1 - radius
+                && point.1 <= note.position.1 + note.size.1 + radius;
+            if hit {
+                took = true;
+                self.erased.push(note.id.clone());
+            }
+            !hit
+        });
         if !took {
             return false;
         }
@@ -752,17 +875,67 @@ impl Annotations {
     /// pulpit ever opened it.
     ///
     /// An unfinished gesture is left alone: it belongs to the hand that is
-    /// still moving, not to the document.
+    /// still moving, not to the document. So is a stroke the document has not
+    /// named yet — one whose commit is still in flight. The list the engine
+    /// answered with was made before that commit landed, so a stroke missing
+    /// from it is not a stroke that was deleted; adopting over it would take
+    /// the pen's last line off the screen for the length of a round trip.
     pub fn adopt(&mut self, strokes: Vec<InkStroke>) {
-        if self.drawing {
-            let open = self.strokes.pop();
-            self.strokes = strokes;
-            if let Some(open) = open {
-                self.strokes.push(open);
-            }
-        } else {
-            self.strokes = strokes;
+        let in_flight: Vec<InkStroke> = self
+            .strokes
+            .iter()
+            .filter(|stroke| stroke.id.is_none())
+            .cloned()
+            .collect();
+        self.strokes = strokes;
+        self.strokes.extend(in_flight);
+        self.bump();
+    }
+
+    /// Replace the committed labels with what the document says is on this
+    /// slide, the way [`Self::adopt`] does for ink.
+    ///
+    /// The label being typed is left alone and keeps its place in the list: it
+    /// is the open gesture, and it belongs to the keyboard rather than to the
+    /// document (A2). So does one that has been finished but not yet named,
+    /// which is a label the engine has not answered about — dropping it would
+    /// take a mark off the screen between the commit and its confirmation.
+    ///
+    /// Local drawing identities are minted here rather than carried in from
+    /// the document, because they exist to key an in-process compile cache and
+    /// an annotation's name is not a `u64`.
+    pub fn adopt_texts(&mut self, texts: impl IntoIterator<Item = TextMark>) {
+        let typing = self.typing.and_then(|index| self.texts.get(index)).cloned();
+        let unnamed: Vec<TextMark> = self
+            .texts
+            .iter()
+            .filter(|mark| mark.annotation.is_none())
+            .filter(|mark| Some(mark.id) != typing.as_ref().map(|mark| mark.id))
+            .cloned()
+            .collect();
+        let mut adopted: Vec<TextMark> = texts.into_iter().collect();
+        for mark in &mut adopted {
+            mark.id = self.next_text_id;
+            self.next_text_id = self.next_text_id.wrapping_add(1).max(1);
         }
+        self.texts = adopted;
+        self.texts.extend(unnamed);
+        self.typing = typing.map(|mark| {
+            self.texts.push(mark);
+            self.texts.len() - 1
+        });
+        self.bump();
+    }
+
+    /// Replace the committed highlights with the document's.
+    pub fn adopt_highlights(&mut self, highlights: Vec<HighlightMark>) {
+        self.highlights = highlights;
+        self.bump();
+    }
+
+    /// Replace the committed notes with the document's.
+    pub fn adopt_notes(&mut self, notes: Vec<NoteMark>) {
+        self.notes = notes;
         self.bump();
     }
 
@@ -778,11 +951,26 @@ impl Annotations {
 
     /// Start a label at `point`. An unfinished empty label is harmless and is
     /// discarded when typing ends.
-    pub fn begin_text(&mut self, point: (f32, f32), size: f32, color: InkColor) -> bool {
+    /// Returns whether the press started a label, and the label it closed to
+    /// do so — which the caller commits, exactly as it commits the one
+    /// [`Self::finish_text`] hands back. Starting a second label is how a
+    /// presenter most often finishes the first, and a label that ended by
+    /// being replaced is not a label they meant to throw away.
+    #[must_use = "a label closed by starting another is a mark that vanishes"]
+    ///
+    /// `note` says which mark the typing becomes: a label on the page, or a
+    /// sticky note whose text is behind an icon.
+    pub fn begin_text(
+        &mut self,
+        point: (f32, f32),
+        size: f32,
+        color: InkColor,
+        note: bool,
+    ) -> (bool, Option<TextMark>) {
         if !Self::is_on_page(point) {
-            return false;
+            return (false, None);
         }
-        self.finish_text();
+        let finished = self.finish_text();
         let id = self
             .texts
             .iter()
@@ -803,12 +991,15 @@ impl Annotations {
                 0.025
             },
             color,
+            note,
             // Nothing yet: a label with no text in it is not an annotation.
             annotation: None,
+            // Written here, so it is drawn at the size it was set at.
+            fit: None,
         });
         self.typing = Some(self.texts.len() - 1);
         self.bump();
-        true
+        (true, finished)
     }
 
     /// Append composed keyboard text to the active label.
@@ -852,6 +1043,7 @@ impl Annotations {
     /// same way a completed stroke is. A label with nothing typed into it is
     /// removed and returns `None`: an empty annotation is a thing other
     /// viewers draw as an empty box, and it is never what someone meant.
+    #[must_use = "a finished label that is not committed is a mark that vanishes"]
     pub fn finish_text(&mut self) -> Option<TextMark> {
         let index = self.typing.take()?;
         let finished = match self.texts.get(index) {
@@ -892,6 +1084,135 @@ impl Annotations {
         self.drawing
     }
 
+    /// Start a rubber band at `point`, dropping whatever was held.
+    ///
+    /// A new band is a new question, so the previous answer goes with it —
+    /// the same thing document mode's band does (§8.4).
+    pub fn begin_band(&mut self, point: (f32, f32)) -> bool {
+        if !Self::is_on_page(point) {
+            return false;
+        }
+        self.selected.clear();
+        self.band = Some((point, point));
+        self.bump();
+        true
+    }
+
+    /// Drag the band's far corner.
+    pub fn extend_band(&mut self, point: (f32, f32)) -> bool {
+        let Some((from, _)) = self.band else {
+            return false;
+        };
+        let point = (point.0.clamp(0.0, 1.0), point.1.clamp(0.0, 1.0));
+        self.band = Some((from, point));
+        self.bump();
+        true
+    }
+
+    /// Close the band and hold everything it encloses.
+    ///
+    /// Returns the marks now held, which is what the caller deletes when the
+    /// delete key follows. A band that enclosed nothing holds nothing and is
+    /// not an error: it is how a selection is dismissed.
+    ///
+    /// Only marks the document has named can be held. One whose commit is
+    /// still in flight has no name to hold it by, and a moment later it will
+    /// have one — so it is left out rather than held by a name it does not
+    /// have yet.
+    pub fn finish_band(&mut self) -> &[crate::annotate::AnnotationId] {
+        let Some((from, to)) = self.band.take() else {
+            return &self.selected;
+        };
+        let rect = (
+            from.0.min(to.0),
+            from.1.min(to.1),
+            from.0.max(to.0),
+            from.1.max(to.1),
+        );
+        let within = |point: (f32, f32)| {
+            point.0 >= rect.0 && point.0 <= rect.2 && point.1 >= rect.1 && point.1 <= rect.3
+        };
+        let mut held = Vec::new();
+        for stroke in &self.strokes {
+            if let Some(id) = &stroke.id {
+                if stroke.points.iter().any(|point| within(*point)) {
+                    held.push(id.clone());
+                }
+            }
+        }
+        for mark in &self.texts {
+            if let Some(id) = &mark.annotation {
+                if within(mark.position) {
+                    held.push(id.clone());
+                }
+            }
+        }
+        for highlight in &self.highlights {
+            if highlight
+                .runs
+                .iter()
+                .any(|run| run.iter().any(|corner| within(*corner)))
+            {
+                held.push(highlight.id.clone());
+            }
+        }
+        for note in &self.notes {
+            if within(note.position) {
+                held.push(note.id.clone());
+            }
+        }
+        self.selected = held;
+        self.bump();
+        &self.selected
+    }
+
+    /// Put down whatever is held, without touching the document.
+    pub fn clear_selection(&mut self) {
+        if self.band.is_none() && self.selected.is_empty() {
+            return;
+        }
+        self.band = None;
+        self.selected.clear();
+        self.bump();
+    }
+
+    /// Take the held marks off the slide and hand back their names, for the
+    /// caller to delete from the document in one transaction — one press, one
+    /// undo (§8.4).
+    #[must_use = "held marks that are not deleted are marks the slide has lost"]
+    pub fn take_selection(&mut self) -> Vec<crate::annotate::AnnotationId> {
+        let held: Vec<_> = std::mem::take(&mut self.selected);
+        if held.is_empty() {
+            return held;
+        }
+        self.strokes
+            .retain(|stroke| !stroke.id.as_ref().is_some_and(|id| held.contains(id)));
+        self.texts
+            .retain(|mark| !mark.annotation.as_ref().is_some_and(|id| held.contains(id)));
+        self.highlights
+            .retain(|highlight| !held.contains(&highlight.id));
+        self.notes.retain(|note| !held.contains(&note.id));
+        self.band = None;
+        self.bump();
+        held
+    }
+
+    /// Abandon the label being typed, taking it off the slide.
+    ///
+    /// The way out that makes nothing, and the same one document mode offers:
+    /// escape from a mark being written cancels it, and cancelling is not a
+    /// mutation (§8.5). Distinct from [`Self::finish_text`], which hands the
+    /// label over to be committed.
+    pub fn cancel_text(&mut self) {
+        let Some(index) = self.typing.take() else {
+            return;
+        };
+        if index < self.texts.len() {
+            self.texts.remove(index);
+        }
+        self.bump();
+    }
+
     /// Finish whatever gesture is open, so that "undo" means the same thing
     /// whether or not the button happens to be down.
     ///
@@ -901,11 +1222,17 @@ impl Annotations {
     /// just do", and the two would disagree the first time an edit was made in
     /// document mode. What is left is this: settle the gesture, and let the
     /// caller ask the engine.
-    pub fn settle(&mut self) {
+    ///
+    /// Returns the label the settling finished, for the caller to commit. The
+    /// finished *stroke* is the last one in [`Self::strokes`], where it was
+    /// already; a label is returned because an empty one is removed rather
+    /// than kept, so there would otherwise be no way to tell which it was.
+    #[must_use = "a settled label that is not committed is a mark that vanishes"]
+    pub fn settle(&mut self) -> Option<TextMark> {
         if self.drawing {
             let _ = self.end_stroke();
         }
-        let _ = self.finish_text();
+        self.finish_text()
     }
 
     /// Remove every mark, leaving the armed tool and the audience choice
@@ -913,9 +1240,13 @@ impl Annotations {
     pub fn clear(&mut self) {
         self.strokes.clear();
         self.texts.clear();
+        self.highlights.clear();
+        self.notes.clear();
         self.pointer = None;
         self.spotlight = None;
         self.selection = None;
+        self.band = None;
+        self.selected.clear();
         self.drawing = false;
         self.erasing = false;
         self.typing = None;
@@ -964,21 +1295,34 @@ impl Annotations {
     pub fn is_empty(&self) -> bool {
         self.strokes.is_empty()
             && self.texts.is_empty()
+            && self.highlights.is_empty()
+            && self.notes.is_empty()
             && self.pointer.is_none()
             && self.spotlight.is_none()
             && self.selection.is_none()
+            && self.band.is_none()
+            && self.selected.is_empty()
     }
 
     /// Arm a tool, or put the pointer back to its ordinary duties. Changing
     /// tool takes away the marks that belonged to the old one, but never the
     /// ink: ink is the only annotation the presenter deliberately committed.
-    pub fn arm(&mut self, tool: Option<AnnotationTool>) {
+    ///
+    /// Returns the label that putting the text tool down finished, which the
+    /// caller commits. Reaching for another tool is a way of saying a label is
+    /// done, not a way of throwing it away.
+    #[must_use = "a label closed by changing tool is a mark that vanishes"]
+    pub fn arm(&mut self, tool: Option<AnnotationTool>) -> Option<TextMark> {
         self.tool = tool;
         self.drawing = false;
         self.erasing = false;
-        if tool != Some(AnnotationTool::Text) {
-            self.finish_text();
-        }
+        // A label and a note are both typed, so neither one ends the other's
+        // typing; every other tool does.
+        let finished = if matches!(tool, Some(AnnotationTool::Text | AnnotationTool::Note)) {
+            None
+        } else {
+            self.finish_text()
+        };
         if tool != Some(AnnotationTool::Pointer) {
             self.pointer = None;
         }
@@ -988,7 +1332,15 @@ impl Annotations {
         if tool != Some(AnnotationTool::Highlighter) {
             self.selection = None;
         }
+        // Putting the band down puts down what it was holding: a selection is
+        // a thing that tool is doing, and the delete key belongs to the deck
+        // again the moment another tool is armed.
+        if tool != Some(AnnotationTool::Select) {
+            self.band = None;
+            self.selected.clear();
+        }
         self.bump();
+        finished
     }
 
     /// Show the text the highlighter has swept so far, or take it away.
@@ -1019,19 +1371,56 @@ fn distance_squared(left: (f32, f32), right: (f32, f32)) -> f32 {
 /// outlines would couple the pure model to a renderer; a rectangular label
 /// target is also much easier to erase deliberately at presentation speed.
 fn text_mark_hit(mark: &TextMark, point: (f32, f32), radius: f32) -> bool {
-    let mut lines = 0_usize;
-    let mut longest = 0_usize;
-    for line in mark.text.split('\n') {
-        lines += 1;
-        longest = longest.max(line.chars().count());
-    }
-    let width = longest as f32 * mark.size * 0.6;
-    let height = lines.max(1) as f32 * mark.size * 1.2;
+    // A label read back out of the document knows the box it fills, so it is
+    // erased by that box rather than by an estimate of one.
+    let (width, height) = match mark.fit {
+        Some(fit) => fit,
+        None => {
+            let mut lines = 0_usize;
+            let mut longest = 0_usize;
+            for line in mark.text.split('\n') {
+                lines += 1;
+                longest = longest.max(line.chars().count());
+            }
+            (
+                longest as f32 * mark.size * 0.6,
+                lines.max(1) as f32 * mark.size * 1.2,
+            )
+        }
+    };
     let nearest = (
         point.0.clamp(mark.position.0, mark.position.0 + width),
         point.1.clamp(mark.position.1, mark.position.1 + height),
     );
     distance_squared(point, nearest) <= radius * radius
+}
+
+/// Whether an eraser of `radius` centred on `point` touches a text run.
+///
+/// A run is a quadrilateral rather than a rectangle — a line of rotated text
+/// resolves to one that is not axis-aligned — so the test is against its four
+/// edges, plus containment for a press in the middle of a word.
+fn quad_hit(point: (f32, f32), quad: &[(f32, f32); 4], radius: f32) -> bool {
+    let radius_squared = radius * radius;
+    let touches_edge = (0..4).any(|corner| {
+        distance_to_segment_squared(point, quad[corner], quad[(corner + 1) % 4]) <= radius_squared
+    });
+    touches_edge || point_in_quad(point, quad)
+}
+
+/// Whether a point is inside a quadrilateral, by the sign of the cross product
+/// against each edge. Convex by construction: it is a run of text.
+fn point_in_quad(point: (f32, f32), quad: &[(f32, f32); 4]) -> bool {
+    let mut positive = false;
+    let mut negative = false;
+    for corner in 0..4 {
+        let (start, end) = (quad[corner], quad[(corner + 1) % 4]);
+        let cross =
+            (end.0 - start.0) * (point.1 - start.1) - (end.1 - start.1) * (point.0 - start.0);
+        positive |= cross > 0.0;
+        negative |= cross < 0.0;
+    }
+    !(positive && negative)
 }
 
 fn distance_to_segment_squared(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
@@ -1173,7 +1562,7 @@ mod tests {
     #[test]
     fn clearing_takes_the_marks_but_not_the_pen() {
         let mut annotations = drawn(&[(0.1, 0.1), (0.4, 0.4)]);
-        annotations.arm(Some(AnnotationTool::Ink));
+        let _ = annotations.arm(Some(AnnotationTool::Ink));
         annotations.audience_visible = true;
         annotations.set_pointer(Some((0.2, 0.2)));
 
@@ -1194,7 +1583,7 @@ mod tests {
         assert!(!retained, "ink belongs to the slide it was drawn on");
         let mut annotations = drawn(&[(0.1, 0.1), (0.4, 0.4)]);
         annotations.set_spotlight(Some((0.5, 0.5)));
-        annotations.arm(Some(AnnotationTool::Spotlight));
+        let _ = annotations.arm(Some(AnnotationTool::Spotlight));
 
         annotations.clear_on_slide_change();
 
@@ -1205,15 +1594,15 @@ mod tests {
     #[test]
     fn arming_a_tool_takes_away_only_the_other_tools_marks() {
         let mut annotations = drawn(&[(0.1, 0.1), (0.4, 0.4)]);
-        annotations.arm(Some(AnnotationTool::Pointer));
+        let _ = annotations.arm(Some(AnnotationTool::Pointer));
         annotations.set_pointer(Some((0.3, 0.3)));
 
-        annotations.arm(Some(AnnotationTool::Spotlight));
+        let _ = annotations.arm(Some(AnnotationTool::Spotlight));
         assert_eq!(annotations.pointer, None, "the dot belonged to the pointer");
         assert_eq!(annotations.strokes.len(), 1, "the ink was committed");
 
         annotations.set_spotlight(Some((0.6, 0.6)));
-        annotations.arm(None);
+        let _ = annotations.arm(None);
         assert_eq!(annotations.spotlight, None);
         assert!(
             !annotations.is_armed(),
@@ -1454,6 +1843,15 @@ mod tests {
                 },
             ];
             annotations.adopt(from_the_document.clone());
+            assert_eq!(annotations.strokes[..2], from_the_document[..]);
+            // The stroke drawn a moment ago is still there: it has no name, so
+            // its commit has not been answered, so the list the engine sent
+            // was made before it existed. A page turn is the case where it
+            // *does* go, and `clear_on_slide_change` is what takes it.
+            assert_eq!(annotations.strokes.len(), 3);
+            assert!(annotations.strokes[2].id.is_none());
+            annotations.clear_on_slide_change();
+            annotations.adopt(from_the_document.clone());
             assert_eq!(annotations.strokes, from_the_document);
         }
 
@@ -1525,7 +1923,7 @@ mod tests {
         #[test]
         fn a_finished_label_is_handed_over_and_an_empty_one_is_not() {
             let mut annotations = Annotations::default();
-            assert!(annotations.begin_text((0.3, 0.3), 0.025, RED));
+            assert!(annotations.begin_text((0.3, 0.3), 0.025, RED, false).0);
             assert!(annotations.type_text("Hello"));
             let finished = annotations
                 .finish_text()
@@ -1536,7 +1934,12 @@ mod tests {
             assert_eq!(annotations.texts[0].annotation, Some(named("the-label")));
 
             // A label with nothing typed into it is not an annotation.
-            assert!(annotations.begin_text((0.7, 0.7), 0.025, RED));
+            let (started, closed) = annotations.begin_text((0.7, 0.7), 0.025, RED, false);
+            assert!(started);
+            assert!(
+                closed.is_none(),
+                "the first label was already finished by hand"
+            );
             assert!(annotations.finish_text().is_none());
             assert_eq!(annotations.texts.len(), 1);
         }
@@ -1550,9 +1953,83 @@ mod tests {
             assert!(!annotations.has_open_gesture());
             assert!(annotations.begin_stroke((0.2, 0.2), WIDTH, RED));
             assert!(annotations.has_open_gesture());
-            annotations.settle();
+            assert!(annotations.settle().is_none());
             assert!(!annotations.has_open_gesture());
             assert_eq!(annotations.strokes.len(), 1, "settling keeps the mark");
+        }
+
+        #[test]
+        fn a_label_and_a_note_are_the_same_gesture_and_differ_at_the_commit() {
+            let mut annotations = Annotations::default();
+            assert!(annotations.begin_text((0.3, 0.3), 0.025, RED, true).0);
+            assert!(annotations.type_text("ask about the third column"));
+            let finished = annotations.finish_text().expect("a typed note");
+            assert!(finished.note, "the commit is what tells the two apart");
+
+            // Reaching from one to the other does not end the typing: they are
+            // one gesture wearing two names.
+            assert!(annotations.begin_text((0.6, 0.6), 0.025, RED, false).0);
+            assert!(annotations.arm(Some(AnnotationTool::Note)).is_none());
+            assert!(annotations.is_typing());
+            // Any other tool does end it, and hands the label over.
+            assert!(annotations.type_text("a label"));
+            let closed = annotations
+                .arm(Some(AnnotationTool::Ink))
+                .expect("the label is handed over rather than dropped");
+            assert_eq!(closed.text, "a label");
+        }
+
+        #[test]
+        fn a_band_holds_what_it_encloses_and_the_delete_takes_exactly_those() {
+            let mut annotations = Annotations::default();
+            annotations.adopt(vec![
+                InkStroke {
+                    points: vec![(0.2, 0.2), (0.3, 0.3)],
+                    width: WIDTH,
+                    color: RED,
+                    kind: StrokeKind::Ink,
+                    id: Some(named("inside")),
+                },
+                InkStroke {
+                    points: vec![(0.8, 0.8)],
+                    width: WIDTH,
+                    color: RED,
+                    kind: StrokeKind::Ink,
+                    id: Some(named("outside")),
+                },
+            ]);
+            annotations.adopt_notes(vec![NoteMark {
+                position: (0.25, 0.25),
+                size: (0.02, 0.02),
+                color: RED,
+                id: named("a-note"),
+            }]);
+
+            assert!(annotations.begin_band((0.1, 0.1)));
+            assert!(annotations.extend_band((0.5, 0.5)));
+            let held = annotations.finish_band().to_vec();
+            assert!(held.contains(&named("inside")), "{held:?}");
+            assert!(held.contains(&named("a-note")), "{held:?}");
+            assert!(!held.contains(&named("outside")), "{held:?}");
+            assert!(annotations.band.is_none(), "the band ends at the release");
+
+            let taken = annotations.take_selection();
+            assert_eq!(taken.len(), 2);
+            assert_eq!(annotations.strokes.len(), 1, "only the held one went");
+            assert!(annotations.notes.is_empty());
+            assert!(annotations.selected.is_empty());
+        }
+
+        #[test]
+        fn a_mark_the_document_has_not_named_cannot_be_held() {
+            // Its commit is still in flight, so there is no name to hold it by
+            // — and a moment later there will be.
+            let mut annotations = Annotations::default();
+            assert!(annotations.begin_stroke((0.2, 0.2), WIDTH, RED));
+            let _ = annotations.end_stroke();
+            assert!(annotations.begin_band((0.0, 0.0)));
+            assert!(annotations.extend_band((1.0, 1.0)));
+            assert!(annotations.finish_band().is_empty());
         }
     }
 }

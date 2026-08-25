@@ -492,6 +492,23 @@ Three consequences follow, and each is load-bearing:
   document mode having opened the file. The presenter is told once, when the
   first mark is made, rather than discovering it after the talk.
 
+Two things follow from the first of those, and both were once wrong in the
+code. The palettes offer the *same marks* — ink, the highlighter, a label, a
+note, the eraser and the rubber band, in the same order, under the same digits.
+What presentation has and document mode does not is the pointer, which makes no
+mark at all; what document mode has and presentation does not is moving and
+resizing a held mark, because a mark dragged to a new place mid-talk is a mark
+the audience watches move. A tool one palette had and the other did not was
+never a restraint on what could reach the file: it was only a mark the
+presenter had to change mode to make.
+
+And the overlay draws *every* kind the document holds for the page, not only
+ink. A slide's pixels are rendered without annotations, which is what keeps an
+unfinished gesture and the mark it becomes from being on the screen at once;
+the price is that a mark the overlay does not draw is a mark presentation does
+not show at all. A highlight made at the lectern used to disappear at the
+release for exactly that reason — it was in the file, and on nobody's screen.
+
 The conversion between slide space (fractions of what the projector shows) and
 canonical page space (PDF points from the crop box's top-left corner) lives in
 `pulpit_core::annotate::presenter` and nowhere else, in both directions. A

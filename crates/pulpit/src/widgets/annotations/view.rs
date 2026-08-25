@@ -553,6 +553,13 @@ fn tool_control<Message: Clone + 'static>(
         main = main.on_press(on(WidgetEvent::Annotate(command)));
     }
 
+    // A tool with nothing to configure carries no arrow and opens no panel:
+    // a rubber band is a shape the hand makes, and it has no colour or size
+    // to choose.
+    if !armable.has_options() {
+        return palette_hint(main.into(), armable.label());
+    }
+
     let toggle = if open == Some(tool) { None } else { Some(tool) };
     let gutter = size * ARROW_FRACTION;
     let mut arrow = button(theme::icon::icon(
@@ -1150,6 +1157,221 @@ impl Marks {
         );
     }
 
+    /// The highlights the document holds for this slide.
+    ///
+    /// Drawn by the overlay rather than by the page's own pixels, because a
+    /// slide is rendered without annotations so that the sweep under the hand
+    /// and the mark it becomes are never on the screen at once. Each mark is
+    /// one path filled once with the non-zero rule, for the reason
+    /// `draw_highlights` gives: two runs that touch describe one region, and a
+    /// region is painted once.
+    fn draw_committed_highlights(&self, frame: &mut canvas::Frame, panel: Size) {
+        for highlight in &self.annotations.highlights {
+            let mut any = false;
+            let path = canvas::Path::new(|builder| {
+                for run in &highlight.runs {
+                    let corners: Option<Vec<iced::Point>> = run
+                        .iter()
+                        .map(|corner| self.point(panel, *corner))
+                        .collect();
+                    let Some(corners) = corners else {
+                        continue;
+                    };
+                    builder.move_to(corners[0]);
+                    for corner in &corners[1..] {
+                        builder.line_to(*corner);
+                    }
+                    builder.close();
+                    any = true;
+                }
+            });
+            if !any {
+                continue;
+            }
+            let (red, green, blue) = highlight.color.rgb();
+            frame.fill(
+                &path,
+                canvas::Fill {
+                    style: canvas::Style::Solid(iced::Color::from_rgba(
+                        red,
+                        green,
+                        blue,
+                        // The mark's own opacity, which is what makes a
+                        // highlight a highlight in a PDF. Held away from
+                        // invisible: a mark drawn as nothing reads as a bug.
+                        highlight.opacity.clamp(0.1, 1.0),
+                    )),
+                    rule: canvas::fill::Rule::NonZero,
+                },
+            );
+        }
+    }
+
+    /// The sticky notes the document holds for this slide.
+    ///
+    /// An icon and nothing more. What a note says is behind it, and a slide
+    /// that spilled that onto the projector would be showing the audience
+    /// something the reader chose to fold away.
+    fn draw_notes(&self, frame: &mut canvas::Frame, panel: Size) {
+        for note in &self.annotations.notes {
+            let (Some(corner), Some(far)) = (
+                self.point(panel, note.position),
+                self.point(
+                    panel,
+                    (note.position.0 + note.size.0, note.position.1 + note.size.1),
+                ),
+            ) else {
+                continue;
+            };
+            let width = (far.x - corner.x).max(6.0);
+            let height = (far.y - corner.y).max(6.0);
+            let (red, green, blue) = note.color.rgb();
+            let colour = iced::Color::from_rgb(red, green, blue);
+            let body = canvas::Path::new(|builder| {
+                builder.rectangle(corner, Size::new(width, height));
+            });
+            frame.fill(&body, iced::Color { a: 0.85, ..colour });
+            frame.stroke(
+                &body,
+                canvas::Stroke::default()
+                    .with_color(iced::Color {
+                        a: 0.9,
+                        ..iced::Color::BLACK
+                    })
+                    .with_width(1.0),
+            );
+            // Two rules for "there are words in here", which is all the icon
+            // has room to say at slide size.
+            for line in 1..3 {
+                let y = corner.y + height * (line as f32) / 3.0;
+                let rule = canvas::Path::new(|builder| {
+                    builder.move_to(iced::Point::new(corner.x + width * 0.2, y));
+                    builder.line_to(iced::Point::new(corner.x + width * 0.8, y));
+                });
+                frame.stroke(
+                    &rule,
+                    canvas::Stroke::default()
+                        .with_color(iced::Color {
+                            a: 0.7,
+                            ..iced::Color::BLACK
+                        })
+                        .with_width(1.0),
+                );
+            }
+        }
+    }
+
+    /// The rubber band being dragged, and the marks it is holding.
+    ///
+    /// The band is drawn in the interface's accent rather than in a mark
+    /// colour: it is not a mark, it is a question about which marks, and it
+    /// disappears at the release. What it is holding is outlined in the same
+    /// accent, which is the only thing on the slide that says a press of
+    /// delete will take those and not everything.
+    fn draw_band(&self, frame: &mut canvas::Frame, panel: Size) {
+        let accent = theme::ambient::palette().accent;
+        for held in self.held_bounds(panel) {
+            let outline = canvas::Path::new(|builder| {
+                builder.rectangle(held.0, held.1);
+            });
+            frame.fill(&outline, iced::Color { a: 0.12, ..accent });
+            frame.stroke(
+                &outline,
+                canvas::Stroke::default()
+                    .with_color(iced::Color { a: 0.8, ..accent })
+                    .with_width(1.5),
+            );
+        }
+        let Some((from, to)) = self.annotations.band else {
+            return;
+        };
+        let (Some(from), Some(to)) = (self.point(panel, from), self.point(panel, to)) else {
+            return;
+        };
+        let corner = iced::Point::new(from.x.min(to.x), from.y.min(to.y));
+        let size = Size::new((to.x - from.x).abs(), (to.y - from.y).abs());
+        let band = canvas::Path::new(|builder| {
+            builder.rectangle(corner, size);
+        });
+        frame.fill(&band, iced::Color { a: 0.1, ..accent });
+        frame.stroke(
+            &band,
+            canvas::Stroke::default()
+                .with_color(iced::Color { a: 0.9, ..accent })
+                .with_width(1.5),
+        );
+    }
+
+    /// Where each held mark is on the panel, as a corner and a size.
+    ///
+    /// Bounding boxes rather than the marks' own outlines: what this says is
+    /// "these are the ones", and a stroke traced in a second colour reads as
+    /// a second stroke.
+    fn held_bounds(&self, panel: Size) -> Vec<(iced::Point, Size)> {
+        if self.annotations.selected.is_empty() {
+            return Vec::new();
+        }
+        let held = |id: &pulpit_core::annotate::AnnotationId| {
+            self.annotations.selected.iter().any(|other| other == id)
+        };
+        let mut boxes = Vec::new();
+        let mut add = |points: Vec<(f32, f32)>| {
+            let corners: Vec<iced::Point> = points
+                .into_iter()
+                .filter_map(|point| self.point(panel, point))
+                .collect();
+            let Some(first) = corners.first() else {
+                return;
+            };
+            let mut left = first.x;
+            let mut top = first.y;
+            let mut right = first.x;
+            let mut bottom = first.y;
+            for corner in &corners[1..] {
+                left = left.min(corner.x);
+                top = top.min(corner.y);
+                right = right.max(corner.x);
+                bottom = bottom.max(corner.y);
+            }
+            const PADDING: f32 = 3.0;
+            boxes.push((
+                iced::Point::new(left - PADDING, top - PADDING),
+                Size::new(
+                    (right - left) + PADDING * 2.0,
+                    (bottom - top) + PADDING * 2.0,
+                ),
+            ));
+        };
+        for stroke in &self.annotations.strokes {
+            if stroke.id.as_ref().is_some_and(&held) {
+                add(stroke.points.clone());
+            }
+        }
+        for mark in &self.annotations.texts {
+            if mark.annotation.as_ref().is_some_and(&held) {
+                let fit = mark.fit.unwrap_or((mark.size * 4.0, mark.size * 1.6));
+                add(vec![
+                    mark.position,
+                    (mark.position.0 + fit.0, mark.position.1 + fit.1),
+                ]);
+            }
+        }
+        for highlight in &self.annotations.highlights {
+            if held(&highlight.id) {
+                add(highlight.runs.iter().flatten().copied().collect());
+            }
+        }
+        for note in &self.annotations.notes {
+            if held(&note.id) {
+                add(vec![
+                    note.position,
+                    (note.position.0 + note.size.0, note.position.1 + note.size.1),
+                ]);
+            }
+        }
+        boxes
+    }
+
     fn draw_marks(&self, frame: &mut canvas::Frame, panel: Size) {
         // The spotlight goes underneath the ink: dimming what has just been
         // circled would defeat the circle.
@@ -1179,6 +1401,7 @@ impl Marks {
             }
         }
 
+        self.draw_committed_highlights(frame, panel);
         self.draw_highlights(frame, panel);
         self.draw_selection(frame, panel);
 
@@ -1222,6 +1445,11 @@ impl Marks {
                 }
             }
         }
+
+        // Notes over the ink: an icon is a small target, and one under a
+        // stroke would be an icon nobody can see is there.
+        self.draw_notes(frame, panel);
+        self.draw_band(frame, panel);
 
         // The pointer dot last: it is where the presenter is looking now, so
         // nothing is allowed to be drawn over it.
@@ -1418,10 +1646,29 @@ pub fn marks<'a, Message: 'a>(
                     let Some(page) = PageBox::fit(panel, aspect, fit) else {
                         continue;
                     };
-                    let available_width =
-                        ((page.x + page.width).min(panel.width) - rect.x).max(0.0);
-                    let available_height =
-                        ((page.y + page.height).min(panel.height) - rect.y).max(0.0);
+                    // A label read back out of the document is drawn in the
+                    // box the annotation occupies, because that box is what
+                    // the file records — the type size it was set at is not.
+                    // One being written here is drawn at the size it was set
+                    // at, in the room that is left to the edge of the page.
+                    let (available_width, available_height) = match mark.fit {
+                        Some(box_fit) => {
+                            let far = Region::new(
+                                mark.position.0 + box_fit.0,
+                                mark.position.1 + box_fit.1,
+                                1.0,
+                                1.0,
+                            );
+                            match place(panel, aspect, fit, crop, far) {
+                                Some(far) => ((far.x - rect.x).max(0.0), (far.y - rect.y).max(0.0)),
+                                None => continue,
+                            }
+                        }
+                        None => (
+                            ((page.x + page.width).min(panel.width) - rect.x).max(0.0),
+                            ((page.y + page.height).min(panel.height) - rect.y).max(0.0),
+                        ),
+                    };
                     let (width, height) =
                         fit_svg_viewport(available_width, available_height, rendered.aspect);
                     let picture = iced::widget::svg(handle.clone())
