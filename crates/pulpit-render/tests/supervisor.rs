@@ -464,18 +464,38 @@ fn a_burst_of_frames_is_one_wakeup() {
     assert_eq!(frames(&events).len(), 6, "all six rendered: {events:?}");
 
     // A reader thread posts its message and *then* rings, so collecting the
-    // six frames does not mean the six rings have all been attempted yet.
-    // Let the stragglers land, otherwise this counts a ring that arrives
-    // between two waits and calls coalescing a queue.
-    std::thread::sleep(Duration::from_millis(500));
-
-    // Six frames have been drained. However many rings they produced, the
-    // channel holds at most the one that says "there may be more".
+    // six frames does not mean the six rings have all been attempted yet. A
+    // ring that lands between two waits is a *late* ring, not a queued one,
+    // and counting it as queueing is how this test used to fail on a loaded
+    // machine: it slept a fixed 500 ms and called that "every straggler has
+    // landed", which is a guess about scheduling rather than a fact about the
+    // doorbell.
+    //
+    // So wait for silence instead of guessing at it. The doorbell is one
+    // deep, so quiet for a whole window means every ring has been attempted
+    // and collapsed; the deadline is only there so a broken doorbell fails
+    // rather than hangs.
+    let quiet = Duration::from_millis(250);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut rings = 0;
-    while wakeup.wait(Duration::from_millis(10)) == Wakeup::Ring {
+    while wakeup.wait(quiet) == Wakeup::Ring {
         rings += 1;
-        assert!(rings <= 1, "the doorbell coalesces rather than queues");
+        assert!(
+            Instant::now() < deadline,
+            "the doorbell never went quiet: {rings} rings and counting"
+        );
     }
+
+    // What coalescing means, stated so that it cannot be confused with
+    // scheduling: six frames did not produce six wakeups. A queueing doorbell
+    // holds one ring per frame and hands back all six here with no pause
+    // between them, which is the failure this is looking for. Coalescing
+    // gives one, or two when the last frame's ring lands just after the first
+    // wait took the slot.
+    assert!(
+        rings < 6,
+        "the doorbell queued a ring per frame rather than coalescing: {rings}"
+    );
 }
 
 /// A shutdown closes the doorbell rather than leaving a listener parked on it
