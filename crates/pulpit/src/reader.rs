@@ -442,9 +442,23 @@ pub struct ReaderSession {
     /// would put the reader back at a different place in the document from
     /// the one they cropped at.
     crop_restore: Option<(Zoom, f32, f32)>,
-    /// Has the surface said how tall its window is? Until it has, the
-    /// layout's estimate stands in.
-    viewport_reported: bool,
+    /// The layout's own measurement of the page cell's height, before the
+    /// chrome the page widget draws inside it.
+    ///
+    /// Kept beside `cell` because the two answer different questions: this is
+    /// what the layout allotted, `cell.1` is what a page is fitted into.
+    estimated_height: f32,
+    /// How much of that height the surface keeps for itself — the band and
+    /// the gaps drawn inside the cell — learnt from the difference between
+    /// the layout's estimate and the height the surface reports.
+    ///
+    /// Learnt once and then subtracted from every later estimate, rather than
+    /// letting the last report stand as the answer for ever: a surface
+    /// reports only when it is scrolled, and a page fitted to its window has
+    /// nothing to scroll. Holding the old report is how a fit stayed sized
+    /// for the window it was made in when the window changed size under it —
+    /// entering fullscreen, most visibly.
+    viewport_inset: f32,
     /// The offset the last batch of renders was asked for at, which is how
     /// "the reader is scrolling" is told from "the reader has stopped".
     last_render_offset: f32,
@@ -3051,16 +3065,17 @@ impl ReaderSession {
     /// The page surface was drawn at this size. Recomputes the column, because
     /// a fit that ignored the cell it is fitting to is not a fit.
     pub fn set_cell(&mut self, width: f32, height: f32) {
-        // The height only until the surface has reported its own: the layout
-        // knows what it allotted the cell, the surface knows what is left
-        // after the chrome around it, and only the second of those is what a
-        // page is fitted into.
-        let height = if self.viewport_reported {
-            self.cell.1
-        } else {
-            height.max(0.0)
-        };
-        let cell = (width.max(0.0), height);
+        // The layout knows what it allotted the cell; the surface knows what
+        // is left after the chrome inside it, and only the second of those is
+        // what a page is fitted into. So the estimate is kept as the estimate
+        // and the difference the surface last reported is taken off it — that
+        // way a window that changes size still moves the cell, which holding
+        // the report itself would not.
+        self.estimated_height = height.max(0.0);
+        let cell = (
+            width.max(0.0),
+            (self.estimated_height - self.viewport_inset).max(0.0),
+        );
         let first = !self.cell_known;
         self.cell_known = true;
         if (cell.0 - self.cell.0).abs() > VIEWPORT_EPSILON
@@ -3072,15 +3087,15 @@ impl ReaderSession {
         }
     }
 
-    /// Forget that the surface reported its own height.
+    /// Forget what the surface said about the chrome inside its cell.
     ///
     /// Said by the application when the tree the page is mounted in has
-    /// changed. Until some surface reports again, the layout's own
-    /// measurement of the cell is the best account of it there is; leaving
-    /// the departed surface's report in charge is how a fit stayed sized
-    /// for the window it was made in.
+    /// changed. A different tree draws different chrome, so the inset learnt
+    /// from the departed surface says nothing about the new one; until the
+    /// new one reports, the layout's own measurement of the cell is the best
+    /// account of it there is.
     pub fn retire_reported_viewport(&mut self) {
-        self.viewport_reported = false;
+        self.viewport_inset = 0.0;
     }
 
     /// The page surface was replaced by another mount with its own geometry.
@@ -3088,14 +3103,16 @@ impl ReaderSession {
     /// Fullscreen and the ordinary reader layout use different scrollable
     /// widget trees. A fit therefore has to be resolved again against the new
     /// surface, while the page and the place within it remain the reader's.
-    /// The old surface's reported viewport cannot remain authoritative for
-    /// the new one; its first scroll report may refine the supplied height.
-    pub fn remount_cell(&mut self, width: f32, height: f32) {
+    /// `estimate` is what the layout allotted the cell and `reported` what
+    /// the new surface says is left of it: the difference is the chrome, and
+    /// learning it here is what lets a later window resize re-fit correctly.
+    pub fn remount_cell(&mut self, estimate: (f32, f32), reported: f32) {
         let anchor = self
             .reading_position()
             .map(|(page, _zoom, fraction)| (page, fraction));
         self.retire_reported_viewport();
-        self.set_cell(width, height);
+        self.set_cell(estimate.0, estimate.1);
+        self.set_viewport(reported);
         if let Some((page, fraction)) = anchor {
             self.restore_position(page, None, fraction);
         }
@@ -3130,10 +3147,16 @@ impl ReaderSession {
             return;
         }
         self.cell_known = true;
-        // From here on the surface is the authority on its own height, and
-        // the layout's estimate is not consulted again: two answers to "how
-        // tall is the window" is a fit that changes every tick.
-        self.viewport_reported = true;
+        // What the surface reports is the truth about *this* cell; what it
+        // says about every later one is the difference from the layout's
+        // estimate, which is the chrome and does not change with the window.
+        // Recorded that way round so the two answers to "how tall is the
+        // window" cannot fight — the estimate always wins, less the inset.
+        self.viewport_inset = if self.estimated_height > height {
+            self.estimated_height - height
+        } else {
+            0.0
+        };
         if (height - self.cell.1).abs() > VIEWPORT_EPSILON {
             self.cell.1 = height;
             self.relayout();
@@ -4735,7 +4758,7 @@ mod tests {
             session.apply(&ReadCommand::SetZoom(zoom));
             session.apply(&ReadCommand::GoToPage(PageIndex(4)));
 
-            session.remount_cell(1_000.0, 800.0);
+            session.remount_cell((1_000.0, 800.0), 800.0);
 
             assert_eq!(session.controls().zoom, zoom);
             assert_eq!(session.controls().page, PageIndex(4));
@@ -4779,6 +4802,73 @@ mod tests {
     }
 
     #[test]
+    fn a_window_that_changes_size_refits_through_the_chrome_the_surface_reported() {
+        // The bug this holds shut: fit the page, press `f`, and the fit stays
+        // sized for the window fullscreen was entered from. A surface reports
+        // its height only when it is scrolled, and a page fitted to its
+        // window has nothing to scroll, so the report from the old size was
+        // the last word ever said and every later estimate was ignored.
+        let mut session = open(4);
+        // The layout allotted 400; the surface says 360, so 40 points of that
+        // cell are the band drawn inside it.
+        session.apply(&ReadCommand::ScrollTo {
+            offset: 0.0,
+            offset_x: 0.0,
+            viewport: 360.0,
+        });
+        session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
+        assert!(
+            (session.scale - 360.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
+
+        // The window grows — fullscreen, a drag of the frame, a projector
+        // arriving — and says nothing else. The fit follows it, less the
+        // chrome it already knows about.
+        session.set_cell(1_000.0, 900.0);
+
+        assert!(
+            (session.scale - 860.0 / 792.0).abs() < 1e-4,
+            "a resize re-fits: {}",
+            session.scale
+        );
+    }
+
+    #[test]
+    fn a_remount_learns_the_new_surfaces_chrome_from_its_first_report() {
+        // Fullscreen mounts a tree with no band at all. Leaving it mounts one
+        // that has a band again, and the inset learnt from the fullscreen
+        // surface would otherwise stand until something was scrolled.
+        let mut session = open(4);
+        session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
+
+        // Fullscreen: the whole window, nothing drawn inside the cell.
+        session.remount_cell((1_000.0, 800.0), 800.0);
+        assert!(
+            (session.scale - 800.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
+
+        // …and back, to a layout whose cell keeps 40 points for its band.
+        session.remount_cell((612.0, 400.0), 360.0);
+        assert!(
+            (session.scale - 360.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
+        // A resize of *that* window is fitted through the band, not to the
+        // fullscreen surface's inset of nothing.
+        session.set_cell(612.0, 500.0);
+        assert!(
+            (session.scale - 460.0 / 792.0).abs() < 1e-4,
+            "{}",
+            session.scale
+        );
+    }
+
+    #[test]
     fn remounting_keeps_the_place_within_the_page() {
         let mut session = open(8);
         session.apply(&ReadCommand::SetZoom(Zoom::FitWidth));
@@ -4788,7 +4878,7 @@ mod tests {
             placed.top + placed.height * 0.6,
         ));
 
-        session.remount_cell(1_000.0, 800.0);
+        session.remount_cell((1_000.0, 800.0), 800.0);
 
         let (page, _, fraction) = session.reading_position().expect("a laid-out column");
         assert_eq!(page, PageIndex(4));
@@ -4800,13 +4890,13 @@ mod tests {
         let mut session = open(8);
         session.apply(&ReadCommand::SetZoom(Zoom::FitWidth));
         session.apply(&ReadCommand::GoToPage(PageIndex(2)));
-        session.remount_cell(1_224.0, 900.0);
+        session.remount_cell((1_224.0, 900.0), 900.0);
 
         // Navigation while the fullscreen surface is mounted belongs to the
         // reader, so the normal layout must return to this page rather than
         // the page fullscreen began on.
         session.apply(&ReadCommand::GoToPage(PageIndex(6)));
-        session.remount_cell(612.0, 400.0);
+        session.remount_cell((612.0, 400.0), 400.0);
 
         assert_eq!(session.controls().zoom, Zoom::FitWidth);
         assert_eq!(session.controls().page, PageIndex(6));

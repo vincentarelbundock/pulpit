@@ -1332,11 +1332,11 @@ fn menu(app: &App) -> Element<'_, Message> {
             .height(Length::Fill),
     );
 
-    // The menu hangs below the button's strip. The shortcut reference owns a
-    // fixed header rather than the active layout's toolbar, so its flyout is
-    // anchored to that header on both empty startup and explicit `?` help.
+    // The menu hangs below the button's strip. The shortcut reference lays its
+    // menu button over the page in the same corner the toolbar uses, so the
+    // flyout hangs from exactly the same height there as everywhere else.
     let above = if app.shortcuts_open || app.state.document().is_none() {
-        gap::L + theme::controls::BUTTON_HEIGHT + gap::S * 2.0
+        theme::controls::BUTTON_HEIGHT + gap::S * 2.0
     } else {
         flyout_top(app, crate::widgets::WidgetKind::MainMenu)
     };
@@ -1448,7 +1448,7 @@ fn shortcut_table_separator() -> Element<'static, Message> {
         .height(Length::Fill)
         .style(theme::ambient::separator);
     container(line)
-        .width(Length::Fixed(gap::L))
+        .width(Length::Fixed(gap::XXL))
         .height(Length::Fill)
         .align_x(Alignment::Center)
         .into()
@@ -1468,8 +1468,11 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
                             .width(Length::Fill)
                             .max_width(SHORTCUT_TABLE_WIDTH),
                     )
+                    // Each half hugs the rule between them rather than
+                    // centring in its own share of the window: a wide window
+                    // should widen the margins, not the gutter.
                     .width(Length::FillPortion(1))
-                    .align_x(Alignment::Center),
+                    .align_x(Alignment::End),
                     shortcut_table_separator(),
                     container(
                         container(shortcut_table(app, SHORTCUT_TABLE_RIGHT))
@@ -1477,7 +1480,7 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
                             .max_width(SHORTCUT_TABLE_WIDTH),
                     )
                     .width(Length::FillPortion(1))
-                    .align_x(Alignment::Center),
+                    .align_x(Alignment::Start),
                 ]
                 .width(Length::Fill)
                 .align_y(Alignment::Start),
@@ -1508,28 +1511,7 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .align_x(Alignment::Center);
-    let mut header = stack![
-        brand,
-        container(menu_button(app))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Start)
-            .align_y(Alignment::Center),
-    ];
-    if can_close {
-        let close = button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
-            .padding(gap::XS)
-            .style(theme::ambient::tool_button)
-            .on_press(Message::CloseShortcuts);
-        header = header.push(
-            container(close)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::End)
-                .align_y(Alignment::Center),
-        );
-    }
-    let content = column![header, guide].spacing(gap::M).width(Length::Fill);
+    let content = column![brand, guide].spacing(gap::M).width(Length::Fill);
 
     // The centring has to happen *inside* the scrollable. A vertical
     // scrollable hands its child a full-width, infinite-height box, so the
@@ -1540,11 +1522,28 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
         .width(Length::Fill)
         .align_x(Alignment::Center)
         .padding(gap::L);
-    container(scrollable(centred).style(theme::ambient::scrollbar))
+    let surface = container(scrollable(centred).style(theme::ambient::scrollbar))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::ambient::surface)
-        .into()
+        .style(theme::ambient::surface);
+
+    // The menu button sits in the window's own top-left corner, exactly where
+    // the toolbar puts it on every other surface: it is the same control, so
+    // it must not move when the welcome page stands in for a layout. Laying it
+    // over the page rather than inside the centred column is what keeps it
+    // there whatever the window's width does to that column.
+    let mut corner = Row::new()
+        .align_y(Alignment::Center)
+        .push(menu_button(app))
+        .push(space::horizontal());
+    if can_close {
+        let close = button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
+            .padding(gap::XS)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::CloseShortcuts);
+        corner = corner.push(container(close).padding(gap::S));
+    }
+    stack![surface, corner.width(Length::Fill)].into()
 }
 
 fn about_overlay() -> Element<'static, Message> {

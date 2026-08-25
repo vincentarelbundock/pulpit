@@ -8205,10 +8205,15 @@ impl App {
                     let generation = self.reader_surface_shape.get().generation;
                     if generation != self.reader_surface_seen {
                         self.reader_surface_seen = generation;
-                        let width = self
+                        // The layout's estimate for the new mount, beside the
+                        // height the new surface reports: the difference is
+                        // the chrome the widget draws inside the cell, and
+                        // the session needs both to keep fitting correctly
+                        // when the window later changes size.
+                        let estimate = self
                             .page_surface_size()
-                            .map_or_else(|| self.reader.cell_width(), |(width, _)| width);
-                        self.reader.remount_cell(width, *viewport);
+                            .unwrap_or((self.reader.cell_width(), *viewport));
+                        self.reader.remount_cell(estimate, *viewport);
                         self.apply_pending_position();
                         self.request_reader_renders();
                         return self.scroll_surface_to_reader();
