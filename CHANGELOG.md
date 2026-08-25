@@ -37,6 +37,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search results follow the document when it changes.** A result is a place
+  on a page, so when the file you are watching is rebuilt, the results found
+  in the old one describe where the words used to be: the list points at text
+  that has moved, and the highlights on the page mark bare paper. The page
+  count went stale with them, so a rebuild that added pages had pages the
+  search would never look at. A reload now runs the query again over the
+  document that arrived, keeping what you typed — a deck is rebuilt while you
+  are looking for something in it. Opening a different document clears the
+  search instead of keeping the previous file's results to draw over the new
+  one's pages.
+
 - **Windows: a second copy can name the one that is running, and a released
   claim cleans up after itself.** The file a running instance uses to claim
   the projector was opened in a way that locked the instance out of reading
