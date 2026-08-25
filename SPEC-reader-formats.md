@@ -8,8 +8,9 @@ main purpose is to say **which of those pulpit should do, which it should
 refuse, and why** — so that "why not EPUB?" has a written answer rather than
 being re-litigated.
 
-Nothing here is implemented. Sections marked **Not planned** are decisions,
-not backlog.
+**Class A (§54) is implemented**: `.cbz` and `.cbt` are read, and `.cbr` and
+`.cb7` are refused by name. Nothing else here is, and sections marked **Not
+planned** are decisions rather than backlog.
 
 ---
 
