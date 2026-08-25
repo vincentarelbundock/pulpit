@@ -3,7 +3,9 @@
 //! One executable, several roles. Run normally it is the presenter
 //! application; run with `--render-worker` it is a renderer worker process,
 //! and with `--document-worker=FILE` it is a document worker holding one open
-//! PDF. Every role is this same binary re-executed with a flag, which is how
+//! PDF — or one open folder of images (`SPEC-images.md` §48), which is the
+//! same role over a source that answers `Unsupported` to every PDF semantic.
+//! Every role is this same binary re-executed with a flag, which is how
 //! a supervisor spawns what it needs without a second installed binary to
 //! ship, sign or find on `PATH`.
 
@@ -241,7 +243,11 @@ fn explain_missing_libraries(text: &str) {
 
 fn print_help() {
     println!(
-        "pulpit [OPTIONS] [FILE.pdf]\n\
+        "pulpit [OPTIONS] [FILE.pdf | IMAGE | DIRECTORY]\n\
+         \n\
+         A directory is presented as a document whose pages are the images\n\
+         directly inside it, in natural name order. Naming one image opens\n\
+         the directory it is in, starting on that image.\n\
          \n\
          Options:\n\
            --layouts         open the layout library\n\
@@ -273,38 +279,47 @@ fn run_worker() {
         )
         .init();
 
-    // PDFium is a hard requirement, installed by every supported package. A
-    // worker that cannot bind it exits with guidance rather than falling back
-    // to placeholder pages, which would show the audience something that is
-    // not the deck. Only an explicit request gets the fixture backend.
-    let backend: Box<dyn PdfBackend> = if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some()
-    {
-        Box::new(FixtureBackend::new())
-    } else {
-        #[cfg(feature = "pdfium")]
-        {
-            match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
-                Ok(backend) => Box::new(backend),
-                Err(e) => {
-                    eprintln!(
-                        "{}",
-                        pulpit_render::pdf::missing_pdfium_message(&e.to_string())
-                    );
-                    std::process::exit(1);
+    // Two backends in one worker (SPEC-images.md §45): a directory source is
+    // decoded here by the `image` crate, a file source goes to PDFium. The
+    // choice is made per open, not once at startup, because a worker holds
+    // several documents at a time — always two during a reload — and after
+    // this they need not be the same kind.
+    //
+    // PDFium is still a hard requirement *for a PDF*, installed by every
+    // supported package: a worker asked to open a deck it cannot render exits
+    // with guidance rather than falling back to placeholder pages, which
+    // would show the audience something that is not the deck. Only an
+    // explicit request gets the fixture backend.
+    let backend: Box<dyn PdfBackend> = Box::new(pulpit_render::pdf::router::RoutingBackend::new(
+        Box::new(|| {
+            if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some() {
+                return Ok(Box::new(FixtureBackend::new()) as Box<dyn PdfBackend>);
+            }
+            #[cfg(feature = "pdfium")]
+            {
+                match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
+                    Ok(backend) => Ok(Box::new(backend) as Box<dyn PdfBackend>),
+                    Err(e) => {
+                        eprintln!(
+                            "{}",
+                            pulpit_render::pdf::missing_pdfium_message(&e.to_string())
+                        );
+                        std::process::exit(1);
+                    }
                 }
             }
-        }
-        #[cfg(not(feature = "pdfium"))]
-        {
-            eprintln!(
-                "{}",
-                pulpit_render::pdf::missing_pdfium_message(
-                    "this build was compiled without the pdfium feature"
-                )
-            );
-            std::process::exit(1);
-        }
-    };
+            #[cfg(not(feature = "pdfium"))]
+            {
+                eprintln!(
+                    "{}",
+                    pulpit_render::pdf::missing_pdfium_message(
+                        "this build was compiled without the pdfium feature"
+                    )
+                );
+                std::process::exit(1);
+            }
+        }),
+    ));
 
     if let Err(e) = pulpit_render::worker::run(std::io::stdin(), std::io::stdout(), backend) {
         tracing::error!(error = %e, "renderer worker exiting");
@@ -327,6 +342,14 @@ fn run_document_worker(source: PathBuf) {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    // A folder of images needs no PDF library at all, and must not be refused
+    // because one is missing (SPEC-images.md §45.3). Checked before the
+    // binding below, which is the whole point of the ordering.
+    if pulpit_render::images::resolve_source(&source).is_some() {
+        run_image_document_worker(source);
+        return;
+    }
 
     #[cfg(feature = "pdfium")]
     {
@@ -385,8 +408,38 @@ fn run_document_worker(source: PathBuf) {
     }
 }
 
+/// Serve the document-worker role for an image directory (`SPEC-images.md`
+/// §48).
+///
+/// The same loop and the same protocol; only the engine differs, and this one
+/// refuses every PDF semantic rather than pretending to have one.
+fn run_image_document_worker(source: PathBuf) {
+    use pulpit_render::document::worker::DocumentWorker;
+    use pulpit_render::document::PdfDocument;
+    use pulpit_render::images::ImageDocument;
+
+    let engine = match ImageDocument::open(&source) {
+        Ok(engine) => engine,
+        Err(error) => {
+            eprintln!("cannot open {}: {error}", source.display());
+            std::process::exit(1);
+        }
+    };
+    let mut worker = DocumentWorker::new();
+    // Nothing here writes an annotation, so the seed identifies nothing —
+    // but the document type is shared and wants one, and a per-process value
+    // is what every other engine gets.
+    worker.adopt(PdfDocument::new(Box::new(engine), seed_from_process()));
+
+    if let Err(e) =
+        pulpit_render::document::session::serve_stdio(worker, std::io::stdin(), std::io::stdout())
+    {
+        tracing::error!(error = %e, "image document worker exiting");
+        std::process::exit(1);
+    }
+}
+
 /// Something this process has that no other does, for annotation identity.
-#[cfg(feature = "pdfium")]
 fn seed_from_process() -> u64 {
     let pid = u64::from(std::process::id());
     let since_epoch = std::time::SystemTime::now()

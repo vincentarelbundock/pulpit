@@ -9,8 +9,10 @@
 // satisfy a lint about a boundary that no longer exists.
 #![allow(dead_code)]
 
+pub mod images;
 pub mod manager;
 pub mod watcher;
 
+pub use images::{ImageDocumentState, Positions};
 pub use manager::{DocumentManager, ReloadPolicy};
 pub use watcher::DocumentWatcher;

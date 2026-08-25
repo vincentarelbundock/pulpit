@@ -33,6 +33,7 @@ memmap2 = { workspace = true }
 # Already in the dependency graph via `zip`; used here to inflate xref streams
 # and object streams during signature verification.
 flate2 = "1"
+image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

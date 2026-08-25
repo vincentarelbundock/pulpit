@@ -11,26 +11,50 @@ use std::time::{Duration, Instant};
 
 use pulpit_core::{DocumentId, DocumentInfo};
 
-/// What the filesystem says about the watched file right now.
+/// What the filesystem says about the watched source right now.
+///
+/// An enum since `SPEC-images.md` §44.3, because the file case is blind to
+/// the one that matters for a directory: a directory's mtime moves when a
+/// member is added or removed, but **not** when a member's contents are
+/// overwritten, so an export re-writing `slide03.png` in place would never be
+/// noticed. The manager only ever compares stamps for equality, so the enum
+/// drops into the existing logic unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FileStamp {
-    pub len: u64,
-    pub modified: Option<std::time::SystemTime>,
+pub enum SourceStamp {
+    File {
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+    },
+    Directory {
+        entries: usize,
+        /// The digest of §42.3, over the ordered `(name, len, mtime)`
+        /// triples — the same one the worker computes and the application
+        /// compares against.
+        digest: u64,
+    },
 }
 
 /// Abstracted so tests can simulate a partial write without racing a real
 /// filesystem.
 pub trait FileProbe {
-    fn probe(&self, path: &Path) -> Option<FileStamp>;
+    fn probe(&self, path: &Path) -> Option<SourceStamp>;
 }
 
 /// The real filesystem.
 pub struct RealFileProbe;
 
 impl FileProbe for RealFileProbe {
-    fn probe(&self, path: &Path) -> Option<FileStamp> {
+    fn probe(&self, path: &Path) -> Option<SourceStamp> {
         let metadata = std::fs::metadata(path).ok()?;
-        Some(FileStamp {
+        if metadata.is_dir() {
+            // A directory still settling — a camera import landing fifty
+            // files — is an unstable source on the same debounce and backoff
+            // as a half-written PDF (§44.4), and that falls straight out of
+            // the digest still moving between two probes.
+            let (entries, digest) = pulpit_render::images::directory_stamp(path)?;
+            return Some(SourceStamp::Directory { entries, digest });
+        }
+        Some(SourceStamp::File {
             len: metadata.len(),
             modified: metadata.modified().ok(),
         })
@@ -94,12 +118,12 @@ enum State {
     /// Changes are arriving; wait for quiet.
     Debouncing {
         quiet_at: Instant,
-        last_stamp: Option<FileStamp>,
+        last_stamp: Option<SourceStamp>,
     },
     /// Quiet, but the stamp must repeat before we trust it.
     Stabilising {
         check_at: Instant,
-        stamp: Option<FileStamp>,
+        stamp: Option<SourceStamp>,
     },
     /// An open is in flight.
     Opening {
@@ -370,11 +394,11 @@ mod tests {
 
     #[derive(Default)]
     struct FakeProbe {
-        stamps: RefCell<Vec<Option<FileStamp>>>,
+        stamps: RefCell<Vec<Option<SourceStamp>>>,
     }
 
     impl FakeProbe {
-        fn with(stamps: Vec<Option<FileStamp>>) -> Self {
+        fn with(stamps: Vec<Option<SourceStamp>>) -> Self {
             Self {
                 stamps: RefCell::new(stamps),
             }
@@ -382,7 +406,7 @@ mod tests {
     }
 
     impl FileProbe for FakeProbe {
-        fn probe(&self, _path: &Path) -> Option<FileStamp> {
+        fn probe(&self, _path: &Path) -> Option<SourceStamp> {
             let mut stamps = self.stamps.borrow_mut();
             if stamps.len() > 1 {
                 stamps.remove(0)
@@ -392,11 +416,15 @@ mod tests {
         }
     }
 
-    fn stamp(len: u64) -> Option<FileStamp> {
-        Some(FileStamp {
+    fn stamp(len: u64) -> Option<SourceStamp> {
+        Some(SourceStamp::File {
             len,
             modified: None,
         })
+    }
+
+    fn folder(entries: usize, digest: u64) -> Option<SourceStamp> {
+        Some(SourceStamp::Directory { entries, digest })
     }
 
     fn manager() -> DocumentManager {
@@ -457,6 +485,44 @@ mod tests {
             now += Duration::from_millis(200);
         }
         assert_eq!(opens, 1, "opened once, only after the size settled");
+    }
+
+    /// §44.4. A folder receiving fifty files from a camera import is the
+    /// normal case, not an error: it is an unstable source on the same
+    /// debounce and backoff as a half-written PDF, and the digest still
+    /// moving is what says so.
+    #[test]
+    fn a_directory_still_receiving_files_is_never_opened() {
+        let start = Instant::now();
+        let mut manager = DocumentManager::new("/pictures/import", ReloadPolicy::default());
+        let probe = FakeProbe::with(vec![
+            folder(3, 0xaaa),
+            folder(20, 0xbbb),
+            folder(50, 0xccc),
+            folder(50, 0xccc),
+        ]);
+
+        manager.on_file_event(start);
+        let mut now = start + Duration::from_millis(400);
+        let mut opens = 0;
+        for _ in 0..4 {
+            opens += manager
+                .tick(now, &probe)
+                .iter()
+                .filter(|action| matches!(action, Action::OpenCandidate { .. }))
+                .count();
+            now += Duration::from_millis(200);
+        }
+        assert_eq!(opens, 1, "opened once, only after the digest settled");
+    }
+
+    /// The §44.2 regression, at the manager's own level: the *count* did not
+    /// change and neither did the directory's mtime, so only a stamp that
+    /// carries the digest can tell these two apart.
+    #[test]
+    fn a_member_overwritten_in_place_is_a_different_stamp() {
+        assert_ne!(folder(12, 0xaaa), folder(12, 0xbbb));
+        assert_eq!(folder(12, 0xaaa), folder(12, 0xaaa));
     }
 
     #[test]

@@ -555,3 +555,72 @@ fn a_backend_that_cannot_search_says_so_over_the_protocol() {
     assert!(!found.2, "the fixture backend has no text layer to search");
     supervisor.shutdown();
 }
+
+/// `SPEC-images.md` §45, end to end through real worker processes: one worker
+/// holds a folder of pictures and a deck at the same time, each answered by
+/// its own backend, and the folder's open carries the source digest §42.3
+/// compares against.
+#[test]
+fn a_folder_of_images_and_a_deck_are_both_held_by_one_worker() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    for (name, colour) in [("img2.png", 40u8), ("img10.png", 90)] {
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([colour, colour, colour, 255]))
+            .save(dir.path().join(name))
+            .expect("write a fixture image");
+    }
+    // Neither a page nor a reload trigger: decided by extension alone (§41.1).
+    std::fs::write(dir.path().join("notes.txt"), b"not a page").unwrap();
+
+    let mut supervisor = start(1);
+    supervisor.open(1, "fixture:pages=4");
+    supervisor.open(2, &dir.path().to_string_lossy());
+
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .filter(|e| matches!(e, RenderEvent::Opened(_)))
+            .count()
+            == 2
+    });
+    let opened: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RenderEvent::Opened(opened) => Some(opened.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let deck = opened.iter().find(|o| o.document == 1).expect("the deck");
+    assert_eq!(deck.page_count, 4);
+    assert!(deck.source_digest.is_none(), "a file has no listing digest");
+
+    let folder = opened.iter().find(|o| o.document == 2).expect("the folder");
+    assert_eq!(folder.page_count, 2, "the text file is not a page");
+    assert_eq!(folder.first_page_size.width, 64.0);
+    assert!(folder.metadata_text.is_empty(), "§46.5");
+    assert!(!folder.page_sizes_sampled, "§46.3");
+    // The application lists the same directory and must reach the same
+    // number, or the open is stale (§42.3).
+    let ours = pulpit_render::images::list_directory(dir.path()).unwrap();
+    assert_eq!(folder.source_digest, Some(ours.digest()));
+
+    // Page 1 is img10.png, because the order is natural rather than readdir's.
+    let mut picture = job(9, 1, 1, Priority::Audience);
+    picture.document = 2;
+    supervisor.submit(picture);
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        !frames(events).is_empty()
+    });
+    let pixels = events
+        .iter()
+        .find_map(|event| match event {
+            RenderEvent::Frame { job, frame, .. } if job.id == RequestId(9) => {
+                Some(frame.pixels.clone())
+            }
+            _ => None,
+        })
+        .expect("the picture");
+    assert_eq!(&pixels[..4], &[90, 90, 90, 255]);
+
+    supervisor.shutdown();
+}

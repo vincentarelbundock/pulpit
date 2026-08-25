@@ -927,6 +927,7 @@ impl PdfBackend for PdfiumBackend {
             page_sizes,
             page_sizes_sampled,
             metadata_text: self.metadata_text(handle),
+            source_digest: None,
         })
     }
 

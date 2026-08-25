@@ -33,6 +33,11 @@ anyhow = "1"
 bincode = { version = "1.3", default-features = false }
 crc32fast = "1"
 iced = "0.14"
+# Raster image decoding for the image-directory document tier
+# (SPEC-images.md §41.2). Default features on purpose: the supported extension
+# set in `pulpit_render::images` is exactly what the crate decodes out of the
+# box, and it adds no native dependency to the package.
+image = "0.25"
 libc = "0.2"
 memmap2 = "0.9"
 notify = "8"

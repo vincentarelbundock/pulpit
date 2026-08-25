@@ -58,6 +58,16 @@ pub enum CompatibilityLevel {
     /// than promising less and finding more.
     #[default]
     AnnotateOnly,
+    /// Renders and turns its pages, and nothing else.
+    ///
+    /// A folder of images (`SPEC-images.md` §48): annotations, form fields,
+    /// text selection, save and signing are PDF semantics and there is
+    /// nothing honest to map them onto. Distinct from
+    /// [`Self::Unsupported`], which is a document that does not render at
+    /// all — this one renders perfectly and is simply not a PDF. The UI
+    /// reads this rather than offering controls that refuse when pressed
+    /// (§48.3).
+    ViewOnly,
     /// Does not render, or cannot be opened safely.
     Unsupported,
 }
@@ -68,13 +78,27 @@ impl CompatibilityLevel {
             CompatibilityLevel::Native => "Native",
             CompatibilityLevel::NativeWithLimitations => "Native with limitations",
             CompatibilityLevel::AnnotateOnly => "Annotate only",
+            CompatibilityLevel::ViewOnly => "View only",
             CompatibilityLevel::Unsupported => "Unsupported",
         }
     }
 
     /// May this document be annotated at all?
     pub fn allows_annotation(self) -> bool {
-        !matches!(self, CompatibilityLevel::Unsupported)
+        !matches!(
+            self,
+            CompatibilityLevel::Unsupported | CompatibilityLevel::ViewOnly
+        )
+    }
+
+    /// Is this a document pulpit can only show?
+    ///
+    /// Separate from [`Self::allows_annotation`] because the two answers
+    /// coincide for exactly one other level, and a reader that dims a control
+    /// wants to know *why*: a folder of images has nothing to annotate, and a
+    /// document that will not open has nothing at all.
+    pub fn is_view_only(self) -> bool {
+        matches!(self, CompatibilityLevel::ViewOnly)
     }
 
     /// May its form fields be filled?

@@ -21,6 +21,7 @@ Application (iced daemon, one update loop)
 ├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
+├── images::PageTable        a directory of pictures as pages   pulpit-render
 ├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
 └── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
@@ -1496,6 +1497,17 @@ broken installation and placeholder pages on the projector would be worse than
 stopping. `PULPIT_FORCE_FIXTURE_BACKEND=1` selects the fixture backend
 explicitly, which is how the tests run without PDFium.
 
+Binding is *lazy*, attempted on the first PDF open rather than at worker
+startup (`SPEC-images.md` §45.3, §45.4). This deliberately softens the rule
+above by one step: a worker still exits with that diagnostic when it is asked
+to open a PDF it cannot render, but it no longer exits before knowing what it
+was asked for. Since image directories are documents too, refusing to display
+a JPEG because a PDF library is absent is not defensible, and the reasoning
+behind the original rule — a deck silently rendering as blanks — does not
+apply to a format the worker can fully decode. `pdf::router::RoutingBackend`
+is what dispatches per document, and it is the only thing that names both
+backends.
+
 
 = Notes mapping contract
 
@@ -1512,6 +1524,12 @@ In priority order:
 + A recognised *metadata contract* in the PDF, if
   `notes.honour_metadata_contract` is on.
 + Your *default mapping* (`notes.default_mapping`).
+
+An image document is outside that order entirely: it is pinned to
+`SlidesOnly`, consults no default and records no per-document choice
+(`SPEC-images.md` §46.4). A presenter whose default is a `SplitPage` mapping
+would otherwise have every photograph cut down the middle with its right half
+treated as speaker notes.
 
 == The metadata contract (Typst/Mosaic)
 

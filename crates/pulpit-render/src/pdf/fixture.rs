@@ -152,6 +152,7 @@ impl PdfBackend for FixtureBackend {
             page_sizes,
             page_sizes_sampled,
             metadata_text: doc.metadata_text.clone(),
+            source_digest: None,
         })
     }
 

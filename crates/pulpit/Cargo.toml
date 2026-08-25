@@ -81,3 +81,5 @@ winresource = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Writes the fixture pictures the image-directory tests present.
+image = { workspace = true }

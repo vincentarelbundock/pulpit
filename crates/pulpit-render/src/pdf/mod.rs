@@ -8,6 +8,7 @@
 pub mod capabilities;
 pub mod fixture;
 pub mod overlays;
+pub mod router;
 pub mod synth;
 
 #[cfg(feature = "pdfium")]
@@ -194,6 +195,18 @@ pub struct DocumentMetadata {
     pub page_sizes_sampled: bool,
     /// Concatenated metadata strings, searched for the notes-mapping contract.
     pub metadata_text: String,
+    /// A digest over the ordered `(name, len, mtime)` triples of a directory
+    /// source, and `None` for a file (`SPEC-images.md` §42.3).
+    ///
+    /// The application and the worker list an image directory independently,
+    /// and two listings can disagree because the directory can change between
+    /// them. Comparing digests is what makes that disagreement *detectable*:
+    /// the application treats a mismatch as a stale open and re-drives it
+    /// through the ordinary candidate/promote path, which already exists and
+    /// is already tested. A silently mismatched table would put the wrong
+    /// picture on the projector with nothing to notice it (§42.4).
+    #[serde(default)]
+    pub source_digest: Option<u64>,
 }
 
 /// Measure every page, up to the bound the domain sets on how many per-page

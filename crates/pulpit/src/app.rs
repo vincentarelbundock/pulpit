@@ -658,6 +658,33 @@ const SNAPSHOT_QUIET: Duration = Duration::from_secs(2);
 /// hand that never pauses, so the quiet spell is not the only way out.
 const MAX_RETAINED_MARKS: usize = 24;
 
+/// The "open a document" dialog, offering everything pulpit can open.
+///
+/// The image filter is **derived from** `pulpit_render::images` rather than
+/// restated (`SPEC-images.md` §41.5). Picking one image opens the folder it
+/// is in, which is what makes a folder reachable through a file picker at
+/// all (§40.2), and the presenter is told so before anything moves (§40.3).
+fn document_dialog() -> rfd::AsyncFileDialog {
+    let mut dialog = rfd::AsyncFileDialog::new();
+    for (label, extensions) in document_dialog_filters() {
+        dialog = dialog.add_filter(label, &extensions);
+    }
+    dialog
+}
+
+/// What that dialog offers, as data, so the derivation is testable.
+fn document_dialog_filters() -> Vec<(&'static str, Vec<&'static str>)> {
+    let images: Vec<&'static str> = pulpit_render::images::IMAGE_EXTENSIONS.to_vec();
+    let everything: Vec<&'static str> = std::iter::once("pdf")
+        .chain(images.iter().copied())
+        .collect();
+    vec![
+        ("Documents and images", everything),
+        ("PDF", vec!["pdf"]),
+        ("Images", images),
+    ]
+}
+
 /// Where reader snapshots are written: a per-process scratch directory, so a
 /// crash leaves nothing worse than temporary files and two running pulpits
 /// cannot overwrite each other's.
@@ -1137,6 +1164,12 @@ pub struct App {
     /// because the mouse happens to be resting somewhere.
     focused_link: Option<usize>,
     document_serial: u64,
+    /// The page table of an open image document, and everything that follows
+    /// from owning it: name-anchored re-indexing across a reload, the digest
+    /// comparison against the worker's own listing, and §40.3's statement of
+    /// what directory a picked file resolved to. `None` for a PDF, which is
+    /// also what "is this an image document?" is asked through.
+    image_pages: Option<crate::doc::ImageDocumentState>,
     /// A document the workers still hold for a file the presenter has moved
     /// on from. It is released once its replacement is promoted, so a failed
     /// open leaves the old deck rendering.
@@ -1872,6 +1905,9 @@ impl App {
             focused_link: None,
             pending: Vec::new(),
             document_serial: 0,
+            // Settled by `open_document`, which is the one funnel every open
+            // goes through — including the path named on the command line.
+            image_pages: None,
             retired_document: None,
             placement_retries: Vec::new(),
             presenter_refocus_deadlines: Vec::new(),
@@ -2983,8 +3019,7 @@ impl App {
             }
             Message::OpenDialog => Task::perform(
                 async {
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("PDF", &["pdf"])
+                    document_dialog()
                         .pick_file()
                         .await
                         .map(|handle| handle.path().to_path_buf())
@@ -3081,6 +3116,13 @@ impl App {
                 Task::none()
             }
             Message::SetMapping(mapping) => {
+                // §46.4. An image document is pinned to `SlidesOnly` and
+                // records no mapping: the control is not offered, and a
+                // keystroke that reaches this anyway must not write a
+                // per-document choice for a folder.
+                if self.image_pages.is_some() {
+                    return Task::none();
+                }
                 self.state
                     .apply(Nav::SetNotesMapping(mapping.clone()), self.now);
                 if let Some(document) = self.state.document() {
@@ -5112,6 +5154,30 @@ impl App {
                 }
             }
             RenderEvent::Opened(opened) => {
+                // §42.3. The application and the worker listed the directory
+                // independently, and the directory can change between the two
+                // listings. A disagreement is *detectable*, and the recovery
+                // is machinery that already exists and is already tested: the
+                // open is stale, so it is re-driven through the ordinary
+                // candidate/promote path. A silently mismatched table would
+                // put the wrong picture on the projector with nothing to
+                // notice it (§42.4).
+                if self
+                    .image_pages
+                    .as_ref()
+                    .is_some_and(|images| !images.agrees_with(opened.source_digest))
+                {
+                    self.diagnostics.note(
+                        "the folder changed while it was being opened; listing again".to_string(),
+                    );
+                    let actions = self.documents.on_candidate_failed(
+                        pulpit_core::DocumentId(opened.document),
+                        "the folder changed while it was being opened".into(),
+                        self.now,
+                    );
+                    let _ = self.run_document_actions(actions);
+                    return;
+                }
                 let mut info = DocumentInfo::new(
                     pulpit_core::DocumentId(opened.document),
                     self.documents.path(),
@@ -5142,12 +5208,19 @@ impl App {
 
                 // A mapping the user chose for this document outranks every
                 // other source, and neither source below may disturb it.
-                let explicit = self
-                    .settings
-                    .notes
-                    .per_document
-                    .iter()
-                    .any(|entry| entry.path == info.path);
+                //
+                // An image document counts as settled too (§46.4): it is
+                // pinned to `SlidesOnly`, has no metadata contract to read
+                // and no doubled pages to detect, and letting the geometry
+                // detector loose on a folder whose pages are every shape
+                // would put half of somebody's photograph on the projector.
+                let explicit = self.image_pages.is_some()
+                    || self
+                        .settings
+                        .notes
+                        .per_document
+                        .iter()
+                        .any(|entry| entry.path == info.path);
                 let from_metadata = if explicit || !self.settings.notes.honour_metadata_contract {
                     None
                 } else {
@@ -5399,6 +5472,17 @@ impl App {
                 tracing::warn!(?job, reason, "render failed");
                 self.diagnostics
                     .note(format!("render of page {} failed: {reason}", job.page + 1));
+                // §49.3. A picture that will not decode leaves the last
+                // complete audience frame where it is, and the presenter is
+                // told *which file* is broken — a page number is no help
+                // when the pages are files somebody can go and fix.
+                if let Some(name) = self
+                    .image_pages
+                    .as_mut()
+                    .and_then(|images| images.note_render_failure(job.page))
+                {
+                    self.notify(format!("{name} could not be shown: {reason}"));
+                }
                 let was_thumbnail = self.thumbnail_requests.contains(&job.id);
                 self.take_pending(job.id);
                 // A failure frees a warming slot exactly as a frame does, and
@@ -5442,6 +5526,11 @@ impl App {
     }
 
     fn run_document_actions(&mut self, actions: Vec<DocAction>) -> Task<Message> {
+        // Actions an action produced, run after this batch rather than in the
+        // middle of it: an image directory that has changed under a candidate
+        // fails that candidate, and the remaining actions in the batch are
+        // still owed their turn.
+        let mut deferred: Vec<DocAction> = Vec::new();
         for action in actions {
             match action {
                 DocAction::OpenCandidate {
@@ -5454,6 +5543,27 @@ impl App {
                         "opening candidate {} (attempt {attempt})",
                         path.display()
                     ));
+                    // The application lists the directory itself (§42.1), as
+                    // the open is issued, so its listing and the worker's are
+                    // as close together in time as they can be. They can
+                    // still disagree; the digest comparison in `Opened` is
+                    // what notices (§42.3).
+                    let listing = self
+                        .image_pages
+                        .as_mut()
+                        .map(|images| images.list_candidate());
+                    if let Some(Err(error)) = listing {
+                        // §40.5's refusal arrives here too, naming the count,
+                        // on the same retry machinery as a deck that will not
+                        // open.
+                        let now = self.now;
+                        deferred.extend(self.documents.on_candidate_failed(
+                            document,
+                            error.to_string(),
+                            now,
+                        ));
+                        continue;
+                    }
                     if let Some(supervisor) = self.supervisor.as_mut() {
                         supervisor.open(document.0, &path.to_string_lossy());
                     }
@@ -5473,15 +5583,58 @@ impl App {
                         info.path.display(),
                         info.pdf_pages
                     ));
-                    let mapping = self.settings.mapping_for(&info.path);
+                    // §46.4. An image document's mapping is pinned to
+                    // `SlidesOnly` and never consults the presenter's
+                    // default: a `SplitPage` default would otherwise cut
+                    // every photograph down the middle and treat its right
+                    // half as speaker notes.
+                    let mapping = match self.image_pages.is_some() {
+                        true => pulpit_core::NotesMapping::SlidesOnly,
+                        false => self.settings.mapping_for(&info.path),
+                    };
+                    // Where the presentation is *now*, in the table being
+                    // replaced. Read before the replacement, because the
+                    // translation is from the old names to the new (§43.3).
+                    let before = crate::doc::Positions {
+                        committed: self.state.committed(),
+                        preview: self.state.preview(),
+                    };
                     if self.state.document().is_none() {
                         self.state = PresentationState::new(info.clone(), mapping);
                         // A fresh state starts with no target; the length of
                         // the talk was settled before the deck was opened.
                         self.state.timer_mut().target = self.timer_controls.target();
                     } else {
+                        // A reload preserves the mapping on purpose, so only
+                        // an image document — which has no choice about it —
+                        // sets one here.
+                        if self.image_pages.is_some() {
+                            self.state.apply(Nav::SetNotesMapping(mapping), self.now);
+                        }
                         self.state
                             .apply(Nav::ReplaceDocument(info.clone()), self.now);
+                    }
+                    // §43.3, immediately after the replacement: for a
+                    // directory the identity of a page is its file name, and
+                    // an index clamp would put unrelated content on the
+                    // projector with no navigation.
+                    if let Some(after) = self
+                        .image_pages
+                        .as_mut()
+                        .and_then(|images| images.promote(before))
+                    {
+                        self.state.apply(Nav::GoTo(after.committed), self.now);
+                        self.state.apply(Nav::PreviewGoTo(after.preview), self.now);
+                    }
+                    // §40.3: the presenter is told what directory their file
+                    // resolved to, and how many pages that is, before any
+                    // navigation happens.
+                    if let Some(said) = self
+                        .image_pages
+                        .as_mut()
+                        .and_then(crate::doc::ImageDocumentState::announcement)
+                    {
+                        self.notify(said);
                     }
                     if let Some(retired) = self.retired_document.take() {
                         if retired != info.id {
@@ -5515,6 +5668,13 @@ impl App {
                     if let Some(supervisor) = self.supervisor.as_mut() {
                         supervisor.close(document.0);
                     }
+                    // The listing that candidate was opened against goes with
+                    // it; the active table is untouched, which is what keeps
+                    // a failed reload a no-op. A no-op after a promote too,
+                    // which is what takes the candidate in the first place.
+                    if let Some(images) = self.image_pages.as_mut() {
+                        images.discard_candidate();
+                    }
                 }
                 DocAction::ReportFailure { reason, attempts } => {
                     self.notify_error(
@@ -5531,7 +5691,11 @@ impl App {
                 }
             }
         }
-        Task::none()
+        if deferred.is_empty() {
+            Task::none()
+        } else {
+            self.run_document_actions(deferred)
+        }
     }
 
     fn open_document(&mut self, path: PathBuf) -> Task<Message> {
@@ -5539,6 +5703,16 @@ impl App {
         // because everything below replaces the identity this position
         // belongs to.
         self.record_reading_position();
+        // An image document's source is the *directory* (§40.1), and an image
+        // file resolves to the one it is in (§40.2). Everything below — the
+        // manager, the watcher, the workers — is then handed the directory
+        // and treats it exactly as it treats a file.
+        let resolved = pulpit_render::images::resolve_source(&path);
+        let path = match resolved.as_ref() {
+            Some(resolved) => resolved.directory.clone(),
+            None => path,
+        };
+        self.image_pages = resolved.map(crate::doc::ImageDocumentState::new);
         let mut documents = DocumentManager::new(
             path.clone(),
             ReloadPolicy {
@@ -14716,6 +14890,33 @@ fn restored_fields(
             outline_open,
             search_open,
         } => (page, None, 0.0, outline_open, search_open),
+    }
+}
+
+#[cfg(test)]
+mod image_document_tests {
+    use super::document_dialog_filters;
+    use pulpit_render::images::IMAGE_EXTENSIONS;
+
+    /// §41.5 and §51.4: the dialog filters are *derived* from the one
+    /// extension set, not restated beside it. Three hand-maintained copies
+    /// would drift, and a file that appears in the contact sheet but cannot
+    /// be picked in the dialog is invisible until it matters.
+    #[test]
+    fn the_dialog_filters_come_from_the_one_extension_set() {
+        let filters = document_dialog_filters();
+        let images = filters
+            .iter()
+            .find(|(label, _)| *label == "Images")
+            .expect("an images filter");
+        assert_eq!(images.1, IMAGE_EXTENSIONS);
+
+        let everything = filters
+            .iter()
+            .find(|(label, _)| *label == "Documents and images")
+            .expect("a combined filter");
+        assert_eq!(everything.1[0], "pdf");
+        assert_eq!(&everything.1[1..], IMAGE_EXTENSIONS);
     }
 }
 

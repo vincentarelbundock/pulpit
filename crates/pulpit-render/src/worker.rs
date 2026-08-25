@@ -184,6 +184,7 @@ pub fn run(
                                     page_sizes_sampled: metadata.page_sizes_sampled,
                                     metadata_text: metadata.metadata_text,
                                     notes_pdfpc,
+                                    source_digest: metadata.source_digest,
                                 })
                             }
                             Err(e) => {

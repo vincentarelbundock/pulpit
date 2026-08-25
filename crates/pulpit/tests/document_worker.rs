@@ -626,3 +626,79 @@ fn dated_pdf() -> Vec<u8> {
     );
     pdf
 }
+
+/// `SPEC-images.md` §45.3 and §48, end to end as a real child process: a
+/// folder of pictures opens in a document worker **without a PDF library**,
+/// its pages render, and every PDF semantic reports `Unsupported` rather than
+/// pretending to have an answer.
+#[test]
+fn a_folder_of_images_opens_in_a_document_worker_and_refuses_pdf_semantics() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    for (name, size) in [("img2.png", (40u32, 20u32)), ("img10.png", (10, 30))] {
+        image::RgbaImage::from_pixel(size.0, size.1, image::Rgba([9, 9, 9, 255]))
+            .save(directory.path().join(name))
+            .expect("write a fixture image");
+    }
+    let source = directory.path().to_path_buf();
+    let Some(command) = command(&source) else {
+        eprintln!("skipping: the pulpit executable was not built beside this test");
+        return;
+    };
+
+    let mut session = DocumentSession::start(&command, &source)
+        .expect("a folder needs no PDF library to open (§45.3)");
+
+    let DocumentResponse::Opened(info) = session
+        .request(DocumentRequest::Info)
+        .expect("the worker describes its folder")
+    else {
+        panic!("expected document info")
+    };
+    assert_eq!(info.page_count, 2);
+    assert!(!info.has_form);
+    assert!(
+        info.level.is_view_only(),
+        "§48.3: the UI reads this rather than offering controls that refuse"
+    );
+    assert!(!info.level.allows_annotation());
+    assert!(!info.level.allows_form_filling());
+    // Natural order, so page 0 is img2.png at 40×20.
+    assert_eq!(info.first_page.width, 40.0);
+
+    let DocumentResponse::Frame(frame) = session
+        .request(DocumentRequest::Render(DocumentRenderRequest {
+            page: PageIndex(1),
+            width: 20,
+            height: 60,
+            region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
+        }))
+        .expect("the picture renders")
+    else {
+        panic!("expected a frame")
+    };
+    assert!(frame.is_consistent());
+    assert_eq!(&frame.pixels[..4], &[9, 9, 9, 255]);
+
+    // §48.1 and §48.2, over the wire.
+    for request in [
+        DocumentRequest::ListAnnotations { page: PageIndex(0) },
+        DocumentRequest::ListFields,
+        DocumentRequest::Apply {
+            expected_revision: DocumentRevision::INITIAL,
+            transaction: stroke(),
+        },
+        DocumentRequest::SaveAs(SaveRequest {
+            destination: directory.path().join("saved.pdf"),
+            options: SaveOptions::verified(),
+        }),
+    ] {
+        match session.request(request) {
+            Err(SessionError::Refused(_)) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    session.close();
+}

@@ -78,19 +78,35 @@ impl std::fmt::Debug for DocumentWatcher {
 ///   differently by different backends.
 ///
 /// This is why the argument is an `OsStr` and not a `Path`.
+///
+/// `watched` is `None` for an image document, whose source is the *directory*
+/// (`SPEC-images.md` §40.1): there the interesting change is any supported
+/// image in it, and the predicate widens to the one extension set in
+/// `pulpit_render::images` rather than restating it (§41.5, §50.2).
 fn is_the_watched_file(changed: &Path, watched: Option<&std::ffi::OsStr>) -> bool {
     match watched {
         Some(name) => changed.file_name() == Some(name),
-        // A path with no final component cannot be a document.
-        None => false,
+        None => pulpit_render::images::is_supported_image(changed),
     }
 }
 
 impl DocumentWatcher {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, WatchError> {
         let path = path.as_ref().to_path_buf();
-        let directory = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let watched = path.file_name().map(|name| name.to_os_string());
+        // An image document *is* its directory, so that is what is watched,
+        // and every supported image in it counts. A PDF watches the directory
+        // containing it and filters by name.
+        let is_directory = path.is_dir();
+        let directory = if is_directory {
+            path.clone()
+        } else {
+            path.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
+        let watched = if is_directory {
+            None
+        } else {
+            path.file_name().map(|name| name.to_os_string())
+        };
         let (sender, events) = channel();
         let (signal, wakeup) = sync_channel(1);
 
@@ -216,6 +232,48 @@ mod tests {
             watcher.wait(Duration::from_secs(5)),
             "the rebuild was not noticed"
         );
+    }
+
+    /// §41.5 and §51.4: the predicate reads the one extension set rather than
+    /// restating it, so a format added there cannot be a format the watcher
+    /// silently ignores.
+    #[test]
+    fn a_directory_source_notices_exactly_the_supported_extensions() {
+        for extension in pulpit_render::images::IMAGE_EXTENSIONS {
+            let name = format!("/pictures/talk/slide.{extension}");
+            assert!(
+                is_the_watched_file(Path::new(&name), None),
+                "{name} is a page of the document"
+            );
+            let shouted = format!("/pictures/talk/slide.{}", extension.to_uppercase());
+            assert!(is_the_watched_file(Path::new(&shouted), None), "{shouted}");
+        }
+        for other in ["/pictures/talk/notes.txt", "/pictures/talk/deck.pdf"] {
+            assert!(!is_the_watched_file(Path::new(other), None), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_new_image_in_the_watched_directory_is_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"first").unwrap();
+        let watcher = DocumentWatcher::new(dir.path()).unwrap();
+
+        std::fs::write(dir.path().join("b.png"), b"second").unwrap();
+        assert!(
+            watcher.wait(Duration::from_secs(5)),
+            "a page appearing in the folder is a change to the document"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_file_in_the_watched_directory_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"first").unwrap();
+        let watcher = DocumentWatcher::new(dir.path()).unwrap();
+
+        std::fs::write(dir.path().join("notes.txt"), b"unrelated").unwrap();
+        assert!(!watcher.wait(Duration::from_millis(500)));
     }
 
     #[test]

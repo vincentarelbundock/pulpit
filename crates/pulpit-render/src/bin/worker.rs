@@ -1,14 +1,22 @@
 //! The renderer worker executable.
 //!
-//! Spawned by the supervisor, one per worker slot. It binds PDFium or exits:
-//! PDFium ships with every supported package, so failing to find it is a
-//! broken installation, and rendering placeholders in its place would put
-//! something on the projector that is not the presenter's deck. The backend
-//! it got is still reported in the handshake, for diagnostics.
+//! Spawned by the supervisor, one per worker slot. A worker that cannot bind
+//! PDFium prints the diagnostic and exits: PDFium ships with every supported
+//! package, so failing to find it is a broken installation, and rendering
+//! placeholders in its place would put something on the projector that is not
+//! the presenter's deck. The backend it got is still reported in the
+//! handshake, for diagnostics.
+//!
+//! Since `SPEC-images.md` §45 that exit happens on the first **PDF** open
+//! rather than at startup: a worker holds several documents at a time and
+//! they need not be the same kind, and refusing to display a JPEG because a
+//! PDF library is absent is not defensible. The diagnostic is unchanged; only
+//! its timing moved.
 
 use std::io::{stdin, stdout};
 
 use pulpit_render::pdf::fixture::FixtureBackend;
+use pulpit_render::pdf::router::RoutingBackend;
 use pulpit_render::pdf::PdfBackend;
 
 fn main() {
@@ -32,14 +40,27 @@ fn main() {
     }
 }
 
+/// A router, so a directory source is decoded in this process and a file
+/// source reaches PDFium (§45.2).
+///
+/// The failure injection wraps the router rather than sitting under it: it is
+/// keyed by page number, and which backend answers that page is not its
+/// business.
 fn select_backend() -> Box<dyn PdfBackend> {
+    Box::new(failure_injection(Box::new(RoutingBackend::new(Box::new(
+        bind_pdf,
+    )))))
+}
+
+/// Produce the PDF backend, the first time a PDF is opened (§45.4).
+fn bind_pdf() -> pulpit_render::pdf::Result<Box<dyn PdfBackend>> {
     if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some() {
-        return Box::new(failure_injection(Box::new(FixtureBackend::new())));
+        return Ok(Box::new(FixtureBackend::new()));
     }
     #[cfg(feature = "pdfium")]
     {
         match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
-            Ok(backend) => Box::new(backend),
+            Ok(backend) => Ok(Box::new(backend)),
             Err(e) => fail_without_pdfium(&e.to_string()),
         }
     }
@@ -47,10 +68,11 @@ fn select_backend() -> Box<dyn PdfBackend> {
     fail_without_pdfium("this build was compiled without the pdfium feature");
 }
 
-/// PDFium is a hard requirement: every supported package installs it, and a
-/// worker that cannot bind it exits rather than rendering placeholder pages
-/// that the presenter might mistake for their deck. The fixture backend
-/// remains reachable, but only when a test asks for it by name.
+/// PDFium is a hard requirement *for a PDF*: every supported package installs
+/// it, and a worker asked to open a deck it cannot render exits rather than
+/// rendering placeholder pages that the presenter might mistake for their own
+/// slides (§45.3). The fixture backend remains reachable, but only when a
+/// test asks for it by name.
 fn fail_without_pdfium(reason: &str) -> ! {
     eprintln!("{}", pulpit_render::pdf::missing_pdfium_message(reason));
     std::process::exit(1);

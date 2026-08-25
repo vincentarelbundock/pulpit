@@ -1862,7 +1862,12 @@ impl ReaderSession {
     /// The pages whose annotations are not known and are worth asking for:
     /// the ones in the window.
     pub fn annotations_wanted(&mut self) -> Vec<PageIndex> {
-        if !self.open {
+        // A document that cannot carry annotations is not asked for its
+        // annotations. Otherwise every page in the window would produce a
+        // refusal the moment it scrolled into view — which is the shape of
+        // "offering a control that refuses when pressed" (`SPEC-images.md`
+        // §48.3), only without anyone having pressed anything.
+        if !self.open || !self.level.allows_annotation() {
             return Vec::new();
         }
         let wanted: Vec<PageIndex> = self

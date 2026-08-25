@@ -258,6 +258,11 @@ pub struct OpenedDocument {
     /// malformed one has to be reported. Absent when the document has no such
     /// attachment, or when it is not UTF-8.
     pub notes_pdfpc: Option<String>,
+    /// The worker's own digest of a directory source, so the application can
+    /// tell whether the two listings agree (`SPEC-images.md` §42.3). `None`
+    /// for a PDF, whose source is one file and needs no such check.
+    #[serde(default)]
+    pub source_digest: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
