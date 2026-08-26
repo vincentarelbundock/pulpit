@@ -99,6 +99,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its clipboard says so instead of copying nothing. Table extraction is
   deliberately not offered.
 
+- **The highlighter underlines and strikes out.** Highlight was the only text
+  markup pulpit could make, and the other two every reviewer reaches for are
+  the same mark with a different subtype. They are not three tools: the
+  highlighter now has a kind in its options, the way the band has one, and the
+  colour control applies to whichever is chosen — a rail already holding six
+  tools did not need two more.
+
+  A retained underline is drawn as a rule sitting on the text rather than as a
+  translucent wash over it, because a strikeout is opaque and an underline is a
+  line; inheriting the highlight's translucency would have made all three look
+  like the same smudge. They import as well as export: a document that arrives
+  carrying an `/Underline` or a `/StrikeOut` is understood, drawn and erasable,
+  rather than a mark pulpit can only decline to touch.
+
+  Squiggly is deliberately not offered.
+
 ### Fixed
 
 - **A copied region pastes into a file manager.** On Wayland the select
