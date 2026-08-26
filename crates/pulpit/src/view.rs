@@ -2520,46 +2520,59 @@ fn color_editor(app: &App) -> Element<'_, Message> {
                 .then_some(Message::AskResetColors),
         );
 
+    // Two roles to a row rather than seven in a stack: each cell is the
+    // role's name over its swatch and hex field, and the sentence that used
+    // to sit under every name rides on the name as a hover hint instead. The
+    // stack scrolled past a screen to say what the grid says at a glance.
     let mut roles = Column::new().spacing(gap::M);
-    for role in crate::theme::ColorRole::ALL {
-        let value = app
-            .color_drafts
-            .get(&(scheme, role))
-            .cloned()
-            .unwrap_or_else(|| colors.value(scheme, role));
-        let parsed = crate::settings::parse_hex_color(&value);
-        let swatch = parsed.unwrap_or_else(|| palette.color(role));
-        let field = text_input("#RRGGBB", &value)
-            .on_input(move |value| Message::SetColor(role, value))
-            .style(theme::ambient::text_field)
-            .width(Length::Fixed(124.0));
-        let mut role_row = column![
-            column![
+    for pair in crate::theme::ColorRole::ALL.chunks(2) {
+        let mut grid_row = Row::new().spacing(gap::L);
+        for &role in pair {
+            let value = app
+                .color_drafts
+                .get(&(scheme, role))
+                .cloned()
+                .unwrap_or_else(|| colors.value(scheme, role));
+            let parsed = crate::settings::parse_hex_color(&value);
+            let swatch = parsed.unwrap_or_else(|| palette.color(role));
+            let field = text_input("#RRGGBB", &value)
+                .on_input(move |value| Message::SetColor(role, value))
+                .style(theme::ambient::text_field)
+                .width(Length::Fixed(124.0));
+            let name = tooltip(
                 theme::typography::body(role.label()),
-                theme::typography::caption(role.description()),
+                container(theme::typography::caption(role.description()))
+                    .padding(gap::S)
+                    .max_width(280)
+                    .style(theme::ambient::dialog),
+                tooltip::Position::Top,
+            );
+            let mut cell = column![
+                name,
+                row![
+                    // The swatch is the wheel's handle. Typing `#RRGGBB`
+                    // stays the reproducible path; the wheel is the choosing
+                    // path.
+                    role_swatch(app, role, swatch),
+                    field,
+                ]
+                .spacing(gap::S)
+                .align_y(Alignment::Center),
             ]
             .spacing(gap::XS)
-            .width(Length::Fill),
-            row![
-                // The swatch is the wheel's handle. Typing `#RRGGBB` stays
-                // the reproducible path; the wheel is the choosing path.
-                role_swatch(app, role, swatch),
-                field,
-            ]
-            .spacing(gap::M)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(gap::XS);
-        if parsed.is_none() {
-            role_row = role_row.push(
-                theme::typography::caption("Use a six-digit HEX color such as #C9CCD4.")
-                    .color(theme::ambient::alert()),
-            );
-        } else if let Some(warning) = contrast_warning(palette, role) {
-            role_row =
-                role_row.push(theme::typography::caption(warning).color(theme::ambient::alert()));
+            .width(Length::Fixed(190.0));
+            if parsed.is_none() {
+                cell = cell.push(
+                    theme::typography::caption("Use a six-digit HEX color such as #C9CCD4.")
+                        .color(theme::ambient::alert()),
+                );
+            } else if let Some(warning) = contrast_warning(palette, role) {
+                cell =
+                    cell.push(theme::typography::caption(warning).color(theme::ambient::alert()));
+            }
+            grid_row = grid_row.push(cell);
         }
-        roles = roles.push(role_row);
+        roles = roles.push(grid_row);
     }
 
     column![

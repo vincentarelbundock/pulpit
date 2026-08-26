@@ -3539,33 +3539,13 @@ impl ReaderSession {
                 // The wheel was opened to answer this question, and it has
                 // been answered.
                 self.controls.tool_wheel = None;
-                self.controls.tool_overflow = tool_overflow;
-                match tool {
-                    AnnotationTool::Ink => {
-                        self.controls.ink_color = *color;
-                        self.interaction.set_ink_style(pulpit_core::annotate::MarkStyle {
-                            color: *color,
-                            ..self.interaction.ink_style()
-                        });
-                    }
-                    AnnotationTool::Highlighter => {
-                        self.controls.highlight_color = *color;
-                        self.interaction
-                            .set_highlight_style(pulpit_core::annotate::MarkStyle {
-                                color: *color,
-                                ..self.interaction.highlight_style()
-                            });
-                    }
-                    AnnotationTool::Text | AnnotationTool::Note => {
-                        self.controls.text_color = *color;
-                        self.interaction.set_text_style(pulpit_core::annotate::MarkStyle {
-                            color: *color,
-                            ..self.interaction.text_style()
-                        });
-                    }
-                    // Nothing else lays a colour down; a command naming one is
-                    // a stale message, and stale messages do nothing.
-                    _ => {}
+                let recorded = self.record_tool_color(*tool, *color);
+                // A colour chosen is the tool asked for: the hand that picked
+                // red for the pen means to write with it, not to keep
+                // configuring it. The panel — and the compact menu it may be
+                // inlined in — closes as if the tool's own button was pressed.
+                if recorded {
+                    self.arm_from_panel(*tool);
                 }
                 false
             }
@@ -3581,11 +3561,14 @@ impl ReaderSession {
                 false
             }
             ReadCommand::SetSelectKind(kind) => {
-                self.controls.tool_overflow = tool_overflow;
                 // Changing what the band means does not disturb what it is
                 // currently holding: a reader who has gathered marks up and
-                // then switches to copying has not asked to put them down.
+                // then switches to copying has not asked to put them down —
+                // which is also why arming below is skipped when the band is
+                // already in hand.
                 self.controls.select_kind = *kind;
+                // Choosing what the band takes is reaching for the band.
+                self.arm_from_panel(AnnotationTool::Select);
                 false
             }
             ReadCommand::SetTextSize(size) => {
@@ -3647,6 +3630,79 @@ impl ReaderSession {
             // so both go to the worker rather than being answered here.
             | ReadCommand::DeleteSelected
             | ReadCommand::EditSelected => false,
+        }
+    }
+
+    /// Record `color` as `tool`'s colour, on the toolbar and on the marks the
+    /// interaction is about to make. Returns whether the tool takes one at
+    /// all: a command naming a colourless tool is a stale message, and stale
+    /// messages do nothing.
+    ///
+    /// Split from [`ReadCommand::SetToolColor`] because two hands reach it:
+    /// this session's own toolbar, whose pick also arms the tool, and the
+    /// presenter palette keeping the one pen one colour across modes — which
+    /// must not arm anything here, because nobody touched this toolbar.
+    pub fn record_tool_color(
+        &mut self,
+        tool: AnnotationTool,
+        color: pulpit_core::annotation::InkColor,
+    ) -> bool {
+        match tool {
+            AnnotationTool::Ink => {
+                self.controls.ink_color = color;
+                self.interaction
+                    .set_ink_style(pulpit_core::annotate::MarkStyle {
+                        color,
+                        ..self.interaction.ink_style()
+                    });
+                true
+            }
+            AnnotationTool::Highlighter => {
+                self.controls.highlight_color = color;
+                self.interaction
+                    .set_highlight_style(pulpit_core::annotate::MarkStyle {
+                        color,
+                        ..self.interaction.highlight_style()
+                    });
+                true
+            }
+            AnnotationTool::Text | AnnotationTool::Note => {
+                self.controls.text_color = color;
+                self.interaction
+                    .set_text_style(pulpit_core::annotate::MarkStyle {
+                        color,
+                        ..self.interaction.text_style()
+                    });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record what the select band takes, without touching the toolbar.
+    ///
+    /// The presenter palette's half of the one-band setting; the Reader's own
+    /// toolbar goes through [`ReadCommand::SetSelectKind`], which also arms
+    /// the band.
+    pub fn record_select_kind(&mut self, kind: pulpit_core::annotation::SelectKind) {
+        self.controls.select_kind = kind;
+    }
+
+    /// Arm `tool` because one of its options was chosen: the panel closes the
+    /// way it would had the tool's own button been pressed.
+    ///
+    /// A tool already in hand is left exactly as it is — re-arming would
+    /// abandon an open gesture and put down whatever a select band is
+    /// holding, and neither is what picking an option asks for.
+    fn arm_from_panel(&mut self, tool: AnnotationTool) {
+        self.controls.tool_options = None;
+        self.controls.tool_wheel = None;
+        if self.controls.tool != Some(tool) {
+            self.controls.tool = Some(tool);
+            self.interaction.arm(Some(tool));
+            // The caret leaves whatever field had it, exactly as in
+            // [`ReadCommand::Arm`] (§8.6).
+            self.form_focus_dropped();
         }
     }
 
@@ -7208,6 +7264,61 @@ mod tests {
         assert_eq!(session.controls().tool_options, Some(AnnotationTool::Ink));
         session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
         assert_eq!(session.controls().tool_options, None);
+    }
+
+    /// A colour picked from the panel is the tool asked for: the panel — and
+    /// the compact menu it may be inlined in — closes, and the tool arms.
+    #[test]
+    fn picking_a_colour_arms_the_tool_and_closes_the_panel() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::ToolOverflow(true));
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Highlighter)));
+        session.apply(&ReadCommand::SetToolColor(
+            AnnotationTool::Highlighter,
+            pulpit_core::annotation::InkColor::Green,
+        ));
+        assert_eq!(session.controls().tool, Some(AnnotationTool::Highlighter));
+        assert_eq!(session.controls().tool_options, None);
+        assert!(
+            !session.controls().tool_overflow,
+            "the menu's question was answered"
+        );
+    }
+
+    /// Re-picking an option for the tool already in hand must not re-arm it:
+    /// arming abandons gestures, and a colour change mid-stroke asked for a
+    /// colour, not for the stroke to be thrown away.
+    #[test]
+    fn picking_a_colour_for_the_armed_tool_keeps_the_open_stroke() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), 100.0, 100.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 200.0, 140.0);
+        session.apply(&ReadCommand::SetToolColor(
+            AnnotationTool::Ink,
+            pulpit_core::annotation::InkColor::Cyan,
+        ));
+        assert!(
+            matches!(session.pointer_released(), Released::Commit(_)),
+            "the stroke survives a colour change and commits"
+        );
+    }
+
+    /// Choosing what the band takes is reaching for the band.
+    #[test]
+    fn picking_a_band_kind_arms_the_band() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Select)));
+        session.apply(&ReadCommand::SetSelectKind(
+            pulpit_core::annotation::SelectKind::Text,
+        ));
+        assert_eq!(session.controls().tool, Some(AnnotationTool::Select));
+        assert_eq!(session.controls().tool_options, None);
+        assert_eq!(
+            session.controls().select_kind,
+            pulpit_core::annotation::SelectKind::Text
+        );
     }
 
     /// The five fixed swatches are the colours a reader reaches for without

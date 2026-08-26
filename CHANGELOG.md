@@ -68,6 +68,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A copied region pastes into a file manager.** On Wayland the select
+  band's image now goes out three ways at once: as `image/png` for anything
+  that pastes pixels, and as a freshly written PNG file under `text/uri-list`
+  and `x-special/gnome-copied-files` for anything that pastes files — which
+  is what Thunar and its siblings ask for, and why the copy used to paste
+  into GIMP and into no directory anywhere. Pasting into a file manager now
+  drops a PNG there; image editors still receive the pixels directly.
+
+- **Hover hints inside tool panels appear.** The popover the panels hang
+  from never forwarded its contents' overlays, so every tooltip on a control
+  inside one was silently swallowed. The panels also now close when the
+  window loses focus, since a click into another window is a click off the
+  panel that arrives with no press to see.
+
 - **Text written on a slide is kept.** A label typed at the lectern was drawn
   on the screen and then thrown away at the next page turn: nothing ever
   committed it, so it never reached the file. It now becomes an annotation in
@@ -84,6 +98,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the PDF before pulpit opened it, is on the slide and on the projector.
 
 ### Changed
+
+- **Choosing a tool option is choosing the tool.** Picking a colour, a band
+  kind or the pointer's dot-or-spotlight closes the panel it was picked in
+  and arms the tool concerned: the hand that chose red for the pen means to
+  write with it. The sliders — width, size, radius — still hold the panel
+  open, because they are adjustments rather than answers, and an option
+  picked for the tool already in hand leaves its open gesture and held marks
+  exactly where they are.
+
+- **The band's kinds are pictures with hints.** The three choices are drawn
+  as a lasso gathering marks, a picture and text in a dashed frame, each
+  saying its one word — Annotations, Image, Text — on hover instead of
+  wearing it as a label.
+
+- **The theme's colours read as a grid.** The settings palette sits two
+  roles to a row, each cell a name over its swatch and hex field, with the
+  role's description on the name as a hover hint. Seven stacked fields
+  scrolled past a screen to say what the grid says at a glance.
 
 - **Both modes offer the same annotation tools.** Presentation gains the
   sticky note and the rubber band, so every mark document mode can make can be

@@ -8660,8 +8660,15 @@ impl App {
                 // has to hear about it: losing focus is what commits the
                 // half-typed value, and PDFium would otherwise keep the caret
                 // — and the uncommitted text — waiting for a click that is
-                // never coming (§8.6).
-                if matches!(command, ReadCommand::Arm(_)) && self.reader.form_has_keyboard() {
+                // never coming (§8.6). Picking a colour or a band kind arms
+                // the tool too, so those count.
+                if matches!(
+                    command,
+                    ReadCommand::Arm(_)
+                        | ReadCommand::SetToolColor(..)
+                        | ReadCommand::SetSelectKind(_)
+                ) && self.reader.form_has_keyboard()
+                {
                     self.ask_form_key(pulpit_render::document::protocol::FormInputEvent::Focus {
                         gained: false,
                     });
@@ -12644,19 +12651,36 @@ impl App {
         Task::none()
     }
 
+    /// Arm `tool` because one of its options was chosen, closing the panel
+    /// as if the tool's own button had been pressed: a presenter who picks
+    /// red means to write in red, not to keep configuring the pen.
+    ///
+    /// A tool already in hand is left exactly as it is — re-arming would
+    /// abandon an open gesture, and that is not what picking an option asks
+    /// for.
+    fn arm_from_panel(&mut self, tool: AnnotationTool) {
+        self.annotation_controls.open = None;
+        if self.annotations.tool != Some(tool) {
+            let closed = self.annotations.arm(Some(tool));
+            self.commit_presenter_text(closed);
+            self.diagnostics
+                .note(format!("annotating: {}", tool.label()));
+        }
+    }
+
     fn on_annotation_command(&mut self, command: crate::widgets::event::AnnotationCommand) {
         use crate::widgets::event::AnnotationCommand;
         // Picking something in the overflow menu is done with it: the menu is
         // opened to reach one control, and leaving it up afterwards covers
         // the slide it was opened over. Only the commands that *are* the menu
-        // — opening a panel, and the settings inside one — leave it up.
+        // — opening a panel, and the sliders inside one — leave it up. A
+        // colour, a kind or a pointer mode is a choice made, not a value
+        // being adjusted, and making one closes the menu with the panel.
         if !matches!(
             command,
             AnnotationCommand::OpenOptions(_)
                 | AnnotationCommand::OpenOverflow(_)
                 | AnnotationCommand::SetSize(..)
-                | AnnotationCommand::SetColor(..)
-                | AnnotationCommand::SetPointerSpotlight(_)
                 | AnnotationCommand::OpenColorWheel(_)
         ) {
             // The panel inside the menu goes with the menu; a panel opened
@@ -12724,37 +12748,46 @@ impl App {
                 self.annotation_controls.options.sanitise();
             }
             AnnotationCommand::SetColor(tool, color) => {
-                match tool {
-                    AnnotationTool::Ink => self.annotation_controls.options.ink_color = color,
+                let recorded = match tool {
+                    AnnotationTool::Ink => {
+                        self.annotation_controls.options.ink_color = color;
+                        true
+                    }
                     AnnotationTool::Highlighter => {
-                        self.annotation_controls.options.highlight_color = color
+                        self.annotation_controls.options.highlight_color = color;
+                        true
                     }
                     AnnotationTool::Pointer => {
-                        self.annotation_controls.options.pointer_color = color
+                        self.annotation_controls.options.pointer_color = color;
+                        true
                     }
                     AnnotationTool::Text | AnnotationTool::Note => {
-                        self.annotation_controls.options.text_color = color
+                        self.annotation_controls.options.text_color = color;
+                        true
                     }
                     AnnotationTool::Spotlight
                     | AnnotationTool::Eraser
                     | AnnotationTool::Stamp
-                    | AnnotationTool::Select => {}
-                }
+                    | AnnotationTool::Select => false,
+                };
                 // …and it is the colour in document mode too. The pen is one
                 // pen: a presenter who reaches for red at the lectern and then
                 // opens the same file to read it should not have to say red
-                // again. The pointer is the exception with nowhere to go —
+                // again. Recorded rather than applied as the Reader's own
+                // command, which would also arm the Reader's toolbar nobody
+                // touched. The pointer is the exception with nowhere to go —
                 // document mode has no pointer to colour.
                 if tool != AnnotationTool::Pointer {
-                    let _ = self
-                        .reader
-                        .apply(&crate::widgets::event::ReadCommand::SetToolColor(
-                            tool, color,
-                        ));
+                    let _ = self.reader.record_tool_color(tool, color);
                 }
                 // A colour chosen from the wheel is the wheel finished.
                 if self.annotation_controls.wheel == Some(tool) {
                     self.annotation_controls.wheel = None;
+                }
+                // A colour chosen is the tool asked for: picking red means
+                // writing in red now, so the panel closes and the tool arms.
+                if recorded {
+                    self.arm_from_panel(tool);
                 }
             }
             // The band means one thing, whichever palette it was set from.
@@ -12762,29 +12795,16 @@ impl App {
             // pointer's mode it does have somewhere to go in document mode.
             AnnotationCommand::SetSelectKind(kind) => {
                 self.annotation_controls.options.select_kind = kind;
-                let _ = self
-                    .reader
-                    .apply(&crate::widgets::event::ReadCommand::SetSelectKind(kind));
+                self.reader.record_select_kind(kind);
+                // Choosing what the band takes is reaching for the band.
+                self.arm_from_panel(AnnotationTool::Select);
             }
-            // Changing the pointer's mode while it is in hand changes what is
-            // in hand: a presenter who asks for the spotlight mid-sentence
-            // means now, not next time they arm it.
+            // Choosing the pointer's mode is choosing the pointer: a
+            // presenter who asks for the spotlight mid-sentence means now,
+            // not next time they arm it — whether or not it was in hand.
             AnnotationCommand::SetPointerSpotlight(spotlight) => {
                 self.annotation_controls.options.pointer_spotlight = spotlight;
-                let pointing = matches!(
-                    self.annotations.tool,
-                    Some(AnnotationTool::Pointer | AnnotationTool::Spotlight)
-                );
-                if pointing {
-                    // Nothing can be being typed: the tool armed is the
-                    // pointer's. The label is committed anyway rather than
-                    // dropped, because "cannot happen" is not a reason to
-                    // throw a mark away.
-                    let closed = self
-                        .annotations
-                        .arm(Some(self.annotation_controls.options.pointer_tool()));
-                    self.commit_presenter_text(closed);
-                }
+                self.arm_from_panel(self.annotation_controls.options.pointer_tool());
             }
             // Undo and redo are the *document's*, in both modes. There is one
             // history because there is one representation (A1, criterion 8):
@@ -15675,7 +15695,10 @@ mod image_document_tests {
         let everything = of("Documents, images and comics");
         assert_eq!(everything[0], "pdf");
         assert_eq!(&everything[1..1 + DJVU_EXTENSIONS.len()], DJVU_EXTENSIONS);
-        assert_eq!(&everything[1 + DJVU_EXTENSIONS.len()..], openable_extensions());
+        assert_eq!(
+            &everything[1 + DJVU_EXTENSIONS.len()..],
+            openable_extensions()
+        );
         assert!(
             !everything.contains(&"cbr"),
             "§54.7: a format pulpit refuses is not offered in the picker"
