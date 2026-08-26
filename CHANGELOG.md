@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Pulpit can read a document aloud.** `R` reads the whole document, turning
+  pages as it goes; `Shift+R` reads the current page; either key pauses its
+  own reading, and `Shift+←`/`Shift+→` step by sentence. Speech follows the
+  document's language — a page confidently in another tongue switches to a
+  voice for it, or offers to fetch one — and a pinned language, the speaking
+  speed and the voice live in Settings ▸ Speech. Voices are downloaded on
+  demand from a catalog of 139 across 45 languages, each verified against a
+  checksum pinned in the binary before first use; nothing is bundled, nothing
+  new is linked, and a session that cannot speak says why instead of greying
+  out. The synthesiser and the audio player are installed programs driven as
+  child processes, so stop is immediate and quitting pulpit silences it.
+  (Rotating pages moved from `Shift+R` to `Ctrl+Shift+R` to make room.)
+
 - **Pages turn on their own.** `P` starts an unattended loop and stops it: the
   poster in the corridor, the lobby screen, the deck left running before the
   room fills. The dwell, whether it starts again at the first page, and

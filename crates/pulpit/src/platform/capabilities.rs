@@ -119,6 +119,54 @@ pub struct Capabilities {
     /// a headless session or a compositor with no data-control protocol has
     /// nowhere to put them.
     pub image_clipboard: bool,
+    /// Whether this session can read a document aloud, and if not, why.
+    ///
+    /// Three states, not a `bool`, for the same reason `accessibility_bridge`
+    /// is careful about what it claims: "cannot" and "not yet" have different
+    /// remedies, and a control that is merely greyed out tells the reader
+    /// which of the two it is — never. A session with no audio output is
+    /// [`Speech::Unavailable`]; a session one download away is
+    /// [`Speech::Downloadable`], and the settings page offers the download
+    /// with its size on it.
+    pub speech: Speech,
+}
+
+/// What speech can do in this session.
+///
+/// Mirrors `pulpit_media::speech::Availability`, which is where it is computed.
+/// Restated here because `Capabilities` is what views are allowed to ask, and
+/// a view that reached into the speech crate for one field would be the
+/// beginning of the platform boundary leaking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Speech {
+    /// No engine can run here — no audio output, or no build for this
+    /// platform. A download would not help.
+    Unavailable { why: String },
+    /// Everything is present except the artifacts.
+    Downloadable { bytes: u64, needs_engine: bool },
+    /// Ready, with this many voices installed.
+    Ready { voices: usize },
+}
+
+impl Default for Speech {
+    /// The honest default, before anything has been probed.
+    fn default() -> Self {
+        Speech::Unavailable {
+            why: "speech has not been set up".into(),
+        }
+    }
+}
+
+impl Speech {
+    pub fn can_speak(&self) -> bool {
+        matches!(self, Speech::Ready { .. })
+    }
+
+    /// Whether the settings page should offer a download button.
+    pub fn can_download(&self) -> bool {
+        matches!(self, Speech::Downloadable { .. } | Speech::Ready { .. })
+    }
 }
 
 impl Default for Capabilities {
@@ -146,6 +194,7 @@ impl Default for Capabilities {
             // Nothing to put a clipboard on: the null adapter must never
             // touch the real one.
             image_clipboard: false,
+            speech: Speech::default(),
         }
     }
 }
@@ -203,6 +252,13 @@ impl Capabilities {
                 "accessibility bridge: present",
                 "accessibility bridge: absent",
             ),
+            match &self.speech {
+                Speech::Unavailable { why } => format!("speech: unavailable — {why}"),
+                Speech::Downloadable { bytes, .. } => {
+                    format!("speech: not installed — {bytes} bytes to download")
+                }
+                Speech::Ready { voices } => format!("speech: ready, {voices} voice(s)"),
+            },
         ]
     }
 
@@ -223,6 +279,12 @@ impl Capabilities {
         }
         if self.identity < IdentityQuality::Connector {
             out.push("remembering displays across a reconnect");
+        }
+        // Only the genuinely impossible case is a limitation. "A download
+        // away" is not something missing from the session, it is something
+        // the reader has not asked for yet, and listing it here would nag.
+        if matches!(self.speech, Speech::Unavailable { .. }) {
+            out.push("reading the document aloud");
         }
         out
     }
@@ -257,9 +319,51 @@ mod tests {
             sleep_inhibition: true,
             native_dialogs: true,
             identity: IdentityQuality::Stable,
+            speech: Speech::Ready { voices: 1 },
             ..Capabilities::default()
         };
         assert!(full.limitations().is_empty());
+    }
+
+    #[test]
+    fn speech_distinguishes_impossible_from_not_yet_downloaded() {
+        // The whole reason this is not a bool: the two "no" answers have
+        // different remedies, and only one of them is a limitation of the
+        // session.
+        let impossible = Capabilities {
+            speech: Speech::Unavailable {
+                why: "this session has no audio output".into(),
+            },
+            ..Capabilities::default()
+        };
+        assert!(!impossible.speech.can_speak());
+        assert!(!impossible.speech.can_download());
+        assert!(impossible
+            .limitations()
+            .contains(&"reading the document aloud"));
+
+        let one_download_away = Capabilities {
+            speech: Speech::Downloadable {
+                bytes: 63_000_000,
+                needs_engine: true,
+            },
+            ..Capabilities::default()
+        };
+        assert!(!one_download_away.speech.can_speak());
+        assert!(one_download_away.speech.can_download());
+        assert!(
+            !one_download_away
+                .limitations()
+                .contains(&"reading the document aloud"),
+            "a download the reader has not asked for is not a limitation"
+        );
+
+        let ready = Capabilities {
+            speech: Speech::Ready { voices: 2 },
+            ..Capabilities::default()
+        };
+        assert!(ready.speech.can_speak());
+        assert!(ready.report().join("\n").contains("speech: ready"));
     }
 
     #[test]

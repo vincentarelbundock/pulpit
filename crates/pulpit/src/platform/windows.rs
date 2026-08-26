@@ -195,6 +195,10 @@ impl PlatformServices for WindowsServices {
             // …and the verb takes nothing else: no range, no copies, no
             // queue. See `print` below.
             print_options: false,
+            // Filled in by the application once the speech catalog has been
+            // probed. Whether a voice is installed on disk is not a question
+            // a window backend can answer.
+            speech: crate::platform::capabilities::Speech::default(),
         }
     }
 

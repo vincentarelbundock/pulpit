@@ -166,7 +166,14 @@
         devShells.default = pkgs.mkShell {
           # nfpm builds the .deb and the .rpm from one description
           # (`make linux-packages`); rpm is not otherwise needed to develop.
-          nativeBuildInputs = buildTools ++ (with pkgs; [ cargo rustc rustfmt clippy rust-analyzer nfpm ]);
+          # `piper-tts` for the same reason the media engines are pinned
+          # below: speech discovers an installed synthesiser on PATH before it
+          # offers to download one, so putting it here means `cargo run` from
+          # this shell can read a document aloud without fetching a 26 MB
+          # engine — and, on NixOS specifically, without needing the
+          # downloaded build's system `libstdc++`, which this distribution
+          # does not put on the default library path.
+          nativeBuildInputs = buildTools ++ (with pkgs; [ cargo rustc rustfmt clippy rust-analyzer nfpm piper-tts ]);
           buildInputs = buildLibraries;
 
           # A cargo-built binary from this shell needs the same loader path
@@ -185,6 +192,7 @@
             echo "pulpit dev shell: cargo run -- deck.pdf"
             echo "PDFium: $PULPIT_PDFIUM_PATH"
             echo "media:  $PULPIT_LIBMPV, $PULPIT_BROWSER"
+            echo "speech: $(command -v piper || echo 'no piper on PATH')"
           '';
         };
       });

@@ -20,6 +20,9 @@
   [`B`], [Blank], [`T`], [Start/pause timer],
   [`Shift+T`], [Reset timer], [`S`], [Swap displays],
   [`F`], [Audience fullscreen], [], [],
+  table.cell(colspan: 4)[#smallcaps[Read aloud]],
+  [`R`], [Read the document aloud / pause], [`Shift+R`], [Read this page aloud / pause],
+  [`Shift+→`], [Next sentence], [`Shift+←`], [Previous sentence],
   table.cell(colspan: 4)[#smallcaps[Annotate]],
   [`1`], [Hold marks with a rubber band], [`2`], [Draw on the page],
   [`3`], [Highlight on the page], [`4`], [Write on the page],
@@ -33,6 +36,6 @@
   table.cell(colspan: 4)[#smallcaps[Page view]],
   [`Ctrl+=` (`+`)], [Zoom in], [`Ctrl+-` (`-`)], [Zoom out],
   [`Ctrl+1` (`=`)], [Actual size], [`Ctrl+0` (`A`)], [Fit page],
-  [`Ctrl+2`], [Fit width], [`Shift+R`], [Rotate pages],
+  [`Ctrl+2`], [Fit width], [`Ctrl+Shift+R`], [Rotate pages],
   [`D`], [Toggle two-page view], [], [],
 )

@@ -129,6 +129,9 @@ fn answer(document: &mut PdfDocument<'_>, request: DocumentRequest) -> DocumentR
         DocumentRequest::AreaText { page, rect } => document
             .area_text(page, rect)
             .map(|(text, truncated)| DocumentResponse::AreaText { text, truncated }),
+        DocumentRequest::PageText { page } => {
+            document.page_text(page).map(DocumentResponse::PageText)
+        }
         DocumentRequest::FindText {
             query,
             from_page,

@@ -33,6 +33,7 @@ mod session;
 mod settings;
 mod signature_profiles;
 mod signing;
+mod speech;
 mod theme;
 mod thumbnails;
 mod toast;
@@ -266,7 +267,9 @@ fn print_help() {
            PULPIT_PDFIUM_PATH   directory or file holding libpdfium\n\
            PULPIT_CONFIG_DIR    settings directory\n\
            PULPIT_LOG           tracing filter, e.g. debug\n\
-           PULPIT_LOG_DIR       persistent log directory"
+           PULPIT_LOG_DIR       persistent log directory\n\
+           PULPIT_SPEECH_DIR    read-only directory of speech voices and\n\
+                                engines, searched before the user's own"
     );
 }
 

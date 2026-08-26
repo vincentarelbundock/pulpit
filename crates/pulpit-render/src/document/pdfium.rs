@@ -3992,6 +3992,46 @@ impl DocumentBackend for PdfiumDocument<'_> {
         })
     }
 
+    /// One page's whole text layer, for speech (issue #20).
+    ///
+    /// Answered from the same cache search fills, so speaking a page that has
+    /// already been searched costs nothing, and speaking a document that is
+    /// then searched has warmed it. The cache is byte-bounded and cleared on
+    /// every mutation, so this cannot serve text from a page that has since
+    /// been edited.
+    fn page_text(&self, page: PageIndex) -> Result<String> {
+        let count = self.info.page_count;
+        if page.get() >= count {
+            return Err(DocumentError::NoSuchPage {
+                page: page.get(),
+                count,
+            });
+        }
+        if let Some(cached) = self.page_text.borrow().get(&page.get()) {
+            return Ok(cached.as_str().to_string());
+        }
+
+        let bindings = self.backend.bindings();
+        let text = self
+            .backend
+            .on_page(self.document, page.get(), |handle| {
+                let text_page = unsafe { bindings.FPDFText_LoadPage(handle) };
+                if text_page.is_null() {
+                    // A scan or a full-bleed photograph. Nothing to say is
+                    // not a failure, and remembering that it has nothing is
+                    // worth as much as remembering what a page does say.
+                    return Ok(crate::pdf::search::PageText::default());
+                }
+                let text = crate::pdf::search::PageText::extract(bindings, text_page);
+                unsafe { bindings.FPDFText_ClosePage(text_page) };
+                Ok(text)
+            })
+            .map_err(to_document_error)?;
+        let extracted = text.as_str().to_string();
+        self.page_text.borrow_mut().insert(page.get(), text);
+        Ok(extracted)
+    }
+
     fn select_text(
         &self,
         page: PageIndex,

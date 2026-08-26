@@ -23,7 +23,7 @@ description = "Media and interactive overlays for pulpit, driven over CDP."
 default = ["chromium-runtime"]
 # Drives an *externally installed* Chromium-family browser over CDP. Ships no
 # engine; the dependency is a JPEG decoder for screencast frames.
-chromium-runtime = ["dep:image", "dep:serde_json"]
+chromium-runtime = ["dep:image"]
 
 [dependencies]
 pulpit-core = { workspace = true }
@@ -34,7 +34,10 @@ bincode = { workspace = true }
 libloading = "0.8"
 memmap2 = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
+# No longer optional: CDP needs it when the browser runtime is on, and the
+# speech voice catalog needs it always. A feature that gates a dependency two
+# things need is a feature that only ever fails to build.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -43,6 +46,24 @@ getrandom = "0.2"
 image = { version = "0.25", optional = true, default-features = false, features = [
     "jpeg",
 ] }
+
+# --- Speech (`src/speech`) ---
+#
+# Not behind a feature. Speech links no engine at all — the synthesiser and
+# the audio player are installed programs driven over a pipe — so there is
+# nothing here for a build to opt out of, and a dependant that quietly
+# disabled it would ship an application whose accessibility feature silently
+# does nothing. That is the failure this crate's `default` policy already
+# exists to prevent.
+sha2 = { workspace = true }
+# Voice and engine downloads. Rustls rather than a system TLS library, so
+# fetching a voice does not become the second thing that can fail for want of
+# an installed shared object.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+# Engine archives. Pure-Rust backends throughout, for the same reason.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+zip = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

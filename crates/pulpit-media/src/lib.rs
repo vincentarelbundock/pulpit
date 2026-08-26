@@ -1,11 +1,17 @@
-//! Media and interactive overlays for pulpit (`docs-src/internals.typ`).
+//! Media overlays and speech for pulpit (`docs-src/internals.typ`).
 //!
-//! This crate owns runtime discovery, capability-based selection, worker
-//! supervision, the continuous frame transport and the runtime adapters. It
-//! knows nothing about PDF dictionaries — `pulpit-render` interprets
-//! those — and nothing about Iced: `pulpit` composites and routes
-//! input. The two never depend on one another; they exchange pure
-//! `pulpit-core` descriptors through the application.
+//! This crate owns the runtimes pulpit *launches* rather than links:
+//! discovery, capability-based selection, worker supervision, the continuous
+//! frame transport, the runtime adapters, and — under [`speech`] — the
+//! synthesiser and audio player that read a document aloud. It knows nothing
+//! about PDF dictionaries — `pulpit-render` interprets those — and nothing
+//! about Iced: `pulpit` composites and routes input. The two never depend on
+//! one another; they exchange pure `pulpit-core` descriptors through the
+//! application.
+//!
+//! Media and speech share no types. What they share is the reason they are
+//! both here: an installed program on the other side of a process boundary,
+//! discovered honestly, supervised, and reported on when it is absent.
 //!
 //! The invariants worth stating once, because everything here serves them:
 //!
@@ -20,6 +26,12 @@ pub mod diagnostics;
 pub mod protocol;
 pub mod runtime;
 pub mod selection;
+/// Reading documents aloud (issue #20).
+///
+/// A second runtime pulpit launches rather than links, kept behind its own
+/// module because it shares no types with the media half — only the policy
+/// that makes both live here.
+pub mod speech;
 pub mod supervisor;
 pub mod surface;
 pub mod worker;

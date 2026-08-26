@@ -179,6 +179,17 @@ impl PageText {
         }
     }
 
+    /// The whole page's text, in the order PDFium extracted it.
+    ///
+    /// Content-stream order, which is *not* reading order on a multi-column
+    /// page: a two-column layout comes back with the columns interleaved line
+    /// by line. That is a real limitation of the text layer rather than of
+    /// this accessor, and the one place it becomes audible is speech, which
+    /// is why it is said here rather than left to be discovered.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.text
+    }
+
     /// Every match on this page, without asking PDFium anything.
     ///
     /// The overwhelmingly common answer is "none", and that answer now costs

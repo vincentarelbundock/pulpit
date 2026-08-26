@@ -16,6 +16,7 @@ pub mod overlay;
 pub mod page;
 pub mod pdfpc;
 pub mod search;
+pub mod speech;
 pub mod state;
 pub mod timer;
 
@@ -37,6 +38,9 @@ pub use pdfpc::TextNotes;
 pub use search::{
     Hit, HitChunk, HitSource, PreparedQuery, Query, SearchGeneration, SearchProblem, SearchState,
     TextMatch,
+};
+pub use speech::{
+    detect, LanguagePolicy, LanguageSetting, LanguageTag, Reading, Scope, SpeechRate, SpeechState,
 };
 pub use state::{Blank, Changed, Command, PresentationState, SlideIndex};
 pub use timer::Timer;

@@ -40,6 +40,25 @@ pub enum Action {
     Blank,
     ToggleTimer,
     ResetTimer,
+    /// Read the whole document aloud, or pause it (issue #20).
+    ///
+    /// One key for start and pause, because that is what a reader expects of
+    /// one control, and because the alternative — hunting for a second key
+    /// while a voice talks over you — is exactly the moment when hunting is
+    /// hardest. Its partner is [`Action::SpeakPageToggle`]: same behaviour,
+    /// smaller scope.
+    SpeakToggle,
+    /// Read this page aloud, or pause it.
+    ///
+    /// Toggling is per scope: pressing this while the *document* is being
+    /// read starts reading the page, rather than pausing something else. A
+    /// key that does a different thing depending on hidden state is worse
+    /// than no key.
+    SpeakPageToggle,
+    /// Stop reading and forget the place.
+    SpeakStop,
+    SpeakNextSentence,
+    SpeakPreviousSentence,
     SwapDisplays,
     ToggleAudienceFullscreen,
     OpenDocument,
@@ -120,7 +139,7 @@ pub struct ShortcutGroup {
 /// The grouping is semantic, not balanced by item count. Actions deliberately
 /// left without a keyboard shortcut are absent because there is nothing a
 /// user can press for them while shortcut customisation is unavailable.
-pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
+pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
     ShortcutGroup {
         title: "Files & application",
         actions: &[
@@ -152,6 +171,19 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
             Action::ResetTimer,
             Action::SwapDisplays,
             Action::ToggleAudienceFullscreen,
+        ],
+    },
+    ShortcutGroup {
+        title: "Read aloud",
+        // `SpeakStop` is deliberately absent: it has no key, because "r"
+        // already pauses and both shifted forms are taken. It is reachable
+        // from the menu, and this reference only publishes rows a reader can
+        // actually press something for.
+        actions: &[
+            Action::SpeakToggle,
+            Action::SpeakPageToggle,
+            Action::SpeakNextSentence,
+            Action::SpeakPreviousSentence,
         ],
     },
     ShortcutGroup {
@@ -282,6 +314,11 @@ impl Action {
             Action::CycleLayout => "Next layout",
             Action::ShowLayouts => "Layouts",
             Action::ShowShortcuts => "Keyboard shortcuts",
+            Action::SpeakToggle => "Read the document aloud / pause",
+            Action::SpeakPageToggle => "Read this page aloud / pause",
+            Action::SpeakStop => "Stop reading",
+            Action::SpeakNextSentence => "Next sentence",
+            Action::SpeakPreviousSentence => "Previous sentence",
             Action::AnnotateSelect => "Hold marks with a rubber band",
             Action::AnnotateInk => "Draw on the page",
             Action::AnnotateHighlighter => "Highlight on the page",
@@ -631,6 +668,30 @@ impl Default for Keymap {
                 named("l", Action::CycleLayout),
                 with("l", Mods::shift(), Action::ShowLayouts),
                 with("/", Mods::shift(), Action::ShowShortcuts),
+                // Speech: "r" for read. One key starts and pauses, which is
+                // what a reader expects of one control, and hunting for a
+                // second key while a voice talks over you is the worst moment
+                // to be hunting.
+                //
+                // Deliberately *not* "p". Nothing in pulpit binds it — the
+                // timer is "t" — but "p" means pause-the-talk in every other
+                // presenter, pdfpc included, so a presenter reaching for it
+                // expecting the clock to stop would instead have the slide
+                // read out loud to the room. No conflict in the keymap;
+                // a bad one in the hands. "v" and "s" are taken by the
+                // annotation-audience toggle and display swap.
+                //
+                // Two scopes, one key each, both play/pause toggles: bare "r"
+                // reads the whole document, shifted reads just this page.
+                // Rotating pages moved to "Ctrl+Shift+R" to make room, which
+                // keeps it an R-shaped key beside "Ctrl+R" (reload).
+                //
+                // Stop has no key of its own: both keys already pause, and
+                // stopping outright is rare enough to live in the menu.
+                named("r", Action::SpeakToggle),
+                with("r", Mods::shift(), Action::SpeakPageToggle),
+                with("Right", Mods::shift(), Action::SpeakNextSentence),
+                with("Left", Mods::shift(), Action::SpeakPreviousSentence),
                 // The tools sit under the digits, in the order the palette
                 // draws them — which is the order document mode's own digits
                 // arm them in, so a digit means the same tool in both modes.
@@ -684,7 +745,10 @@ impl Default for Keymap {
                 named("a", Action::FitPage),
                 with("0", Mods::primary(), Action::FitPage),
                 with("2", Mods::primary(), Action::FitWidth),
-                with("r", Mods::shift(), Action::RotateReader),
+                // Moved off "Shift+R", which now reads this page aloud. Still
+                // an R-shaped key, and beside the primary chord that reloads;
+                // primary-with-shift is the row redo already lives on.
+                with("r", Mods::primary_shift(), Action::RotateReader),
                 named("d", Action::ToggleDualPage),
                 with("r", Mods::primary(), Action::ReloadDocument),
                 named("f", Action::ToggleAudienceFullscreen),
@@ -1475,13 +1539,23 @@ mod tests {
     }
 
     /// Reading and presenting are layouts, and the layout keys are how a file
-    /// moves between them. `r` is free: it was a second name for `l`.
+    /// moves between them.
+    ///
+    /// `r` used to be a second name for `l` and was left unbound when that
+    /// went; it now reads the document aloud. What this test is actually
+    /// defending is that mounting the reader is *not* a key of its own, and
+    /// that `l` still cycles layouts — so it asserts those, and asserts what
+    /// `r` does now rather than that it does nothing.
     #[test]
     fn reading_and_presenting_are_reached_by_the_layout_keys() {
         let keymap = Keymap::default();
-        assert_eq!(keymap.resolve(Some("r"), None), None);
         assert!(keymap.keys_for(Action::ToggleReader).is_empty());
         assert_eq!(keymap.resolve(Some("l"), None), Some(Action::CycleLayout));
+        assert_eq!(
+            keymap.resolve(Some("r"), None),
+            Some(Action::SpeakToggle),
+            "r reads aloud; it is no longer a spare name for the layout key"
+        );
     }
 
     #[test]
