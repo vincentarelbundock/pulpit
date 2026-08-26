@@ -402,6 +402,23 @@ pub fn accent_rule(palette: Palette) -> impl Fn(&Theme) -> container::Style + Co
     }
 }
 
+/// A rule in one particular colour.
+///
+/// What a row of the annotations panel wears down its left edge: the colour
+/// the mark is drawn in, which is how three highlights on one page are told
+/// apart in a list that can say nothing else about them. Takes a colour
+/// rather than a role because the colour is the document's, not the theme's.
+pub fn ink_rule(color: Color) -> impl Fn(&Theme) -> container::Style + Copy {
+    move |_| container::Style {
+        background: Some(Background::Color(color)),
+        border: Border {
+            radius: 2.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn separator(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
     move |_| container::Style {
         background: Some(Background::Color(palette.border())),

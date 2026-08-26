@@ -135,6 +135,8 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         document_keyboard_focus: true,
         has_form: false,
         fields: std::sync::Arc::default(),
+        annotations: std::sync::Arc::default(),
+        annotation_scan: (0, 0),
         level: pulpit_render::document::CompatibilityLevel::AnnotateOnly,
         warnings: &[],
         dirty: false,

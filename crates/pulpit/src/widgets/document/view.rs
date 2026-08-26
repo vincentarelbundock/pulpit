@@ -22,7 +22,7 @@ use crate::widgets::event::ReadCommand;
 use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
-use super::model::{CropState, OutlineView, PageSpread, Zoom};
+use super::model::{CropState, OutlineView, PageSpread, SidebarTab, Zoom};
 
 /// One outline row plus the two-point gap below it.
 pub const OUTLINE_ROW_HEIGHT: f32 = 28.0;
@@ -1853,12 +1853,24 @@ fn outline<Message: Clone + 'static>(
     if reader.has_form && view != OutlineView::Fields {
         tabs = tabs.push(tab(OutlineView::Fields));
     }
+    // The marks are deliberately absent from this row: they are not a way of
+    // looking at the document's authored structure, and they have their own
+    // icon in the row above.
 
     // Search and outline occupy the same rail, so they begin with the same
     // title scale and inset. The tabs are controls within the outline rather
     // than a substitute for its title.
     let header = column![
-        sidebar_tabs(false, live, on_event),
+        sidebar_tabs(
+            if view == OutlineView::Annotations {
+                SidebarTab::Annotations
+            } else {
+                SidebarTab::Outline
+            },
+            reader.annotatable(),
+            live,
+            on_event
+        ),
         text(view.label()).size(theme::type_scale::TITLE),
         tabs.width(Length::Fill)
     ]
@@ -1891,6 +1903,7 @@ fn outline<Message: Clone + 'static>(
             let focus = reader.outline_focus.cloned();
             virtual_outline(
                 fields.len(),
+                OUTLINE_ROW_HEIGHT,
                 reader.outline_scroll,
                 reader.outline_viewport.clone(),
                 on_event,
@@ -1988,6 +2001,7 @@ fn outline<Message: Clone + 'static>(
             let focus = reader.outline_focus.cloned();
             virtual_outline(
                 page_count,
+                OUTLINE_ROW_HEIGHT,
                 reader.outline_scroll,
                 reader.outline_viewport.clone(),
                 on_event,
@@ -2034,6 +2048,7 @@ fn outline<Message: Clone + 'static>(
                 },
             )
         }
+        OutlineView::Annotations => annotations(reader, live, on_event),
     };
 
     let panel = container(
@@ -2076,9 +2091,168 @@ fn outline<Message: Clone + 'static>(
     })
 }
 
+/// Every mark the document carries, in page order (§8.4).
+///
+/// A list of what is *in the document*, not a second store of it (A1): the
+/// rows are built from the engine's own answers, and a mark deleted from here
+/// is deleted from the page in the same transaction any other deletion uses.
+fn annotations<Message: Clone + 'static>(
+    reader: &ReaderData<'_>,
+    live: bool,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    use crate::widgets::document::model::OutlineItemId;
+
+    let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
+    let rows = reader.annotations.clone();
+    let (read, pages) = reader.annotation_scan;
+    let scanning = read < pages;
+
+    // Not reachable as the code stands — the tab is not offered for a
+    // document pulpit cannot annotate, and opening one resets the rail to
+    // bookmarks — but the view is a function of the state it is given, and
+    // this is what this state means. It says which of the two silences it is
+    // rather than sitting on "looking…" for a document nothing will ever
+    // look through.
+    if !reader.annotatable() {
+        return nothing("This document cannot carry marks.");
+    }
+
+    if rows.is_empty() {
+        // Two different answers, and the difference matters: one says the
+        // document has nothing on it, the other says nobody has looked yet.
+        return nothing(if scanning {
+            "Looking through the document…"
+        } else {
+            "This document has no marks."
+        });
+    }
+
+    // What the list is, in one line: how many marks, and — while the sweep is
+    // still walking the document — how much of it has been read, so a list
+    // that is still growing does not read as a list that is complete.
+    let counted = if rows.len() == 1 {
+        "1 mark".to_string()
+    } else {
+        format!("{} marks", rows.len())
+    };
+    let said = if scanning {
+        format!("{counted} · {read} of {pages} pages read")
+    } else {
+        counted
+    };
+    let status = text(said)
+        .size(theme::type_scale::LABEL)
+        .color(theme::ambient::muted());
+
+    let focus = reader.outline_focus.cloned();
+    let list = virtual_outline(
+        rows.len(),
+        ANNOTATION_ROW_HEIGHT,
+        reader.outline_scroll,
+        reader.outline_viewport.clone(),
+        on_event,
+        move |index| {
+            let mark = &rows[index];
+            let id = OutlineItemId::Annotation(mark.id.clone());
+            let focused = focus.as_ref() == Some(&id);
+
+            // The mark's own colour down the left edge. Three highlights on
+            // one page have the same kind and the same page and may have no
+            // text at all; the colour is what tells them apart.
+            let (red, green, blue) = mark.color.rgb();
+            let swatch: Element<'static, Message> =
+                container(space::vertical().width(3.0).height(Length::Fill))
+                    .style(theme::ink_rule(iced::Color::from_rgb(red, green, blue)))
+                    .into();
+
+            // What it says, or what it is when it says nothing — an ink
+            // stroke carries no text, and a blank row would read as a mark
+            // that failed to load rather than as a line on a page.
+            let says = text(mark.description())
+                .size(theme::type_scale::LABEL)
+                .width(Length::Fill)
+                // One line, and never two: the row is a fixed height and the
+                // line below this one says what kind the mark is and what
+                // page it is on — a wrapped description would push that out
+                // of the row and take the support note with it.
+                .wrapping(iced::widget::text::Wrapping::None)
+                .color(if mark.text.is_empty() {
+                    theme::ambient::muted()
+                } else {
+                    theme::ambient::text()
+                });
+            let mut about = format!("{} · page {}", mark.kind.label(), mark.page.get() + 1);
+            // How well pulpit understands it, in words (§10.1). A mark it
+            // only preserves is said to be read-only rather than being left
+            // to look like one of the reader's own.
+            if let Some(note) = mark.support_note() {
+                about.push_str(" · ");
+                about.push_str(note);
+            }
+            let about = text(about)
+                .size(theme::type_scale::CAPTION)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .color(theme::ambient::muted());
+
+            let open = button(column![says, about])
+                .width(Length::Fill)
+                .height(Length::Fixed(ANNOTATION_ROW_HEIGHT - 2.0))
+                .padding(Padding::from([3.0, 6.0]))
+                .style(if focused {
+                    theme::ambient::focus_button
+                } else {
+                    theme::ambient::tool_button
+                });
+            let open = if live {
+                open.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
+            } else {
+                open
+            };
+
+            let mut controls = row![swatch, open]
+                .spacing(theme::space::XS)
+                .align_y(Alignment::Center);
+            // Deleting is a rewrite, and pulpit does not rewrite what it does
+            // not model (A5) — so a mark it only preserves gets no control
+            // rather than one that would refuse.
+            if mark.deletable() {
+                let mut remove = button(theme::icon::icon(
+                    theme::Icon::Trash,
+                    theme::type_scale::LABEL,
+                ))
+                .padding(theme::space::XS)
+                .style(theme::ambient::tool_button);
+                if live {
+                    remove = remove.on_press(send(ReadCommand::DeleteAnnotation(mark.id.clone())));
+                }
+                controls = controls.push(hint(remove, "Delete this mark"));
+            }
+
+            container(controls)
+                .id(outline_item_id(&id))
+                .width(Length::Fill)
+                .height(Length::Fixed(ANNOTATION_ROW_HEIGHT))
+                .into()
+        },
+    );
+
+    column![status, list]
+        .spacing(theme::space::XS)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 /// Select the contents of the document's one shared sidebar.
+///
+/// `annotatable` is what the marks tab asks before it is drawn: a document
+/// pulpit cannot annotate has no marks and never will, and a tab that is
+/// always empty is a control that teaches the reader to ignore the rail —
+/// the same rule the form tab is offered under.
 pub fn sidebar_tabs<Message: Clone + 'static>(
-    search_selected: bool,
+    selected: SidebarTab,
+    annotatable: bool,
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
@@ -2100,21 +2274,32 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
         hint(control, label)
     };
 
-    let tabs = row![
+    let mut tabs = row![
         tab(
             theme::Icon::Outline,
             "Outline",
-            !search_selected,
+            selected == SidebarTab::Outline,
             PanelCommand::ShowOutline
         ),
         tab(
             theme::Icon::Search,
             "Search",
-            search_selected,
+            selected == SidebarTab::Search,
             PanelCommand::ShowSearch
         ),
     ]
     .spacing(theme::space::XS);
+    // Third and last, and reached by pressing it and by nothing else: the
+    // marks are worth a tab in the rail a reader has already opened, and not
+    // worth a key of their own (§8.4).
+    if annotatable {
+        tabs = tabs.push(tab(
+            theme::Icon::StickyNote,
+            "Annotations",
+            selected == SidebarTab::Annotations,
+            PanelCommand::ShowAnnotations,
+        ));
+    }
 
     let mut close = button(theme::icon::icon(
         theme::Icon::Close,
@@ -2131,6 +2316,11 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
         .width(Length::Fill)
         .into()
 }
+
+/// A row of the annotations panel: what the mark says, and a line under it
+/// saying what kind it is and where. Two lines rather than one because the
+/// text is what a reader looks for and the kind is what they check.
+pub const ANNOTATION_ROW_HEIGHT: f32 = 46.0;
 
 const OUTLINE_LINE_HEIGHT: f32 = 15.0;
 const OUTLINE_ROW_PADDING: f32 = 8.0;
@@ -2259,6 +2449,7 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
 /// the scrollbar's full extent.
 fn virtual_outline<Message: Clone + 'static>(
     count: usize,
+    row_height: f32,
     scroll: f32,
     measured_viewport: std::rc::Rc<std::cell::Cell<f32>>,
     on_event: fn(WidgetEvent) -> Message,
@@ -2266,8 +2457,7 @@ fn virtual_outline<Message: Clone + 'static>(
 ) -> Element<'static, Message> {
     responsive(move |size| {
         measured_viewport.set(size.height);
-        let window =
-            crate::widgets::scroll::virtual_window(count, OUTLINE_ROW_HEIGHT, scroll, size.height);
+        let window = crate::widgets::scroll::virtual_window(count, row_height, scroll, size.height);
         let mut rows = Column::new();
         if window.before > 0.0 {
             rows = rows.push(space::vertical().height(window.before));
@@ -2314,6 +2504,7 @@ pub fn outline_item_id(
             name,
             source_ordinal,
         } => format!("field-{source_ordinal}-{name}"),
+        OutlineItemId::Annotation(id) => format!("annotation-{}", id.as_str()),
     };
     iced::advanced::widget::Id::from(format!("pulpit-outline-{key}"))
 }
