@@ -20,6 +20,7 @@ use crate::djvu::sys::{
     self, Api, Context, Document, Format, Job, Page, FORMAT_RGB24, MESSAGE_ERROR, RENDER_COLOR,
     STATUS_FAILED, STATUS_OK,
 };
+use crate::djvu::text::{DjvuPageText, Placement};
 use crate::pdf::{
     page_placement, BackendDocumentId, CancelSignal, DocumentMetadata, PdfBackend, PdfError,
     RenderRequest, RenderedPage, Result,
@@ -34,6 +35,18 @@ use crate::pdf::{
 /// djvulibre keeps this cache itself, so pulpit sizes it rather than building
 /// a second one in front.
 const DECODED_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How many times a page's text is asked for before the search gives up.
+///
+/// `ddjvu_document_get_pagetext` answers "not yet" until the page has been
+/// fetched, and each attempt costs one blocking wait on a message. A page
+/// that has not arrived after this many is not going to.
+const MAX_TEXT_ATTEMPTS: usize = 4096;
+
+/// The bounds a search answers within, shared with the PDF path so that a
+/// query does not mean two different things depending on the format.
+const MAX_HITS_PER_SEARCH: usize = crate::document::limits::MAX_HITS_PER_SEARCH;
+const MAX_QUADS_PER_HIT: usize = crate::document::limits::MAX_QUADS_PER_HIT;
 
 /// One open DjVu file.
 struct OpenDocument {
@@ -54,6 +67,10 @@ struct Inner {
     format: *mut Format,
     documents: HashMap<u64, OpenDocument>,
     next_id: u64,
+    /// Text layers already read, in the same bounded cache the PDF path
+    /// uses: after the first query a page with no match for the second costs
+    /// nothing, and a book of dense pages fills the budget and stops.
+    texts: crate::pdf::search::PageTextCache<(u64, usize), DjvuPageText>,
 }
 
 // SAFETY: every pointer in `Inner` is reached only through the `Mutex` in
@@ -259,6 +276,7 @@ impl DjvuBackend {
                 format,
                 documents: HashMap::new(),
                 next_id: 0,
+                texts: crate::pdf::search::PageTextCache::default(),
             }),
             version,
         })
@@ -278,6 +296,33 @@ impl Inner {
             .ok_or_else(|| PdfError::Render("unknown document".into()))
     }
 
+    /// One page's `ddjvu_pageinfo_t`, waited out.
+    ///
+    /// This is the call §56.3 requires: page count and page sizes are read
+    /// without rendering, and a backend that could only learn a page's size by
+    /// rasterising it is not ready to be used. It is shared by `page_size` and
+    /// by the text layer, which needs the rotation and the resolution to put a
+    /// word where the renderer will draw it.
+    fn page_info(&mut self, handle: *mut Document, page: usize) -> Result<sys::PageInfo> {
+        let mut last_error: Option<String> = None;
+        loop {
+            // SAFETY: `handle` is a live document on this context.
+            let (status, info) = unsafe { self.api.page_info(handle, page as c_int) };
+            if status >= STATUS_FAILED {
+                return Err(PdfError::Render(last_error.unwrap_or_else(|| {
+                    format!("djvulibre could not describe page {}", page + 1)
+                })));
+            }
+            if status >= STATUS_OK {
+                return Ok(info);
+            }
+            // SAFETY: the context is live and owned by `self.api`.
+            if let Some(error) = unsafe { pump(&self.api, self.context, true) } {
+                last_error = Some(error);
+            }
+        }
+    }
+
     /// One page's size in points, measured without rendering it (§56.3).
     fn page_size(&mut self, document: BackendDocumentId, page: usize) -> Result<PageSize> {
         let (handle, page_count, cached) = {
@@ -294,23 +339,7 @@ impl Inner {
             });
         }
 
-        let mut last_error: Option<String> = None;
-        let info = loop {
-            // SAFETY: `handle` is a live document on this context.
-            let (status, info) = unsafe { self.api.page_info(handle, page as c_int) };
-            if status >= STATUS_FAILED {
-                return Err(PdfError::Render(last_error.unwrap_or_else(|| {
-                    format!("djvulibre could not describe page {}", page + 1)
-                })));
-            }
-            if status >= STATUS_OK {
-                break info;
-            }
-            // SAFETY: the context is live and owned by `self.api`.
-            if let Some(error) = unsafe { pump(&self.api, self.context, true) } {
-                last_error = Some(error);
-            }
-        };
+        let info = self.page_info(handle, page)?;
 
         if info.width <= 0 || info.height <= 0 {
             return Err(PdfError::Render(format!("page {} has no size", page + 1)));
@@ -343,6 +372,80 @@ impl Inner {
         };
         self.look_up(document)?.sizes.insert(page, size);
         Ok(size)
+    }
+
+    /// One page's text layer, read once and kept (§59.2).
+    ///
+    /// Returns it beside the placement that maps its coordinates onto the
+    /// page, because the two come from the same `pageinfo` call and a hit
+    /// drawn with one and measured by the other would land in the wrong place
+    /// on any rotated scan.
+    fn page_text(
+        &mut self,
+        document: BackendDocumentId,
+        page: usize,
+    ) -> Result<(std::sync::Arc<DjvuPageText>, Placement)> {
+        let (handle, page_count) = {
+            let open = self.look_up(document)?;
+            (open.handle, open.page_count)
+        };
+        if page >= page_count {
+            return Err(PdfError::PageOutOfRange {
+                page,
+                count: page_count,
+            });
+        }
+        let info = self.page_info(handle, page)?;
+        // The same points-per-pixel `page_size` uses, so a word's box is in
+        // the same units as the page it sits on.
+        let scale = if info.dpi > 0 {
+            72.0 / info.dpi as f32
+        } else {
+            1.0
+        };
+        let at = Placement::new(info.width, info.height, info.rotation, scale);
+        if let Some(text) = self.texts.get(&(document.0, page)) {
+            return Ok((text, at));
+        }
+
+        // `get_pagetext` answers `miniexp_dummy` while it fetches the page and
+        // has to be asked again, which is the documented shape of every
+        // asynchronous call in this API. The bound is not for a well-behaved
+        // library: it is so that a file whose text never arrives fails the
+        // search rather than parking a worker thread in this loop for good.
+        let mut attempts = 0;
+        let expression = loop {
+            // SAFETY: `handle` is a live document on this context, the page
+            // was bounds-checked above, and the detail string is a literal.
+            let expression = unsafe {
+                (self.api.document_get_pagetext)(
+                    handle,
+                    page as c_int,
+                    crate::djvu::text::MAX_DETAIL.as_ptr().cast::<c_char>(),
+                )
+            };
+            if expression != sys::MINIEXP_DUMMY {
+                break expression;
+            }
+            attempts += 1;
+            if attempts > MAX_TEXT_ATTEMPTS {
+                return Err(PdfError::Render(format!(
+                    "djvulibre never produced the text of page {}",
+                    page + 1
+                )));
+            }
+            // SAFETY: the context is live and owned by `self.api`.
+            unsafe { pump(&self.api, self.context, true) };
+        };
+
+        // SAFETY: `expression` came from this document's `get_pagetext` and is
+        // released below, once, after the walk that reads it.
+        let text = unsafe {
+            let text = DjvuPageText::from_expression(&self.api, expression);
+            (self.api.miniexp_release)(handle, expression);
+            text
+        };
+        Ok((self.texts.insert((document.0, page), text), at))
     }
 
     fn render_into(
@@ -527,6 +630,7 @@ impl PdfBackend for DjvuBackend {
 
     fn close(&mut self, document: BackendDocumentId) {
         let mut inner = self.locked();
+        inner.texts.retain(|(id, _)| *id != document.0);
         if let Some(open) = inner.documents.remove(&document.0) {
             // SAFETY: this handle is removed from the map first, so this is
             // its only release.
@@ -586,17 +690,49 @@ impl PdfBackend for DjvuBackend {
         self.locked().render_into(request, target, cancel)
     }
 
-    /// §59.2. DjVu files often carry a text layer, and this backend does not
-    /// read it yet — so it says so, rather than answering with an empty list.
-    /// "This cannot be searched" and "there are no matches" are different
-    /// facts about a document.
+    /// §59.2. A DjVu carries its text as hidden zones beside the scan, and a
+    /// scanned book is exactly the document somebody searches rather than
+    /// reads front to back.
+    ///
+    /// The matching is `pulpit_core::search`'s, the same matcher the PDF path
+    /// and the notes run through, so a hit found here is the hit the reader
+    /// finds; what this backend contributes is the geometry, one box per word
+    /// (`crate::djvu::text`).
+    ///
+    /// A page with no text layer is not a failure — a plate, a map, a page the
+    /// producer never ran OCR over — and answers no matches. A backend that
+    /// could not search at all would still say so, which is a different fact
+    /// and was this backend's honest answer until now.
     fn find_text(
         &self,
-        _document: BackendDocumentId,
-        _query: &pulpit_core::search::Query,
-        _pages: std::ops::Range<usize>,
+        document: BackendDocumentId,
+        query: &pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
     ) -> Result<Vec<pulpit_core::search::Hit>> {
-        Err(PdfError::Unsupported("search a DjVu document"))
+        let mut hits = Vec::new();
+        if query.is_empty() {
+            return Ok(hits);
+        }
+        let prepared = query.prepare();
+        let mut inner = self.locked();
+        // Clamped rather than refused: the caller's page count can be one
+        // reload behind, and a scan that walks off the end should stop.
+        let page_count = inner.look_up(document)?.page_count;
+        for page in pages.start..pages.end.min(page_count) {
+            let (text, at) = inner.page_text(document, page)?;
+            let found = text.matches(&prepared, MAX_HITS_PER_SEARCH);
+            hits.extend(crate::pdf::search::hits_from_matches(
+                pulpit_core::page::PageIndex(page),
+                text.text(),
+                &found,
+                |matched| text.quads(matched, &at, MAX_QUADS_PER_HIT),
+            ));
+            if hits.len() >= MAX_HITS_PER_SEARCH {
+                hits.truncate(MAX_HITS_PER_SEARCH);
+                break;
+            }
+        }
+        Ok(hits)
     }
 }
 

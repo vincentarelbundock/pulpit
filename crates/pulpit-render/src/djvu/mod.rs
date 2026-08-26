@@ -16,6 +16,8 @@
 //! * [`backend`] — the renderer's view.
 //! * [`document`] — the reader's view, where every PDF semantic reports
 //!   `Unsupported` (§60.1).
+//! * [`text`] — the hidden text layer, which is what makes a scanned book
+//!   searchable (§59.2).
 //!
 //! [`is_djvu`] and [`missing_djvu_message`] are outside the feature gate on
 //! purpose. A build compiled without DjVu support must still *recognise* a
@@ -24,9 +26,7 @@
 //! not name the format would report a DjVu book as a damaged PDF.
 //!
 //! Not here, deliberately: annotations and any other mutation (§60.3 — a
-//! per-format sidecar is the one thing `SPEC-document.md` refuses), and the
-//! text layer (§59.2 — the backend reports search unsupported rather than
-//! reporting no matches).
+//! per-format sidecar is the one thing `SPEC-document.md` refuses).
 
 use std::path::Path;
 
@@ -36,6 +36,8 @@ pub mod backend;
 pub mod document;
 #[cfg(feature = "djvu")]
 pub mod sys;
+#[cfg(feature = "djvu")]
+pub(crate) mod text;
 
 #[cfg(feature = "djvu")]
 pub use backend::DjvuBackend;

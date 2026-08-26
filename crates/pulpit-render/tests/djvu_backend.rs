@@ -17,11 +17,17 @@
 //!   produces.
 //! * `halves.djvu` — one 100×100 page, red over blue, for the two orientation
 //!   flags that a solid colour cannot tell apart.
+//! * `text.djvu` — `book.djvu` with a hidden text layer on its first two
+//!   pages and none on its third, added with `djvused set-txt` (§59.2).
+//! * `rotated-text.djvu` — `rotated.djvu` with one word on its turned first
+//!   page, which is the case `get_pagetext` reports differently from what
+//!   `get_pageinfo` and `page_render` do.
 
 use std::path::{Path, PathBuf};
 
 use pulpit_core::notes::Region;
 use pulpit_render::djvu::DjvuBackend;
+use pulpit_render::document::DocumentBackend;
 use pulpit_render::pdf::{BackendDocumentId, NeverCancel, PdfBackend, RenderRequest};
 
 fn fixture(name: &str) -> PathBuf {
@@ -292,21 +298,21 @@ fn a_page_past_the_end_is_refused_by_number() {
         .is_err());
 }
 
-/// §59.2 and §48.2: "this cannot be searched" and "there are no matches" are
-/// different facts about a document, and answering with an empty list would
-/// tell a presenter their search term is absent from a book that may well
-/// contain it.
+/// A book with no text layer at all answers no matches, and does not fail.
+///
+/// This is the one case §59.2 and §48.2 warn about, from the other side: while
+/// this backend could not read a text layer, an empty list would have told a
+/// presenter their term was absent from a book that may well contain it, so it
+/// refused instead. Now that it reads one, an empty list means what it says —
+/// these pages carry no hidden text, which `djvused print-txt` agrees with.
 #[test]
-fn search_is_unsupported_rather_than_empty() {
+fn a_book_with_no_text_layer_answers_no_matches() {
     let Some((_turn, backend, document)) = opened("book.djvu") else {
         return;
     };
     let query = pulpit_core::search::Query::new("anything", false, false);
-    let error = backend.find_text(document, &query, 0..3).unwrap_err();
-    assert!(
-        error.to_string().to_lowercase().contains("djvu"),
-        "the refusal names the format: {error}"
-    );
+    let hits = backend.find_text(document, &query, 0..3).unwrap();
+    assert!(hits.is_empty(), "{hits:?}");
 }
 
 /// One worker holds several documents, and closing one must not disturb
@@ -345,4 +351,147 @@ fn something_that_is_not_a_djvu_fails_to_open() {
     let impostor = directory.path().join("not-really.djvu");
     std::fs::write(&impostor, b"%PDF-1.7\nthis is not a DjVu at all\n").unwrap();
     assert!(backend.open(&impostor).is_err());
+}
+
+/// §59.2: the hidden text layer is what makes a scanned book searchable, and
+/// the matcher is `pulpit_core::search`'s — the same one the PDF path runs.
+///
+/// `text.djvu` carries "hello world" and "Hello" on its first page, "world" on
+/// its second, and nothing at all on its third.
+#[test]
+fn a_text_layer_is_searched_page_by_page() {
+    let Some((_turn, backend, document)) = opened("text.djvu") else {
+        return;
+    };
+    let query = pulpit_core::search::Query::new("world", false, false);
+    let hits = backend.find_text(document, &query, 0..3).unwrap();
+    let pages: Vec<_> = hits.iter().map(|hit| hit.page.0).collect();
+    assert_eq!(pages, vec![0, 1], "one on each page that says it: {hits:?}");
+    for hit in &hits {
+        assert_eq!(
+            hit.source,
+            pulpit_core::search::HitSource::PageText,
+            "a DjVu hit is on the page itself"
+        );
+        assert!(!hit.quads.is_empty(), "a hit on a page has geometry");
+        assert!(
+            hit.context.contains("world"),
+            "the results list shows the document's own words: {:?}",
+            hit.context
+        );
+    }
+}
+
+/// A page with no text layer is not a failure.
+///
+/// A plate, a map, a page nobody ran OCR over: it has nothing to find, which
+/// is a different fact from a document that cannot be searched, and it must
+/// not stop the scan of the pages around it.
+#[test]
+fn a_page_with_no_text_finds_nothing_and_fails_nothing() {
+    let Some((_turn, backend, document)) = opened("text.djvu") else {
+        return;
+    };
+    let query = pulpit_core::search::Query::new("world", false, false);
+    let hits = backend.find_text(document, &query, 2..3).unwrap();
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// Case folding and multi-word matching are the matcher's, not this backend's.
+///
+/// "hello" and "world" are two zones with a gap between them, so a query
+/// spanning both is also the check that words are joined by a separator: with
+/// no space between them the page would read "helloworld" and this would find
+/// nothing.
+#[test]
+fn a_match_spanning_two_words_is_highlighted_word_by_word() {
+    let Some((_turn, backend, document)) = opened("text.djvu") else {
+        return;
+    };
+    let query = pulpit_core::search::Query::new("HELLO WORLD", false, false);
+    let hits = backend.find_text(document, &query, 0..1).unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].quads.len(),
+        2,
+        "one box per word, not one box from the first to the last: {:?}",
+        hits[0].quads
+    );
+
+    let sensitive = pulpit_core::search::Query::new("HELLO WORLD", true, false);
+    assert!(
+        backend
+            .find_text(document, &sensitive, 0..1)
+            .unwrap()
+            .is_empty(),
+        "case sensitivity is the matcher's, and it is shared"
+    );
+}
+
+/// The mirror image of `a_rotated_page_is_measured_once_and_not_turned_twice`,
+/// and the second half of §56.6's finding.
+///
+/// `get_pageinfo` reports a rotated page's *turned* size; `get_pagetext`
+/// reports its text in the *stored*, unturned image space, and says nothing
+/// about it. Measured on djvulibre 3.5.30: this fixture's first page is stored
+/// 120×80 and turned a quarter turn, `pageinfo` answers 80×120, and the text
+/// s-expression still says `(page 0 0 120 80)`. So the rotation the renderer
+/// applies for free must be applied to these coordinates by hand.
+///
+/// The word sits at (10,50)–(55,70) in the stored image, which is its upper
+/// left. djvulibre turns counter-clockwise, so on the rendered page it belongs
+/// near the *bottom* left — and it must land inside a page that is 19.2×28.8
+/// points, which the unturned reading would not even fit inside.
+#[test]
+fn a_word_on_a_rotated_page_is_turned_the_way_the_renderer_turns_it() {
+    let Some((_turn, backend, document)) = opened("rotated-text.djvu") else {
+        return;
+    };
+    let size = backend.page_size(document, 0).unwrap();
+    let query = pulpit_core::search::Query::new("corner", false, false);
+    let hits = backend.find_text(document, &query, 0..1).unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    let bounds = hits[0].quads[0].bounds();
+
+    assert!(
+        bounds.right <= size.width + 0.01 && bounds.bottom <= size.height + 0.01,
+        "the box is off a {}×{} page: {bounds:?} — which is what reading the \
+         text layer in the page's turned space produces",
+        size.width,
+        size.height
+    );
+    // 300dpi: the stored x range 10–55 becomes the vertical range 15.6–26.4pt
+    // measured down the page, and the stored y range 50–70 becomes 2.4–7.2pt
+    // across it.
+    for (got, want) in [
+        (bounds.left, 2.4),
+        (bounds.top, 15.6),
+        (bounds.right, 7.2),
+        (bounds.bottom, 26.4),
+    ] {
+        assert!(
+            (got - want).abs() < 0.05,
+            "{bounds:?} is not the quarter turn the renderer makes"
+        );
+    }
+}
+
+/// An empty query is not a scan, and the reader's view answers the same
+/// search the presenter's does — the same layer, through the same backend.
+#[test]
+fn the_reader_searches_the_same_text_the_presenter_does() {
+    let Some(_turn) = backend().map(|(turn, _)| turn) else {
+        return;
+    };
+    let document =
+        pulpit_render::djvu::DjvuDocument::open(&fixture("text.djvu")).expect("djvulibre is here");
+    let empty = pulpit_core::search::Query::new("", false, false);
+    let chunk = document.find_text(&empty, 0..3).unwrap();
+    assert!(chunk.hits.is_empty() && !chunk.truncated);
+
+    let query = pulpit_core::search::Query::new("world", false, false);
+    let chunk = document.find_text(&query, 0..3).unwrap();
+    let pages: Vec<_> = chunk.hits.iter().map(|hit| hit.page.0).collect();
+    assert_eq!(pages, vec![0, 1], "{:?}", chunk.hits);
+    assert_eq!((chunk.from_page, chunk.to_page), (0, 3));
 }

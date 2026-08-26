@@ -179,11 +179,6 @@ impl PageText {
         }
     }
 
-    /// How much memory this page's text is holding, for a bounded cache.
-    pub(crate) fn weight(&self) -> usize {
-        self.text.len() + self.utf16_offsets.len() * std::mem::size_of::<usize>()
-    }
-
     /// Every match on this page, without asking PDFium anything.
     ///
     /// The overwhelmingly common answer is "none", and that answer now costs
@@ -202,6 +197,21 @@ impl PageText {
     }
 }
 
+/// How much memory one cached page of text is holding.
+///
+/// A trait rather than a method because the cache below holds whatever a
+/// backend extracted — PDFium's characters, or DjVu's words and their boxes —
+/// and the budget is in bytes either way.
+pub(crate) trait Weigh {
+    fn weight(&self) -> usize;
+}
+
+impl Weigh for PageText {
+    fn weight(&self) -> usize {
+        self.text.len() + self.utf16_offsets.len() * std::mem::size_of::<usize>()
+    }
+}
+
 /// Extracted page text, bounded by total size rather than by page count.
 ///
 /// A deck of picture slides holds almost nothing; a book of dense pages fills
@@ -214,13 +224,13 @@ impl PageText {
 /// engine that has one document, a document and page for a backend that has
 /// several.
 #[derive(Debug)]
-pub(crate) struct PageTextCache<K> {
-    pages: std::collections::HashMap<K, std::sync::Arc<PageText>>,
+pub(crate) struct PageTextCache<K, V = PageText> {
+    pages: std::collections::HashMap<K, std::sync::Arc<V>>,
     weight: usize,
     budget: usize,
 }
 
-impl<K: std::hash::Hash + Eq> Default for PageTextCache<K> {
+impl<K: std::hash::Hash + Eq, V> Default for PageTextCache<K, V> {
     fn default() -> Self {
         PageTextCache {
             pages: std::collections::HashMap::new(),
@@ -231,12 +241,12 @@ impl<K: std::hash::Hash + Eq> Default for PageTextCache<K> {
     }
 }
 
-impl<K: std::hash::Hash + Eq> PageTextCache<K> {
-    pub(crate) fn get(&self, key: &K) -> Option<std::sync::Arc<PageText>> {
+impl<K: std::hash::Hash + Eq, V: Weigh> PageTextCache<K, V> {
+    pub(crate) fn get(&self, key: &K) -> Option<std::sync::Arc<V>> {
         self.pages.get(key).cloned()
     }
 
-    pub(crate) fn insert(&mut self, key: K, text: PageText) -> std::sync::Arc<PageText> {
+    pub(crate) fn insert(&mut self, key: K, text: V) -> std::sync::Arc<V> {
         let weight = text.weight();
         if self.weight.saturating_add(weight) > self.budget {
             self.clear();
@@ -268,28 +278,28 @@ impl<K: std::hash::Hash + Eq> PageTextCache<K> {
 
 /// Turn matches into hits, asking `quads` for the geometry of each one.
 ///
-/// The geometry is a closure so that a caller holding a cached [`PageText`]
-/// decides *when* to open the page: a page with no matches never needs one.
+/// The geometry is a closure so that a caller holding a cached page of text
+/// decides *when* to go and get it: a page with no matches never needs to be
+/// opened at all. It is also what lets a backend with a text layer of its own
+/// shape — DjVu, whose zones are boxes rather than character runs — produce
+/// the same hits from the same matcher (§59.2).
 pub(crate) fn hits_from_matches(
     page: PageIndex,
-    text: &PageText,
+    text: &str,
     found: &[TextMatch],
-    mut quads: impl FnMut(i32, i32) -> Vec<PageQuad>,
+    mut quads: impl FnMut(TextMatch) -> Vec<PageQuad>,
 ) -> Vec<Hit> {
     if found.is_empty() {
         return Vec::new();
     }
     // The context windows are cut from the page's own characters, so the
     // results list shows the document's words — ligatures, dashes and all.
-    let indexed = IndexedText::new(&text.text);
+    let indexed = IndexedText::new(text);
     found
         .iter()
         .enumerate()
         .map(|(ordinal, matched)| {
-            let geometry = match text.utf16_range(*matched) {
-                Some((start, length)) => quads(start, length),
-                None => Vec::new(),
-            };
+            let geometry = quads(*matched);
             Hit::from_indexed_text(
                 page,
                 HitSource::PageText,
@@ -300,6 +310,22 @@ pub(crate) fn hits_from_matches(
             )
         })
         .collect()
+}
+
+/// The same, for a PDFium text page, which addresses a match by the UTF-16
+/// range it occupies rather than by characters.
+pub(crate) fn hits_from_pdfium_matches(
+    page: PageIndex,
+    text: &PageText,
+    found: &[TextMatch],
+    mut quads: impl FnMut(i32, i32) -> Vec<PageQuad>,
+) -> Vec<Hit> {
+    hits_from_matches(page, &text.text, found, |matched| {
+        match text.utf16_range(matched) {
+            Some((start, length)) => quads(start, length),
+            None => Vec::new(),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ use crate::document::model::{
     AnnotationBeforeImage, AnnotationSummary, CompatibilityLevel, FormField, OpenDocumentInfo,
     SaveOptions, TextSelection, TextSelectionResult,
 };
-use crate::document::{DocumentBackend, DocumentError, Result};
+use crate::document::{limits, DocumentBackend, DocumentError, Result};
 use crate::pdf::{BackendDocumentId, NeverCancel, PdfBackend, RenderRequest};
 
 /// One open DjVu file, for the document worker.
@@ -185,14 +185,35 @@ impl DocumentBackend for DjvuDocument {
         Err(unsupported("have its text selected"))
     }
 
-    /// §59.2. A DjVu may well carry a text layer; this backend does not read
-    /// one yet, and says so rather than reporting no matches.
+    /// §59.2. The one operation on this list a DjVu can answer.
+    ///
+    /// It is the *same* search the presenter runs — the same text layer, read
+    /// through the same backend, matched by the same matcher — because the
+    /// reader and the render worker are two processes holding two handles to
+    /// one file, and a hit the presenter can highlight and the reader cannot
+    /// would be two answers to one question.
     fn find_text(
         &self,
-        _query: &pulpit_core::search::Query,
-        _pages: std::ops::Range<usize>,
+        query: &pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
     ) -> Result<pulpit_core::search::HitChunk> {
-        Err(unsupported("be searched"))
+        let mut chunk = pulpit_core::search::HitChunk {
+            from_page: pages.start,
+            to_page: pages.end,
+            ..Default::default()
+        };
+        if query.is_empty() {
+            return Ok(chunk);
+        }
+        chunk.hits = self
+            .backend
+            .find_text(self.handle, query, pages)
+            .map_err(|e| DocumentError::Backend(e.to_string()))?;
+        if chunk.hits.len() >= limits::MAX_HITS_PER_SEARCH {
+            chunk.hits.truncate(limits::MAX_HITS_PER_SEARCH);
+            chunk.truncated = true;
+        }
+        Ok(chunk)
     }
 
     fn write_to(&mut self, _destination: &Path, _options: SaveOptions) -> Result<u64> {

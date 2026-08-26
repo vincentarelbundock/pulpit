@@ -1398,7 +1398,7 @@ impl<'a> PdfiumDocument<'a> {
                     if text_page.is_null() {
                         return Ok(Vec::new());
                     }
-                    let hits = crate::pdf::search::hits_from_matches(
+                    let hits = crate::pdf::search::hits_from_pdfium_matches(
                         PageIndex(page),
                         &text,
                         &found,
@@ -1442,7 +1442,7 @@ impl<'a> PdfiumDocument<'a> {
                 }
                 let text = crate::pdf::search::PageText::extract(bindings, text_page);
                 let found = text.matches(query, limits::MAX_HITS_PER_SEARCH);
-                let hits = crate::pdf::search::hits_from_matches(
+                let hits = crate::pdf::search::hits_from_pdfium_matches(
                     PageIndex(page),
                     &text,
                     &found,

@@ -359,7 +359,7 @@ impl PdfiumBackend {
                     return Ok(Vec::new());
                 }
                 let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
-                let hits = crate::pdf::search::hits_from_matches(
+                let hits = crate::pdf::search::hits_from_pdfium_matches(
                     pulpit_core::page::PageIndex(page),
                     &text,
                     &found,
@@ -390,7 +390,7 @@ impl PdfiumBackend {
             let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
             let text = crate::pdf::search::PageText::extract(self.bindings.as_ref(), text_page);
             let found = text.matches(query, MAX_HITS_PER_SEARCH);
-            let hits = crate::pdf::search::hits_from_matches(
+            let hits = crate::pdf::search::hits_from_pdfium_matches(
                 pulpit_core::page::PageIndex(page),
                 &text,
                 &found,
