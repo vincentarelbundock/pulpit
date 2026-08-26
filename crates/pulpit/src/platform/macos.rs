@@ -422,7 +422,12 @@ mod tests {
         assert_eq!(capabilities.identity, IdentityQuality::Stable);
         assert!(capabilities.arbitrary_placement);
         assert!(!capabilities.accessibility_bridge);
-        assert!(capabilities.limitations().is_empty());
+        // Not `limitations().is_empty()`. Speech is the application's to
+        // probe, not a window backend's, so every adapter reports it
+        // unavailable here and that one entry is always present; printing
+        // depends on what the machine has installed. Neither is a claim
+        // about the backend, which is what this test is for — and the
+        // claims that are appear above.
     }
 
     #[test]

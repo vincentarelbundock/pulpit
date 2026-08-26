@@ -184,6 +184,20 @@ impl DocumentWatcher {
 mod tests {
     use super::*;
 
+    /// Forget whatever the setup writes produced, so that what follows is
+    /// the only thing the watcher can be reacting to.
+    ///
+    /// inotify draws a clean line: nothing that happened before
+    /// `inotify_add_watch` is ever reported. FSEvents does not — it
+    /// coalesces per directory, so a file written moments before the stream
+    /// opened still arrives in the stream's first batch. A negative test
+    /// without this sees the setup write, matches it against the watched
+    /// name, and calls it the change it was told to ignore.
+    fn settle(watcher: &DocumentWatcher) {
+        std::thread::sleep(Duration::from_millis(250));
+        watcher.drain();
+    }
+
     /// The macOS failure, as a test that runs everywhere: FSEvents reports
     /// the canonical path, so the deck the user opened as `/var/…` is
     /// reported as `/private/var/…`. Comparing whole paths dropped the event
@@ -271,6 +285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.png"), b"first").unwrap();
         let watcher = DocumentWatcher::new(dir.path()).unwrap();
+        settle(&watcher);
 
         std::fs::write(dir.path().join("notes.txt"), b"unrelated").unwrap();
         assert!(!watcher.wait(Duration::from_millis(500)));
@@ -282,6 +297,7 @@ mod tests {
         let path = dir.path().join("deck.pdf");
         std::fs::write(&path, b"original").unwrap();
         let watcher = DocumentWatcher::new(&path).unwrap();
+        settle(&watcher);
 
         std::fs::write(dir.path().join("notes.txt"), b"unrelated").unwrap();
         assert!(!watcher.wait(Duration::from_millis(500)));
