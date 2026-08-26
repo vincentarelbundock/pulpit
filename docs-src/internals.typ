@@ -1426,6 +1426,40 @@ uses compact subsets of that same model, so advertised keys cannot drift from
 input handling. Hardware aliases from presenter remotes are resolved
 separately and do not become visual clutter in the keyboard reference.
 
+Which surface a key belongs to is decided by one ordered list, the key
+ladder (`keyladder::LADDER`). Every press descends it top rung first —
+typing surfaces, held marks, the overview grid, the captured widget, the
+open panels and popups innermost first, the editor pages, a focused media
+overlay, the document viewer, reader fullscreen, and finally the keymap —
+and the first active rung to consume the press wins. A key reused across
+contexts is therefore a vocabulary, not a conflict: a digit arms a slide
+tool in presenter mode and a document tool in reader mode because only one
+of those rungs is ever active for the press. Escape needs no rules of its
+own; it closes the topmost open thing because the innermost surfaces sit on
+the highest rungs. The order is behaviour — moving a rung moves who wins a
+contested key — so it MUST stay in that one table, with the reasons written
+on the rungs, and never re-grow as scattered early returns. A shortcut that
+must fire while a text box holds the caret declares it on its action
+(`Action::reaches_captured`) and is honoured only under commanding
+modifiers, rather than being special-cased at the dispatch site.
+
+Modifiers reach the keymap as roles, not key caps. The event's raw Control
+and Command flags are folded by `InputPolicy::split_modifiers` into
+_primary_ — Command on macOS, Control elsewhere — and _control_, the
+Control key specifically on the one platform where that is a different key;
+one press never counts as both. Bindings are written against these roles,
+so `primary + Q` is ⌘Q on a Mac without a second keymap, and macOS Ctrl
+combinations stay free. Stored keymaps that spell the old conflated flag
+load as primary, which is what it always meant in practice.
+
+Two hardware-alias decisions are made knowingly. The volume, media and
+browser keys, and `F1`, resolve to navigation and blanking because presenter
+remotes emit them and identify themselves no further; a laptop's own volume
+keys therefore page the deck while pulpit is focused. The aliases sit on
+the ladder's bottom rung, apply only unmodified, and never appear in the
+reference. If this trade ever turns out wrong in rooms, the remedy is a
+setting that disables `Keymap::resolve_remote`, not per-device guessing.
+
 *Properties…* is one of its file commands, and it opens a dialog rather than a
 rail view: the rail holds per-page navigation, while what a document _is_ is
 one question about the whole file, asked once and closed. The answer is a

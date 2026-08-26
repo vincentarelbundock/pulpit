@@ -73,6 +73,17 @@ pub trait InputPolicy: Send + Sync {
 
     /// Should a press with these modifiers count as the primary modifier?
     fn is_primary(&self, control: bool, command: bool) -> bool;
+
+    /// Fold the toolkit's raw modifier flags into the two semantic ones:
+    /// `(primary, control)`.
+    ///
+    /// `control` and `command` are the physical Control and Command/logo
+    /// keys as the event reported them. On macOS the Command key is primary
+    /// and Control comes back separately, for the rare binding that means
+    /// that key specifically. Everywhere else the Control key *is* primary
+    /// — one press must never count as both — and the logo key belongs to
+    /// the desktop, so it is not pulpit's to interpret.
+    fn split_modifiers(&self, control: bool, command: bool) -> (bool, bool);
 }
 
 /// The portable implementation, parameterised by target at compile time.
@@ -154,6 +165,14 @@ impl InputPolicy for DesktopInput {
             control
         }
     }
+
+    fn split_modifiers(&self, control: bool, command: bool) -> (bool, bool) {
+        if MACOS {
+            (command, control)
+        } else {
+            (control, false)
+        }
+    }
 }
 
 /// Key names that read better than their raw spelling.
@@ -222,6 +241,19 @@ mod tests {
             assert_eq!(input.primary_label(), "Ctrl");
             assert!(input.is_primary(true, false));
             assert!(!input.is_primary(false, true));
+        }
+    }
+
+    #[test]
+    fn one_press_is_never_both_primary_and_control() {
+        let input = DesktopInput;
+        if MACOS {
+            assert_eq!(input.split_modifiers(false, true), (true, false));
+            assert_eq!(input.split_modifiers(true, false), (false, true));
+        } else {
+            assert_eq!(input.split_modifiers(true, false), (true, false));
+            // The logo key is the desktop's, not a primary modifier.
+            assert_eq!(input.split_modifiers(false, true), (false, false));
         }
     }
 

@@ -17,6 +17,7 @@ mod designer_view;
 mod display;
 mod doc;
 mod form_flow;
+mod keyladder;
 mod latency;
 mod layout;
 mod layout_renderer;

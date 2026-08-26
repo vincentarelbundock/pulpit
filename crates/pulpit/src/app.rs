@@ -119,12 +119,17 @@ pub enum Message {
     /// An authoritative topology snapshot gathered off the event-loop thread
     /// after a native change hint (or the slow fallback poll).
     TopologySnapshot(pulpit_display::DisplaySnapshot),
+    /// A key went down. `control` and `command` are the physical keys as
+    /// the event reported them; they become the semantic primary/control
+    /// pair in the handler, where the platform is known
+    /// (`InputPolicy::split_modifiers`).
     Key {
         key: Option<String>,
         text: Option<String>,
         scancode: Option<u32>,
         shift: bool,
         control: bool,
+        command: bool,
         alt: bool,
         captured: bool,
     },
@@ -255,11 +260,12 @@ pub enum Message {
     SetBlankColor(crate::settings::BlankColor),
     SetMotion(crate::platform::MotionSetting),
     /// A key came up. Only interactive overlays care; pulpit's own
-    /// bindings all act on the press.
+    /// bindings all act on the press. Raw modifier flags, as for `Key`.
     KeyReleased {
         key: String,
         shift: bool,
         control: bool,
+        command: bool,
     },
     Wheel {
         x: f32,
@@ -2315,7 +2321,11 @@ impl App {
                 text: text.map(|value| value.to_string()),
                 scancode: physical_scancode(&physical_key),
                 shift: modifiers.shift(),
-                control: modifiers.command() || modifiers.control(),
+                // The raw facts, not a platform reading of them: this
+                // closure has no `self`, and folding Command into Control
+                // here is what once made ⌘ and ⌃ indistinguishable.
+                control: modifiers.control(),
+                command: modifiers.logo(),
                 alt: modifiers.alt(),
                 captured: status == iced::event::Status::Captured,
             }),
@@ -2343,7 +2353,8 @@ impl App {
             }) => describe_key(&key).map(|key| Message::KeyReleased {
                 key,
                 shift: modifiers.shift(),
-                control: modifiers.command() || modifiers.control(),
+                control: modifiers.control(),
+                command: modifiers.logo(),
             }),
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
                 if status == iced::event::Status::Captured {
@@ -2804,265 +2815,37 @@ impl App {
                 scancode,
                 shift,
                 control,
+                command,
                 alt,
                 captured,
             } => {
-                if self.annotations.is_typing() {
-                    match key.as_deref() {
-                        Some(key) if control && key.eq_ignore_ascii_case("v") => {
-                            let Some(target) = self
-                                .annotations
-                                .typing_index()
-                                .and_then(|index| self.annotations.texts.get(index))
-                                .map(|mark| mark.id)
-                            else {
-                                return Task::none();
-                            };
-                            return iced::clipboard::read()
-                                .map(move |value| Message::PasteAnnotationText { target, value });
-                        }
-                        Some("Enter") if control => {
-                            self.annotations.type_text("\n");
-                        }
-                        Some("Enter") => {
-                            let finished = self.annotations.finish_text();
-                            self.commit_presenter_text(finished);
-                        }
-                        // Escape is the way out of a label, and the way out
-                        // makes nothing — the same answer document mode gives
-                        // (§8.5). Enter is how a label is kept.
-                        Some("Escape") => {
-                            self.annotations.cancel_text();
-                        }
-                        Some("Backspace") => {
-                            self.annotations.backspace_text();
-                        }
-                        _ if !control => {
-                            if let Some(value) = text.as_deref() {
-                                self.annotations.type_text(value);
-                            }
-                        }
-                        _ => {}
+                // The raw flags become the semantic pair once, here, so
+                // every rung and the keymap agree on what was held.
+                let (primary, control) = self.platform.input.split_modifiers(control, command);
+                let press = crate::keyladder::KeyPress {
+                    key: key.as_deref(),
+                    text: text.as_deref(),
+                    scancode,
+                    mods: crate::settings::Mods {
+                        primary,
+                        shift,
+                        alt,
+                        control,
+                    },
+                    captured,
+                };
+                // Top rung first; the first active rung to consume the
+                // press wins. The order — and the reasons for it — are
+                // `keyladder::LADDER`, not anything in this loop.
+                for rung in crate::keyladder::LADDER {
+                    if !self.rung_active(rung, &press) {
+                        continue;
                     }
-                    return Task::none();
-                }
-                // A mark being written owns the keyboard while the caret is in
-                // it: the box on the page takes the typing itself, and every
-                // key that reached the bindings from here would be a document
-                // shortcut fired by someone writing a word — "n" for the next
-                // page, Home for the first one. Escape is the way out, and
-                // cancelling is not a mutation (§8.5).
-                if self.composing_mark.is_some() {
-                    if key.as_deref() == Some("Escape") {
-                        self.composing_mark = None;
-                    }
-                    return Task::none();
-                }
-                // Marks the presenter's band is holding answer to delete and
-                // to escape, the same two keys document mode's selection
-                // answers to (§8.4). Only while something is held, so both
-                // keys keep every other meaning they have the rest of the
-                // time.
-                if !self.annotations.selected.is_empty() {
-                    match key.as_deref() {
-                        Some("Delete") | Some("Backspace") => {
-                            self.delete_held_marks();
-                            return Task::none();
-                        }
-                        Some("Escape") => {
-                            self.annotations.clear_selection();
-                            return Task::none();
-                        }
-                        _ => {}
-                    }
-                }
-                // The overview is a grid, so while it is open the arrow keys
-                // move about that grid: left and right along a row, up and
-                // down between rows. Its scrollable may capture the vertical
-                // arrows before this global subscription sees them, but the
-                // grid still owns navigation while it covers the presenter.
-                // Keys it does not recognise continue to the captured-widget
-                // check and the ordinary keymap.
-                if self.overview {
-                    if let Some(task) = self.overview_key(key.as_deref()) {
+                    if let Some(task) = self.on_rung(rung, &press) {
                         return task;
                     }
                 }
-                // A widget that captured the event owns the keyboard. The
-                // two sidebar selectors are the narrow exception: Ctrl-B in
-                // Search must still reach Outline, and the Search binding
-                // must close the Search tab it opened. Ordinary text input
-                // and every other shortcut remain owned by the widget.
-                if captured {
-                    let mods = crate::settings::Mods::new(control, shift, alt);
-                    let action = self
-                        .settings
-                        .keymap
-                        .resolve_with_mods(key.as_deref(), mods, scancode)
-                        .or_else(|| crate::settings::Keymap::resolve_remote(key.as_deref(), mods));
-                    if self.search_workspace
-                        && self.uses_document_viewer()
-                        && action == Some(Action::ToggleOutline)
-                    {
-                        return self.on_action(Action::ToggleOutline);
-                    }
-                    if self.search_workspace && action == Some(Action::FocusSearch) {
-                        return self.on_action(Action::FocusSearch);
-                    }
-                    return Task::none();
-                }
-                if key.as_deref() == Some("Escape") && self.confirm_reset_colors {
-                    self.confirm_reset_colors = false;
-                    return Task::none();
-                }
-                // Escape declines what the document asked for. Safe as a
-                // default: declining leaves the reader exactly where they
-                // already are.
-                if key.as_deref() == Some("Escape") && self.pending_form_goto.is_some() {
-                    self.pending_form_goto = None;
-                    return Task::none();
-                }
-                // And Escape declines the save under review, for the same
-                // reason: writing no file leaves everything as it was.
-                if key.as_deref() == Some("Escape") && self.pending_save_review.is_some() {
-                    self.pending_save_review = None;
-                    self.cancel_signing_if_saving_first();
-                    return Task::none();
-                }
-                // A cue going off is acknowledged by Escape as well as by the
-                // clock: hands are not always on the mouse. Dismissing comes
-                // before closing the popup, since the marker is the thing
-                // demanding attention.
-                if key.as_deref() == Some("Escape") && self.alarm_controls.ringing.is_some() {
-                    self.alarm_controls.dismiss();
-                    return Task::none();
-                }
-                // And the timer's overrun, which pulses for the same reason and
-                // is answered the same way.
-                if key.as_deref() == Some("Escape") && self.timer_controls.overtime_since.is_some()
-                {
-                    self.timer_controls.dismiss_overtime();
-                    return Task::none();
-                }
-                if key.as_deref() == Some("Escape") && self.alarm_controls.open {
-                    self.alarm_controls.open = false;
-                    return Task::none();
-                }
-                if key.as_deref() == Some("Escape") && self.timer_controls.open {
-                    self.timer_controls.open = false;
-                    return Task::none();
-                }
-                // A rectangle drawn on the page is the innermost thing of all,
-                // and Escape is how a rectangle is taken back everywhere else
-                // it can be drawn. It leaves the tool armed: the reader who
-                // mis-drew one meant to draw another.
-                if key.as_deref() == Some("Escape")
-                    && self.reader.controls().crop.takes_the_pointer()
-                {
-                    return self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop);
-                }
-                if key.as_deref() == Some("Escape") && self.search_workspace {
-                    return self.close_search(true);
-                }
-                // The editor owns the keyboard while it is open: presenter
-                // shortcuts must not blank the audience while someone is
-                // typing a layout name.
-                // Escape backs out of whatever is open, before any binding is
-                // consulted: it is the one key everyone tries first.
-                // An open annotation panel is the innermost thing on screen,
-                // so it is what Escape closes first — and closing it must not
-                // also cancel the preview behind it.
-                if key.as_deref() == Some("Escape")
-                    && (self.annotation_controls.overflow
-                        || self.annotation_controls.open.is_some())
-                {
-                    self.annotation_controls.overflow = false;
-                    self.annotation_controls.open = None;
-                    return Task::none();
-                }
-                if key.as_deref() == Some("Escape")
-                    && (self.shortcuts_open
-                        || self.about_open
-                        || self.properties_open
-                        || self.menu_open
-                        || self.audience_start_menu_open
-                        || self.overview)
-                {
-                    self.shortcuts_open = false;
-                    self.about_open = false;
-                    self.properties_open = false;
-                    self.menu_open = false;
-                    self.audience_start_menu_open = false;
-                    // Backing out of the overview returns to the slide that
-                    // was showing, without committing a jump: the grid moves
-                    // the preview, so abandoning it is what undoes the look
-                    // around.
-                    let was_overview = self.overview;
-                    self.overview = false;
-                    if was_overview {
-                        return self.update(Message::Nav(Nav::CancelPreview));
-                    }
-                    return Task::none();
-                }
-                if back_to_presenter_key(self.page, key.as_deref(), self.layout_dialog.is_some()) {
-                    return self.update(Message::ShowPresenter);
-                }
-                if self.page != crate::designer::Page::Presenter {
-                    return self.editor_key(key, shift, control);
-                }
-                // A focused overlay owns every key. Escape is interpreted by
-                // the overlay router as releasing focus; no press falls
-                // through to the application keymap while it owns input.
-                if self.input_router.focused().is_some() {
-                    if let Some(name) = key.as_deref() {
-                        let routed = self.input_router.key_pressed(name, None);
-                        match routed {
-                            crate::media::Routed::ToOverlay { .. } => {
-                                self.deliver(routed);
-                                return Task::none();
-                            }
-                            // Escape has already given the focus back inside
-                            // the router; nothing else needs to happen.
-                            crate::media::Routed::ReleaseFocus => return Task::none(),
-                            _ => return Task::none(),
-                        }
-                    }
-                    return Task::none();
-                }
-                // Reading a document, Page Down means the next screenful of
-                // this document — not the next slide. The presenter's
-                // bindings are unchanged and mean what they always did the
-                // moment the reader is closed again.
-                if let Some(task) =
-                    self.document_key(key.as_deref(), text.as_deref(), control, shift)
-                {
-                    return task;
-                }
-                // The last rung of the Escape ladder: leaving fullscreen.
-                // Fullscreen takes the band away, and the way back to the
-                // menu goes with it, so the reader who does not know `f` has
-                // only the `?` reference to find it in — and Escape is the
-                // key they will try first. Last rather than first because
-                // everything above wanted it more: a marquee, an open panel,
-                // a focused overlay, a choice list in a form. It leaves the
-                // layout mounted, exactly as `f` does; the tree behind
-                // fullscreen is the Reader's own, so this reveals the band
-                // and the rail rather than switching layouts underneath
-                // somebody.
-                if key.as_deref() == Some("Escape") && self.reader_fullscreen {
-                    self.reader_fullscreen = false;
-                    return Task::none();
-                }
-                let mods = crate::settings::Mods::new(control, shift, alt);
-                match self
-                    .settings
-                    .keymap
-                    .resolve_with_mods(key.as_deref(), mods, scancode)
-                    .or_else(|| crate::settings::Keymap::resolve_remote(key.as_deref(), mods))
-                {
-                    Some(action) => self.update(Message::Do(action)),
-                    None => Task::none(),
-                }
+                Task::none()
             }
             Message::PasteAnnotationText { target, value } => {
                 let still_editing_target = self
@@ -3752,6 +3535,7 @@ impl App {
                 key,
                 shift,
                 control,
+                command,
             } => {
                 if self.input_router.focused().is_some() {
                     let routed = self.input_router.key_released(&key);
@@ -3760,13 +3544,16 @@ impl App {
                 // A field told a key went down is told it came up: the engine
                 // tracks the key's state, and a press with no release leaves
                 // it believing the key is still held. Only where a field has
-                // the keyboard, so an ordinary deck is untouched.
+                // the keyboard, so an ordinary deck is untouched. The engine
+                // hears the primary modifier as its control flag, exactly as
+                // the press path tells it (`form_key`).
                 if self.reader.form_has_keyboard() {
                     if let Some(named) = released_form_key(&key) {
                         use pulpit_render::document::protocol::{FormInputEvent, KeyModifiers};
+                        let (primary, _) = self.platform.input.split_modifiers(control, command);
                         self.ask_form_key(FormInputEvent::KeyUp {
                             key: named,
-                            modifiers: KeyModifiers::new(shift, control),
+                            modifiers: KeyModifiers::new(shift, primary),
                         });
                     }
                 }
@@ -4440,14 +4227,15 @@ impl App {
         // The toolkit reports the question-mark key as Shift+/. The help is
         // teaching the character printed on the keypress, not its event
         // representation.
-        if key == "/" && mods.shift && !mods.ctrl && !mods.alt {
+        if key == "/" && mods.shift && !mods.primary && !mods.control && !mods.alt {
             return Some("?".into());
         }
         let mut modifiers = Vec::new();
-        // `ctrl` in a keymap means "the modifier this desktop uses for
-        // application commands", which is Command on macOS.
-        if mods.ctrl {
+        if mods.primary {
             modifiers.push(Modifier::Primary);
+        }
+        if mods.control {
+            modifiers.push(Modifier::Control);
         }
         if mods.alt {
             modifiers.push(Modifier::Alt);
@@ -4537,13 +4325,252 @@ impl App {
     ///
     /// Standard shortcuts, plus the arrow-key divider resizing the
     /// specification asks for: 1% per press, 5% with shift.
-    fn editor_key(&mut self, key: Option<String>, shift: bool, control: bool) -> Task<Message> {
+    /// Is this context on screen and able to claim a press?
+    ///
+    /// The claim is separate from the handling so the ladder can be walked —
+    /// and reasoned about — without running anything. `press` is consulted
+    /// only by the rung whose activity is a fact about the event rather than
+    /// about the application (a widget having captured it).
+    fn rung_active(
+        &self,
+        rung: crate::keyladder::Rung,
+        press: &crate::keyladder::KeyPress,
+    ) -> bool {
+        use crate::keyladder::Rung;
+        match rung {
+            Rung::AnnotationTyping => self.annotations.is_typing(),
+            Rung::ComposingMark => self.composing_mark.is_some(),
+            Rung::HeldMarks => !self.annotations.selected.is_empty(),
+            Rung::OverviewGrid => self.overview,
+            Rung::CapturedWidget => press.captured,
+            Rung::ConfirmResetColors => self.confirm_reset_colors,
+            Rung::PendingFormGoto => self.pending_form_goto.is_some(),
+            Rung::PendingSaveReview => self.pending_save_review.is_some(),
+            Rung::AlarmRinging => self.alarm_controls.ringing.is_some(),
+            Rung::TimerOvertime => self.timer_controls.overtime_since.is_some(),
+            Rung::AlarmPopup => self.alarm_controls.open,
+            Rung::TimerPopup => self.timer_controls.open,
+            Rung::CropMarquee => self.reader.controls().crop.takes_the_pointer(),
+            Rung::SearchWorkspace => self.search_workspace,
+            Rung::AnnotationPanel => {
+                self.annotation_controls.overflow || self.annotation_controls.open.is_some()
+            }
+            Rung::PresenterPopups => {
+                self.shortcuts_open
+                    || self.about_open
+                    || self.properties_open
+                    || self.menu_open
+                    || self.audience_start_menu_open
+                    || self.overview
+            }
+            Rung::EditorPages => self.page != crate::designer::Page::Presenter,
+            Rung::MediaOverlay => self.input_router.focused().is_some(),
+            Rung::DocumentViewer => self.document_viewer_live(),
+            Rung::ReaderFullscreen => self.reader_fullscreen,
+            Rung::Keymap => true,
+        }
+    }
+
+    /// One rung's answer to a press: `Some` consumes the key and ends the
+    /// descent, `None` lets it continue down `keyladder::LADDER`. Why each
+    /// rung sits where it does is documented on the rung itself.
+    fn on_rung(
+        &mut self,
+        rung: crate::keyladder::Rung,
+        press: &crate::keyladder::KeyPress,
+    ) -> Option<Task<Message>> {
+        use crate::keyladder::Rung;
+        let key = press.key;
+        let mods = press.mods;
+        match rung {
+            Rung::AnnotationTyping => {
+                match key {
+                    Some(key) if mods.primary && key.eq_ignore_ascii_case("v") => {
+                        let Some(target) = self
+                            .annotations
+                            .typing_index()
+                            .and_then(|index| self.annotations.texts.get(index))
+                            .map(|mark| mark.id)
+                        else {
+                            return Some(Task::none());
+                        };
+                        return Some(
+                            iced::clipboard::read()
+                                .map(move |value| Message::PasteAnnotationText { target, value }),
+                        );
+                    }
+                    Some("Enter") if mods.primary => {
+                        self.annotations.type_text("\n");
+                    }
+                    Some("Enter") => {
+                        let finished = self.annotations.finish_text();
+                        self.commit_presenter_text(finished);
+                    }
+                    // Escape is the way out of a label, and the way out
+                    // makes nothing — the same answer document mode gives
+                    // (§8.5). Enter is how a label is kept.
+                    Some("Escape") => {
+                        self.annotations.cancel_text();
+                    }
+                    Some("Backspace") => {
+                        self.annotations.backspace_text();
+                    }
+                    // A chord is a command wherever it lands, so it must
+                    // not also type. Shift is not a chord, and neither is
+                    // bare Alt: AltGr arrives as Alt with text on some
+                    // layouts, and that text is typing.
+                    _ if !mods.primary && !mods.control => {
+                        if let Some(value) = press.text {
+                            self.annotations.type_text(value);
+                        }
+                    }
+                    _ => {}
+                }
+                Some(Task::none())
+            }
+            Rung::ComposingMark => {
+                if key == Some("Escape") {
+                    self.composing_mark = None;
+                }
+                Some(Task::none())
+            }
+            Rung::HeldMarks => match key {
+                Some("Delete") | Some("Backspace") => {
+                    self.delete_held_marks();
+                    Some(Task::none())
+                }
+                Some("Escape") => {
+                    self.annotations.clear_selection();
+                    Some(Task::none())
+                }
+                _ => None,
+            },
+            Rung::OverviewGrid => self.overview_key(key),
+            Rung::CapturedWidget => {
+                // The widget owns the keyboard. The exception is the action
+                // class that declares it reaches captured widgets
+                // (`Action::reaches_captured`), and only under commanding
+                // modifiers, so typing is never a shortcut: Ctrl+B in the
+                // search box must still reach the outline, and Ctrl+F must
+                // close the search tab it opened.
+                let action = self
+                    .settings
+                    .keymap
+                    .resolve_with_mods(key, mods, press.scancode)
+                    .or_else(|| crate::settings::Keymap::resolve_remote(key, mods));
+                match action {
+                    Some(action) if action.reaches_captured() && mods.commands() => {
+                        Some(self.on_action(action))
+                    }
+                    _ => Some(Task::none()),
+                }
+            }
+            Rung::ConfirmResetColors => (key == Some("Escape")).then(|| {
+                self.confirm_reset_colors = false;
+                Task::none()
+            }),
+            // Escape declines what the document asked for. Safe as a
+            // default: declining leaves the reader exactly where they
+            // already are.
+            Rung::PendingFormGoto => (key == Some("Escape")).then(|| {
+                self.pending_form_goto = None;
+                Task::none()
+            }),
+            // And Escape declines the save under review, for the same
+            // reason: writing no file leaves everything as it was.
+            Rung::PendingSaveReview => (key == Some("Escape")).then(|| {
+                self.pending_save_review = None;
+                self.cancel_signing_if_saving_first();
+                Task::none()
+            }),
+            Rung::AlarmRinging => (key == Some("Escape")).then(|| {
+                self.alarm_controls.dismiss();
+                Task::none()
+            }),
+            Rung::TimerOvertime => (key == Some("Escape")).then(|| {
+                self.timer_controls.dismiss_overtime();
+                Task::none()
+            }),
+            Rung::AlarmPopup => (key == Some("Escape")).then(|| {
+                self.alarm_controls.open = false;
+                Task::none()
+            }),
+            Rung::TimerPopup => (key == Some("Escape")).then(|| {
+                self.timer_controls.open = false;
+                Task::none()
+            }),
+            Rung::CropMarquee => (key == Some("Escape"))
+                .then(|| self.on_read_command(crate::widgets::event::ReadCommand::CancelCrop)),
+            Rung::SearchWorkspace => (key == Some("Escape")).then(|| self.close_search(true)),
+            Rung::AnnotationPanel => (key == Some("Escape")).then(|| {
+                self.annotation_controls.overflow = false;
+                self.annotation_controls.open = None;
+                Task::none()
+            }),
+            Rung::PresenterPopups => (key == Some("Escape")).then(|| {
+                self.shortcuts_open = false;
+                self.about_open = false;
+                self.properties_open = false;
+                self.menu_open = false;
+                self.audience_start_menu_open = false;
+                // Backing out of the overview returns to the slide that
+                // was showing, without committing a jump: the grid moves
+                // the preview, so abandoning it is what undoes the look
+                // around.
+                let was_overview = self.overview;
+                self.overview = false;
+                if was_overview {
+                    return self.update(Message::Nav(Nav::CancelPreview));
+                }
+                Task::none()
+            }),
+            Rung::EditorPages => {
+                if back_to_presenter_key(self.page, key, self.layout_dialog.is_some()) {
+                    return Some(self.update(Message::ShowPresenter));
+                }
+                Some(self.editor_key(key, mods))
+            }
+            Rung::MediaOverlay => {
+                if let Some(name) = key {
+                    let routed = self.input_router.key_pressed(name, None);
+                    // Escape has already given the focus back inside the
+                    // router; only a routed key still has to be delivered.
+                    if matches!(routed, crate::media::Routed::ToOverlay { .. }) {
+                        self.deliver(routed);
+                    }
+                }
+                Some(Task::none())
+            }
+            Rung::DocumentViewer => self.document_key(key, press.text, mods.primary, mods.shift),
+            Rung::ReaderFullscreen => (key == Some("Escape")).then(|| {
+                self.reader_fullscreen = false;
+                Task::none()
+            }),
+            Rung::Keymap => self
+                .settings
+                .keymap
+                .resolve_with_mods(key, mods, press.scancode)
+                .or_else(|| crate::settings::Keymap::resolve_remote(key, mods))
+                .map(|action| self.update(Message::Do(action))),
+        }
+    }
+
+    /// Is a Reader layout on screen with a document open? The document
+    /// viewer's ladder rung and the reader-only actions both hang off this
+    /// one fact.
+    fn document_viewer_live(&self) -> bool {
+        self.reader.is_open()
+            && crate::layout::PrimaryViewer::of(&self.active_layout)
+                == crate::layout::PrimaryViewer::Document
+    }
+
+    fn editor_key(&mut self, key: Option<&str>, mods: crate::settings::Mods) -> Task<Message> {
         let Some(key) = key else { return Task::none() };
         use crate::designer::Msg;
 
         // The library page has a dialog of its own to dismiss.
         if self.page == crate::designer::Page::Library {
-            return match key.as_str() {
+            return match key {
                 "Escape" => {
                     self.layout_dialog = None;
                     Task::none()
@@ -4555,7 +4582,8 @@ impl App {
             };
         }
 
-        let message = match (key.as_str(), control, shift) {
+        let shift = mods.shift;
+        let message = match (key, mods.primary, shift) {
             ("z", true, false) | ("Z", true, false) => Some(Msg::Undo),
             ("z", true, true) | ("Z", true, true) | ("y", true, _) => Some(Msg::Redo),
             ("s", true, _) => Some(Msg::Save),
@@ -7313,14 +7341,16 @@ impl App {
         &mut self,
         key: Option<&str>,
         text: Option<&str>,
-        control: bool,
+        primary: bool,
         shift: bool,
     ) -> Option<Task<Message>> {
         use pulpit_render::document::protocol::{FormInputEvent, FormKey, KeyModifiers};
 
         // What the field is told was held down. Shift is what turns an arrow
         // into a selection, which is what a copy out of the field then reads.
-        let modifiers = KeyModifiers::new(shift, control);
+        // The engine's control flag means "the commanding modifier", which
+        // is the primary one: ⌘C in a macOS field is a copy.
+        let modifiers = KeyModifiers::new(shift, primary);
 
         // Ctrl-anything belongs to the field while it owns the keyboard. The
         // clipboard combinations have local meanings; every other modified
@@ -7329,7 +7359,7 @@ impl App {
         // clipboard of its own — it has `FORM_GetSelectedText`,
         // `FORM_ReplaceSelection` and `FORM_SelectAllText`, and the host is
         // expected to be the clipboard — so this is where the two are joined.
-        if control {
+        if primary {
             if self.reader.form_holds_the_caret() {
                 if let Some(task) = self.form_clipboard_key(key) {
                     return Some(task);
@@ -8133,18 +8163,16 @@ impl App {
         &mut self,
         key: Option<&str>,
         text: Option<&str>,
-        control: bool,
+        primary: bool,
         shift: bool,
     ) -> Option<Task<Message>> {
         use crate::widgets::event::ReadCommand;
         use pulpit_core::annotation::AnnotationTool;
 
-        if !self.reader.is_open()
-            || crate::layout::PrimaryViewer::of(&self.active_layout)
-                != crate::layout::PrimaryViewer::Document
-        {
-            return None;
-        }
+        // Whether the viewer is on screen at all is the ladder's question
+        // (`rung_active`, via `document_viewer_live`); this method is only
+        // reached when it is.
+        //
         // The calendar takes Escape first, because Escape closes the nearest
         // open thing and a calendar over a field is nearer than anything else.
         if key == Some("Escape") && self.reader.date_picker().is_some() {
@@ -8184,7 +8212,7 @@ impl App {
         //
         // Only where there is a form: on a deck of slides Tab stays what the
         // keymap says it is.
-        if !control && key == Some("Tab") && self.reader.has_form() {
+        if !primary && key == Some("Tab") && self.reader.has_form() {
             if let Some((page, name)) = self.reader.field_to_focus(!shift) {
                 return Some(self.on_read_command(ReadCommand::GoToField { page, name }));
             }
@@ -8197,7 +8225,7 @@ impl App {
         // the keymap's — which is to say, the next slide. Forwarded as the
         // character PDFium's own button handler acts on, not as a synthesised
         // click on a widget whose position this layer would have to guess.
-        if !control && key == Some("Space") {
+        if !primary && key == Some("Space") {
             use pulpit_render::document::FieldKind;
             if matches!(
                 self.reader.focused_field_kind(),
@@ -8214,7 +8242,7 @@ impl App {
         // the toolbar or global keymap (§8.6). This comes before everything,
         // including Page Down, Escape and Ctrl-Z.
         if self.reader.form_has_keyboard() {
-            if let Some(task) = self.form_key(key, text, control, shift) {
+            if let Some(task) = self.form_key(key, text, primary, shift) {
                 return Some(task);
             }
         }
@@ -8243,7 +8271,7 @@ impl App {
         // History, on the keys every editor on the machine uses for it. These
         // were toolbar buttons only, which meant the one action a reader takes
         // most often was the one they had to reach for the mouse to take.
-        if control && key.eq_ignore_ascii_case("z") {
+        if primary && key.eq_ignore_ascii_case("z") {
             let command = if shift {
                 ReadCommand::Redo
             } else {
@@ -8253,7 +8281,7 @@ impl App {
         }
         // The rest are single keys, so a modifier means the press belongs to
         // some other binding and not to the toolbar.
-        if control {
+        if primary {
             return None;
         }
 

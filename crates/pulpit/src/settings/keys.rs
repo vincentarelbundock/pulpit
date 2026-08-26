@@ -302,6 +302,21 @@ impl Action {
             Action::Quit => "Quit",
         }
     }
+
+    /// Does this action's shortcut still fire while a widget owns the
+    /// keyboard?
+    ///
+    /// A text box that has the caret owns nearly every key — that is what
+    /// typing is. The two sidebar selectors are the standing exception:
+    /// Ctrl+B must reach the outline and Ctrl+F must reach — and close —
+    /// the search from inside the search box itself, or the key that opened
+    /// the pane could never toggle it. This is a property of the action, not
+    /// a special case at the dispatch site, so the next such shortcut is a
+    /// one-line change here. It only ever applies to a press whose modifiers
+    /// [`Mods::commands`]: a bare letter in a text box is a letter.
+    pub fn reaches_captured(self) -> bool {
+        matches!(self, Action::ToggleOutline | Action::FocusSearch)
+    }
 }
 
 /// The modifiers held down with a key.
@@ -310,28 +325,42 @@ impl Action {
 /// `"CtrlShiftZ"` spelling could not express modifiers structurally, and — worse
 /// — it gave resolution no way to tell a modifier that is load-bearing from
 /// one that is incidental. See [`Keymap::resolve_with_mods`].
+///
+/// Modifiers are named by role, not by key cap, exactly as
+/// `crate::platform::input::Modifier` names them: `primary` is the modifier
+/// this desktop commands applications with — Command on macOS, Control
+/// elsewhere — and `control` is the Control key specifically, on the one
+/// platform where that is a different key. The event's raw flags are folded
+/// into these two by `InputPolicy::split_modifiers` before they reach the
+/// keymap, so a binding written once means the conventional thing on every
+/// desktop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Mods {
-    pub ctrl: bool,
+    /// A stored keymap from before the rename spells this field `ctrl`. It
+    /// always meant "the modifier applications command with" — resolution
+    /// accepted Command as well as Control — so it loads as `primary`
+    /// unchanged.
+    #[serde(alias = "ctrl")]
+    pub primary: bool,
     pub shift: bool,
     pub alt: bool,
+    /// The Control key itself, where it is not the primary modifier. Always
+    /// false on Windows and Linux: one press must never count as both.
+    pub control: bool,
 }
 
 impl Mods {
     pub const NONE: Mods = Mods {
-        ctrl: false,
+        primary: false,
         shift: false,
         alt: false,
+        control: false,
     };
 
-    pub fn new(ctrl: bool, shift: bool, alt: bool) -> Self {
-        Mods { ctrl, shift, alt }
-    }
-
-    pub fn ctrl() -> Self {
+    pub fn primary() -> Self {
         Mods {
-            ctrl: true,
+            primary: true,
             ..Mods::NONE
         }
     }
@@ -343,18 +372,29 @@ impl Mods {
         }
     }
 
-    pub fn ctrl_shift() -> Self {
+    pub fn primary_shift() -> Self {
         Mods {
-            ctrl: true,
+            primary: true,
             shift: true,
-            alt: false,
+            ..Mods::NONE
         }
+    }
+
+    /// A press that is a command, not typing: at least one non-shift
+    /// modifier is down. Only these may reach a binding while a widget owns
+    /// the keyboard — a bare or merely shifted key inside a text box is a
+    /// character being written, never a shortcut.
+    pub fn commands(self) -> bool {
+        self.primary || self.alt || self.control
     }
 
     fn prefix(self) -> String {
         let mut out = String::new();
-        if self.ctrl {
+        if self.primary {
             out.push_str("Ctrl+");
+        }
+        if self.control {
+            out.push_str("Control+");
         }
         if self.alt {
             out.push_str("Alt+");
@@ -446,7 +486,9 @@ impl KeyBinding {
             match stripped {
                 Some((prefix, tail)) if !tail.is_empty() => {
                     match prefix {
-                        "Ctrl" | "Control" => mods.ctrl = true,
+                        // The legacy spelling predates the macOS split, so
+                        // it can only have meant the primary modifier.
+                        "Ctrl" | "Control" => mods.primary = true,
                         "Shift" => mods.shift = true,
                         _ => mods.alt = true,
                     }
@@ -522,12 +564,12 @@ impl From<KeymapWire> for Keymap {
                 *binding = KeyBinding::named("/");
             }
             if *action == Action::ToggleAudienceFullscreen
-                && *binding == KeyBinding::named_with("f", Mods::ctrl())
+                && *binding == KeyBinding::named_with("f", Mods::primary())
             {
                 *binding = KeyBinding::named("f");
             }
         }
-        let ctrl_f = KeyBinding::named_with("f", Mods::ctrl());
+        let ctrl_f = KeyBinding::named_with("f", Mods::primary());
         if !bindings.iter().any(|(binding, _)| *binding == ctrl_f) {
             bindings.push((ctrl_f, Action::FocusSearch));
         }
@@ -591,25 +633,25 @@ impl Default for Keymap {
                 // with, so it takes the digit after them.
                 named("7", Action::AnnotatePointer),
                 // Editing convention first, then the familiar Vim undo.
-                with("z", Mods::ctrl(), Action::UndoAnnotation),
+                with("z", Mods::primary(), Action::UndoAnnotation),
                 named("u", Action::UndoAnnotation),
-                with("z", Mods::ctrl_shift(), Action::RedoAnnotation),
+                with("z", Mods::primary_shift(), Action::RedoAnnotation),
                 named("c", Action::ClearAnnotations),
                 named("v", Action::ToggleAnnotationAudience),
                 // Anything that leaves the deck — opening, reloading, quitting,
                 // resizing the audience window — takes the primary modifier,
                 // as it does in every other application. Quit especially: a
                 // bare "q" next to "w" is a talk ended by a typo.
-                with("o", Mods::ctrl(), Action::OpenDocument),
-                with("p", Mods::ctrl(), Action::Print),
+                with("o", Mods::primary(), Action::OpenDocument),
+                with("p", Mods::primary(), Action::Print),
                 // Ctrl+F and "/" find; F3 and Shift+F3 step through matches.
                 // Iced reports the slash character as "/", so the binding
                 // must use the character rather than the key-cap name.
                 // Ctrl+B for the side rail, as every editor and reader with a
                 // sidebar has it. Bare "b" is not free — and would be a
                 // blanked screen in the middle of a talk if it were taken.
-                with("b", Mods::ctrl(), Action::ToggleOutline),
-                with("f", Mods::ctrl(), Action::FocusSearch),
+                with("b", Mods::primary(), Action::ToggleOutline),
+                with("f", Mods::primary(), Action::FocusSearch),
                 named("/", Action::FocusSearch),
                 named("f3", Action::FindNext),
                 with("f3", Mods::shift(), Action::FindPrevious),
@@ -621,19 +663,19 @@ impl Default for Keymap {
                 // memory. One semantic action may have several bindings; a
                 // physical combination still resolves to only one action.
                 named("+", Action::ZoomIn),
-                with("=", Mods::ctrl(), Action::ZoomIn),
+                with("=", Mods::primary(), Action::ZoomIn),
                 named("-", Action::ZoomOut),
-                with("-", Mods::ctrl(), Action::ZoomOut),
+                with("-", Mods::primary(), Action::ZoomOut),
                 named("=", Action::ZoomReset),
-                with("1", Mods::ctrl(), Action::ZoomReset),
+                with("1", Mods::primary(), Action::ZoomReset),
                 named("a", Action::FitPage),
-                with("0", Mods::ctrl(), Action::FitPage),
-                with("2", Mods::ctrl(), Action::FitWidth),
+                with("0", Mods::primary(), Action::FitPage),
+                with("2", Mods::primary(), Action::FitWidth),
                 with("r", Mods::shift(), Action::RotateReader),
                 named("d", Action::ToggleDualPage),
-                with("r", Mods::ctrl(), Action::ReloadDocument),
+                with("r", Mods::primary(), Action::ReloadDocument),
                 named("f", Action::ToggleAudienceFullscreen),
-                with("q", Mods::ctrl(), Action::Quit),
+                with("q", Mods::primary(), Action::Quit),
                 // Link focus has no fixed shortcut. It remains an internal
                 // action for pointer/focus routing, not a key the reference
                 // can honestly advertise.
@@ -656,9 +698,10 @@ impl Keymap {
     /// The second allows an *unmatched shift only*: a presenter resting a
     /// finger on shift must still be able to blank the screen with `b`.
     ///
-    /// `Ctrl` and `Alt` never fall back. They are pressed deliberately, so
-    /// `Ctrl`+`Q` must never reach a binding for a bare `q` — which is the
-    /// whole reason modifiers are data here and not a name prefix.
+    /// `Primary`, `Control` and `Alt` never fall back. They are pressed
+    /// deliberately, so `Ctrl`+`Q` must never reach a binding for a bare `q`
+    /// — which is the whole reason modifiers are data here and not a name
+    /// prefix.
     pub fn resolve_with_mods(
         &self,
         key: Option<&str>,
@@ -672,7 +715,8 @@ impl Keymap {
                 continue;
             }
             let matches = |bound: Mods| {
-                bound.ctrl == mods.ctrl
+                bound.primary == mods.primary
+                    && bound.control == mods.control
                     && bound.alt == mods.alt
                     && if lenient {
                         !bound.shift
@@ -1014,12 +1058,12 @@ mod tests {
         );
         keymap.unbind(&KeyBinding::named("o"));
         keymap.bind(
-            KeyBinding::named_with("m", Mods::ctrl()),
+            KeyBinding::named_with("m", Mods::primary()),
             Action::ShowOverview,
         );
         assert_eq!(
             keymap.display_binding(Action::ShowOverview),
-            Some(&KeyBinding::named_with("m", Mods::ctrl()))
+            Some(&KeyBinding::named_with("m", Mods::primary()))
         );
     }
 
@@ -1028,11 +1072,11 @@ mod tests {
         let keymap = Keymap::default();
         assert_eq!(
             keymap.display_binding(Action::ZoomIn),
-            Some(&KeyBinding::named_with("=", Mods::ctrl()))
+            Some(&KeyBinding::named_with("=", Mods::primary()))
         );
         assert_eq!(
             keymap.display_binding(Action::FitPage),
-            Some(&KeyBinding::named_with("0", Mods::ctrl()))
+            Some(&KeyBinding::named_with("0", Mods::primary()))
         );
     }
 
@@ -1220,7 +1264,7 @@ mod tests {
         // trigger a presenting action by accident.
         let keymap = Keymap::default();
         assert_eq!(
-            keymap.resolve_with_mods(Some("q"), Mods::ctrl(), None),
+            keymap.resolve_with_mods(Some("q"), Mods::primary(), None),
             Some(Action::Quit)
         );
         assert_eq!(keymap.resolve(Some("q"), None), None, "a bare q is inert");
@@ -1228,12 +1272,19 @@ mod tests {
         // is *that* and not a blanked screen: the bare "b" beneath it must not
         // show through.
         assert_eq!(
-            keymap.resolve_with_mods(Some("b"), Mods::ctrl(), None),
+            keymap.resolve_with_mods(Some("b"), Mods::primary(), None),
             Some(Action::ToggleOutline),
             "Ctrl+B must not blank the screen"
         );
         assert_eq!(
-            keymap.resolve_with_mods(Some("j"), Mods::new(false, false, true), None),
+            keymap.resolve_with_mods(
+                Some("j"),
+                Mods {
+                    alt: true,
+                    ..Mods::NONE
+                },
+                None
+            ),
             None,
             "Alt+J must not advance the slide"
         );
@@ -1245,13 +1296,91 @@ mod tests {
         // could not follow the convention every other editor uses.
         let keymap = Keymap::default();
         assert_eq!(
-            keymap.resolve_with_mods(Some("z"), Mods::ctrl(), None),
+            keymap.resolve_with_mods(Some("z"), Mods::primary(), None),
             Some(Action::UndoAnnotation)
         );
         assert_eq!(
-            keymap.resolve_with_mods(Some("Z"), Mods::ctrl_shift(), None),
+            keymap.resolve_with_mods(Some("Z"), Mods::primary_shift(), None),
             Some(Action::RedoAnnotation)
         );
+    }
+
+    #[test]
+    fn the_macos_control_key_is_not_the_primary_modifier() {
+        // On macOS the Control key arrives as `control`, not `primary`, and
+        // every default binding is written against `primary`. Ctrl+Q on a
+        // Mac must therefore not quit — ⌘Q does. On Windows and Linux the
+        // platform layer never sets `control`, so this shape cannot occur.
+        let keymap = Keymap::default();
+        let mac_ctrl = Mods {
+            control: true,
+            ..Mods::NONE
+        };
+        assert_eq!(keymap.resolve_with_mods(Some("q"), mac_ctrl, None), None);
+        assert_eq!(keymap.resolve_with_mods(Some("f"), mac_ctrl, None), None);
+    }
+
+    #[test]
+    fn a_stored_keymap_spelling_primary_as_ctrl_still_loads() {
+        // The field was called `ctrl` before macOS Command and Control were
+        // told apart. Every settings file written in that era says
+        // `"ctrl":true` and must go on meaning the primary modifier.
+        let mods: Mods = serde_json::from_str(r#"{"ctrl":true,"shift":true}"#)
+            .expect("the legacy spelling parses");
+        assert_eq!(
+            mods,
+            Mods {
+                primary: true,
+                shift: true,
+                ..Mods::NONE
+            }
+        );
+    }
+
+    #[test]
+    fn no_default_binding_is_reserved_by_a_desktop() {
+        // `InputPolicy::is_reserved` knows what the desktop will not give
+        // us — ⌘Q is macOS's, Alt+Tab is the window switcher's. A default
+        // the desktop swallows is a documented key that does nothing, which
+        // is worse than no key: this keeps the curated table honest on the
+        // platform the build is for. (Quit *is* Ctrl+Q here and ⌘Q on
+        // macOS, where the reservation and the binding agree in meaning; the
+        // desktop delivering the press to us anyway is the app quitting,
+        // which is what the key says.)
+        use crate::platform::input::{InputPolicy, Modifier};
+        let input = crate::platform::input::DesktopInput;
+        let keymap = Keymap::default();
+        for (binding, action) in &keymap.bindings {
+            if *action == Action::Quit {
+                continue;
+            }
+            let KeyBinding::Named { key, mods } = binding else {
+                continue;
+            };
+            let mut modifiers = Vec::new();
+            if mods.primary {
+                modifiers.push(Modifier::Primary);
+            }
+            if mods.control {
+                modifiers.push(Modifier::Control);
+            }
+            if mods.alt {
+                modifiers.push(Modifier::Alt);
+            }
+            if mods.shift {
+                modifiers.push(Modifier::Shift);
+            }
+            let shortcut = crate::platform::Shortcut {
+                modifiers,
+                key: key.clone(),
+            };
+            assert_eq!(
+                input.is_reserved(&shortcut),
+                None,
+                "{} ({action:?}) is a key the desktop will swallow",
+                binding.describe()
+            );
+        }
     }
 
     #[test]
@@ -1351,7 +1480,7 @@ mod tests {
         let keymap = Keymap::default();
         assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
         assert_eq!(
-            keymap.resolve_with_mods(Some("f"), Mods::ctrl(), None),
+            keymap.resolve_with_mods(Some("f"), Mods::primary(), None),
             Some(Action::FocusSearch)
         );
         assert_eq!(
@@ -1412,10 +1541,10 @@ mod migration_tests {
         let keymap: Keymap = serde_json::from_str(stored).expect("should load");
         assert_eq!(
             keymap.bindings[0].0,
-            KeyBinding::named_with("Z", Mods::ctrl_shift())
+            KeyBinding::named_with("Z", Mods::primary_shift())
         );
         assert_eq!(
-            keymap.resolve_with_mods(Some("Z"), Mods::ctrl_shift(), None),
+            keymap.resolve_with_mods(Some("Z"), Mods::primary_shift(), None),
             Some(Action::RedoAnnotation)
         );
     }
@@ -1464,7 +1593,7 @@ mod migration_tests {
         let keymap: Keymap = serde_json::from_str(stored).expect("should load");
         assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
         assert_eq!(
-            keymap.resolve_with_mods(Some("f"), Mods::ctrl(), None),
+            keymap.resolve_with_mods(Some("f"), Mods::primary(), None),
             Some(Action::FocusSearch)
         );
         assert_eq!(
