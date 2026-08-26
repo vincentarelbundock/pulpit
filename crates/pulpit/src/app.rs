@@ -8663,6 +8663,7 @@ impl App {
                     ReadCommand::Arm(_)
                         | ReadCommand::SetToolColor(..)
                         | ReadCommand::SetSelectKind(_)
+                        | ReadCommand::SetMarkupKind(_)
                 ) && self.reader.form_has_keyboard()
                 {
                     self.ask_form_key(pulpit_render::document::protocol::FormInputEvent::Focus {
@@ -8678,6 +8679,12 @@ impl App {
                 // whichever mode the reader happened to set it in.
                 if let ReadCommand::SetSelectKind(kind) = command {
                     self.annotation_controls.options.select_kind = kind;
+                }
+                // …and so is the highlighter's nib, for the same reason.
+                if let ReadCommand::SetMarkupKind(kind) = command {
+                    self.annotation_controls.options.markup_kind = kind;
+                    self.presenter_interaction.set_markup_kind(kind);
+                    self.persist();
                 }
                 if let ReadCommand::SetToolColor(tool, color) = command {
                     let options = &mut self.annotation_controls.options;
@@ -10470,14 +10477,19 @@ impl App {
             self.warn_marks_are_not_kept();
             return false;
         };
-        // The palette's colour is the mark's colour, and the highlighter's
-        // opacity is what makes it a highlighter (§7.2).
+        // The palette's colour is the mark's colour, and the palette's nib is
+        // which of the three marks it makes (§7.2). Both are read here rather
+        // than pushed when they change, so a choice restored from settings is
+        // in force on the first sweep of the session without a separate path
+        // to remember to walk.
         let options = self.annotation_options();
         self.presenter_interaction
             .set_highlight_style(pulpit_core::annotate::MarkStyle {
                 color: options.highlight_color,
-                ..pulpit_core::annotate::MarkStyle::highlighter()
+                ..pulpit_core::annotate::MarkStyle::text_markup(options.markup_kind)
             });
+        self.presenter_interaction
+            .set_markup_kind(options.markup_kind);
         self.presenter_interaction
             .arm(Some(pulpit_core::annotation::AnnotationTool::Highlighter));
         self.annotations.set_selection(None);
@@ -11457,10 +11469,15 @@ impl App {
                 .map(|quad| placement.quad_to_slide(quad))
                 .collect::<Vec<_>>();
             let style = self.presenter_interaction.highlight_style();
+            let kind = self.presenter_interaction.markup_kind();
             let selection = pulpit_core::annotation::SlideSelection {
                 runs,
                 color: style.color,
-                opacity: style.opacity,
+                // The kind's own opacity rather than the style's: the sweep
+                // has to look like the mark it is about to become, and a
+                // strikeout is not laid down at a wash's translucency.
+                opacity: kind.opacity(),
+                kind,
             };
             self.annotations
                 .set_selection((!selection.runs.is_empty()).then_some(selection));
@@ -11827,7 +11844,10 @@ impl App {
                         &placement,
                     ));
                 }
-                AnnotationKind::Highlight if !summary.geometry_elided => {
+                // All three text markups, not the wash alone: an underline
+                // the overlay did not draw is an underline presentation does
+                // not show at all.
+                kind if kind.is_text_markup() && !summary.geometry_elided => {
                     if let Some(runs) =
                         presenter::highlight_to_runs(page, &summary.quads, &placement)
                     {
@@ -11835,6 +11855,7 @@ impl App {
                             runs,
                             color: summary.style.color,
                             opacity: summary.style.opacity,
+                            kind: kind.markup().expect("checked above"),
                             id: summary.id.clone(),
                         });
                     }
@@ -12789,6 +12810,17 @@ impl App {
             // The band means one thing, whichever palette it was set from.
             // Same reasoning as the pen's colour above, and unlike the
             // pointer's mode it does have somewhere to go in document mode.
+            // The highlighter's three nibs, and the same reasoning as the
+            // band's kinds below: one highlighter, whichever palette it was
+            // set from.
+            AnnotationCommand::SetMarkupKind(kind) => {
+                self.annotation_controls.options.markup_kind = kind;
+                self.presenter_interaction.set_markup_kind(kind);
+                self.reader.record_markup_kind(kind);
+                self.persist();
+                // Choosing which mark to make is reaching for the highlighter.
+                self.arm_from_panel(AnnotationTool::Highlighter);
+            }
             AnnotationCommand::SetSelectKind(kind) => {
                 self.annotation_controls.options.select_kind = kind;
                 self.reader.record_select_kind(kind);

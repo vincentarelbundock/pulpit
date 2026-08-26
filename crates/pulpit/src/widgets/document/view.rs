@@ -532,6 +532,9 @@ fn sheet<'a, Message: Clone + 'static>(
                 super::preview::GesturePreview {
                     points: Vec::new(),
                     quads,
+                    // A found word is washed, never ruled: it is a place on
+                    // the page, not a mark somebody made on it.
+                    markup: pulpit_core::annotation::MarkupKind::Highlight,
                     // The accent, as everywhere else a thing is picked out.
                     color: {
                         let accent = theme::ambient::accent();
@@ -2331,6 +2334,7 @@ fn tools<Message: Clone + 'static>(
         ink_width: reader.controls.ink_width,
         highlight_color: reader.controls.highlight_color,
         select_kind: reader.controls.select_kind,
+        markup_kind: reader.controls.markup_kind,
         text_color: reader.controls.text_color,
         text_size: reader.controls.text_size,
         selected: reader.selected,
@@ -2352,6 +2356,7 @@ struct DocumentToolsState {
     ink_width: f32,
     highlight_color: InkColor,
     select_kind: pulpit_core::annotation::SelectKind,
+    markup_kind: pulpit_core::annotation::MarkupKind,
     text_color: InkColor,
     text_size: f32,
     selected: bool,
@@ -2543,6 +2548,11 @@ impl DocumentToolsState {
     }
 }
 
+/// A tool's icon in the Reader's toolbar, in the palette's text colour.
+///
+/// Never in the ink the tool lays down, for the reason given on the
+/// presenter palette's `tool_glyph`: an icon says which tool, and a swatch
+/// says which colour.
 fn document_tool_glyph<Message: 'static>(
     tool: AnnotationTool,
     state: DocumentToolsState,
@@ -2551,20 +2561,18 @@ fn document_tool_glyph<Message: 'static>(
     let icon = match tool {
         AnnotationTool::Select => theme::Icon::Select,
         AnnotationTool::Ink => theme::Icon::Pen,
-        AnnotationTool::Highlighter => theme::Icon::Highlighter,
+        // The highlighter's glyph is the mark it is set to make, which is the
+        // one thing about it a toolbar can show without opening its options.
+        AnnotationTool::Highlighter => {
+            crate::widgets::common::view::markup_kind_glyph(state.markup_kind)
+        }
         AnnotationTool::Text => theme::Icon::Type,
         AnnotationTool::Note => theme::Icon::StickyNote,
         AnnotationTool::Stamp => theme::Icon::Stamp,
         AnnotationTool::Eraser => theme::Icon::Eraser,
         AnnotationTool::Pointer | AnnotationTool::Spotlight => theme::Icon::Pointer,
     };
-    match state.color(tool) {
-        Some(colour) => {
-            let (red, green, blue) = colour.rgb();
-            theme::icon::tinted(icon, size, iced::Color::from_rgb(red, green, blue))
-        }
-        None => theme::icon::icon(icon, size),
-    }
+    theme::icon::icon(icon, size)
 }
 
 fn document_tools_overflow<Message: Clone + 'static>(
@@ -2724,7 +2732,7 @@ fn document_tool_options_panel<Message: Clone + 'static>(
             "Color",
             crate::widgets::common::color::swatches(
                 selected,
-                24.0,
+                crate::widgets::common::color::SWATCH,
                 state.live,
                 move |colour| on_event(WidgetEvent::Read(ReadCommand::SetToolColor(tool, colour))),
                 on_event(WidgetEvent::Read(ReadCommand::ToolColorWheel(Some(tool)))),
@@ -2747,6 +2755,21 @@ fn document_tool_options_panel<Message: Clone + 'static>(
         }
         panel = panel.row("Takes", kinds);
     }
+    // The highlighter's three marks, beside the colour they are laid down in.
+    if tool == AnnotationTool::Highlighter {
+        let mut kinds = Row::new().spacing(theme::space::XS);
+        for kind in pulpit_core::annotation::MarkupKind::ALL {
+            kinds = kinds.push(document_command_button(
+                crate::widgets::common::view::markup_kind_glyph(kind),
+                kind.label(),
+                ReadCommand::SetMarkupKind(kind),
+                state.markup_kind == kind,
+                state.live,
+                on_event,
+            ));
+        }
+        panel = panel.row("Marks", kinds);
+    }
     // Measures are in page points here rather than fractions of the page, so
     // the caption carries the number: a reader setting a pen to two points is
     // setting it to something the document itself is measured in.
@@ -2756,7 +2779,10 @@ fn document_tool_options_panel<Message: Clone + 'static>(
             slider(0.5..=12.0, state.ink_width, move |value| {
                 on_event(WidgetEvent::Read(ReadCommand::SetInkWidth(value)))
             })
-            .step(0.5_f32),
+            .step(0.5_f32)
+            .width(Length::Fixed(
+                crate::widgets::common::options::CONTROL_WIDTH,
+            )),
         );
     }
     if matches!(tool, AnnotationTool::Text | AnnotationTool::Note) {
@@ -2765,7 +2791,10 @@ fn document_tool_options_panel<Message: Clone + 'static>(
             slider(6.0..=48.0, state.text_size, move |value| {
                 on_event(WidgetEvent::Read(ReadCommand::SetTextSize(value)))
             })
-            .step(1.0_f32),
+            .step(1.0_f32)
+            .width(Length::Fixed(
+                crate::widgets::common::options::CONTROL_WIDTH,
+            )),
         );
     }
     panel.into()

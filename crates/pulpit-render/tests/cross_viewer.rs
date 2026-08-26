@@ -183,6 +183,7 @@ fn a_highlights_quads_land_on_the_text_another_reader_extracts() {
                 DocumentRevision::INITIAL,
                 DocumentTransaction::from_annotations([AnnotationCommand::Create(
                     AnnotationDraft::Highlight(HighlightDraft {
+                        kind: pulpit_core::annotation::MarkupKind::Highlight,
                         page: PageIndex(0),
                         quads: word.quads.clone(),
                         text: word.text.clone(),

@@ -20,7 +20,7 @@ pub mod timer;
 
 pub use annotate::{AnnotationCommand, AnnotationDraft, AnnotationId, AnnotationInteraction};
 pub use annotation::{
-    AnnotationStyle, AnnotationTool, Annotations, InkColor, InkStroke, StrokeKind,
+    AnnotationStyle, AnnotationTool, Annotations, InkColor, InkStroke, MarkupKind, StrokeKind,
 };
 pub use document::{DocumentId, DocumentInfo, LinkTarget, PageLink, PageSize};
 pub use generation::RenderGeneration;

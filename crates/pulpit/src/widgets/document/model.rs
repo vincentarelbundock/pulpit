@@ -573,6 +573,9 @@ pub struct ReaderControls {
     /// the palette's own, here for the same reason the colours are: the
     /// toolbar is drawn from the controls alone.
     pub select_kind: pulpit_core::annotation::SelectKind,
+    /// Which of its three marks the highlighter lays down, mirrored here for
+    /// the same reason.
+    pub markup_kind: pulpit_core::annotation::MarkupKind,
     pub text_color: pulpit_core::annotation::InkColor,
     /// The size placed text and notes are written at, in page points. The
     /// pen has a width control and type had nothing, which left the one
@@ -615,6 +618,7 @@ impl Default for ReaderControls {
             ink_width: pulpit_core::annotate::MarkStyle::default().width,
             highlight_color: pulpit_core::annotate::MarkStyle::highlighter().color,
             select_kind: pulpit_core::annotation::SelectKind::default(),
+            markup_kind: pulpit_core::annotation::MarkupKind::default(),
             text_color: pulpit_core::annotate::MarkStyle::default().color,
             text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),

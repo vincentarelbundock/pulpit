@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::annotation::InkColor;
+use crate::annotation::{InkColor, MarkupKind};
 use crate::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
 
 use super::id::AnnotationId;
@@ -37,6 +37,10 @@ pub enum AnnotationKind {
     Ink,
     /// `/Highlight`, with `/QuadPoints` over extracted text.
     Highlight,
+    /// `/Underline`, with the same `/QuadPoints`.
+    Underline,
+    /// `/StrikeOut`, likewise.
+    StrikeOut,
     /// `/FreeText`
     FreeText,
     /// `/Text`
@@ -52,6 +56,8 @@ impl AnnotationKind {
         match self {
             AnnotationKind::Ink => "Ink",
             AnnotationKind::Highlight => "Highlight",
+            AnnotationKind::Underline => "Underline",
+            AnnotationKind::StrikeOut => "Strikeout",
             AnnotationKind::FreeText => "Text",
             AnnotationKind::Note => "Note",
             AnnotationKind::Stamp => "Stamp",
@@ -64,6 +70,8 @@ impl AnnotationKind {
         match self {
             AnnotationKind::Ink => "Ink",
             AnnotationKind::Highlight => "Highlight",
+            AnnotationKind::Underline => "Underline",
+            AnnotationKind::StrikeOut => "StrikeOut",
             AnnotationKind::FreeText => "FreeText",
             AnnotationKind::Note => "Text",
             AnnotationKind::Stamp => "Stamp",
@@ -77,7 +85,37 @@ impl AnnotationKind {
     /// dragging the rectangle somewhere else would leave them describing text
     /// that is no longer under them (§8.4).
     pub fn is_freely_movable(self) -> bool {
-        !matches!(self, AnnotationKind::Highlight | AnnotationKind::Other)
+        !self.is_text_markup() && !matches!(self, AnnotationKind::Other)
+    }
+
+    /// Is this one of the three marks the highlighter makes?
+    ///
+    /// The question almost every arm asking about `/Highlight` was really
+    /// asking: the three share their geometry, their draft and every rule
+    /// about what may be done to them, and differ only in what a viewer draws
+    /// for them.
+    pub fn is_text_markup(self) -> bool {
+        self.markup().is_some()
+    }
+
+    /// Which mark this is, for the three the highlighter makes.
+    pub fn markup(self) -> Option<MarkupKind> {
+        match self {
+            AnnotationKind::Highlight => Some(MarkupKind::Highlight),
+            AnnotationKind::Underline => Some(MarkupKind::Underline),
+            AnnotationKind::StrikeOut => Some(MarkupKind::StrikeOut),
+            _ => None,
+        }
+    }
+}
+
+impl From<MarkupKind> for AnnotationKind {
+    fn from(kind: MarkupKind) -> AnnotationKind {
+        match kind {
+            MarkupKind::Highlight => AnnotationKind::Highlight,
+            MarkupKind::Underline => AnnotationKind::Underline,
+            MarkupKind::StrikeOut => AnnotationKind::StrikeOut,
+        }
     }
 }
 
@@ -124,9 +162,19 @@ pub const FONT_SIZE_RANGE: (f32, f32) = (4.0, 288.0);
 impl MarkStyle {
     /// The style a highlighter is born with: broad, translucent, yellow.
     pub fn highlighter() -> MarkStyle {
+        MarkStyle::text_markup(MarkupKind::Highlight)
+    }
+
+    /// The style one of the highlighter's three marks is born with.
+    ///
+    /// The colour is the tool's, whichever mark it makes: it is one pen with
+    /// three nibs, not three pens. Only the opacity parts company, because a
+    /// wash that let the words through and a rule that did are not the same
+    /// request (see [`MarkupKind::opacity`]).
+    pub fn text_markup(kind: MarkupKind) -> MarkStyle {
         MarkStyle {
             color: InkColor::Yellow,
-            opacity: 0.4,
+            opacity: kind.opacity(),
             ..MarkStyle::default()
         }
     }
@@ -237,6 +285,10 @@ pub struct InkDraft {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HighlightDraft {
     pub page: PageIndex,
+    /// Which of the three marks this is. Defaulted when absent so a journal
+    /// written before underlines existed replays as the highlights it meant.
+    #[serde(default)]
+    pub kind: MarkupKind,
     /// One quadrilateral per contiguous run of selected text, in reading
     /// order. Normative geometry, not a hint (§7.2).
     pub quads: Vec<PageQuad>,
@@ -313,7 +365,7 @@ impl AnnotationDraft {
     pub fn kind(&self) -> AnnotationKind {
         match self {
             AnnotationDraft::Ink(_) => AnnotationKind::Ink,
-            AnnotationDraft::Highlight(_) => AnnotationKind::Highlight,
+            AnnotationDraft::Highlight(d) => d.kind.into(),
             AnnotationDraft::FreeText(_) => AnnotationKind::FreeText,
             AnnotationDraft::Note(_) => AnnotationKind::Note,
             AnnotationDraft::Stamp(_) => AnnotationKind::Stamp,
@@ -707,6 +759,7 @@ mod tests {
         let from = PageRect::new(0.0, 0.0, 10.0, 10.0);
         let to = PageRect::new(0.0, 0.0, 40.0, 40.0);
         let highlight = AnnotationDraft::Highlight(HighlightDraft {
+            kind: MarkupKind::Highlight,
             page: PageIndex(0),
             quads: vec![PageQuad::from_rect(from)],
             text: "words".into(),
@@ -820,6 +873,7 @@ mod tests {
     #[test]
     fn a_highlight_needs_quads_that_mark_something() {
         let mut draft = HighlightDraft {
+            kind: MarkupKind::Highlight,
             page: PageIndex(0),
             quads: Vec::new(),
             text: "hello".into(),

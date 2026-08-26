@@ -9,6 +9,7 @@
 use crate::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
 
 pub use crate::annotation::AnnotationTool;
+use crate::annotation::MarkupKind;
 
 use super::draft::{
     AnnotationCommand, AnnotationDraft, FreeTextDraft, HighlightDraft, InkDraft, MarkStyle,
@@ -40,6 +41,10 @@ pub enum Gesture {
         quads: Vec<PageQuad>,
         text: String,
         style: MarkStyle,
+        /// Which of the three marks the release will leave behind. Fixed when
+        /// the sweep begins, so changing the option mid-drag cannot turn the
+        /// mark under the hand into a different one.
+        kind: MarkupKind,
     },
     /// An eraser sweep. Collects the annotations it has passed over so one
     /// sweep is one undo entry (§8.3).
@@ -239,6 +244,12 @@ pub struct AnnotationInteraction {
     /// The style the next mark will be made in, per tool.
     ink_style: MarkStyle,
     highlight_style: MarkStyle,
+    /// Which mark the highlighter makes: a wash, an underline or a strikeout.
+    ///
+    /// Beside the style rather than inside it, because it is not how the mark
+    /// is painted but *which mark it is* — it chooses the PDF subtype, and the
+    /// opacity follows from it rather than the other way round.
+    markup_kind: MarkupKind,
     /// What placed text — free text and notes — is written in. Separate from
     /// the ink's: the pen drawing in green does not make the commentary green.
     text_style: MarkStyle,
@@ -263,6 +274,7 @@ impl AnnotationInteraction {
             selected: Vec::new(),
             ink_style: MarkStyle::default(),
             highlight_style: MarkStyle::highlighter(),
+            markup_kind: MarkupKind::Highlight,
             text_style: MarkStyle::default(),
         }
     }
@@ -342,6 +354,20 @@ impl AnnotationInteraction {
         self.highlight_style = style.sanitised();
     }
 
+    pub fn markup_kind(&self) -> MarkupKind {
+        self.markup_kind
+    }
+
+    /// Choose which mark the highlighter makes.
+    ///
+    /// The opacity follows: a wash is translucent and a rule is not, and a
+    /// reader who switched to underlining and got a 40% grey line would have
+    /// been given a faded mark nobody asked for.
+    pub fn set_markup_kind(&mut self, kind: MarkupKind) {
+        self.markup_kind = kind;
+        self.highlight_style.opacity = kind.opacity();
+    }
+
     pub fn text_style(&self) -> MarkStyle {
         self.text_style
     }
@@ -386,7 +412,11 @@ impl AnnotationInteraction {
                 head: at,
                 quads: Vec::new(),
                 text: String::new(),
-                style: self.highlight_style,
+                style: MarkStyle {
+                    opacity: self.markup_kind.opacity(),
+                    ..self.highlight_style
+                },
+                kind: self.markup_kind,
             }),
             AnnotationTool::Eraser => Some(Gesture::Erasing {
                 page,
@@ -556,10 +586,12 @@ impl AnnotationInteraction {
                 quads,
                 text,
                 style,
+                kind,
                 ..
             } => {
                 let draft = AnnotationDraft::Highlight(HighlightDraft {
                     page,
+                    kind,
                     quads,
                     text,
                     style,
@@ -840,6 +872,54 @@ mod tests {
         };
         assert_eq!(highlight.text, "the selected words");
         assert_eq!(highlight.quads.len(), 1);
+    }
+
+    #[test]
+    fn the_nib_chooses_the_subtype_the_sweep_commits() {
+        use crate::annotation::MarkupKind;
+
+        for kind in MarkupKind::ALL {
+            let mut interaction = AnnotationInteraction::new();
+            interaction.set_markup_kind(kind);
+            interaction.arm(Some(AnnotationTool::Highlighter));
+            interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+            interaction.extend(PagePoint::new(300.0, 50.0));
+            interaction.set_selection_result(
+                vec![PageQuad::from_rect(PageRect::new(50.0, 44.0, 300.0, 58.0))],
+                "the selected words".into(),
+            );
+            let outcome = interaction.finish(&page());
+            let draft = outcome.commands()[0].draft().unwrap().clone();
+            assert_eq!(
+                draft.kind(),
+                crate::annotate::AnnotationKind::from(kind),
+                "{kind:?} must reach the file as its own subtype"
+            );
+            // A rule is opaque and a wash is not: the nib carries the opacity
+            // rather than the style the tool happened to be left in.
+            assert_eq!(draft.style().opacity, kind.opacity(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn changing_the_nib_mid_sweep_leaves_the_mark_under_the_hand_alone() {
+        use crate::annotation::MarkupKind;
+
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::Highlighter));
+        interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+        interaction.set_markup_kind(MarkupKind::StrikeOut);
+        interaction.extend(PagePoint::new(300.0, 50.0));
+        interaction.set_selection_result(
+            vec![PageQuad::from_rect(PageRect::new(50.0, 44.0, 300.0, 58.0))],
+            "the selected words".into(),
+        );
+        let outcome = interaction.finish(&page());
+        assert_eq!(
+            outcome.commands()[0].draft().unwrap().kind(),
+            crate::annotate::AnnotationKind::Highlight,
+            "the sweep fixed its kind when it began"
+        );
     }
 
     #[test]

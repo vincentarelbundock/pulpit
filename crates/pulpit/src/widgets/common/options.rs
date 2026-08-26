@@ -18,11 +18,20 @@ use iced::{Alignment, Element, Length};
 
 use crate::theme;
 
+/// The width a control in an options panel is given.
+///
+/// The panel hugs its contents rather than being told a width, and the
+/// swatch row is the widest thing in it — so a control that would otherwise
+/// fill (a slider, which fills by default) is given exactly that instead. A
+/// filling control inside a hugging container resolves to whatever space the
+/// popover happens to offer, which is how these panels came to be the width
+/// of the window behind them.
+pub const CONTROL_WIDTH: f32 = crate::widgets::common::color::ROW_WIDTH;
+
 /// A tool's options, assembled row by row.
 pub struct Options<Message> {
     title: String,
     on_close: Option<Message>,
-    width: Option<f32>,
     rows: Vec<(Option<String>, Element<'static, Message>)>,
 }
 
@@ -32,7 +41,6 @@ impl<Message: Clone + 'static> Options<Message> {
         Self {
             title: title.into(),
             on_close: None,
-            width: None,
             rows: Vec::new(),
         }
     }
@@ -41,13 +49,6 @@ impl<Message: Clone + 'static> Options<Message> {
     /// dropping it, so a panel does not change shape with the mode.
     pub fn on_close(mut self, message: Option<Message>) -> Self {
         self.on_close = message;
-        self
-    }
-
-    /// A fixed width, for a toolbar whose panels should not resize as their
-    /// contents change.
-    pub fn width(mut self, width: f32) -> Self {
-        self.width = Some(width);
         self
     }
 
@@ -92,13 +93,13 @@ impl<Message: Clone + 'static> From<Options<Message>> for Element<'static, Messa
             panel = panel.push(control);
         }
 
-        let panel = container(panel)
+        // No width: the panel is exactly as wide as the widest row in it, in
+        // both toolbars. Every control that would fill is given
+        // [`CONTROL_WIDTH`] instead, so "as wide as the widest row" is a
+        // width and not the whole window.
+        container(panel)
             .padding(theme::space::M)
-            .style(theme::ambient::surface);
-        match options.width {
-            Some(width) => panel.width(Length::Fixed(width)),
-            None => panel,
-        }
-        .into()
+            .style(theme::ambient::surface)
+            .into()
     }
 }

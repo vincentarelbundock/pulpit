@@ -127,6 +127,84 @@ impl SelectKind {
     }
 }
 
+/// Which of the three text-markup marks the highlighter lays down.
+///
+/// A mode inside one tool rather than three tools, for the same reason
+/// [`SelectKind`] is: the gesture is identical — sweep the pointer across text
+/// and let go — and only the mark left behind differs. Chosen in the tool's
+/// options, beside the colour, because a reader who wants the words underlined
+/// rather than washed is already looking there for the colour to underline
+/// them in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MarkupKind {
+    /// `/Highlight`: a translucent wash over the words. The default, and the
+    /// only one of the three that leaves the page looking marked from across a
+    /// room.
+    #[default]
+    Highlight,
+    /// `/Underline`: a rule along the baseline of each run.
+    Underline,
+    /// `/StrikeOut`: a rule through the middle of each run.
+    StrikeOut,
+}
+
+impl MarkupKind {
+    /// Every kind, in the order the options panel offers them: the wash the
+    /// tool is named for comes first.
+    pub const ALL: [MarkupKind; 3] = [
+        MarkupKind::Highlight,
+        MarkupKind::Underline,
+        MarkupKind::StrikeOut,
+    ];
+
+    /// How thick a rule is, as a fraction of the run's height.
+    pub const RULE_THICKNESS: f32 = 0.07;
+
+    /// The word the option's tooltip says. The buttons are icon-only, like the
+    /// band's, so this one word is the whole of the explanation.
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkupKind::Highlight => "Highlight",
+            MarkupKind::Underline => "Underline",
+            MarkupKind::StrikeOut => "Strikeout",
+        }
+    }
+
+    /// The opacity the mark is laid down at.
+    ///
+    /// A wash has to let the words through it, so it is translucent. A rule is
+    /// not drawn over the text at all — it sits under it or across it — and a
+    /// translucent one only looks faded.
+    pub fn opacity(self) -> f32 {
+        match self {
+            MarkupKind::Highlight => 0.4,
+            MarkupKind::Underline | MarkupKind::StrikeOut => 1.0,
+        }
+    }
+
+    /// Does this kind fill the run, or draw a rule across it?
+    pub fn is_wash(self) -> bool {
+        matches!(self, MarkupKind::Highlight)
+    }
+
+    /// Where the rule sits inside a run, as a fraction of the run's height
+    /// measured from its top, for the kinds that draw one.
+    ///
+    /// A quad from text extraction is the line's box, not its glyphs: the
+    /// baseline sits a little above the bottom of it, and the middle of the
+    /// lower-case letters a little above the middle. These are those two
+    /// places, and they are what stops an underline reading as the next line's
+    /// overline.
+    pub fn rule_at(self) -> Option<f32> {
+        match self {
+            MarkupKind::Highlight => None,
+            MarkupKind::Underline => Some(0.88),
+            MarkupKind::StrikeOut => Some(0.52),
+        }
+    }
+}
+
 impl AnnotationTool {
     /// The tools the presenter's palette offers a control for, in the order it
     /// draws them. [`AnnotationTool::Spotlight`] is absent because it is armed
@@ -470,7 +548,8 @@ pub struct TextMark {
     pub fit: Option<(f32, f32)>,
 }
 
-/// A committed highlight, as the slide draws it.
+/// A committed text markup — a highlight, an underline or a strikeout — as the
+/// slide draws it.
 ///
 /// The runs are the engine's answer about where the marked *text* is, mapped
 /// into slide fractions. It is a view of the annotation (A1): the marks live
@@ -483,6 +562,11 @@ pub struct HighlightMark {
     pub runs: Vec<[(f32, f32); 4]>,
     pub color: InkColor,
     pub opacity: f32,
+    /// Which of the three marks this is, so the overlay knows whether to wash
+    /// the run or rule across it. Read back off the annotation's subtype
+    /// rather than remembered here (A1).
+    #[serde(default)]
+    pub kind: MarkupKind,
     /// The annotation this shows. Always named: nothing puts an uncommitted
     /// highlight here, because the sweep in progress is `selection`.
     pub id: crate::annotate::AnnotationId,
@@ -522,11 +606,15 @@ pub struct SlideSelection {
     /// The four corners of each run, clockwise from upper-left, in fractions
     /// of the slide.
     pub runs: Vec<[(f32, f32); 4]>,
-    /// The colour the highlight will be laid down in.
+    /// The colour the mark will be laid down in.
     pub color: InkColor,
     /// The opacity it will be laid down at, so the live sweep and the
     /// committed mark look the same.
     pub opacity: f32,
+    /// Which mark the release will leave behind, for the same reason: a sweep
+    /// that washes the words and then commits an underline has shown the
+    /// presenter the wrong thing for the length of the gesture.
+    pub kind: MarkupKind,
 }
 
 /// Every annotation on the current slide, plus what the pointer is armed to
@@ -1517,6 +1605,35 @@ mod tests {
         }
         let _ = annotations.end_stroke();
         annotations
+    }
+
+    #[test]
+    fn only_the_highlighters_default_nib_washes_the_words() {
+        assert!(MarkupKind::Highlight.is_wash());
+        assert!(MarkupKind::Highlight.rule_at().is_none());
+        assert_eq!(
+            MarkupKind::default(),
+            MarkupKind::Highlight,
+            "the tool must keep making the mark it is named for until it is told otherwise"
+        );
+        for kind in [MarkupKind::Underline, MarkupKind::StrikeOut] {
+            assert!(!kind.is_wash(), "{kind:?}");
+            // A rule sits inside the run rather than at its edge: an
+            // underline at 1.0 is the next line's overline, and one at 0.0 is
+            // the previous line's.
+            let at = kind.rule_at().unwrap_or_else(|| panic!("{kind:?} rules"));
+            assert!((0.0..=1.0).contains(&at), "{kind:?} at {at}");
+            assert!(
+                at - MarkupKind::RULE_THICKNESS / 2.0 > 0.0
+                    && at + MarkupKind::RULE_THICKNESS / 2.0 < 1.0,
+                "{kind:?} would spill out of the run it belongs to"
+            );
+            assert_eq!(kind.opacity(), 1.0, "a rule is not laid down faded");
+        }
+        assert!(
+            MarkupKind::StrikeOut.rule_at() < MarkupKind::Underline.rule_at(),
+            "a strikeout goes through the words and an underline beneath them"
+        );
     }
 
     #[test]

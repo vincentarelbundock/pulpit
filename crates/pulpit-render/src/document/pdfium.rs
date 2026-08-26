@@ -69,6 +69,8 @@ mod subtype {
     pub const TEXT: FPDF_ANNOTATION_SUBTYPE = 1;
     pub const FREETEXT: FPDF_ANNOTATION_SUBTYPE = 3;
     pub const HIGHLIGHT: FPDF_ANNOTATION_SUBTYPE = 9;
+    pub const UNDERLINE: FPDF_ANNOTATION_SUBTYPE = 10;
+    pub const STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
     pub const INK: FPDF_ANNOTATION_SUBTYPE = 15;
     pub const STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
     pub const WIDGET: FPDF_ANNOTATION_SUBTYPE = 20;
@@ -1703,6 +1705,8 @@ impl<'a> PdfiumDocument<'a> {
         let kind = match subtype {
             subtype::INK => AnnotationKind::Ink,
             subtype::HIGHLIGHT => AnnotationKind::Highlight,
+            subtype::UNDERLINE => AnnotationKind::Underline,
+            subtype::STRIKEOUT => AnnotationKind::StrikeOut,
             subtype::FREETEXT => AnnotationKind::FreeText,
             subtype::TEXT => AnnotationKind::Note,
             subtype::STAMP => AnnotationKind::Stamp,
@@ -1740,6 +1744,8 @@ impl<'a> PdfiumDocument<'a> {
             // does not know about survives the edit (see the module note).
             AnnotationKind::Ink
             | AnnotationKind::Highlight
+            | AnnotationKind::Underline
+            | AnnotationKind::StrikeOut
             | AnnotationKind::FreeText
             | AnnotationKind::Note
             | AnnotationKind::Stamp => AnnotationSupport::Editable,
@@ -1764,7 +1770,7 @@ impl<'a> PdfiumDocument<'a> {
             } else {
                 Vec::new()
             },
-            quads: if kind == AnnotationKind::Highlight {
+            quads: if kind.is_text_markup() {
                 self.quads_of(annotation, geometry)
             } else {
                 Vec::new()
@@ -3293,6 +3299,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
         let subtype = match draft.kind() {
             AnnotationKind::Ink => subtype::INK,
             AnnotationKind::Highlight => subtype::HIGHLIGHT,
+            AnnotationKind::Underline => subtype::UNDERLINE,
+            AnnotationKind::StrikeOut => subtype::STRIKEOUT,
             AnnotationKind::FreeText => subtype::FREETEXT,
             AnnotationKind::Note => subtype::TEXT,
             AnnotationKind::Stamp => subtype::STAMP,

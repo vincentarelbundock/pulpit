@@ -257,6 +257,11 @@ pub enum ReadCommand {
     /// of choice, made in the same panel, and it names no tool because only
     /// one tool has it.
     SetSelectKind(pulpit_core::annotation::SelectKind),
+    /// Set which of its three marks the highlighter lays down.
+    ///
+    /// The highlighter's counterpart to [`ReadCommand::SetSelectKind`], and it
+    /// names no tool for the same reason: only one tool has it.
+    SetMarkupKind(pulpit_core::annotation::MarkupKind),
     /// The pointer moved over the page surface, in canonical page points on
     /// the page it is over (A4).
     PageCursor {
@@ -468,6 +473,8 @@ pub enum AnnotationCommand {
     SetPointerSpotlight(bool),
     /// Choose what the select control's band does with what it encloses.
     SetSelectKind(pulpit_core::annotation::SelectKind),
+    /// Choose which of its three marks the highlighter lays down.
+    SetMarkupKind(pulpit_core::annotation::MarkupKind),
     /// Take back the most recent edit — a stroke drawn, or a sweep erased.
     Undo,
     /// Put back the most recently taken-back edit.

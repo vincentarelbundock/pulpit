@@ -22,6 +22,22 @@ use crate::theme;
 /// window and their tooltips fall on opposite sides of it.
 pub type Hint<Message> = fn(Element<'static, Message>, &str) -> Element<'static, Message>;
 
+/// One swatch, square, in an options panel.
+///
+/// One size for both toolbars rather than one each. The swatch row is the
+/// widest thing an options panel holds, so it is what sets the panel's width
+/// — and two sizes meant the presenter's panel and the Reader's were
+/// different widths for no reason a reader could see.
+pub const SWATCH: f32 = 24.0;
+
+/// The width the swatch row occupies: every fixed colour, the mixer, and the
+/// gaps between them.
+///
+/// Derived rather than written down, so adding a colour widens the panels
+/// that hold it instead of overflowing them.
+pub const ROW_WIDTH: f32 =
+    (InkColor::ALL.len() + 1) as f32 * SWATCH + InkColor::ALL.len() as f32 * theme::space::XS;
+
 /// The fixed swatches, then the mixer that reaches every other colour.
 ///
 /// The last swatch is the way out of the fixed five: it fills with the mixed

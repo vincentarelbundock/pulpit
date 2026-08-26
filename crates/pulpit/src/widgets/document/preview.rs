@@ -29,6 +29,12 @@ pub struct GesturePreview {
     pub points: Vec<PagePoint>,
     /// The text runs a selection has resolved to so far, also canonical.
     pub quads: Vec<pulpit_core::page::PageQuad>,
+    /// Which mark those runs will become: a wash over them, a rule under
+    /// them, or a rule through them.
+    ///
+    /// Defaulted for everything that is not text markup — a stroke has no
+    /// runs, and a search hit is a wash by nature.
+    pub markup: pulpit_core::annotation::MarkupKind,
     /// sRGB, as the tool will lay it down.
     pub color: (f32, f32, f32),
     pub opacity: f32,
@@ -528,16 +534,30 @@ impl<Message> canvas::Program<Message> for Painter {
         let (red, green, blue) = self.preview.color;
         let color = Color::from_rgba(red, green, blue, self.preview.opacity.clamp(0.0, 1.0));
 
-        // A selection's runs, as translucent blocks: what the highlighter
-        // would mark if the pointer came up now.
+        // A selection's runs, as what the highlighter would leave if the
+        // pointer came up now: the whole run for a wash, and a rule across it
+        // for an underline or a strikeout. Previewing all three as blocks
+        // would show the reader a highlight and then commit a line.
         for quad in &self.preview.quads {
             let bounds = quad.bounds();
-            let top_left = place(&PagePoint::new(bounds.left, bounds.top));
-            let size = Size::new(
-                bounds.width() * scale_x,
-                (bounds.height() * scale_y).max(1.0),
-            );
-            frame.fill_rectangle(top_left, size, color);
+            let height = bounds.height() * scale_y;
+            match self.preview.markup.rule_at() {
+                None => {
+                    let top_left = place(&PagePoint::new(bounds.left, bounds.top));
+                    let size = Size::new(bounds.width() * scale_x, height.max(1.0));
+                    frame.fill_rectangle(top_left, size, color);
+                }
+                Some(at) => {
+                    let thickness =
+                        (height * pulpit_core::annotation::MarkupKind::RULE_THICKNESS).max(1.0);
+                    let top_left = place(&PagePoint::new(bounds.left, bounds.top));
+                    frame.fill_rectangle(
+                        Point::new(top_left.x, top_left.y + height * at - thickness / 2.0),
+                        Size::new(bounds.width() * scale_x, thickness),
+                        color,
+                    );
+                }
+            }
         }
 
         match self.preview.points.len() {
@@ -583,6 +603,7 @@ mod tests {
         let empty = GesturePreview {
             points: Vec::new(),
             quads: Vec::new(),
+            markup: pulpit_core::annotation::MarkupKind::Highlight,
             color: (1.0, 0.0, 0.0),
             opacity: 1.0,
             width: 2.0,

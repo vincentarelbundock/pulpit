@@ -265,6 +265,7 @@
               "highlight_width": 0.02500000037252903,
               "ink_color": "black",
               "ink_width": 0.004000000189989805,
+              "markup_kind": "highlight",
               "pointer_color": "red",
               "pointer_radius": 0.012000000104308128,
               "pointer_spotlight": false,

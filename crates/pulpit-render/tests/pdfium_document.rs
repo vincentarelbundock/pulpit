@@ -223,6 +223,85 @@ fn an_erased_mark_comes_back_under_its_own_name() {
     assert!(document.annotations(PageIndex(0)).unwrap().is_empty());
 }
 
+/// The highlighter's other two nibs reach the file as their own subtypes and
+/// come back as themselves.
+///
+/// The failure this guards against is silent and total: an `/Underline`
+/// written as a `/Highlight` looks right in pulpit — the overlay draws it
+/// from the kind it remembers — and is a yellow wash in every other reader.
+#[test]
+fn an_underline_and_a_strikeout_round_trip_as_themselves() {
+    use pulpit_core::annotate::AnnotationKind;
+    use pulpit_core::annotation::MarkupKind;
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("markups");
+    let path = source(&directory);
+    let destination = directory.join("markups.pdf");
+
+    {
+        let mut document = open(backend, &path);
+        let transaction = DocumentTransaction::from_annotations(
+            [
+                (MarkupKind::Underline, 200.0_f32),
+                (MarkupKind::StrikeOut, 300.0_f32),
+            ]
+            .map(|(kind, top)| {
+                AnnotationCommand::Create(AnnotationDraft::Highlight(HighlightDraft {
+                    kind,
+                    page: PageIndex(0),
+                    quads: vec![PageQuad::from_rect(PageRect::new(
+                        72.0,
+                        top,
+                        300.0,
+                        top + 16.0,
+                    ))],
+                    text: "the marked words".into(),
+                    style: MarkStyle::text_markup(kind),
+                }))
+            }),
+        );
+        document
+            .apply(DocumentRevision::INITIAL, transaction)
+            .expect("both marks commit as one action");
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .unwrap();
+    }
+
+    let reopened = PdfiumDocument::open(backend, &destination).unwrap();
+    let document = PdfDocument::new(Box::new(reopened), 8);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    assert_eq!(annotations.len(), 2);
+
+    for kind in [AnnotationKind::Underline, AnnotationKind::StrikeOut] {
+        let mark = annotations
+            .iter()
+            .find(|summary| summary.kind == kind)
+            .unwrap_or_else(|| panic!("{kind:?} is in the file under its own subtype"));
+        assert_eq!(
+            mark.quads.len(),
+            1,
+            "{kind:?} kept its /QuadPoints as normative geometry"
+        );
+        // A rule is opaque, and a viewer that regenerates the appearance uses
+        // /CA to decide how firm to draw it.
+        assert!(
+            (mark.style.opacity - 1.0).abs() < 1e-3,
+            "{kind:?} is not laid down at a wash's translucency"
+        );
+        // …and it is editable in place rather than merely preserved, which is
+        // what lets the eraser and the options panel reach it.
+        assert!(matches!(
+            mark.to_draft(),
+            Some(AnnotationDraft::Highlight(draft)) if AnnotationKind::from(draft.kind) == kind
+        ));
+    }
+}
+
 #[test]
 fn several_kinds_of_mark_round_trip_through_a_saved_file() {
     let Some(mut guard) = common::pdfium("the PDFium document tests") else {
@@ -237,6 +316,7 @@ fn several_kinds_of_mark_round_trip_through_a_saved_file() {
         let mut document = open(backend, &path);
         let transaction = DocumentTransaction::from_annotations([
             AnnotationCommand::Create(AnnotationDraft::Highlight(HighlightDraft {
+                kind: pulpit_core::annotation::MarkupKind::Highlight,
                 page: PageIndex(0),
                 quads: vec![PageQuad::from_rect(PageRect::new(
                     72.0, 200.0, 300.0, 216.0,
@@ -516,6 +596,7 @@ fn selecting_real_text_resolves_to_quads_that_become_a_highlight() {
             DocumentRevision::INITIAL,
             DocumentTransaction::from_annotations([AnnotationCommand::Create(
                 AnnotationDraft::Highlight(HighlightDraft {
+                    kind: pulpit_core::annotation::MarkupKind::Highlight,
                     page: PageIndex(0),
                     quads: word.quads.clone(),
                     text: word.text.clone(),

@@ -784,12 +784,17 @@ impl AnnotationSummary {
                 points: self.path.iter().map(|at| InkPoint { at: *at }).collect(),
                 style,
             })),
-            AnnotationKind::Highlight => Some(AnnotationDraft::Highlight(HighlightDraft {
-                page: self.page,
-                quads: self.quads.clone(),
-                text: self.contents.text.clone(),
-                style,
-            })),
+            // One draft for all three text markups: they differ in the
+            // subtype the draft's own kind chooses, and in nothing else.
+            AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::StrikeOut => {
+                Some(AnnotationDraft::Highlight(HighlightDraft {
+                    page: self.page,
+                    kind: self.kind.markup().expect("a text markup kind"),
+                    quads: self.quads.clone(),
+                    text: self.contents.text.clone(),
+                    style,
+                }))
+            }
             AnnotationKind::FreeText => Some(AnnotationDraft::FreeText(FreeTextDraft {
                 page: self.page,
                 rect: self.bounds,

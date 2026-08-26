@@ -34,6 +34,10 @@ pub enum Icon {
     Pen,
     /// The broad translucent stroke: `highlighter`.
     Highlighter,
+    /// The highlighter's second mark, a rule under the words: `underline`.
+    Underline,
+    /// Its third, a rule through them: `strikethrough`.
+    StrikeOut,
     /// `eraser`.
     Eraser,
     /// Nothing armed: a press reaches the slide's own links, media and
@@ -136,6 +140,8 @@ impl Icon {
         match self {
             Icon::Pen => include_bytes!("../../assets/icons/pen.svg"),
             Icon::Highlighter => include_bytes!("../../assets/icons/highlighter.svg"),
+            Icon::Underline => include_bytes!("../../assets/icons/underline.svg"),
+            Icon::StrikeOut => include_bytes!("../../assets/icons/strikethrough.svg"),
             Icon::Eraser => include_bytes!("../../assets/icons/eraser.svg"),
             Icon::Hand => include_bytes!("../../assets/icons/hand.svg"),
             Icon::Pointer => include_bytes!("../../assets/icons/mouse-pointer-2.svg"),
@@ -191,9 +197,11 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 45] = [
+    const ALL: [Icon; 47] = [
         Icon::Pen,
         Icon::Highlighter,
+        Icon::Underline,
+        Icon::StrikeOut,
         Icon::Eraser,
         Icon::Hand,
         Icon::Pointer,

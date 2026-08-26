@@ -94,17 +94,19 @@ fn preview_of(
 ) -> Option<(PageIndex, crate::widgets::document::preview::GesturePreview)> {
     use pulpit_core::annotate::AnnotationDraft;
 
-    let (page, points, quads, style) = match draft {
+    let (page, points, quads, markup, style) = match draft {
         AnnotationDraft::Ink(ink) => (
             ink.page,
             ink.points.iter().map(|point| point.at).collect(),
             Vec::new(),
+            pulpit_core::annotation::MarkupKind::default(),
             ink.style,
         ),
         AnnotationDraft::Highlight(highlight) => (
             highlight.page,
             Vec::new(),
             highlight.quads.clone(),
+            highlight.kind,
             highlight.style,
         ),
         _ => return None,
@@ -112,6 +114,7 @@ fn preview_of(
     let preview = crate::widgets::document::preview::GesturePreview {
         points,
         quads,
+        markup,
         color: style.color.rgb(),
         opacity: style.opacity,
         width: style.width,
@@ -2100,13 +2103,16 @@ impl ReaderSession {
         if gesture.page() != page {
             return None;
         }
-        let (points, quads, style) = match gesture {
+        let (points, quads, markup, style) = match gesture {
             Gesture::Ink { points, style, .. } => (
                 points.iter().map(|point| point.at).collect(),
                 Vec::new(),
+                pulpit_core::annotation::MarkupKind::default(),
                 *style,
             ),
-            Gesture::Selecting { quads, style, .. } => (Vec::new(), quads.clone(), *style),
+            Gesture::Selecting {
+                quads, kind, style, ..
+            } => (Vec::new(), quads.clone(), *kind, *style),
             // The band is chrome and is drawn with the selection, not here:
             // this layer paints marks in their own colour, and the band is
             // not a mark.
@@ -2117,6 +2123,7 @@ impl ReaderSession {
         let preview = crate::widgets::document::preview::GesturePreview {
             points,
             quads,
+            markup,
             color: style.color.rgb(),
             opacity: style.opacity,
             width: style.width,
@@ -3560,6 +3567,17 @@ impl ReaderSession {
                 self.controls.ink_width = self.interaction.ink_style().width;
                 false
             }
+            ReadCommand::SetMarkupKind(kind) => {
+                // Changing which mark the highlighter makes never disturbs a
+                // sweep in progress: the gesture fixed its kind when it began
+                // (see `Gesture::Selecting`), so this is always about the
+                // *next* mark.
+                self.controls.markup_kind = *kind;
+                self.interaction.set_markup_kind(*kind);
+                // Choosing which mark to make is reaching for the highlighter.
+                self.arm_from_panel(AnnotationTool::Highlighter);
+                false
+            }
             ReadCommand::SetSelectKind(kind) => {
                 // Changing what the band means does not disturb what it is
                 // currently holding: a reader who has gathered marks up and
@@ -3686,6 +3704,15 @@ impl ReaderSession {
     /// the band.
     pub fn record_select_kind(&mut self, kind: pulpit_core::annotation::SelectKind) {
         self.controls.select_kind = kind;
+    }
+
+    /// Record which mark the highlighter makes, without touching the toolbar.
+    ///
+    /// The presenter palette's half of the one-highlighter setting, exactly as
+    /// [`Session::record_select_kind`] is the band's.
+    pub fn record_markup_kind(&mut self, kind: pulpit_core::annotation::MarkupKind) {
+        self.controls.markup_kind = kind;
+        self.interaction.set_markup_kind(kind);
     }
 
     /// Arm `tool` because one of its options was chosen: the panel closes the
@@ -6915,6 +6942,7 @@ mod tests {
 
         let mut session = open(1);
         let draft = AnnotationDraft::Highlight(HighlightDraft {
+            kind: pulpit_core::annotation::MarkupKind::Highlight,
             page: PageIndex(0),
             quads: vec![pulpit_core::page::PageQuad::from_rect(
                 pulpit_core::page::PageRect::new(72.0, 100.0, 300.0, 114.0),
@@ -7342,6 +7370,35 @@ mod tests {
         assert_eq!(session.controls().ink_color, mixed);
     }
 
+    /// Choosing a nib in the highlighter's options is reaching for the
+    /// highlighter, exactly as choosing a band kind reaches for the band.
+    #[test]
+    fn choosing_a_nib_arms_the_highlighter_and_holds_the_choice() {
+        use pulpit_core::annotation::MarkupKind;
+
+        let mut session = open(1);
+        session.apply(&ReadCommand::ToolOptions(Some(AnnotationTool::Highlighter)));
+        session.apply(&ReadCommand::SetMarkupKind(MarkupKind::StrikeOut));
+        assert_eq!(session.controls().markup_kind, MarkupKind::StrikeOut);
+        assert_eq!(session.controls().tool, Some(AnnotationTool::Highlighter));
+        assert_eq!(
+            session.controls().tool_options,
+            None,
+            "an option chosen is the panel answered"
+        );
+
+        // The presenter palette's half of the one-highlighter setting sets the
+        // same nib without arming anything.
+        let mut session = open(1);
+        session.record_markup_kind(MarkupKind::Underline);
+        assert_eq!(session.controls().markup_kind, MarkupKind::Underline);
+        assert_eq!(
+            session.controls().tool,
+            None,
+            "recording a choice must not arm a toolbar nobody touched"
+        );
+    }
+
     /// Opening the panel again puts the wheel away: one question at a time.
     #[test]
     fn opening_the_options_panel_closes_the_wheel() {
@@ -7530,27 +7587,37 @@ mod tests {
 
     #[test]
     fn text_markup_can_be_selected_but_not_dragged_off_its_text() {
-        // §8.4: /QuadPoints describe real text runs, and a highlight dragged
-        // elsewhere would describe text no longer under it.
-        let mut session = open(2);
-        let mut highlight = stroke_at(200.0);
-        highlight.kind = pulpit_core::annotate::AnnotationKind::Highlight;
-        highlight.path = Vec::new();
-        highlight.quads = vec![pulpit_core::page::PageQuad::from_rect(
-            pulpit_core::page::PageRect::new(50.0, 192.0, 400.0, 208.0),
-        )];
-        let id = highlight.id.clone();
-        session.set_annotations(PageIndex(0), &[highlight]);
+        // §8.4: /QuadPoints describe real text runs, and a mark dragged
+        // elsewhere would describe text no longer under it. True of all three
+        // of the highlighter's marks, which share their geometry and so share
+        // the rule about it.
+        use pulpit_core::annotate::AnnotationKind;
 
-        session.apply(&ReadCommand::Arm(None));
-        session.pointer_moved(PageIndex(0), 200.0, 200.0);
-        assert!(!session.pointer_pressed(), "it must not start a move");
-        assert_eq!(
-            session.selected(),
-            Some(&id),
-            "it is still selected, so the reader can see what they hit"
-        );
-        assert!(matches!(session.pointer_released(), Released::Nothing));
+        for kind in [
+            AnnotationKind::Highlight,
+            AnnotationKind::Underline,
+            AnnotationKind::StrikeOut,
+        ] {
+            let mut session = open(2);
+            let mut mark = stroke_at(200.0);
+            mark.kind = kind;
+            mark.path = Vec::new();
+            mark.quads = vec![pulpit_core::page::PageQuad::from_rect(
+                pulpit_core::page::PageRect::new(50.0, 192.0, 400.0, 208.0),
+            )];
+            let id = mark.id.clone();
+            session.set_annotations(PageIndex(0), &[mark]);
+
+            session.apply(&ReadCommand::Arm(None));
+            session.pointer_moved(PageIndex(0), 200.0, 200.0);
+            assert!(!session.pointer_pressed(), "{kind:?} must not start a move");
+            assert_eq!(
+                session.selected(),
+                Some(&id),
+                "{kind:?} is still selected, so the reader can see what they hit"
+            );
+            assert!(matches!(session.pointer_released(), Released::Nothing));
+        }
     }
 
     /// Drag a band over page zero, from one corner to the other.

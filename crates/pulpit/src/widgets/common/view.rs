@@ -11,6 +11,15 @@ use crate::widgets::common::Align;
 ///
 /// One mapping for both toolbars, so the presenter palette and the Reader
 /// cannot come to draw the same choice with different pictures.
+/// The glyph for one of the highlighter's three marks.
+pub fn markup_kind_glyph(kind: pulpit_core::annotation::MarkupKind) -> theme::Icon {
+    match kind {
+        pulpit_core::annotation::MarkupKind::Highlight => theme::Icon::Highlighter,
+        pulpit_core::annotation::MarkupKind::Underline => theme::Icon::Underline,
+        pulpit_core::annotation::MarkupKind::StrikeOut => theme::Icon::StrikeOut,
+    }
+}
+
 pub fn select_kind_glyph(kind: pulpit_core::annotation::SelectKind) -> theme::Icon {
     match kind {
         pulpit_core::annotation::SelectKind::Marks => theme::Icon::Lasso,

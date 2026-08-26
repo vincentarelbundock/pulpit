@@ -420,21 +420,16 @@ fn overflow_menu<Message: Clone + 'static>(
                 command,
             } => {
                 let icon = match armable {
-                    AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph, options.ink_color),
-                    AnnotationTool::Highlighter => {
-                        tool_glyph(theme::Icon::Highlighter, glyph, options.highlight_color)
-                    }
-                    AnnotationTool::Pointer => {
-                        tool_glyph(theme::Icon::Pointer, glyph, options.pointer_color)
-                    }
+                    AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph),
+                    AnnotationTool::Highlighter => tool_glyph(
+                        crate::widgets::common::view::markup_kind_glyph(options.markup_kind),
+                        glyph,
+                    ),
+                    AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph),
                     AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
                     AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
-                    AnnotationTool::Text => {
-                        tool_glyph(theme::Icon::Type, glyph, options.text_color)
-                    }
-                    AnnotationTool::Note => {
-                        tool_glyph(theme::Icon::StickyNote, glyph, options.text_color)
-                    }
+                    AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
+                    AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
                     AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
                     AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
                 };
@@ -529,15 +524,16 @@ fn tool_control<Message: Clone + 'static>(
     // colour is armed without opening the options panel.
     let glyph = size * 0.74;
     let icon = match armable {
-        AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph, options.ink_color),
-        AnnotationTool::Highlighter => {
-            tool_glyph(theme::Icon::Highlighter, glyph, options.highlight_color)
-        }
-        AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph, options.pointer_color),
+        AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph),
+        AnnotationTool::Highlighter => tool_glyph(
+            crate::widgets::common::view::markup_kind_glyph(options.markup_kind),
+            glyph,
+        ),
+        AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph),
         AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
         AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
-        AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph, options.text_color),
-        AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph, options.text_color),
+        AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
+        AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
         AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
         AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
     };
@@ -711,12 +707,10 @@ fn options_panel<Message: Clone + 'static>(
     }
     .step(0.005_f32);
 
-    let mut panel = crate::widgets::common::options::Options::new(armable.label())
-        .width(232.0)
-        .on_close(
-            mode.interactive()
-                .then(|| on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(None)))),
-        );
+    let mut panel = crate::widgets::common::options::Options::new(armable.label()).on_close(
+        mode.interactive()
+            .then(|| on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(None)))),
+    );
 
     // The pointer control is two things, and which one it is belongs in its
     // own panel: a presenter who wants the spotlight is already looking here
@@ -779,6 +773,32 @@ fn options_panel<Message: Clone + 'static>(
         kinds
     });
 
+    // The highlighter is three things, the same way the band is, and which
+    // one it is belongs in the same place: beside the colour it will be laid
+    // down in, because choosing to underline and choosing what to underline
+    // in are one decision made in one sitting.
+    let markup_row = (armable == AnnotationTool::Highlighter).then(|| {
+        let mut kinds = Row::new().spacing(theme::space::S);
+        for kind in pulpit_core::annotation::MarkupKind::ALL {
+            let glyph = crate::widgets::common::view::markup_kind_glyph(kind);
+            let chosen = options.markup_kind == kind;
+            let mut choice = button(theme::icon::icon(glyph, theme::type_scale::BODY))
+                .padding(Padding::from([4.0, theme::space::S]))
+                .style(if chosen {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                });
+            if mode.interactive() {
+                choice = choice.on_press(on(WidgetEvent::Annotate(
+                    AnnotationCommand::SetMarkupKind(kind),
+                )));
+            }
+            kinds = kinds.push(palette_hint(choice.into(), kind.label()));
+        }
+        kinds
+    });
+
     // The spotlight is a hole in the dimming rather than something drawn, so
     // it has no colour to pick; everything else that lays down colour does.
     let color_row = matches!(
@@ -797,7 +817,7 @@ fn options_panel<Message: Clone + 'static>(
         };
         crate::widgets::common::color::swatches(
             selected,
-            28.0,
+            crate::widgets::common::color::SWATCH,
             mode.interactive(),
             move |colour| {
                 on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
@@ -818,13 +838,21 @@ fn options_panel<Message: Clone + 'static>(
     // is built from a measure borrowed to keep it well formed. Drawing it
     // would offer a control that changes nothing.
     if armable != AnnotationTool::Select {
-        panel = panel.row("Size", size.width(Length::Fill));
+        panel = panel.row(
+            "Size",
+            size.width(Length::Fixed(
+                crate::widgets::common::options::CONTROL_WIDTH,
+            )),
+        );
     }
     if let Some(modes) = mode_row {
         panel = panel.row("Mode", modes);
     }
     if let Some(kinds) = kind_row {
         panel = panel.row("Takes", kinds);
+    }
+    if let Some(kinds) = markup_row {
+        panel = panel.row("Marks", kinds);
     }
     panel.into()
 }
@@ -950,14 +978,15 @@ fn control<Message: Clone + 'static>(
     .into()
 }
 
-/// A tool's icon, drawn in the ink that tool is about to lay down.
-fn tool_glyph<'a, Message: 'a>(
-    glyph: theme::Icon,
-    size: f32,
-    colour: InkColor,
-) -> Element<'a, Message> {
-    let (red, green, blue) = colour.rgb();
-    theme::icon::tinted(glyph, size, iced::Color::from_rgb(red, green, blue))
+/// A tool's icon, in the palette's own text colour like every other glyph.
+///
+/// It used to be drawn in the ink the tool was about to lay down, which read
+/// as a swatch rather than as an icon: a yellow highlighter on a light theme
+/// was a faint smudge, and a black pen on a dark one vanished. An icon says
+/// *which tool*; the colour it will lay down is what the swatches in its
+/// options say, and they say it against a background chosen to show it.
+fn tool_glyph<'a, Message: 'a>(glyph: theme::Icon, size: f32) -> Element<'a, Message> {
+    theme::icon::icon(glyph, size)
 }
 
 /// One geometry cache per place a [`Marks`] layer is drawn.
@@ -1157,55 +1186,42 @@ impl Marks {
         let Some(selection) = &self.annotations.selection else {
             return;
         };
-        let mut any = false;
-        let path = canvas::Path::new(|builder| {
-            for run in &selection.runs {
-                let corners: Option<Vec<iced::Point>> = run
-                    .iter()
-                    .map(|corner| self.point(panel, *corner))
-                    .collect();
-                let Some(corners) = corners else {
-                    continue;
-                };
-                builder.move_to(corners[0]);
-                for corner in &corners[1..] {
-                    builder.line_to(*corner);
-                }
-                builder.close();
-                any = true;
-            }
-        });
-        if !any {
-            return;
-        }
-        let (red, green, blue) = selection.color.rgb();
-        frame.fill(
-            &path,
-            canvas::Fill {
-                style: canvas::Style::Solid(iced::Color::from_rgba(
-                    red,
-                    green,
-                    blue,
-                    selection.opacity,
-                )),
-                rule: canvas::fill::Rule::NonZero,
-            },
+        self.draw_runs(
+            frame,
+            panel,
+            &selection.runs,
+            selection.kind,
+            selection.color,
+            selection.opacity,
         );
     }
 
-    /// The highlights the document holds for this slide.
+    /// The runs of one text markup, washed or ruled according to its kind.
     ///
-    /// Drawn by the overlay rather than by the page's own pixels, because a
-    /// slide is rendered without annotations so that the sweep under the hand
-    /// and the mark it becomes are never on the screen at once. Each mark is
-    /// one path filled once with the non-zero rule, for the reason
-    /// `draw_highlights` gives: two runs that touch describe one region, and a
-    /// region is painted once.
-    fn draw_committed_highlights(&self, frame: &mut canvas::Frame, panel: Size) {
-        for highlight in &self.annotations.highlights {
+    /// Shared by the live sweep and the committed marks so the two can never
+    /// disagree about what a strikeout looks like — a difference between them
+    /// would show as a jump at the moment of release.
+    ///
+    /// A wash is one path over every run, filled once with the non-zero rule:
+    /// two runs that touch describe one region, and a region painted twice is
+    /// visibly darker where they overlap. Rules are drawn per run, because a
+    /// rule is a line along a run and not a region at all.
+    fn draw_runs(
+        &self,
+        frame: &mut canvas::Frame,
+        panel: Size,
+        runs: &[[(f32, f32); 4]],
+        kind: pulpit_core::annotation::MarkupKind,
+        color: InkColor,
+        opacity: f32,
+    ) {
+        let (red, green, blue) = color.rgb();
+        // Held away from invisible: a mark drawn as nothing reads as a bug.
+        let color = iced::Color::from_rgba(red, green, blue, opacity.clamp(0.1, 1.0));
+        let Some(at) = kind.rule_at() else {
             let mut any = false;
             let path = canvas::Path::new(|builder| {
-                for run in &highlight.runs {
+                for run in runs {
                     let corners: Option<Vec<iced::Point>> = run
                         .iter()
                         .map(|corner| self.point(panel, *corner))
@@ -1221,24 +1237,70 @@ impl Marks {
                     any = true;
                 }
             });
-            if !any {
-                continue;
+            if any {
+                frame.fill(
+                    &path,
+                    canvas::Fill {
+                        style: canvas::Style::Solid(color),
+                        rule: canvas::fill::Rule::NonZero,
+                    },
+                );
             }
-            let (red, green, blue) = highlight.color.rgb();
-            frame.fill(
-                &path,
-                canvas::Fill {
-                    style: canvas::Style::Solid(iced::Color::from_rgba(
-                        red,
-                        green,
-                        blue,
-                        // The mark's own opacity, which is what makes a
-                        // highlight a highlight in a PDF. Held away from
-                        // invisible: a mark drawn as nothing reads as a bug.
-                        highlight.opacity.clamp(0.1, 1.0),
-                    )),
-                    rule: canvas::fill::Rule::NonZero,
-                },
+            return;
+        };
+        for run in runs {
+            let corners: Option<Vec<iced::Point>> = run
+                .iter()
+                .map(|corner| self.point(panel, *corner))
+                .collect();
+            let Some(corners) = corners else {
+                continue;
+            };
+            // The quad's corners are clockwise from upper-left, so the rule
+            // runs from a point down the left edge to the matching point down
+            // the right one. Interpolating along the edges rather than
+            // splitting a bounding box keeps a rule on a rotated page at the
+            // angle of the text it belongs to.
+            let along = |from: iced::Point, to: iced::Point| {
+                iced::Point::new(from.x + (to.x - from.x) * at, from.y + (to.y - from.y) * at)
+            };
+            let left = along(corners[0], corners[3]);
+            let right = along(corners[1], corners[2]);
+            let height = (corners[3].y - corners[0].y)
+                .hypot(corners[3].x - corners[0].x)
+                .max(f32::EPSILON);
+            let thickness = (height * pulpit_core::annotation::MarkupKind::RULE_THICKNESS).max(1.0);
+            frame.stroke(
+                &canvas::Path::new(|builder| {
+                    builder.move_to(left);
+                    builder.line_to(right);
+                }),
+                canvas::Stroke::default()
+                    .with_color(color)
+                    .with_width(thickness),
+            );
+        }
+    }
+
+    /// The highlights the document holds for this slide.
+    ///
+    /// Drawn by the overlay rather than by the page's own pixels, because a
+    /// slide is rendered without annotations so that the sweep under the hand
+    /// and the mark it becomes are never on the screen at once. Each mark is
+    /// one path filled once with the non-zero rule, for the reason
+    /// `draw_highlights` gives: two runs that touch describe one region, and a
+    /// region is painted once.
+    fn draw_committed_highlights(&self, frame: &mut canvas::Frame, panel: Size) {
+        for highlight in &self.annotations.highlights {
+            self.draw_runs(
+                frame,
+                panel,
+                &highlight.runs,
+                highlight.kind,
+                highlight.color,
+                // The mark's own opacity, which is what makes a highlight a
+                // highlight in a PDF.
+                highlight.opacity,
             );
         }
     }

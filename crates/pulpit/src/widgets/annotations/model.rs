@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use pulpit_core::annotation::{
-    AnnotationStyle, AnnotationTool, InkColor, SelectKind, ERASER_RADIUS_RANGE,
+    AnnotationStyle, AnnotationTool, InkColor, MarkupKind, SelectKind, ERASER_RADIUS_RANGE,
     HIGHLIGHT_WIDTH_RANGE,
 };
 
@@ -38,6 +38,12 @@ pub struct AnnotationOptions {
     /// pulling one over a figure are the same gesture asking for different
     /// answers.
     pub select_kind: SelectKind,
+    /// Which of its three marks the highlighter lays down.
+    ///
+    /// The same shape of choice again, and for the same reason: sweeping words
+    /// to wash them and sweeping them to underline them are one gesture, so
+    /// they share one control and part company in its options.
+    pub markup_kind: MarkupKind,
     /// Stroke width as a fraction of the page width.
     pub ink_width: f32,
     pub highlight_width: f32,
@@ -67,6 +73,7 @@ impl Default for AnnotationOptions {
             text_color: InkColor::Black,
             pointer_spotlight: false,
             select_kind: SelectKind::Marks,
+            markup_kind: MarkupKind::Highlight,
             ink_width: style.ink_width,
             highlight_width: 0.025,
             eraser_radius: 0.02,
@@ -133,6 +140,7 @@ pub enum AnnotationPatch {
     PointerRadius(f32),
     PointerSpotlight(bool),
     SelectKind(SelectKind),
+    MarkupKind(MarkupKind),
     TextColor(InkColor),
     TextSize(f32),
     AudienceVisible(bool),
@@ -152,6 +160,7 @@ impl AnnotationPatch {
             AnnotationPatch::PointerRadius(value) => options.pointer_radius = value,
             AnnotationPatch::PointerSpotlight(value) => options.pointer_spotlight = value,
             AnnotationPatch::SelectKind(value) => options.select_kind = value,
+            AnnotationPatch::MarkupKind(value) => options.markup_kind = value,
             AnnotationPatch::TextColor(value) => options.text_color = value,
             AnnotationPatch::TextSize(value) => options.text_size = value,
             AnnotationPatch::AudienceVisible(value) => options.audience_visible = value,

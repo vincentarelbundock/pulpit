@@ -502,6 +502,21 @@ the audience watches move. A tool one palette had and the other did not was
 never a restraint on what could reach the file: it was only a mark the
 presenter had to change mode to make.
 
+Three of the palette's controls are *one control with a mode* rather than
+several buttons: the pointer is a dot or a spotlight, the rubber band gathers
+marks or copies a region or copies text, and the highlighter washes the words
+it sweeps or underlines them or strikes them out. In each case the gesture is
+identical and only the answer differs, so they share a slot and part company in
+the tool's options, beside the colour. A palette row is finite, and three
+buttons that are one gesture crowd out three that are not.
+
+The highlighter's three are `/Highlight`, `/Underline` and `/StrikeOut`: the
+same draft, the same `/QuadPoints` over real extracted text, and the same rule
+that none of them may be dragged somewhere else. What differs is the subtype
+written to the file — and it must actually differ, because an underline written
+as a highlight looks right in pulpit, which draws it from the kind it
+remembers, and is a yellow wash in every other reader.
+
 And the overlay draws *every* kind the document holds for the page, not only
 ink. A slide's pixels are rendered without annotations, which is what keeps an
 unfinished gesture and the mark it becomes from being on the screen at once;
