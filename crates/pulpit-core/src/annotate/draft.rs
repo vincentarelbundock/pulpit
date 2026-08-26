@@ -35,6 +35,12 @@ pub const MAX_QUADS: usize = 4_096;
 pub enum AnnotationKind {
     /// `/Ink`
     Ink,
+    /// `/Square`: a box drawn on the page, which is what PDF calls the
+    /// rectangle rather than anything to do with equal sides.
+    Square,
+    /// `/Circle`: the ellipse inscribed in the annotation's rectangle, which
+    /// is likewise not necessarily round.
+    Circle,
     /// `/Highlight`, with `/QuadPoints` over extracted text.
     Highlight,
     /// `/Underline`, with the same `/QuadPoints`.
@@ -55,6 +61,8 @@ impl AnnotationKind {
     pub fn label(self) -> &'static str {
         match self {
             AnnotationKind::Ink => "Ink",
+            AnnotationKind::Square => "Rectangle",
+            AnnotationKind::Circle => "Ellipse",
             AnnotationKind::Highlight => "Highlight",
             AnnotationKind::Underline => "Underline",
             AnnotationKind::StrikeOut => "Strikeout",
@@ -69,6 +77,8 @@ impl AnnotationKind {
     pub fn subtype(self) -> &'static str {
         match self {
             AnnotationKind::Ink => "Ink",
+            AnnotationKind::Square => "Square",
+            AnnotationKind::Circle => "Circle",
             AnnotationKind::Highlight => "Highlight",
             AnnotationKind::Underline => "Underline",
             AnnotationKind::StrikeOut => "StrikeOut",
@@ -246,6 +256,15 @@ pub enum StampMark {
     },
 }
 
+impl From<crate::annotation::StampChoice> for StampMark {
+    fn from(choice: crate::annotation::StampChoice) -> StampMark {
+        match choice {
+            crate::annotation::StampChoice::Check => StampMark::Check,
+            crate::annotation::StampChoice::Cross => StampMark::Cross,
+        }
+    }
+}
+
 impl StampMark {
     /// The largest picture a stamp may carry. Four megapixels is far past what
     /// a signature or a mark on a page is rendered at, and bounds the decode.
@@ -312,6 +331,143 @@ pub struct HighlightDraft {
     pub style: MarkStyle,
 }
 
+/// The two shapes PDF has an annotation subtype of its own for.
+///
+/// [`crate::annotation::ShapeKind`] is what the *tool* is set to and has four
+/// values; this is what a draft can be, and has two. A line and an arrow are
+/// not here because they are drafted as `/Ink` — see `ShapeKind`'s own note
+/// for why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShapeOutline {
+    /// `/Square`: the rectangle itself.
+    Box,
+    /// `/Circle`: the ellipse inscribed in it.
+    Ellipse,
+}
+
+impl ShapeOutline {
+    pub fn kind(self) -> AnnotationKind {
+        match self {
+            ShapeOutline::Box => AnnotationKind::Square,
+            ShapeOutline::Ellipse => AnnotationKind::Circle,
+        }
+    }
+}
+
+/// A box or an ellipse, bounded by the rectangle the hand pulled.
+///
+/// The rectangle is the annotation's `/Rect`, and the shape is drawn inside
+/// it inset by half the border width, which is where PDF 12.5.6.8 puts a
+/// square's border and what keeps a thick outline from being clipped by the
+/// annotation's own bounds in viewers that honour them strictly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapeDraft {
+    pub page: PageIndex,
+    pub outline: ShapeOutline,
+    pub rect: PageRect,
+    pub style: MarkStyle,
+}
+
+/// How many segments an ellipse is drawn as when it has to be a polyline.
+///
+/// Only the preview needs one — the mark itself is written as four Bézier
+/// curves — and at any zoom a screen can show, sixty-four segments is a
+/// smooth curve. Even, so the polyline is symmetric about both axes.
+pub const ELLIPSE_SEGMENTS: usize = 64;
+
+/// The polyline a shape is previewed as while the hand is still drawing it.
+///
+/// One function for all four kinds because the preview draws one thing — a
+/// stroked path — and because two of the four commit exactly these points as
+/// their `/InkList`. A preview built from different arithmetic than the mark
+/// is a preview that can disagree with what lands on the page.
+///
+/// `from` and `to` are the corners the drag visited, in order: an arrow's
+/// head goes on `to`.
+pub fn shape_outline(
+    kind: crate::annotation::ShapeKind,
+    from: PagePoint,
+    to: PagePoint,
+    width: f32,
+) -> Vec<PagePoint> {
+    use crate::annotation::ShapeKind;
+
+    match kind {
+        ShapeKind::Rectangle => {
+            let rect = PageRect::enclosing([from, to])
+                .unwrap_or(PageRect::new(from.x, from.y, from.x, from.y));
+            vec![
+                PagePoint::new(rect.left, rect.top),
+                PagePoint::new(rect.right, rect.top),
+                PagePoint::new(rect.right, rect.bottom),
+                PagePoint::new(rect.left, rect.bottom),
+                // Back to the start: the painter strokes an open polyline, so
+                // the closing side is a segment like any other.
+                PagePoint::new(rect.left, rect.top),
+            ]
+        }
+        ShapeKind::Ellipse => {
+            let rect = PageRect::enclosing([from, to])
+                .unwrap_or(PageRect::new(from.x, from.y, from.x, from.y));
+            let (cx, cy) = (
+                (rect.left + rect.right) / 2.0,
+                (rect.top + rect.bottom) / 2.0,
+            );
+            let (rx, ry) = (rect.width() / 2.0, rect.height() / 2.0);
+            (0..=ELLIPSE_SEGMENTS)
+                .map(|step| {
+                    let angle = step as f32 / ELLIPSE_SEGMENTS as f32 * std::f32::consts::TAU;
+                    PagePoint::new(cx + rx * angle.cos(), cy + ry * angle.sin())
+                })
+                .collect()
+        }
+        ShapeKind::Line => vec![from, to],
+        ShapeKind::Arrow => arrow_outline(from, to, width),
+    }
+}
+
+/// How long an arrowhead's barbs are, as a multiple of the line's width.
+const ARROWHEAD_WIDTHS: f32 = 5.0;
+/// …and never shorter than this, in page points, so a hairline arrow still
+/// has a head somebody can see.
+const ARROWHEAD_MIN: f32 = 7.0;
+/// …nor longer than this fraction of the shaft, so a short arrow is a short
+/// arrow rather than two crossed barbs.
+const ARROWHEAD_MAX_SHARE: f32 = 0.4;
+/// Half the angle between the barbs and the shaft.
+const ARROWHEAD_HALF_ANGLE: f32 = 0.42;
+
+/// The shaft and the head, as one stroke that doubles back.
+///
+/// One path rather than three, because `/Ink` draws each path in its list
+/// with the same pen and a head made of separate paths would be three marks
+/// to erase, to move and to select. Retracing the shaft's last stretch costs
+/// nothing on a stroked path.
+fn arrow_outline(from: PagePoint, to: PagePoint, width: f32) -> Vec<PagePoint> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let length = (dx * dx + dy * dy).sqrt();
+    if !length.is_finite() || length <= f32::EPSILON {
+        return vec![from, to];
+    }
+    let head = (width * ARROWHEAD_WIDTHS)
+        .max(ARROWHEAD_MIN)
+        .min(length * ARROWHEAD_MAX_SHARE);
+    // The direction the shaft came *from*, which is where the barbs point.
+    let angle = dy.atan2(dx) + std::f32::consts::PI;
+    let barb = |offset: f32| {
+        let angle = angle + offset;
+        PagePoint::new(to.x + head * angle.cos(), to.y + head * angle.sin())
+    };
+    vec![
+        from,
+        to,
+        barb(ARROWHEAD_HALF_ANGLE),
+        to,
+        barb(-ARROWHEAD_HALF_ANGLE),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FreeTextDraft {
     pub page: PageIndex,
@@ -352,6 +508,7 @@ pub struct StampDraft {
 #[serde(rename_all = "kebab-case")]
 pub enum AnnotationDraft {
     Ink(InkDraft),
+    Shape(ShapeDraft),
     Highlight(HighlightDraft),
     FreeText(FreeTextDraft),
     Note(NoteDraft),
@@ -379,6 +536,7 @@ impl AnnotationDraft {
     pub fn kind(&self) -> AnnotationKind {
         match self {
             AnnotationDraft::Ink(_) => AnnotationKind::Ink,
+            AnnotationDraft::Shape(d) => d.outline.kind(),
             AnnotationDraft::Highlight(d) => d.kind.into(),
             AnnotationDraft::FreeText(_) => AnnotationKind::FreeText,
             AnnotationDraft::Note(_) => AnnotationKind::Note,
@@ -389,6 +547,7 @@ impl AnnotationDraft {
     pub fn page(&self) -> PageIndex {
         match self {
             AnnotationDraft::Ink(d) => d.page,
+            AnnotationDraft::Shape(d) => d.page,
             AnnotationDraft::Highlight(d) => d.page,
             AnnotationDraft::FreeText(d) => d.page,
             AnnotationDraft::Note(d) => d.page,
@@ -399,6 +558,7 @@ impl AnnotationDraft {
     pub fn style(&self) -> MarkStyle {
         match self {
             AnnotationDraft::Ink(d) => d.style,
+            AnnotationDraft::Shape(d) => d.style,
             AnnotationDraft::Highlight(d) => d.style,
             AnnotationDraft::FreeText(d) => d.style,
             AnnotationDraft::Note(d) => d.style,
@@ -412,6 +572,7 @@ impl AnnotationDraft {
         let style = self.style().sanitised();
         match self {
             AnnotationDraft::Ink(d) => d.style = style,
+            AnnotationDraft::Shape(d) => d.style = style,
             AnnotationDraft::Highlight(d) => d.style = style,
             AnnotationDraft::FreeText(d) => d.style = style,
             AnnotationDraft::Note(d) => d.style = style,
@@ -428,6 +589,10 @@ impl AnnotationDraft {
         match self {
             AnnotationDraft::Ink(d) => PageRect::enclosing(d.points.iter().map(|p| p.at))
                 .map(|rect| rect.inflated(d.style.width / 2.0 + 1.0)),
+            // The rectangle *is* the mark: PDF 12.5.6.8 draws a square's
+            // border inside its `/Rect`, so the border needs no room made for
+            // it the way a stroke's does.
+            AnnotationDraft::Shape(d) => Some(d.rect),
             AnnotationDraft::Highlight(d) => d
                 .quads
                 .iter()
@@ -484,6 +649,10 @@ impl AnnotationDraft {
                 rect: shift(stamp.rect),
                 ..stamp.clone()
             })),
+            AnnotationDraft::Shape(shape) => Some(AnnotationDraft::Shape(ShapeDraft {
+                rect: shift(shape.rect),
+                ..shape.clone()
+            })),
             AnnotationDraft::Highlight(_) => None,
         }
     }
@@ -518,6 +687,12 @@ impl AnnotationDraft {
                 rect: to,
                 ..stamp.clone()
             })),
+            // A box or an ellipse is its rectangle, so resizing one is
+            // exactly the new rectangle and nothing else has to follow.
+            AnnotationDraft::Shape(shape) => Some(AnnotationDraft::Shape(ShapeDraft {
+                rect: to,
+                ..shape.clone()
+            })),
             AnnotationDraft::Ink(ink) => {
                 // The stroke's points follow the box that held them, so a
                 // scribble stretched wider is the same scribble drawn larger
@@ -543,7 +718,10 @@ impl AnnotationDraft {
     pub fn is_resizable(&self) -> bool {
         matches!(
             self,
-            AnnotationDraft::FreeText(_) | AnnotationDraft::Stamp(_) | AnnotationDraft::Ink(_)
+            AnnotationDraft::FreeText(_)
+                | AnnotationDraft::Stamp(_)
+                | AnnotationDraft::Ink(_)
+                | AnnotationDraft::Shape(_)
         )
     }
 
@@ -553,7 +731,7 @@ impl AnnotationDraft {
             AnnotationDraft::FreeText(free) => Some(&free.text),
             AnnotationDraft::Note(note) => Some(&note.text),
             AnnotationDraft::Highlight(highlight) => Some(&highlight.text),
-            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) => None,
+            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) | AnnotationDraft::Shape(_) => None,
         }
     }
 
@@ -578,7 +756,7 @@ impl AnnotationDraft {
                     ..highlight.clone()
                 }))
             }
-            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) => None,
+            AnnotationDraft::Ink(_) | AnnotationDraft::Stamp(_) | AnnotationDraft::Shape(_) => None,
         }
     }
 
@@ -651,6 +829,9 @@ impl AnnotationDraft {
                 }
                 check_rect(d.rect, page)?;
             }
+            // A shape is its rectangle, so `check_rect` is the whole of it:
+            // finite, on the page, and not dragged down to nothing.
+            AnnotationDraft::Shape(d) => check_rect(d.rect, page)?,
         }
         Ok(())
     }

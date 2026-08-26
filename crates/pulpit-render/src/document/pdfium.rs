@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use pdfium_render::prelude::*;
 use pulpit_core::annotate::{
     AnnotationDraft, AnnotationId, AnnotationKind, FreeTextDraft, HighlightDraft, InkDraft,
-    MarkStyle, NoteDraft, StampDraft, StampMark, TextSource, NOTE_ICON_POINTS,
+    MarkStyle, NoteDraft, ShapeDraft, ShapeOutline, StampDraft, StampMark, TextSource,
+    NOTE_ICON_POINTS,
 };
 use pulpit_core::annotation::InkColor;
 use pulpit_core::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
@@ -68,12 +69,55 @@ mod subtype {
 
     pub const TEXT: FPDF_ANNOTATION_SUBTYPE = 1;
     pub const FREETEXT: FPDF_ANNOTATION_SUBTYPE = 3;
+    pub const SQUARE: FPDF_ANNOTATION_SUBTYPE = 5;
+    pub const CIRCLE: FPDF_ANNOTATION_SUBTYPE = 6;
     pub const HIGHLIGHT: FPDF_ANNOTATION_SUBTYPE = 9;
     pub const UNDERLINE: FPDF_ANNOTATION_SUBTYPE = 10;
     pub const STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
     pub const INK: FPDF_ANNOTATION_SUBTYPE = 15;
     pub const STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
     pub const WIDGET: FPDF_ANNOTATION_SUBTYPE = 20;
+}
+
+/// Whether a draft is being written into a new annotation or over one that is
+/// already in the file — and, when it is the latter, whether pulpit is the
+/// one that drew what is there.
+///
+/// The distinction exists for one reason: an appearance stream. Everything
+/// pulpit draws itself — a note's icon, a shape's outline, a stamp's check —
+/// is written as an `/AP`, and an `/AP` is the only thing PDF 2.0 lets a
+/// viewer draw. Regenerating one over an annotation pulpit did not draw
+/// replaces what the file says with what pulpit would have said: a cross
+/// becomes a check, a Typst mark's picture becomes a glyph, and another
+/// producer's filled, dashed, cloud-bordered ellipse becomes a plain
+/// rectangle's worth of stroke. A move is not a redrawing, and A5 says pulpit
+/// does not rewrite what it does not model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writing {
+    /// A new annotation. Nothing is in the file yet, so everything the mark
+    /// needs is written.
+    Created,
+    /// An annotation that is already there, being rewritten in place.
+    Replacing {
+        /// Whether its name says pulpit generated it (A3). A hint rather than
+        /// a proof — another producer may of course copy the prefix — and it
+        /// is used only to decide whether to redraw an appearance pulpit
+        /// would otherwise have written itself, which is the one question it
+        /// can answer safely.
+        ours: bool,
+    },
+}
+
+impl Writing {
+    /// May this write replace the annotation's appearance stream?
+    fn may_draw(self) -> bool {
+        matches!(self, Writing::Created | Writing::Replacing { ours: true })
+    }
+
+    /// Is this the write that *makes* the annotation?
+    fn is_new(self) -> bool {
+        matches!(self, Writing::Created)
+    }
 }
 
 /// `FPDFANNOT_COLORTYPE_Color`: the annotation's own colour, `/C`, as opposed
@@ -1704,6 +1748,8 @@ impl<'a> PdfiumDocument<'a> {
         }
         let kind = match subtype {
             subtype::INK => AnnotationKind::Ink,
+            subtype::SQUARE => AnnotationKind::Square,
+            subtype::CIRCLE => AnnotationKind::Circle,
             subtype::HIGHLIGHT => AnnotationKind::Highlight,
             subtype::UNDERLINE => AnnotationKind::Underline,
             subtype::STRIKEOUT => AnnotationKind::StrikeOut,
@@ -1743,6 +1789,8 @@ impl<'a> PdfiumDocument<'a> {
             // A modelled subtype is edited *in place*, so every entry pulpit
             // does not know about survives the edit (see the module note).
             AnnotationKind::Ink
+            | AnnotationKind::Square
+            | AnnotationKind::Circle
             | AnnotationKind::Highlight
             | AnnotationKind::Underline
             | AnnotationKind::StrikeOut
@@ -1752,11 +1800,12 @@ impl<'a> PdfiumDocument<'a> {
             AnnotationKind::Other => AnnotationSupport::Unsupported,
         };
 
+        let bounds = self.rect_of(annotation, geometry);
         Some(AnnotationSummary {
             id,
             page,
             kind,
-            bounds: self.rect_of(annotation, geometry),
+            bounds,
             style: self.style_of(annotation),
             contents: AnnotationContents {
                 text,
@@ -1765,11 +1814,35 @@ impl<'a> PdfiumDocument<'a> {
             },
             support,
             revision: DocumentRevision::INITIAL,
-            path: if kind == AnnotationKind::Ink {
-                self.ink_path(annotation, geometry)
-            } else {
-                Vec::new()
+            path: match kind {
+                AnnotationKind::Ink => self.ink_path(annotation, geometry),
+                // A box and an ellipse are drawn *on* their rectangle, and
+                // the border is the mark: without a path the hit test falls
+                // back to the bounding box, so a box drawn round a figure
+                // would swallow every press on the figure and an eraser
+                // through its middle would take it. The outline is where the
+                // mark actually is, and it is the same polyline the preview
+                // drew (§8.4).
+                AnnotationKind::Square => pulpit_core::annotate::shape_outline(
+                    pulpit_core::annotation::ShapeKind::Rectangle,
+                    PagePoint::new(bounds.left, bounds.top),
+                    PagePoint::new(bounds.right, bounds.bottom),
+                    0.0,
+                ),
+                AnnotationKind::Circle => pulpit_core::annotate::shape_outline(
+                    pulpit_core::annotation::ShapeKind::Ellipse,
+                    PagePoint::new(bounds.left, bounds.top),
+                    PagePoint::new(bounds.right, bounds.bottom),
+                    0.0,
+                ),
+                _ => Vec::new(),
             },
+            // What a `/Stamp` shows, when it is a mark pulpit placed and
+            // named. Anything else is a picture pulpit did not draw, and
+            // `None` is what says so.
+            stamp: (kind == AnnotationKind::Stamp)
+                .then(|| stamp_choice(self.string_value(annotation, "Name").as_deref()))
+                .flatten(),
             quads: if kind.is_text_markup() {
                 self.quads_of(annotation, geometry)
             } else {
@@ -1786,6 +1859,7 @@ impl<'a> PdfiumDocument<'a> {
         annotation: FPDF_ANNOTATION,
         draft: &AnnotationDraft,
         geometry: &PageGeometry,
+        writing: Writing,
     ) -> Result<()> {
         let bindings = self.backend.bindings();
         let style = draft.style();
@@ -1797,10 +1871,16 @@ impl<'a> PdfiumDocument<'a> {
         // appearance is a picture it is nothing at all. Setting it everywhere
         // put an opaque slab of ink behind every text mark — the text colour
         // there is `/DA`'s, and the background of a text mark is nothing.
-        let colours_the_mark = !matches!(
-            draft,
-            AnnotationDraft::FreeText(_) | AnnotationDraft::Stamp(_)
-        );
+        //
+        // A stamp that is a glyph is the exception to the exception: pulpit
+        // draws the check itself, in the pen's colour, and `/C` is the only
+        // place that colour can be read back from — without it a mark moved
+        // an inch would be redrawn in the default black.
+        let colours_the_mark = match draft {
+            AnnotationDraft::FreeText(_) => false,
+            AnnotationDraft::Stamp(stamp) => glyph_choice(&stamp.mark).is_some(),
+            _ => true,
+        };
         if colours_the_mark {
             unsafe {
                 bindings.FPDFAnnot_SetColor(
@@ -1845,13 +1925,16 @@ impl<'a> PdfiumDocument<'a> {
 
         match draft {
             AnnotationDraft::Ink(ink) => self.write_ink(annotation, ink, geometry)?,
+            AnnotationDraft::Shape(shape) => {
+                self.write_shape(annotation, shape, geometry, writing)?
+            }
             AnnotationDraft::Highlight(highlight) => {
                 self.write_highlight(annotation, highlight, geometry)?
             }
             AnnotationDraft::FreeText(free) => self.write_free_text(annotation, free, geometry)?,
             AnnotationDraft::Note(note) => self.write_note(annotation, note, geometry)?,
             AnnotationDraft::Stamp(stamp) => {
-                self.write_stamp(page_handle, annotation, stamp, geometry)?
+                self.write_stamp(page_handle, annotation, stamp, geometry, writing)?
             }
         }
         Ok(())
@@ -1991,6 +2074,115 @@ impl<'a> PdfiumDocument<'a> {
         if rc == 0 {
             return Err(DocumentError::Backend(
                 "PDFium refused the note's appearance".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Draw a box or an ellipse, so every viewer shows the same mark.
+    ///
+    /// `/Square` and `/Circle` carry no geometry of their own beyond `/Rect`,
+    /// which `write_draft` has already set, and PDFium does generate an
+    /// appearance for both — but from its own reading of `/C`, `/IC` and the
+    /// border, which is how a note once ended up as a black tab. The stream
+    /// written here is the same stream in every reader, and it is the same
+    /// argument the note's appearance makes (§7.4).
+    ///
+    /// The shape is inset by half the border width, which is where PDF
+    /// 12.5.6.8 puts a square's border: drawn on the rectangle itself, half
+    /// the stroke would lie outside `/Rect` and be clipped by any viewer that
+    /// honours the bounding box.
+    fn write_shape(
+        &self,
+        annotation: FPDF_ANNOTATION,
+        shape: &ShapeDraft,
+        geometry: &PageGeometry,
+        writing: Writing,
+    ) -> Result<()> {
+        let bindings = self.backend.bindings();
+        // The description a screen reader announces, written when the mark is
+        // made and never again. `/Contents` on a shape is whatever the
+        // producer put there — "see revised figure", as often as nothing at
+        // all — and a move is not a reason to replace somebody's comment with
+        // the word "Rectangle".
+        if writing.is_new() {
+            set_string(
+                bindings,
+                annotation,
+                "Contents",
+                shape.outline.kind().label(),
+            )?;
+        }
+        // The rectangle and the border above are the model, and they are
+        // rewritten either way; the drawing is not ours to redo. Another
+        // producer's square may be filled, dashed or cloud-bordered, and
+        // those entries survive an edit in place — but its *appearance* would
+        // not survive being regenerated from a model that has none of them.
+        if !writing.may_draw() {
+            return Ok(());
+        }
+
+        let rect = geometry.rect_to_user_space(shape.rect);
+        let width = shape.style.width.max(0.0);
+        let inset = width / 2.0;
+        let (left, bottom) = (rect[0] + inset, rect[1] + inset);
+        let (right, top) = (rect[2] - inset, rect[3] - inset);
+        // A rectangle thinner than its own border collapses; drawing it at
+        // zero size is a mark nobody can see and a `re` operator with a
+        // negative extent, so the inset gives way rather than the shape.
+        let (left, right) = if left <= right {
+            (left, right)
+        } else {
+            let middle = (rect[0] + rect[2]) / 2.0;
+            (middle, middle)
+        };
+        let (bottom, top) = if bottom <= top {
+            (bottom, top)
+        } else {
+            let middle = (rect[1] + rect[3]) / 2.0;
+            (middle, middle)
+        };
+
+        let (red, green, blue) = shape.style.color.rgb();
+        let mut stream = String::new();
+        stream.push_str("q\n");
+        stream.push_str(&format!("{red:.3} {green:.3} {blue:.3} RG\n"));
+        stream.push_str(&format!("{width:.3} w\n"));
+        match shape.outline {
+            ShapeOutline::Box => {
+                stream.push_str(&format!(
+                    "{left:.3} {bottom:.3} {:.3} {:.3} re\n",
+                    right - left,
+                    top - bottom
+                ));
+            }
+            ShapeOutline::Ellipse => {
+                // Four Bézier curves, which is how an ellipse is drawn in
+                // PostScript and PDF: the magic constant is the one that
+                // makes a cubic segment approximate a quarter turn to within
+                // a fraction of a point at any size a page is printed at.
+                const KAPPA: f32 = 0.552_284_8;
+                let (cx, cy) = ((left + right) / 2.0, (bottom + top) / 2.0);
+                let (rx, ry) = ((right - left) / 2.0, (top - bottom) / 2.0);
+                let (ox, oy) = (rx * KAPPA, ry * KAPPA);
+                stream.push_str(&format!("{:.3} {cy:.3} m\n", cx + rx));
+                let curve = |x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32| {
+                    format!("{x1:.3} {y1:.3} {x2:.3} {y2:.3} {x:.3} {y:.3} c\n")
+                };
+                stream.push_str(&curve(cx + rx, cy + oy, cx + ox, cy + ry, cx, cy + ry));
+                stream.push_str(&curve(cx - ox, cy + ry, cx - rx, cy + oy, cx - rx, cy));
+                stream.push_str(&curve(cx - rx, cy - oy, cx - ox, cy - ry, cx, cy - ry));
+                stream.push_str(&curve(cx + ox, cy - ry, cx + rx, cy - oy, cx + rx, cy));
+            }
+        }
+        // Closed, then stroked and not filled: a box round a figure has to
+        // leave the figure visible, and `/IC`, the interior colour, is
+        // deliberately never written for the same reason.
+        stream.push_str("h\nS\nQ\n");
+
+        if unsafe { bindings.FPDFAnnot_SetAP_str(annotation, APPEARANCE_NORMAL, &stream) } == 0 {
+            return Err(DocumentError::Backend(
+                "PDFium refused the shape's appearance".into(),
             ));
         }
         Ok(())
@@ -2181,8 +2373,21 @@ impl<'a> PdfiumDocument<'a> {
         annotation: FPDF_ANNOTATION,
         stamp: &StampDraft,
         geometry: &PageGeometry,
+        writing: Writing,
     ) -> Result<()> {
         let bindings = self.backend.bindings();
+        // Every write of a stamp draws it, whether the mark is being made or
+        // moved, because every edit takes its appearance away: setting the
+        // rectangle, the colour or the flags clears what PDFium is holding,
+        // and a `/Stamp` is a subtype PDFium generates nothing for. A stamp
+        // rewritten without being redrawn is an annotation in `/Annots` and
+        // on nobody's screen.
+        //
+        // What makes that safe is that a draft only ever describes a mark
+        // pulpit can draw: `AnnotationSummary::to_draft` refuses to describe a
+        // stamp whose `/Name` pulpit did not write, so a picture nobody here
+        // can rebuild is never offered for rewriting in the first place.
+        let _ = writing;
         // The `/Contents` of a stamp is its description, which is what a
         // screen reader announces; §7.6 says these are called marks and never
         // cryptographic signatures.
@@ -2194,6 +2399,16 @@ impl<'a> PdfiumDocument<'a> {
             Some(source) => set_string(bindings, annotation, "Contents", source)?,
             None => set_string(bindings, annotation, "Contents", stamp.mark.label())?,
         }
+        // `/Name`, PDF 12.5.6.12's entry for which stamp this is, and the one
+        // thing that makes a check or a cross recoverable from the file: an
+        // appearance says nothing about what drew it, so without this a mark
+        // could be moved but never redrawn where it moved to. Written as a
+        // string where the spec asks for a name, for the reason a note's
+        // `/Name` is — PDFium's annotation API offers no way to write a name
+        // object — and read back the same way.
+        if let Some(choice) = glyph_choice(&stamp.mark) {
+            set_string(bindings, annotation, "Name", choice.label())?;
+        }
         if let Some(source) = &stamp.source {
             // The markup itself, in pulpit's own namespaced entry: other
             // viewers show the appearance and are not asked to understand
@@ -2201,13 +2416,12 @@ impl<'a> PdfiumDocument<'a> {
             set_string(bindings, annotation, PULPIT_KEY, source)?;
         }
 
-        if let StampMark::Image {
-            pixel_width,
-            pixel_height,
-            rgba,
-        } = &stamp.mark
-        {
-            self.write_stamp_image(
+        match &stamp.mark {
+            StampMark::Image {
+                pixel_width,
+                pixel_height,
+                rgba,
+            } => self.write_stamp_image(
                 page_handle,
                 annotation,
                 Picture {
@@ -2217,7 +2431,75 @@ impl<'a> PdfiumDocument<'a> {
                     rgba,
                 },
                 geometry,
-            )?;
+            )?,
+            // A check or a cross is two or three strokes, and until they were
+            // drawn here a stamp of one was an annotation with no appearance
+            // at all: in `/Annots`, and on nobody's screen.
+            //
+            // Only ever reached while making the mark — the gate above sends
+            // every replacement that carries no picture home — so this draws
+            // the mark the palette actually chose and never a guess about one
+            // already in the file.
+            mark => self.write_stamp_glyph(annotation, stamp, mark, geometry)?,
+        }
+        Ok(())
+    }
+
+    /// Draw the check or the cross, in the same operators the note's icon is
+    /// drawn in and for the same reason: what the reader sees when they place
+    /// a mark is what every other viewer sees (§7.4).
+    ///
+    /// Both are designed on a unit square and scaled to whatever rectangle
+    /// the mark was placed at, so a stamp resized by its corners is the same
+    /// mark drawn larger.
+    fn write_stamp_glyph(
+        &self,
+        annotation: FPDF_ANNOTATION,
+        stamp: &StampDraft,
+        mark: &StampMark,
+        geometry: &PageGeometry,
+    ) -> Result<()> {
+        let bindings = self.backend.bindings();
+        let rect = geometry.rect_to_user_space(stamp.rect);
+        let (left, bottom) = (rect[0], rect[1]);
+        let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+        let at = |x: f32, y: f32| (left + x * width, bottom + y * height);
+        // Thick enough to read as a mark somebody made rather than as a hair
+        // drawn on the page, and proportional to the stamp so that resizing
+        // one scales the whole mark.
+        let pen = (width.min(height) * 0.12).max(0.5);
+
+        let strokes: &[&[(f32, f32)]] = match mark {
+            // The tick: down to the low point, then up and away.
+            StampMark::Check => &[&[(0.14, 0.52), (0.40, 0.22), (0.88, 0.78)]],
+            StampMark::Cross => &[&[(0.18, 0.18), (0.82, 0.82)], &[(0.82, 0.18), (0.18, 0.82)]],
+            // Pictures are drawn by `write_stamp_image`, which is the arm
+            // this function is never reached from.
+            StampMark::Image { .. } => return Ok(()),
+        };
+
+        let (red, green, blue) = stamp.style.color.rgb();
+        let mut stream = String::new();
+        stream.push_str("q\n");
+        stream.push_str(&format!("{red:.3} {green:.3} {blue:.3} RG\n"));
+        stream.push_str(&format!("{pen:.3} w\n"));
+        // Round joins and caps: a tick drawn with butt caps has square ends
+        // and reads as a piece of machinery rather than as a pen stroke.
+        stream.push_str("1 J\n1 j\n");
+        for stroke in strokes {
+            for (index, (x, y)) in stroke.iter().enumerate() {
+                let (x, y) = at(*x, *y);
+                let operator = if index == 0 { "m" } else { "l" };
+                stream.push_str(&format!("{x:.3} {y:.3} {operator}\n"));
+            }
+            stream.push_str("S\n");
+        }
+        stream.push_str("Q\n");
+
+        if unsafe { bindings.FPDFAnnot_SetAP_str(annotation, APPEARANCE_NORMAL, &stream) } == 0 {
+            return Err(DocumentError::Backend(
+                "PDFium refused the stamp's appearance".into(),
+            ));
         }
         Ok(())
     }
@@ -2752,6 +3034,34 @@ fn escape_pdf_string(line: &str) -> String {
 /// Never derived from a PDFium handle. Handles do not survive the event-loop
 /// turn they were resolved in (rule 2), so an identity built from one is an
 /// identity nothing can ever look up again.
+/// Which of the two marks the palette offers this is, for the stamps that are
+/// a glyph rather than a picture.
+///
+/// The pair with [`stamp_choice`], which reads the same answer back out of a
+/// file's `/Name`.
+fn glyph_choice(mark: &StampMark) -> Option<pulpit_core::annotation::StampChoice> {
+    use pulpit_core::annotation::StampChoice;
+
+    match mark {
+        StampMark::Check => Some(StampChoice::Check),
+        StampMark::Cross => Some(StampChoice::Cross),
+        StampMark::Image { .. } => None,
+    }
+}
+
+/// The mark a `/Stamp`'s `/Name` says it shows, when it says one pulpit wrote.
+///
+/// Deliberately strict: anything else is a picture pulpit did not draw and
+/// cannot draw again, and the honest answer for one is that its mark is not
+/// known rather than that it is a check.
+fn stamp_choice(name: Option<&str>) -> Option<pulpit_core::annotation::StampChoice> {
+    use pulpit_core::annotation::StampChoice;
+
+    StampChoice::ALL
+        .into_iter()
+        .find(|choice| Some(choice.label()) == name)
+}
+
 fn session_id(page: PageIndex, index: usize) -> AnnotationId {
     AnnotationId::imported(&format!("session-{}-{}", page.get(), index))
         .expect("a derived name is well formed")
@@ -3298,6 +3608,8 @@ impl DocumentBackend for PdfiumDocument<'_> {
         let geometry = self.measure(page)?;
         let subtype = match draft.kind() {
             AnnotationKind::Ink => subtype::INK,
+            AnnotationKind::Square => subtype::SQUARE,
+            AnnotationKind::Circle => subtype::CIRCLE,
             AnnotationKind::Highlight => subtype::HIGHLIGHT,
             AnnotationKind::Underline => subtype::UNDERLINE,
             AnnotationKind::StrikeOut => subtype::STRIKEOUT,
@@ -3326,7 +3638,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 }
                 let outcome = (|| {
                     set_string(bindings, annotation, "NM", id.as_str())?;
-                    self.write_draft(handle, annotation, draft, &geometry)
+                    self.write_draft(handle, annotation, draft, &geometry, Writing::Created)
                 })();
                 unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
                 outcome.map_err(|error| PdfError::Render(error.to_string()))?;
@@ -3368,11 +3680,25 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // become durable: written here, the mark keeps the same name
                 // across the save, so an undo of this very edit still finds
                 // it after the file has been reopened (A3).
+                // Whether what is on the page is pulpit's own drawing, asked
+                // *before* the name below is written: a mark another reader
+                // wrote is about to be given a `/NM` for the first time, and
+                // that name must not make its appearance look like ours.
+                let ours = self
+                    .string_value(annotation, "NM")
+                    .and_then(|name| AnnotationId::imported(&name))
+                    .is_some_and(|name| name.looks_generated());
                 let outcome = (|| {
                     if self.string_value(annotation, "NM").is_none() {
                         set_string(bindings, annotation, "NM", id.as_str())?;
                     }
-                    self.write_draft(handle, annotation, draft, &geometry)
+                    self.write_draft(
+                        handle,
+                        annotation,
+                        draft,
+                        &geometry,
+                        Writing::Replacing { ours },
+                    )
                 })();
                 unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
                 unsafe { bindings.FPDFPage_GenerateContent(handle) };

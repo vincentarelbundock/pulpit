@@ -9103,6 +9103,13 @@ impl App {
                 if self.ask_form_pointer(FormPointer::Down) {
                     return unfocus();
                 }
+                // The stamp places a mark and is finished: there is nothing to
+                // type into a check. One click, one transaction, one undo
+                // entry, like every other edit (§9.1).
+                if let Some(transaction) = self.reader.place_stamp() {
+                    self.commit_to_document(transaction);
+                    return unfocus();
+                }
                 // …unless the armed tool *places* a mark rather than drawing
                 // one. Those have no gesture: the click chooses the spot and
                 // the text arrives from an editor (§8.5).
@@ -9335,7 +9342,14 @@ impl App {
                 if let ReadCommand::SetToolColor(tool, color) = command {
                     let options = &mut self.annotation_controls.options;
                     match tool {
-                        pulpit_core::annotation::AnnotationTool::Ink => options.ink_color = color,
+                        // The shape tool and the stamp draw in the pen's ink,
+                        // so a colour picked in either of their panels is the
+                        // pen's colour and is kept as the pen's.
+                        pulpit_core::annotation::AnnotationTool::Ink
+                        | pulpit_core::annotation::AnnotationTool::Shape
+                        | pulpit_core::annotation::AnnotationTool::Stamp => {
+                            options.ink_color = color
+                        }
                         pulpit_core::annotation::AnnotationTool::Highlighter => {
                             options.highlight_color = color
                         }
@@ -13671,9 +13685,9 @@ impl App {
             // A label and a note are placed by the press and filled from the
             // keyboard; the pointer has nothing more to say to either.
             Some(AnnotationTool::Text | AnnotationTool::Note) => {}
-            // The stamp palette is document mode's, so the pointer stays with
-            // links and media overlays for it.
-            Some(AnnotationTool::Stamp) => {}
+            // The stamp and the shape tool are document mode's, so the pointer
+            // stays with links and media overlays for both.
+            Some(AnnotationTool::Stamp | AnnotationTool::Shape) => {}
             None => {}
         }
     }
@@ -13728,10 +13742,10 @@ impl App {
             AnnotationTool::Select => {
                 self.annotations.begin_band(point);
             }
-            // The stamp palette — a check, a cross, a signature mark — is
-            // document mode's, and the presenter palette draws no control for
-            // it, so the press is not the annotations'.
-            AnnotationTool::Stamp => return false,
+            // The stamp — a check, a cross, a signature mark — and the shape
+            // tool are document mode's, and the presenter palette draws no
+            // control for either, so the press is not the annotations'.
+            AnnotationTool::Stamp | AnnotationTool::Shape => return false,
         }
         true
     }
@@ -13999,6 +14013,7 @@ impl App {
                     // selection looks the way selections look.
                     AnnotationTool::Note
                     | AnnotationTool::Stamp
+                    | AnnotationTool::Shape
                     | AnnotationTool::Select
                     | AnnotationTool::SelectText => {}
                 }
@@ -14025,6 +14040,7 @@ impl App {
                     AnnotationTool::Spotlight
                     | AnnotationTool::Eraser
                     | AnnotationTool::Stamp
+                    | AnnotationTool::Shape
                     | AnnotationTool::Select
                     | AnnotationTool::SelectText => false,
                 };

@@ -384,7 +384,22 @@ mod layout_tests {
         }
         let desktop_cell = 1280.0 * 0.475;
         assert!(!navigation_is_compact(desktop_cell));
-        assert!(!tools_are_compact(desktop_cell));
+        // The palette is two tools longer than it was — a shape tool and the
+        // stamp — and two tools no longer fit in an ordinary desktop's half
+        // band. The band gives way to the armed tool and More there, which is
+        // what compact mode is for; a band drawn full into a cell too narrow
+        // for it would be a row of clipped controls.
+        assert!(tools_are_compact(desktop_cell));
+        let wide_cell = 1600.0 * 0.475;
+        assert!(!tools_are_compact(wide_cell));
+        // …and the threshold follows the palette rather than a number left
+        // behind by it: the whole point of deriving it is that the next tool
+        // added cannot silently overflow the band.
+        assert!(
+            tools_are_compact(590.0),
+            "a palette longer than seven tools needs more than the width \
+             seven tools were measured at"
+        );
     }
 }
 
@@ -2337,6 +2352,8 @@ fn tools<Message: Clone + 'static>(
         highlight_color: reader.controls.highlight_color,
         select_kind: reader.controls.select_kind,
         markup_kind: reader.controls.markup_kind,
+        shape_kind: reader.controls.shape_kind,
+        stamp_mark: reader.controls.stamp_mark,
         text_color: reader.controls.text_color,
         text_size: reader.controls.text_size,
         selected: reader.selected,
@@ -2359,6 +2376,8 @@ struct DocumentToolsState {
     highlight_color: InkColor,
     select_kind: pulpit_core::annotation::SelectKind,
     markup_kind: pulpit_core::annotation::MarkupKind,
+    shape_kind: pulpit_core::annotation::ShapeKind,
+    stamp_mark: pulpit_core::annotation::StampChoice,
     text_color: InkColor,
     text_size: f32,
     selected: bool,
@@ -2461,8 +2480,22 @@ fn document_tools_band<Message: Clone + 'static>(
         .into()
 }
 
+/// Below this the band shows the armed tool and More instead of the whole
+/// palette.
+///
+/// Derived from the palette's own length rather than written down once: the
+/// figure was measured when `DOCUMENT` held seven tools, and a palette that
+/// grew without moving it would be drawn full into a band too narrow to hold
+/// it. `PER_TOOL` is one tool's glyph, its padding and its options arrow.
 fn tools_are_compact(width: f32) -> bool {
-    width < 590.0
+    const MEASURED_AT: f32 = 590.0;
+    const MEASURED_TOOLS: usize = 7;
+    const PER_TOOL: f32 = 56.0;
+
+    let extra = AnnotationTool::DOCUMENT
+        .len()
+        .saturating_sub(MEASURED_TOOLS);
+    width < MEASURED_AT + extra as f32 * PER_TOOL
 }
 
 fn document_command_button<Message: Clone + 'static>(
@@ -2550,7 +2583,12 @@ fn document_tool_control<Message: Clone + 'static>(
 impl DocumentToolsState {
     fn color(self, tool: AnnotationTool) -> Option<InkColor> {
         match tool {
-            AnnotationTool::Ink => Some(self.ink_color),
+            // The shape tool and the stamp draw in the pen's ink, so their
+            // panels offer the pen's colour and setting it there sets the
+            // pen's: one pen, whichever panel it was reached from.
+            AnnotationTool::Ink | AnnotationTool::Shape | AnnotationTool::Stamp => {
+                Some(self.ink_color)
+            }
             AnnotationTool::Highlighter => Some(self.highlight_color),
             AnnotationTool::Text | AnnotationTool::Note => Some(self.text_color),
             _ => None,
@@ -2576,9 +2614,13 @@ fn document_tool_glyph<Message: 'static>(
         AnnotationTool::Highlighter => {
             crate::widgets::common::view::markup_kind_glyph(state.markup_kind)
         }
+        // …and the shape tool's is the shape it is set to draw, for the same
+        // reason: four shapes under one button, and the button says which.
+        AnnotationTool::Shape => crate::widgets::common::view::shape_kind_glyph(state.shape_kind),
         AnnotationTool::Text => theme::Icon::Type,
         AnnotationTool::Note => theme::Icon::StickyNote,
-        AnnotationTool::Stamp => theme::Icon::Stamp,
+        // …and the stamp's is the mark it is set to put down.
+        AnnotationTool::Stamp => crate::widgets::common::view::stamp_mark_glyph(state.stamp_mark),
         AnnotationTool::Eraser => theme::Icon::Eraser,
         AnnotationTool::SelectText => theme::Icon::TextCursor,
         AnnotationTool::Pointer | AnnotationTool::Spotlight => theme::Icon::Pointer,
@@ -2787,10 +2829,40 @@ fn document_tool_options_panel<Message: Clone + 'static>(
         }
         panel = panel.row("Marks", kinds);
     }
+    // The shape tool's four, in the same place and for the same reason.
+    if tool == AnnotationTool::Shape {
+        let mut kinds = Row::new().spacing(theme::space::XS);
+        for kind in pulpit_core::annotation::ShapeKind::ALL {
+            kinds = kinds.push(document_command_button(
+                crate::widgets::common::view::shape_kind_glyph(kind),
+                kind.label(),
+                ReadCommand::SetShapeKind(kind),
+                state.shape_kind == kind,
+                state.live,
+                on_event,
+            ));
+        }
+        panel = panel.row("Shapes", kinds);
+    }
+    // …and the stamp's two.
+    if tool == AnnotationTool::Stamp {
+        let mut marks = Row::new().spacing(theme::space::XS);
+        for mark in pulpit_core::annotation::StampChoice::ALL {
+            marks = marks.push(document_command_button(
+                crate::widgets::common::view::stamp_mark_glyph(mark),
+                mark.label(),
+                ReadCommand::SetStampMark(mark),
+                state.stamp_mark == mark,
+                state.live,
+                on_event,
+            ));
+        }
+        panel = panel.row("Marks", marks);
+    }
     // Measures are in page points here rather than fractions of the page, so
     // the caption carries the number: a reader setting a pen to two points is
     // setting it to something the document itself is measured in.
-    if tool == AnnotationTool::Ink {
+    if matches!(tool, AnnotationTool::Ink | AnnotationTool::Shape) {
         panel = panel.row(
             format!("Width — {:.1} pt", state.ink_width),
             slider(0.5..=12.0, state.ink_width, move |value| {

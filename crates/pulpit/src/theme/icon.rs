@@ -87,6 +87,14 @@ pub enum Icon {
     StickyNote,
     /// A check, a cross or a visible mark placed on a page: `stamp`.
     Stamp,
+    /// The shape tool's box, and the mark it draws: `square`.
+    Rectangle,
+    /// Its ellipse: `circle`.
+    Ellipse,
+    /// Its line: `minus`, which is a stroke drawn between two points.
+    Line,
+    /// Its arrow: `move-up-right`.
+    Arrow,
     /// Pick an existing annotation up: `mouse-pointer`.
     ///
     /// Distinct from [`Icon::Pointer`], which is the dot that follows a
@@ -169,6 +177,10 @@ impl Icon {
             Icon::Printer => include_bytes!("../../assets/icons/printer.svg"),
             Icon::StickyNote => include_bytes!("../../assets/icons/sticky-note.svg"),
             Icon::Stamp => include_bytes!("../../assets/icons/stamp.svg"),
+            Icon::Rectangle => include_bytes!("../../assets/icons/square.svg"),
+            Icon::Ellipse => include_bytes!("../../assets/icons/circle.svg"),
+            Icon::Line => include_bytes!("../../assets/icons/minus.svg"),
+            Icon::Arrow => include_bytes!("../../assets/icons/move-up-right.svg"),
             Icon::Select => include_bytes!("../../assets/icons/mouse-pointer.svg"),
             Icon::ZoomIn => include_bytes!("../../assets/icons/zoom-in.svg"),
             Icon::ZoomOut => include_bytes!("../../assets/icons/zoom-out.svg"),

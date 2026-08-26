@@ -262,6 +262,13 @@ pub enum ReadCommand {
     /// The highlighter's counterpart to [`ReadCommand::SetSelectKind`], and it
     /// names no tool for the same reason: only one tool has it.
     SetMarkupKind(pulpit_core::annotation::MarkupKind),
+    /// Set which of its four shapes the shape tool draws, and which of its
+    /// two marks the stamp puts down.
+    ///
+    /// The same sort of choice as the two above, made in the same panel, and
+    /// naming no tool for the same reason: one tool has each.
+    SetShapeKind(pulpit_core::annotation::ShapeKind),
+    SetStampMark(pulpit_core::annotation::StampChoice),
     /// The pointer moved over the page surface, in canonical page points on
     /// the page it is over (A4).
     PageCursor {

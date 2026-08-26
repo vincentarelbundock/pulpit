@@ -4,6 +4,39 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Shapes: a box, an ellipse, a line and an arrow.** One tool in the document
+  palette with four modes, drawn by dragging, in the pen's own colour and
+  width — the same shape the highlighter's three nibs and the band's three
+  kinds have. A box becomes a `/Square` and an ellipse a `/Circle`, the
+  annotations PDF has for exactly them, so a marked-up document opens as
+  shapes in Okular and Acrobat rather than as a picture. A line and an arrow
+  are strokes of ink, because `/Line` keeps its geometry in arrays PDFium
+  cannot write and a malformed annotation travels worse than an honest
+  stroke; the arrowhead is drawn as part of the same stroke, so it is one
+  mark to select, move, resize and erase. All four are movable and resizable
+  afterwards like any other mark.
+
+- **The stamp can be reached.** A check and a cross, placed with one click,
+  centred on where you clicked and resizable afterwards. The tool existed and
+  was not in the palette, and the two marks it puts down had no appearance at
+  all — a check placed before this was an annotation in the file and on
+  nobody's screen. It is never described as a signature.
+
+### Fixed
+
+- **A typeset text mark no longer disappears when it is dragged.** Every edit
+  to an annotation clears the picture the engine is holding for it, and a
+  stamp is a kind nothing redraws by itself — so moving a mark whose
+  appearance pulpit could not rebuild left an annotation in the file that
+  nothing draws. Pulpit now records which mark it placed, redraws it wherever
+  it lands, and holds rather than drags the marks it cannot draw again:
+  another producer's stamp, and a text mark's rendered picture, which is
+  rewritten by editing its source rather than by moving it.
+
 ## [0.0.10] — 2026-08-26
 
 ### Added

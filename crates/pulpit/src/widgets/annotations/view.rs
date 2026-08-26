@@ -431,6 +431,9 @@ fn overflow_menu<Message: Clone + 'static>(
                     AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
                     AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
                     AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
+                    // Never drawn by this palette: shapes are document mode's, and
+                    // arriving here at all would be a stale message.
+                    AnnotationTool::Shape => theme::icon::icon(theme::Icon::Rectangle, glyph),
                     AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
                     AnnotationTool::SelectText => theme::icon::icon(theme::Icon::TextCursor, glyph),
                 };
@@ -536,6 +539,9 @@ fn tool_control<Message: Clone + 'static>(
         AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
         AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
         AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
+        // Never drawn by this palette: shapes are document mode's, and
+        // arriving here at all would be a stale message.
+        AnnotationTool::Shape => theme::icon::icon(theme::Icon::Rectangle, glyph),
         AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
         AnnotationTool::SelectText => theme::icon::icon(theme::Icon::TextCursor, glyph),
     };
@@ -643,6 +649,9 @@ fn colour_of(tool: AnnotationTool, options: crate::widgets::AnnotationOptions) -
         | AnnotationTool::Stamp
         | AnnotationTool::Select
         | AnnotationTool::SelectText => options.ink_color,
+        // The shape tool draws in the pen's ink, and this palette does not
+        // offer it at all.
+        AnnotationTool::Shape => options.ink_color,
     }
 }
 
@@ -683,6 +692,7 @@ fn options_panel<Message: Clone + 'static>(
         // text measures keep the slider well formed.
         AnnotationTool::Note
         | AnnotationTool::Stamp
+        | AnnotationTool::Shape
         | AnnotationTool::Select
         | AnnotationTool::SelectText => (options.text_size, (0.008, 0.12)),
     };

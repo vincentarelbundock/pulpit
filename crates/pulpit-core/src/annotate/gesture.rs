@@ -9,11 +9,11 @@
 use crate::page::{PageGeometry, PageIndex, PagePoint, PageQuad, PageRect};
 
 pub use crate::annotation::AnnotationTool;
-use crate::annotation::MarkupKind;
+use crate::annotation::{MarkupKind, ShapeKind, StampChoice};
 
 use super::draft::{
-    AnnotationCommand, AnnotationDraft, FreeTextDraft, HighlightDraft, InkDraft, MarkStyle,
-    NoteDraft, StampDraft, StampMark, TextSource,
+    shape_outline, AnnotationCommand, AnnotationDraft, FreeTextDraft, HighlightDraft, InkDraft,
+    MarkStyle, NoteDraft, ShapeDraft, ShapeOutline, StampDraft, StampMark, TextSource,
 };
 use super::id::AnnotationId;
 use super::stroke::{accept_sample, simplify, InkPoint, MAX_INK_POINTS, SIMPLIFY_TOLERANCE};
@@ -57,6 +57,19 @@ pub enum Gesture {
         page: PageIndex,
         at: PagePoint,
         touched: Vec<AnnotationId>,
+    },
+    /// A shape being pulled out between two points: a box, an ellipse, a line
+    /// or an arrow, according to the tool's [`ShapeKind`].
+    ///
+    /// The two corners in the order the hand visited them, not a rectangle: a
+    /// drag up-left and a drag down-right bound the same box, and an arrow
+    /// drawn one way round points the other.
+    Shape {
+        page: PageIndex,
+        kind: ShapeKind,
+        anchor: PagePoint,
+        head: PagePoint,
+        style: MarkStyle,
     },
     /// A rubber band being dragged over the page. Selects rather than marks:
     /// the release gathers up what the band encloses and commits nothing, so
@@ -181,6 +194,7 @@ impl Gesture {
     pub fn page(&self) -> PageIndex {
         match self {
             Gesture::Ink { page, .. }
+            | Gesture::Shape { page, .. }
             | Gesture::Selecting { page, .. }
             | Gesture::Erasing { page, .. }
             | Gesture::Marquee { page, .. }
@@ -192,6 +206,10 @@ impl Gesture {
     pub fn is_empty(&self) -> bool {
         match self {
             Gesture::Ink { points, .. } => points.is_empty(),
+            // A shape that never left the point it started from is a click on
+            // the page, and a click makes no shape: there is nothing to be
+            // one corner of.
+            Gesture::Shape { anchor, head, .. } => anchor == head,
             Gesture::Selecting { quads, .. } => quads.is_empty(),
             Gesture::Erasing { touched, .. } => touched.is_empty(),
             // A band that never left the point it started from is a click,
@@ -255,6 +273,15 @@ pub struct AnnotationInteraction {
     /// is painted but *which mark it is* — it chooses the PDF subtype, and the
     /// opacity follows from it rather than the other way round.
     markup_kind: MarkupKind,
+    /// Which shape the shape tool draws, for the same reason `markup_kind` is
+    /// here: it chooses the mark rather than how it is painted.
+    shape_kind: ShapeKind,
+    /// Which mark the stamp puts down.
+    ///
+    /// A [`StampChoice`] and not a [`StampMark`]: a picture is something a
+    /// reader supplies rather than a mode the palette holds, and this is a
+    /// mode the palette holds.
+    stamp_mark: StampChoice,
     /// What placed text — free text and notes — is written in. Separate from
     /// the ink's: the pen drawing in green does not make the commentary green.
     text_style: MarkStyle,
@@ -284,6 +311,8 @@ impl AnnotationInteraction {
             ink_style: MarkStyle::default(),
             highlight_style: MarkStyle::highlighter(),
             markup_kind: MarkupKind::Highlight,
+            shape_kind: ShapeKind::default(),
+            stamp_mark: StampChoice::default(),
             text_style: MarkStyle::default(),
             held_text: None,
         }
@@ -381,6 +410,25 @@ impl AnnotationInteraction {
         self.highlight_style.opacity = kind.opacity();
     }
 
+    pub fn shape_kind(&self) -> ShapeKind {
+        self.shape_kind
+    }
+
+    /// Choose which shape the tool draws. Nothing else follows from it: all
+    /// four are drawn with the pen's own colour and width.
+    pub fn set_shape_kind(&mut self, kind: ShapeKind) {
+        self.shape_kind = kind;
+    }
+
+    pub fn stamp_mark(&self) -> StampChoice {
+        self.stamp_mark
+    }
+
+    /// Choose which mark the stamp puts down.
+    pub fn set_stamp_mark(&mut self, mark: StampChoice) {
+        self.stamp_mark = mark;
+    }
+
     pub fn text_style(&self) -> MarkStyle {
         self.text_style
     }
@@ -445,6 +493,16 @@ impl AnnotationInteraction {
                 kind: MarkupKind::Highlight,
                 select_only: true,
             }),
+            // The shape tool draws in the pen's ink: one colour and one width
+            // for the marks a hand draws and the ones it cannot draw
+            // straight, because they are the same pen to the reader.
+            AnnotationTool::Shape => Some(Gesture::Shape {
+                page,
+                kind: self.shape_kind,
+                anchor: at,
+                head: at,
+                style: self.ink_style,
+            }),
             AnnotationTool::Eraser => Some(Gesture::Erasing {
                 page,
                 at,
@@ -486,7 +544,7 @@ impl AnnotationInteraction {
                 points.push(candidate);
                 true
             }
-            Some(Gesture::Selecting { head, .. }) => {
+            Some(Gesture::Selecting { head, .. }) | Some(Gesture::Shape { head, .. }) => {
                 if *head == at {
                     return false;
                 }
@@ -641,6 +699,22 @@ impl AnnotationInteraction {
                 });
                 vec![AnnotationCommand::Create(draft)]
             }
+            Gesture::Shape {
+                page,
+                kind,
+                anchor,
+                head,
+                style,
+            } => {
+                // A press that went nowhere is not a shape of no size, it is
+                // a press: nothing is committed and nothing is reported.
+                if anchor == head {
+                    return GestureOutcome::Nothing;
+                }
+                vec![AnnotationCommand::Create(shape_draft(
+                    page, kind, anchor, head, style,
+                ))]
+            }
             Gesture::Selecting {
                 page,
                 quads,
@@ -744,6 +818,47 @@ impl AnnotationInteraction {
             return GestureOutcome::Nothing;
         }
         GestureOutcome::Commit(vec![AnnotationCommand::Create(draft)])
+    }
+}
+
+/// What a finished shape drag becomes.
+///
+/// The one place the four kinds part company. A box and an ellipse are
+/// `/Square` and `/Circle`, which is what those annotations are for and what
+/// lets another reader's user edit them; a line and an arrow are `/Ink`,
+/// because `/Line`'s own geometry lives in arrays PDFium's annotation API
+/// cannot write, and a malformed `/Line` travels worse than an honest stroke
+/// (see [`ShapeKind`]).
+fn shape_draft(
+    page: PageIndex,
+    kind: ShapeKind,
+    from: PagePoint,
+    to: PagePoint,
+    style: MarkStyle,
+) -> AnnotationDraft {
+    let outline = match kind {
+        ShapeKind::Rectangle => Some(ShapeOutline::Box),
+        ShapeKind::Ellipse => Some(ShapeOutline::Ellipse),
+        ShapeKind::Line | ShapeKind::Arrow => None,
+    };
+    match outline {
+        Some(outline) => AnnotationDraft::Shape(ShapeDraft {
+            page,
+            outline,
+            rect: PageRect::enclosing([from, to])
+                .unwrap_or(PageRect::new(from.x, from.y, to.x, to.y)),
+            style,
+        }),
+        None => AnnotationDraft::Ink(InkDraft {
+            page,
+            // The same points the preview drew, so what lands on the page is
+            // what the hand was shown while it was drawing.
+            points: shape_outline(kind, from, to, style.width)
+                .into_iter()
+                .map(|at| InkPoint { at })
+                .collect(),
+            style,
+        }),
     }
 }
 
@@ -1202,5 +1317,160 @@ mod tests {
         });
         assert_eq!(interaction.ink_style().opacity, 1.0);
         assert_eq!(interaction.highlight_style().opacity, 0.4);
+    }
+
+    /// Drag `kind` from one corner to another and take what it committed.
+    fn drag_shape(kind: ShapeKind, from: (f32, f32), to: (f32, f32)) -> AnnotationDraft {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.set_shape_kind(kind);
+        interaction.arm(Some(AnnotationTool::Shape));
+        assert!(interaction.begin(PageIndex(0), PagePoint::new(from.0, from.1)));
+        assert!(interaction.extend(PagePoint::new(to.0, to.1)));
+        let outcome = interaction.finish(&page());
+        outcome.commands()[0].draft().unwrap().clone()
+    }
+
+    /// A box and an ellipse are the annotations PDF has for exactly them, so
+    /// another reader's user can edit what pulpit drew.
+    #[test]
+    fn a_box_and_an_ellipse_reach_the_file_as_square_and_circle() {
+        assert_eq!(
+            drag_shape(ShapeKind::Rectangle, (100.0, 100.0), (300.0, 200.0)).kind(),
+            AnnotationKind::Square
+        );
+        assert_eq!(
+            drag_shape(ShapeKind::Ellipse, (100.0, 100.0), (300.0, 200.0)).kind(),
+            AnnotationKind::Circle
+        );
+    }
+
+    /// Whichever way round it was drawn: a drag up and to the left bounds the
+    /// same box as a drag down and to the right.
+    #[test]
+    fn a_box_is_the_rectangle_the_drag_bounded_however_it_was_drawn() {
+        let forwards = drag_shape(ShapeKind::Rectangle, (100.0, 100.0), (300.0, 200.0));
+        let backwards = drag_shape(ShapeKind::Rectangle, (300.0, 200.0), (100.0, 100.0));
+        assert_eq!(forwards.bounds(), backwards.bounds());
+        assert_eq!(
+            forwards.bounds(),
+            Some(PageRect::new(100.0, 100.0, 300.0, 200.0))
+        );
+    }
+
+    /// A line and an arrow are `/Ink`: `/Line` keeps its geometry in arrays
+    /// PDFium's annotation API cannot write, and a stroke travels everywhere.
+    #[test]
+    fn a_line_is_a_stroke_between_the_two_points_the_hand_visited() {
+        let draft = drag_shape(ShapeKind::Line, (100.0, 100.0), (300.0, 200.0));
+        assert_eq!(draft.kind(), AnnotationKind::Ink);
+        let AnnotationDraft::Ink(ink) = draft else {
+            panic!("a line is drafted as ink")
+        };
+        assert_eq!(
+            ink.points.iter().map(|point| point.at).collect::<Vec<_>>(),
+            [PagePoint::new(100.0, 100.0), PagePoint::new(300.0, 200.0)],
+            "the order the drag went in, not a rectangle"
+        );
+    }
+
+    #[test]
+    fn an_arrow_has_its_head_on_the_end_the_drag_finished_on() {
+        let draft = drag_shape(ShapeKind::Arrow, (100.0, 100.0), (300.0, 100.0));
+        let AnnotationDraft::Ink(ink) = draft else {
+            panic!("an arrow is drafted as ink")
+        };
+        let points: Vec<PagePoint> = ink.points.iter().map(|point| point.at).collect();
+        // Shaft, tip, barb, back to the tip, barb: one stroke that doubles
+        // back, so the head is one mark with the line rather than three.
+        assert_eq!(points.len(), 5);
+        assert_eq!(points[0], PagePoint::new(100.0, 100.0));
+        assert_eq!(points[1], PagePoint::new(300.0, 100.0));
+        assert_eq!(points[3], points[1], "the head is drawn from the tip");
+        for barb in [points[2], points[4]] {
+            assert!(
+                barb.x < points[1].x,
+                "a barb points back down the shaft, not past the tip"
+            );
+            assert!(barb.x > points[0].x, "and not past where the drag began");
+        }
+        assert!(
+            (points[2].y - 100.0).abs() > f32::EPSILON
+                && (points[2].y - 100.0) == -(points[4].y - 100.0),
+            "the two barbs are symmetric about the shaft"
+        );
+    }
+
+    /// A short arrow is a short arrow rather than two crossed barbs.
+    #[test]
+    fn an_arrowhead_never_outgrows_the_shaft_it_is_on() {
+        let draft = drag_shape(ShapeKind::Arrow, (100.0, 100.0), (110.0, 100.0));
+        let AnnotationDraft::Ink(ink) = draft else {
+            panic!("an arrow is drafted as ink")
+        };
+        let points: Vec<PagePoint> = ink.points.iter().map(|point| point.at).collect();
+        let head = points[1].distance_to(points[2]);
+        assert!(head <= 10.0 * 0.4 + 1e-3, "{head} is longer than the arrow");
+    }
+
+    /// A press that went nowhere is a press, not a shape of no size.
+    #[test]
+    fn a_shape_that_never_left_its_corner_commits_nothing() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::Shape));
+        assert!(interaction.begin(PageIndex(0), PagePoint::new(100.0, 100.0)));
+        assert_eq!(interaction.finish(&page()), GestureOutcome::Nothing);
+    }
+
+    /// The nib rule, one tool along: the open drag fixed its kind when it
+    /// began, so changing the palette mid-drag is about the *next* shape.
+    #[test]
+    fn changing_the_shape_mid_drag_leaves_the_one_under_the_hand_alone() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::Shape));
+        interaction.begin(PageIndex(0), PagePoint::new(100.0, 100.0));
+        interaction.set_shape_kind(ShapeKind::Ellipse);
+        interaction.extend(PagePoint::new(300.0, 200.0));
+        assert_eq!(
+            interaction.finish(&page()).commands()[0]
+                .draft()
+                .unwrap()
+                .kind(),
+            AnnotationKind::Square,
+            "the drag fixed its kind when it began"
+        );
+    }
+
+    /// One click, one stamp, one undo entry — and it is the mark the palette
+    /// is set to.
+    #[test]
+    fn the_stamp_places_the_mark_it_is_set_to() {
+        use crate::annotation::StampChoice;
+
+        let mut interaction = AnnotationInteraction::new();
+        interaction.set_stamp_mark(StampChoice::Cross);
+        interaction.arm(Some(AnnotationTool::Stamp));
+        // No gesture: the press chooses the spot and there is nothing to type
+        // into a cross.
+        assert!(!interaction.begin(PageIndex(0), PagePoint::new(100.0, 100.0)));
+        let outcome = interaction.place(
+            PageIndex(0),
+            PagePoint::new(100.0, 100.0),
+            PlacedMark::Stamp {
+                mark: interaction.stamp_mark().into(),
+                size: (24.0, 24.0),
+            },
+            &page(),
+        );
+        let commands = outcome.commands();
+        assert_eq!(commands.len(), 1);
+        let AnnotationDraft::Stamp(stamp) = commands[0].draft().unwrap() else {
+            panic!("a stamp is drafted as a stamp")
+        };
+        assert_eq!(stamp.mark, StampMark::Cross);
+        assert_eq!(stamp.rect, PageRect::new(100.0, 100.0, 124.0, 124.0));
+        assert!(
+            stamp.source.is_none(),
+            "a cross came from a palette, not from Typst"
+        );
     }
 }

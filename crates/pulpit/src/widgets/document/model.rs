@@ -576,6 +576,11 @@ pub struct ReaderControls {
     /// Which of its three marks the highlighter lays down, mirrored here for
     /// the same reason.
     pub markup_kind: pulpit_core::annotation::MarkupKind,
+    /// Which shape the shape tool draws, and which mark the stamp puts down.
+    /// Mirrored here for the same reason the colours are: the toolbar is
+    /// drawn from the controls alone.
+    pub shape_kind: pulpit_core::annotation::ShapeKind,
+    pub stamp_mark: pulpit_core::annotation::StampChoice,
     pub text_color: pulpit_core::annotation::InkColor,
     /// The size placed text and notes are written at, in page points. The
     /// pen has a width control and type had nothing, which left the one
@@ -619,6 +624,8 @@ impl Default for ReaderControls {
             highlight_color: pulpit_core::annotate::MarkStyle::highlighter().color,
             select_kind: pulpit_core::annotation::SelectKind::default(),
             markup_kind: pulpit_core::annotation::MarkupKind::default(),
+            shape_kind: pulpit_core::annotation::ShapeKind::default(),
+            stamp_mark: pulpit_core::annotation::StampChoice::default(),
             text_color: pulpit_core::annotate::MarkStyle::default().color,
             text_size: pulpit_core::annotate::MarkStyle::default().font_size,
             outline: OutlineView::default(),

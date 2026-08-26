@@ -758,6 +758,19 @@ pub struct AnnotationSummary {
     /// fetched by id. An empty vector and an omitted one are different things,
     /// and a hit-test that confused them would silently stop selecting.
     pub geometry_elided: bool,
+    /// Which mark a `/Stamp` shows, when the file says so.
+    ///
+    /// A stamp records an *appearance* and nothing else: there is nothing in
+    /// one to read back that tells a check from a cross from a rasterised
+    /// picture. So pulpit writes `/Name` — the entry PDF 12.5.6.12 has for
+    /// exactly this — when it places a check or a cross, and this is that
+    /// name read back.
+    ///
+    /// `None` for every other kind, and for a stamp whose picture pulpit did
+    /// not draw: a mark pulpit cannot rebuild is one it must not offer to
+    /// rewrite (A5), because every edit clears the appearance PDFium is
+    /// holding and only what pulpit can draw again would come back.
+    pub stamp: Option<pulpit_core::annotation::StampChoice>,
 }
 
 impl AnnotationSummary {
@@ -773,8 +786,8 @@ impl AnnotationSummary {
     /// build a replacement out of one by accident.
     pub fn to_draft(&self) -> Option<AnnotationDraft> {
         use pulpit_core::annotate::{
-            FreeTextDraft, HighlightDraft, InkDraft, InkPoint, NoteDraft, StampDraft, StampMark,
-            TextSource,
+            FreeTextDraft, HighlightDraft, InkDraft, InkPoint, NoteDraft, ShapeDraft, ShapeOutline,
+            StampDraft, TextSource,
         };
 
         let style = self.style;
@@ -784,6 +797,20 @@ impl AnnotationSummary {
                 points: self.path.iter().map(|at| InkPoint { at: *at }).collect(),
                 style,
             })),
+            // A box and an ellipse are their rectangle and nothing else, so
+            // the summary carries everything a replacement needs.
+            AnnotationKind::Square | AnnotationKind::Circle => {
+                Some(AnnotationDraft::Shape(ShapeDraft {
+                    page: self.page,
+                    outline: if self.kind == AnnotationKind::Square {
+                        ShapeOutline::Box
+                    } else {
+                        ShapeOutline::Ellipse
+                    },
+                    rect: self.bounds,
+                    style,
+                }))
+            }
             // One draft for all three text markups: they differ in the
             // subtype the draft's own kind chooses, and in nothing else.
             AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::StrikeOut => {
@@ -812,15 +839,25 @@ impl AnnotationSummary {
                 text: self.contents.text.clone(),
                 style,
             })),
-            AnnotationKind::Stamp => Some(AnnotationDraft::Stamp(StampDraft {
-                page: self.page,
-                rect: self.bounds,
-                mark: StampMark::Check,
-                style,
-                // Whatever markup generated this mark, so reopening it for
-                // editing shows the source rather than the picture (§7.4).
-                source: self.contents.pulpit_source.clone(),
-            })),
+            // Only the marks pulpit drew itself. A `/Stamp` records an
+            // appearance and nothing that says what drew it, so a stamp whose
+            // `/Name` pulpit did not write — a rasterised Typst mark, another
+            // producer's picture — cannot be described here at all. Saying
+            // otherwise would be worse than saying nothing: every edit clears
+            // the appearance the engine is holding, so a mark rewritten from
+            // a guess comes back as the guess, and one rewritten from nothing
+            // does not come back.
+            AnnotationKind::Stamp => self.stamp.map(|mark| {
+                AnnotationDraft::Stamp(StampDraft {
+                    page: self.page,
+                    rect: self.bounds,
+                    mark: mark.into(),
+                    style,
+                    // Whatever markup generated this mark, so reopening it for
+                    // editing shows the source rather than the picture (§7.4).
+                    source: self.contents.pulpit_source.clone(),
+                })
+            }),
             AnnotationKind::Other => None,
         }
     }
@@ -1642,12 +1679,61 @@ mod tests {
             path: vec![PagePoint::new(0.0, 0.0), PagePoint::new(10.0, 10.0)],
             quads: Vec::new(),
             geometry_elided: false,
+            stamp: None,
         };
         let hit = summary.to_hit();
         assert_eq!(hit.id, summary.id);
         assert!(hit.editable);
         assert_eq!(hit.width, summary.style.width);
         assert!(summary.editable());
+    }
+
+    /// A box and an ellipse are their rectangle, so the summary carries
+    /// everything a move or a resize needs to build the replacement with.
+    #[test]
+    fn a_shape_round_trips_through_the_summary_and_moves_and_resizes() {
+        use pulpit_core::annotate::{AnnotationDraft, ShapeOutline};
+
+        for (kind, outline) in [
+            (AnnotationKind::Square, ShapeOutline::Box),
+            (AnnotationKind::Circle, ShapeOutline::Ellipse),
+        ] {
+            let summary = AnnotationSummary {
+                id: IdGenerator::new(1).next_id(),
+                page: PageIndex(2),
+                kind,
+                bounds: PageRect::new(10.0, 20.0, 110.0, 70.0),
+                style: MarkStyle::default(),
+                contents: AnnotationContents::default(),
+                support: AnnotationSupport::Editable,
+                revision: DocumentRevision(3),
+                path: Vec::new(),
+                quads: Vec::new(),
+                geometry_elided: false,
+                stamp: None,
+            };
+            let draft = summary.to_draft().expect("a shape pulpit models");
+            let AnnotationDraft::Shape(shape) = &draft else {
+                panic!("{kind:?} drafts as a shape")
+            };
+            assert_eq!(shape.outline, outline);
+            assert_eq!(shape.rect, summary.bounds);
+            assert_eq!(shape.page, PageIndex(2));
+
+            // Freely movable, and moving it moves the rectangle that is the
+            // whole of it (§8.4).
+            assert!(kind.is_freely_movable());
+            let moved = draft.translated(5.0, -5.0).expect("a shape moves");
+            assert_eq!(moved.bounds(), Some(PageRect::new(15.0, 15.0, 115.0, 65.0)));
+            let bigger = PageRect::new(10.0, 20.0, 210.0, 120.0);
+            assert!(draft.is_resizable());
+            assert_eq!(
+                draft
+                    .resized(summary.bounds, bigger)
+                    .and_then(|d| d.bounds()),
+                Some(bigger)
+            );
+        }
     }
 
     #[test]
