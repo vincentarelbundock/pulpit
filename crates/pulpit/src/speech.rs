@@ -336,6 +336,25 @@ impl Speech {
         }
     }
 
+    /// Play/pause for a held selection, on the same key that reads the page.
+    ///
+    /// The same two-key rule as [`Speech::toggle`], with the selection as the
+    /// wanted scope: pressing the key while the selection is being read
+    /// pauses it, and pressing it while anything else is running starts the
+    /// selection afresh.
+    pub fn toggle_selection(
+        &mut self,
+        text: String,
+        page: PageIndex,
+        settings: &SpeechSettings,
+    ) -> Vec<Outgoing> {
+        match toggling(self.reading.state(), self.reading.scope(), Scope::Selection) {
+            Toggle::Start => self.speak_selection(text, page, settings),
+            Toggle::Resume => self.resume(settings),
+            Toggle::Pause => self.pause(settings),
+        }
+    }
+
     pub fn skip(
         &mut self,
         direction: speech::Direction,

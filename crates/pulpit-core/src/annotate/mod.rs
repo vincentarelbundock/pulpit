@@ -28,7 +28,7 @@ pub use draft::{
 };
 pub use gesture::{
     AnnotationInteraction, AnnotationTool, Corner, Gesture, GestureOutcome, PlacedMark,
-    TransformHandle, MIN_MARK_SIZE,
+    SelectedText, TransformHandle, MIN_MARK_SIZE,
 };
 pub use hit::{AnnotationHit, HitTarget};
 pub use id::{AnnotationId, IdGenerator};

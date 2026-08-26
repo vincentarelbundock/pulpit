@@ -570,13 +570,23 @@ Three consequences follow, and each is load-bearing:
 
 Two things follow from the first of those, and both were once wrong in the
 code. The palettes offer the *same marks* — ink, the highlighter, a label, a
-note, the eraser and the rubber band, in the same order, under the same digits.
+note, the eraser, the rubber band and the text selection, in the same order,
+under the same digits.
 What presentation has and document mode does not is the pointer, which makes no
 mark at all; what document mode has and presentation does not is moving and
 resizing a held mark, because a mark dragged to a new place mid-talk is a mark
 the audience watches move. A tool one palette had and the other did not was
 never a restraint on what could reach the file: it was only a mark the
 presenter had to change mode to make.
+
+The text selection is the highlighter's sweep with nothing committed at the
+end: the same engine queries over the same extracted text, and a release that
+holds the words instead of marking them. What it holds outlives the drag —
+that is its whole point — and answers exactly two questions: the primary-C
+chord copies it, and the read-page key reads it aloud instead of the page
+while one is held (the menu row says "Read page or selection" for the same
+reason). It is put down by the things that would make it stale: a new
+gesture, a change of tool, a page change, Escape.
 
 Three of the palette's controls are *one control with a mode* rather than
 several buttons: the pointer is a dot or a spotlight, the rubber band gathers

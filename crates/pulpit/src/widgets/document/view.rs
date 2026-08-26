@@ -666,7 +666,9 @@ fn sheet<'a, Message: Clone + 'static>(
         area.interaction(iced::mouse::Interaction::Crosshair).into()
     } else if let Some(tool) = pointer.armed {
         let cursor = match tool {
-            AnnotationTool::Highlighter => iced::mouse::Interaction::Text,
+            AnnotationTool::Highlighter | AnnotationTool::SelectText => {
+                iced::mouse::Interaction::Text
+            }
             _ => iced::mouse::Interaction::Crosshair,
         };
         area.interaction(cursor).into()
@@ -2578,6 +2580,7 @@ fn document_tool_glyph<Message: 'static>(
         AnnotationTool::Note => theme::Icon::StickyNote,
         AnnotationTool::Stamp => theme::Icon::Stamp,
         AnnotationTool::Eraser => theme::Icon::Eraser,
+        AnnotationTool::SelectText => theme::Icon::TextCursor,
         AnnotationTool::Pointer | AnnotationTool::Spotlight => theme::Icon::Pointer,
     };
     theme::icon::icon(icon, size)

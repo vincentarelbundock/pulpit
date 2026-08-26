@@ -1300,19 +1300,24 @@ fn menu(app: &App) -> Element<'_, Message> {
                     // *now* — so the menu answers "what happens if I press
                     // this" rather than making the reader infer it from a
                     // label that never changes.
-                    let label = |scope: Scope, idle: &'static str| match (state.clone(), reading) {
-                        (SpeechState::Idle, _) => idle,
-                        (_, Some(active)) if active != scope => idle,
-                        (SpeechState::Paused, _) => "Resume",
-                        _ => "Pause",
-                    };
+                    let label =
+                        |scopes: &[Scope], idle: &'static str| match (state.clone(), reading) {
+                            (SpeechState::Idle, _) => idle,
+                            (_, Some(active)) if !scopes.contains(&active) => idle,
+                            (SpeechState::Paused, _) => "Resume",
+                            _ => "Pause",
+                        };
                     items = items.push(entry(
-                        label(Scope::Document, "Read the whole document"),
+                        label(&[Scope::Document], "Read the whole document"),
                         shortcut(Action::SpeakToggle),
                         Message::SpeakToggleScope(Scope::Document),
                     ));
+                    // One row for the page and the selection both, because
+                    // they share one key: with text selected it reads the
+                    // selection, otherwise the page — and while either is
+                    // being read, this is the row that pauses it.
                     items = items.push(entry(
-                        label(Scope::Page, "Read this page"),
+                        label(&[Scope::Page, Scope::Selection], "Read page or selection"),
                         shortcut(Action::SpeakPageToggle),
                         Message::SpeakToggleScope(Scope::Page),
                     ));
@@ -1498,14 +1503,15 @@ fn shortcut_group<'a>(
 
 const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 // Balanced by row count rather than by subject: the annotation group grew when
-// presentation gained document mode's tools, and autoadvance later joined the
-// page-movement group, each time moving where an even split falls. A group is
-// indivisible, so the constants name the evenest split there is rather than a
-// tidy subject grouping — and the test holds them to exactly that. Where the
-// counts allow a choice, the split follows what the keys are *for*: running a
-// talk on the left, working through a document on the right.
-const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 2, 3];
-const SHORTCUT_TABLE_RIGHT: &[usize] = &[4, 5, 6];
+// presentation gained document mode's tools, again when the text selection
+// and its copy chord joined it, and autoadvance joined the page-movement
+// group, each time moving where an even split falls. A group is indivisible,
+// so the constants name the evenest split there is rather than a tidy subject
+// grouping — and the test holds them to exactly that. Where the counts allow
+// a choice, the split follows what the keys are *for*: running a talk on the
+// left, working through a document on the right.
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 2, 3, 6];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[1, 4, 5];
 const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {

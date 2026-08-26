@@ -71,6 +71,16 @@ pub enum AnnotationTool {
     /// they watch one that gathers marks up; there is no reason for the two
     /// windows to disagree about what a rectangle is.
     Select,
+    /// Sweeps the page's own text exactly as the highlighter does, and then
+    /// leaves no mark: what it produces is a selection that outlives the
+    /// drag, for the clipboard and for reading aloud.
+    ///
+    /// A separate tool rather than a fourth [`MarkupKind`], because the other
+    /// three all commit an annotation and this one must never touch the
+    /// document; and separate from [`SelectKind::Text`], because that one
+    /// bounds an *area* and takes what falls inside it, where this one sweeps
+    /// characters the way every text editor's cursor does.
+    SelectText,
 }
 
 /// What [`AnnotationTool::Select`]'s band does with the region it encloses.
@@ -218,7 +228,7 @@ impl AnnotationTool {
     /// has and document mode does not is the pointer, which makes no mark at
     /// all: it is a thing you do to a slide in front of an audience, and there
     /// is nothing to keep afterwards.
-    pub const ALL: [AnnotationTool; 7] = [
+    pub const ALL: [AnnotationTool; 8] = [
         AnnotationTool::Pointer,
         AnnotationTool::Select,
         AnnotationTool::Ink,
@@ -226,6 +236,7 @@ impl AnnotationTool {
         AnnotationTool::Text,
         AnnotationTool::Note,
         AnnotationTool::Eraser,
+        AnnotationTool::SelectText,
     ];
 
     /// The tools a document layout's `AnnotationTools` widget offers, in the
@@ -233,13 +244,14 @@ impl AnnotationTool {
     ///
     /// [`AnnotationTool::ALL`] without the pointer, for the reason given
     /// there.
-    pub const DOCUMENT: [AnnotationTool; 6] = [
+    pub const DOCUMENT: [AnnotationTool; 7] = [
         AnnotationTool::Select,
         AnnotationTool::Ink,
         AnnotationTool::Highlighter,
         AnnotationTool::Text,
         AnnotationTool::Note,
         AnnotationTool::Eraser,
+        AnnotationTool::SelectText,
     ];
 
     /// Has this tool anything to configure — a colour, a size, a mode?
@@ -250,9 +262,11 @@ impl AnnotationTool {
     /// open options panels. The band has no colour and no size — a rubber
     /// band is a shape the hand makes — but it does have a [`SelectKind`],
     /// which is the same sort of choice as the highlighter's colour and
-    /// belongs in the same place.
+    /// belongs in the same place. The text selection has none either: a
+    /// selection looks the way selections look, and a colour chooser for one
+    /// would be a control that changes nothing anyone keeps.
     pub fn has_options(self) -> bool {
-        !matches!(self, AnnotationTool::Stamp)
+        !matches!(self, AnnotationTool::Stamp | AnnotationTool::SelectText)
     }
 
     /// Does this tool make a durable PDF annotation when its gesture ends?
@@ -264,11 +278,13 @@ impl AnnotationTool {
             | AnnotationTool::Note
             | AnnotationTool::Stamp => true,
             // The eraser changes the document but makes nothing; the other
-            // three are transient effects (§3.2).
+            // four are transient effects (§3.2) — the text selection sweeps
+            // like the highlighter but is defined by committing nothing.
             AnnotationTool::Eraser
             | AnnotationTool::Pointer
             | AnnotationTool::Spotlight
-            | AnnotationTool::Select => false,
+            | AnnotationTool::Select
+            | AnnotationTool::SelectText => false,
         }
     }
 
@@ -283,6 +299,7 @@ impl AnnotationTool {
             AnnotationTool::Note => "Note",
             AnnotationTool::Stamp => "Stamp",
             AnnotationTool::Select => "Select",
+            AnnotationTool::SelectText => "Select text",
         }
     }
 }
@@ -1477,7 +1494,10 @@ impl Annotations {
         if tool != Some(AnnotationTool::Spotlight) {
             self.spotlight = None;
         }
-        if tool != Some(AnnotationTool::Highlighter) {
+        if !matches!(
+            tool,
+            Some(AnnotationTool::Highlighter | AnnotationTool::SelectText)
+        ) {
             self.selection = None;
         }
         // Putting the band down puts down what it was holding: a selection is
@@ -1651,14 +1671,18 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_but_the_stamp_has_a_panel_to_open() {
+    fn every_tool_with_a_panel_has_something_in_it() {
         // A control that opens an options panel with nothing in it teaches
         // people not to open options panels, so this is not cosmetic: it is
-        // what decides whether the arrow is drawn at all.
+        // what decides whether the arrow is drawn at all. The stamp chooses
+        // from its own palette, and the text selection has nothing to
+        // configure at all; every other tool has a colour, a size or a mode.
         for tool in AnnotationTool::ALL {
-            assert!(
+            let expected = !matches!(tool, AnnotationTool::Stamp | AnnotationTool::SelectText);
+            assert_eq!(
                 tool.has_options(),
-                "{tool:?} draws an options arrow with nothing behind it"
+                expected,
+                "{tool:?} draws an options arrow with nothing behind it, or hides one"
             );
         }
         assert!(!AnnotationTool::Stamp.has_options());

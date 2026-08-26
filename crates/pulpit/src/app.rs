@@ -273,15 +273,6 @@ pub enum Message {
     SpeakToggleScope(pulpit_core::speech::Scope),
     SpeakStop,
     SpeakSkip(pulpit_core::speech::Direction),
-    /// Read whatever is selected in the reader.
-    ///
-    /// Nothing sends this yet, and that is issue #9's doing rather than an
-    /// oversight: a text selection currently lives only for the duration of
-    /// the drag that makes it, so there is no moment at which a reader could
-    /// ask for it to be spoken. The path below it is complete and tested, so
-    /// when a selection gains somewhere to live this becomes one menu entry.
-    #[allow(dead_code)]
-    SpeakSelection,
     SetSpeechRate(f32),
     SetSpeechVoice(String),
     /// `Auto`, or a language the reader pinned. `None` means `Auto`.
@@ -2403,13 +2394,32 @@ impl App {
         }
     }
 
-    /// Whatever the reader has selected, for "speak the selection".
+    /// Whatever text is selected, in either mode, for the clipboard and for
+    /// "speak the selection".
     ///
-    /// `None` when nothing is selected, which the coordinator turns into a
-    /// sentence rather than a silent no-op.
+    /// The reader's selection and the presenter's are asked in turn; only one
+    /// can exist, because there is one pointer. `None` when nothing is
+    /// selected, which each caller turns into a sentence rather than a
+    /// silent no-op.
     fn selected_text(&self) -> Option<String> {
         let text = self.reader.selection_text();
+        if !text.trim().is_empty() {
+            return Some(text);
+        }
+        let text = self.presenter_interaction.selection_text();
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Put the selected text on the clipboard, and say what happened: what
+    /// the primary-C chord does.
+    fn copy_selection(&mut self) -> Task<Message> {
+        let Some(text) = self.selected_text() else {
+            self.notify("Nothing is selected. The Select text tool holds a selection.".to_string());
+            return Task::none();
+        };
+        let characters = text.chars().count();
+        self.notify_done(format!("Copied {characters} characters."));
+        iced::clipboard::write(text)
     }
 
     /// Carry out what the speech coordinator asked for.
@@ -3195,6 +3205,10 @@ impl App {
                     // page's link list, so it goes rather than pointing at the
                     // wrong rectangle on the next one.
                     self.annotations.clear_on_slide_change();
+                    // The interaction's transients go with them: an open
+                    // sweep and the held text selection both belong to the
+                    // page being left (§8.7).
+                    self.presenter_interaction.clear_transient();
                     self.request_marks_for_this_slide();
                     self.focused_link = None;
                     self.hovered_link = None;
@@ -3883,7 +3897,19 @@ impl App {
             Message::SpeakToggleScope(scope) => {
                 let settings = self.settings.speech.clone();
                 let page = self.speech_page();
-                let outgoing = self.speech.toggle(scope, page, &settings);
+                // The page's key narrows to the selection when one is held
+                // (issue #9): the selection is lit up on the page, so the key
+                // reading it rather than the sheet around it is the key doing
+                // what it looks like it will. The menu row says so too —
+                // "Read page or selection".
+                let selected = match scope {
+                    pulpit_core::speech::Scope::Page => self.selected_text(),
+                    _ => None,
+                };
+                let outgoing = match selected {
+                    Some(text) => self.speech.toggle_selection(text, page, &settings),
+                    None => self.speech.toggle(scope, page, &settings),
+                };
                 self.apply_speech(outgoing);
                 Task::none()
             }
@@ -3896,14 +3922,6 @@ impl App {
             Message::SpeakSkip(direction) => {
                 let settings = self.settings.speech.clone();
                 let outgoing = self.speech.skip(direction, &settings);
-                self.apply_speech(outgoing);
-                Task::none()
-            }
-            Message::SpeakSelection => {
-                let settings = self.settings.speech.clone();
-                let page = self.speech_page();
-                let selected = self.selected_text().unwrap_or_default();
-                let outgoing = self.speech.speak_selection(selected, page, &settings);
                 self.apply_speech(outgoing);
                 Task::none()
             }
@@ -4744,7 +4762,10 @@ impl App {
         match rung {
             Rung::AnnotationTyping => self.annotations.is_typing(),
             Rung::ComposingMark => self.composing_mark.is_some(),
-            Rung::HeldMarks => !self.annotations.selected.is_empty(),
+            Rung::HeldMarks => {
+                !self.annotations.selected.is_empty()
+                    || self.presenter_interaction.held_text().is_some()
+            }
             Rung::OverviewGrid => self.overview,
             Rung::CapturedWidget => press.captured,
             Rung::ConfirmResetColors => self.confirm_reset_colors,
@@ -4845,6 +4866,12 @@ impl App {
                 }
                 Some("Escape") => {
                     self.annotations.clear_selection();
+                    // The held text selection is put down too: Escape means
+                    // "I am holding nothing", whichever kind of held it was.
+                    if self.presenter_interaction.held_text().is_some() {
+                        self.presenter_interaction.clear_held_text();
+                        self.annotations.set_selection(None);
+                    }
                     Some(Task::none())
                 }
                 _ => None,
@@ -5206,6 +5233,8 @@ impl App {
             Action::AnnotateNote => self.arm_from_key(AnnotationTool::Note),
             Action::AnnotateHighlighter => self.arm_from_key(AnnotationTool::Highlighter),
             Action::AnnotateEraser => self.arm_from_key(AnnotationTool::Eraser),
+            Action::AnnotateSelectText => self.arm_from_key(AnnotationTool::SelectText),
+            Action::CopySelection => self.copy_selection(),
             // The key arms whichever of the two the pointer control is set
             // to, so the mode chosen in its options is the mode the key gives.
             Action::AnnotatePointer => self.arm_from_key(self.annotation_options().pointer_tool()),
@@ -7027,15 +7056,14 @@ impl App {
                             .selection_resolved(result.quads, result.text, finalising)
                     {
                         self.commit_to_document(transaction);
-                    } else if finalising {
+                    } else if finalising && !self.reader.has_held_text() {
                         // A selection that resolved to nothing commits nothing
                         // and says why, rather than leaving the reader to
-                        // wonder whether the highlighter is broken (§8.2).
-                        self.notify(
-                            "There is no selectable text there, so there is nothing to \
-                             highlight."
-                                .to_string(),
-                        );
+                        // wonder whether the tool is broken (§8.2). A
+                        // select-text sweep that found words also commits
+                        // nothing — but it is holding them, which is its
+                        // success and needs no sentence.
+                        self.notify("There is no selectable text there.".to_string());
                     }
                 }
                 crate::reader_link::Told::AreaText { text, truncated } => {
@@ -8786,12 +8814,15 @@ impl App {
                     return Some(self.on_read_command(ReadCommand::DeleteSelected))
                 }
                 "Enter" => return Some(self.on_read_command(ReadCommand::EditSelected)),
-                // Escape puts a mark down without committing anything. It is
-                // consumed here only when something is actually held, so it
-                // still backs out of everything else when nothing is.
-                "Escape" => return Some(self.on_read_command(ReadCommand::ClearSelection)),
                 _ => {}
             }
+        }
+        // Escape puts down what is held — a mark or the text selection —
+        // without committing anything. It is consumed here only when
+        // something is actually held, so it still backs out of everything
+        // else when nothing is.
+        if key == "Escape" && (self.reader.selected().is_some() || self.reader.has_held_text()) {
+            return Some(self.on_read_command(ReadCommand::ClearSelection));
         }
 
         // Arming a tool by number, in the order the toolbar draws them, plus
@@ -8807,6 +8838,9 @@ impl App {
             "4" => Some(Some(AnnotationTool::Text)),
             "5" => Some(Some(AnnotationTool::Note)),
             "6" => Some(Some(AnnotationTool::Eraser)),
+            // 7 stays the presenter's pointer digit and means nothing here,
+            // so that 8 arms the text selection in both modes.
+            "8" => Some(Some(AnnotationTool::SelectText)),
             _ => None,
         };
         if let Some(tool) = armed {
@@ -11455,7 +11489,8 @@ impl App {
         placement.is_usable().then_some(placement)
     }
 
-    /// The highlighter went down on the live slide: anchor a text selection.
+    /// The highlighter — or the select-text tool — went down on the live
+    /// slide: anchor a text selection.
     ///
     /// Returns whether the press was taken. It is refused when the slide
     /// cannot be placed on a page — an unmapped slide, or a document mode that
@@ -11464,7 +11499,11 @@ impl App {
     /// for the length of the slide; a highlight over text nobody can find is
     /// not a lesser version of a highlight, it is nothing. Saying so once is
     /// better than a tool that silently does nothing all talk.
-    fn begin_presenter_selection(&mut self, point: (f32, f32)) -> bool {
+    fn begin_presenter_selection(
+        &mut self,
+        point: (f32, f32),
+        tool: pulpit_core::annotation::AnnotationTool,
+    ) -> bool {
         let Some(placement) = self.slide_placement() else {
             self.warn_marks_are_not_kept();
             return false;
@@ -11473,17 +11512,19 @@ impl App {
         // which of the three marks it makes (§7.2). Both are read here rather
         // than pushed when they change, so a choice restored from settings is
         // in force on the first sweep of the session without a separate path
-        // to remember to walk.
-        let options = self.annotation_options();
-        self.presenter_interaction
-            .set_highlight_style(pulpit_core::annotate::MarkStyle {
-                color: options.highlight_color,
-                ..pulpit_core::annotate::MarkStyle::text_markup(options.markup_kind)
-            });
-        self.presenter_interaction
-            .set_markup_kind(options.markup_kind);
-        self.presenter_interaction
-            .arm(Some(pulpit_core::annotation::AnnotationTool::Highlighter));
+        // to remember to walk. The select-text sweep has neither: its style
+        // is fixed, because a selection is chrome rather than a mark.
+        if tool == pulpit_core::annotation::AnnotationTool::Highlighter {
+            let options = self.annotation_options();
+            self.presenter_interaction
+                .set_highlight_style(pulpit_core::annotate::MarkStyle {
+                    color: options.highlight_color,
+                    ..pulpit_core::annotate::MarkStyle::text_markup(options.markup_kind)
+                });
+            self.presenter_interaction
+                .set_markup_kind(options.markup_kind);
+        }
+        self.presenter_interaction.arm(Some(tool));
         self.annotations.set_selection(None);
         self.presenter_interaction
             .begin(placement.page, placement.to_page(point))
@@ -12596,31 +12637,55 @@ impl App {
         };
         self.presenter_interaction
             .set_selection_result(quads.clone(), text);
+        // The sweep's own style and kind, fixed when it began: a select-text
+        // sweep glows as a selection, and a highlighter's as the mark it is
+        // about to become, whatever the palette has been changed to since.
+        let (style, kind, select_only) = match self.presenter_interaction.gesture() {
+            Some(pulpit_core::annotate::Gesture::Selecting {
+                style,
+                kind,
+                select_only,
+                ..
+            }) => (*style, *kind, *select_only),
+            _ => (
+                self.presenter_interaction.highlight_style(),
+                self.presenter_interaction.markup_kind(),
+                false,
+            ),
+        };
+        let runs = quads
+            .iter()
+            .map(|quad| placement.quad_to_slide(quad))
+            .collect::<Vec<_>>();
+        let selection = pulpit_core::annotation::SlideSelection {
+            runs,
+            color: style.color,
+            // The kind's own opacity rather than the style's for a mark in
+            // the making: the sweep has to look like the mark it is about to
+            // become, and a strikeout is not laid down at a wash's
+            // translucency. A selection is not becoming anything, and keeps
+            // its own translucency.
+            opacity: if select_only {
+                style.opacity
+            } else {
+                kind.opacity()
+            },
+            kind,
+        };
+        let selection = (!selection.runs.is_empty()).then_some(selection);
         if !finalising {
             // Still sweeping: show the words, commit nothing.
-            let runs = quads
-                .iter()
-                .map(|quad| placement.quad_to_slide(quad))
-                .collect::<Vec<_>>();
-            let style = self.presenter_interaction.highlight_style();
-            let kind = self.presenter_interaction.markup_kind();
-            let selection = pulpit_core::annotation::SlideSelection {
-                runs,
-                color: style.color,
-                // The kind's own opacity rather than the style's: the sweep
-                // has to look like the mark it is about to become, and a
-                // strikeout is not laid down at a wash's translucency.
-                opacity: kind.opacity(),
-                kind,
-            };
-            self.annotations
-                .set_selection((!selection.runs.is_empty()).then_some(selection));
+            self.annotations.set_selection(selection);
             return true;
         }
-        // The sweep is over and this is the answer that commits. The live
-        // selection goes first: from here the mark is the document's, and a
-        // copy of it on the overlay would be a second representation (A1).
-        self.annotations.set_selection(None);
+        // The sweep is over and this is the answer that commits — except for
+        // the select-text sweep, whose whole outcome is the selection: that
+        // one stays on the overlay, exactly as swept, for the clipboard and
+        // for reading aloud. For a mark, the live selection goes first: from
+        // here the mark is the document's, and a copy of it on the overlay
+        // would be a second representation (A1).
+        self.annotations
+            .set_selection(if select_only { selection } else { None });
         let geometry = self.reader.page_geometry(placement.page).cloned();
         let outcome = match geometry {
             Some(geometry) => self.presenter_interaction.finish(&geometry),
@@ -12638,10 +12703,12 @@ impl App {
                 }
             }
             pulpit_core::annotate::GestureOutcome::Nothing => {
-                self.notify(
-                    "There is no selectable text there, so there is nothing to highlight."
-                        .to_string(),
-                );
+                // A select-text sweep that found words ends exactly this way,
+                // and holding them is its success; only an empty answer is
+                // worth a sentence.
+                if !select_only || self.presenter_interaction.held_text().is_none() {
+                    self.notify("There is no selectable text there.".to_string());
+                }
             }
         }
         true
@@ -13591,7 +13658,9 @@ impl App {
             Some(AnnotationTool::Ink) => {
                 self.annotations.extend_stroke(point);
             }
-            Some(AnnotationTool::Highlighter) => self.extend_presenter_selection(point),
+            Some(AnnotationTool::Highlighter | AnnotationTool::SelectText) => {
+                self.extend_presenter_selection(point)
+            }
             Some(AnnotationTool::Eraser) => {
                 self.annotations
                     .extend_erase(point, self.annotation_options().eraser_radius);
@@ -13632,8 +13701,11 @@ impl App {
             // The highlighter does not draw where the hand goes: it selects
             // the page's own text and lays a `/Highlight` over the words. The
             // press only anchors the sweep; the engine says where the text is
-            // (§8.2), exactly as it does in document mode.
-            AnnotationTool::Highlighter => return self.begin_presenter_selection(point),
+            // (§8.2), exactly as it does in document mode. The select-text
+            // tool is the same sweep with nothing committed at the end.
+            AnnotationTool::Highlighter | AnnotationTool::SelectText => {
+                return self.begin_presenter_selection(point, tool)
+            }
             AnnotationTool::Eraser => {
                 self.annotations
                     .begin_erase(point, self.annotation_options().eraser_radius);
@@ -13830,8 +13902,21 @@ impl App {
         if self.annotations.tool != Some(tool) {
             let closed = self.annotations.arm(Some(tool));
             self.commit_presenter_text(closed);
+            self.sync_presenter_selection(Some(tool));
             self.diagnostics
                 .note(format!("annotating: {}", tool.label()));
+        }
+    }
+
+    /// Keep the interaction and the overlay's selection glow in step with a
+    /// change of tool: arming another tool puts the held text down, and a
+    /// glow describing text nobody is holding goes with it.
+    fn sync_presenter_selection(&mut self, tool: Option<AnnotationTool>) {
+        self.presenter_interaction.arm(tool);
+        if self.presenter_interaction.held_text().is_none()
+            && self.presenter_interaction.gesture().is_none()
+        {
+            self.annotations.set_selection(None);
         }
     }
 
@@ -13864,6 +13949,7 @@ impl App {
                 self.annotation_controls.overflow = false;
                 let closed = self.annotations.arm(tool);
                 self.commit_presenter_text(closed);
+                self.sync_presenter_selection(tool);
                 match tool {
                     Some(tool) => self
                         .diagnostics
@@ -13908,9 +13994,13 @@ impl App {
                         self.annotation_controls.options.pointer_radius = value
                     }
                     AnnotationTool::Text => self.annotation_controls.options.text_size = value,
-                    // The presenter palette draws no control for these
-                    // (see `AnnotationTool::ALL`), so nothing can name one.
-                    AnnotationTool::Note | AnnotationTool::Stamp | AnnotationTool::Select => {}
+                    // No size to set: the note and the stamp have their own
+                    // palettes, the band is a shape the hand makes, and a
+                    // selection looks the way selections look.
+                    AnnotationTool::Note
+                    | AnnotationTool::Stamp
+                    | AnnotationTool::Select
+                    | AnnotationTool::SelectText => {}
                 }
                 self.annotation_controls.options.sanitise();
             }
@@ -13935,7 +14025,8 @@ impl App {
                     AnnotationTool::Spotlight
                     | AnnotationTool::Eraser
                     | AnnotationTool::Stamp
-                    | AnnotationTool::Select => false,
+                    | AnnotationTool::Select
+                    | AnnotationTool::SelectText => false,
                 };
                 // …and it is the colour in document mode too. The pen is one
                 // pen: a presenter who reaches for red at the lectern and then

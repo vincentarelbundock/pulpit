@@ -45,6 +45,11 @@ pub enum Gesture {
         /// the sweep begins, so changing the option mid-drag cannot turn the
         /// mark under the hand into a different one.
         kind: MarkupKind,
+        /// Whether the release only holds the text rather than marking it.
+        /// The select-text tool's sweep: same gesture, same engine queries,
+        /// and a release that must never touch the document. Fixed when the
+        /// sweep begins, like the kind.
+        select_only: bool,
     },
     /// An eraser sweep. Collects the annotations it has passed over so one
     /// sweep is one undo entry (§8.3).
@@ -253,6 +258,10 @@ pub struct AnnotationInteraction {
     /// What placed text — free text and notes — is written in. Separate from
     /// the ink's: the pen drawing in green does not make the commentary green.
     text_style: MarkStyle,
+    /// The selection the select-text tool is holding, after its sweep ended.
+    /// The one piece of gesture state that deliberately outlives its gesture,
+    /// because copying and speaking both happen after the hand lets go.
+    held_text: Option<SelectedText>,
 }
 
 impl Default for AnnotationInteraction {
@@ -276,6 +285,7 @@ impl AnnotationInteraction {
             highlight_style: MarkStyle::highlighter(),
             markup_kind: MarkupKind::Highlight,
             text_style: MarkStyle::default(),
+            held_text: None,
         }
     }
 
@@ -284,10 +294,13 @@ impl AnnotationInteraction {
     }
 
     /// Arm a tool. Doing so abandons any open gesture without mutating the
-    /// document: changing tools mid-stroke is a change of mind.
+    /// document: changing tools mid-stroke is a change of mind — and so is
+    /// the held selection's, for the same reason: reaching for another tool
+    /// is putting the selection down.
     pub fn arm(&mut self, tool: Option<AnnotationTool>) {
         if self.tool != tool {
             self.gesture = None;
+            self.held_text = None;
         }
         self.tool = tool;
     }
@@ -382,13 +395,14 @@ impl AnnotationInteraction {
         self.gesture = None;
     }
 
-    /// Everything a page change clears: the transient effects and any
-    /// unfinished gesture, and nothing else. Committed annotations are in the
-    /// document and stay there (§8.7).
+    /// Everything a page change clears: the transient effects, any unfinished
+    /// gesture and the held selection, and nothing else. Committed
+    /// annotations are in the document and stay there (§8.7).
     pub fn clear_transient(&mut self) {
         self.gesture = None;
         self.pointer = None;
         self.spotlight = None;
+        self.held_text = None;
     }
 
     /// Pointer-down on `page` at `at`.
@@ -417,6 +431,19 @@ impl AnnotationInteraction {
                     ..self.highlight_style
                 },
                 kind: self.markup_kind,
+                select_only: false,
+            }),
+            // The highlighter's sweep with nothing at the end of it: the
+            // release holds the words instead of marking them.
+            AnnotationTool::SelectText => Some(Gesture::Selecting {
+                page,
+                anchor: at,
+                head: at,
+                quads: Vec::new(),
+                text: String::new(),
+                style: MarkStyle::selection(),
+                kind: MarkupKind::Highlight,
+                select_only: true,
             }),
             AnnotationTool::Eraser => Some(Gesture::Erasing {
                 page,
@@ -436,6 +463,12 @@ impl AnnotationInteraction {
             | AnnotationTool::Note
             | AnnotationTool::Stamp => None,
         };
+        // A new gesture puts down whatever the last sweep was holding: the
+        // selection is chrome for "these words, now", and words swept over or
+        // marked past are not those words any more.
+        if self.gesture.is_some() {
+            self.held_text = None;
+        }
         self.gesture.is_some()
     }
 
@@ -487,6 +520,33 @@ impl AnnotationInteraction {
             }) => Some((*page, *anchor, *head)),
             _ => None,
         }
+    }
+
+    /// The selection the select-text tool is holding, if its sweep has ended
+    /// and found words.
+    pub fn held_text(&self) -> Option<&SelectedText> {
+        self.held_text.as_ref()
+    }
+
+    /// Put down the held selection. Escape and a change of tool land here.
+    pub fn clear_held_text(&mut self) {
+        self.held_text = None;
+    }
+
+    /// The words under the selection: the open sweep's while one is open,
+    /// otherwise whatever the last sweep is still holding. Empty when there
+    /// is neither, which the caller turns into a sentence rather than a
+    /// silent no-op.
+    pub fn selection_text(&self) -> String {
+        if let Some(Gesture::Selecting { text, .. }) = &self.gesture {
+            if !text.is_empty() {
+                return text.clone();
+            }
+        }
+        self.held_text
+            .as_ref()
+            .map(|held| held.text.clone())
+            .unwrap_or_default()
     }
 
     /// The engine answered a selection query for the open drag.
@@ -587,8 +647,18 @@ impl AnnotationInteraction {
                 text,
                 style,
                 kind,
+                select_only,
                 ..
             } => {
+                // The select-text sweep ends by holding the words, not by
+                // marking them: nothing reaches the document, and a sweep
+                // that resolved to no text holds nothing.
+                if select_only {
+                    if !quads.is_empty() && !text.trim().is_empty() {
+                        self.held_text = Some(SelectedText { page, quads, text });
+                    }
+                    return GestureOutcome::Nothing;
+                }
                 let draft = AnnotationDraft::Highlight(HighlightDraft {
                     page,
                     kind,
@@ -675,6 +745,20 @@ impl AnnotationInteraction {
         }
         GestureOutcome::Commit(vec![AnnotationCommand::Create(draft)])
     }
+}
+
+/// A text selection that outlived its sweep: the words the select-text tool
+/// is holding, for the clipboard and for reading aloud.
+///
+/// Application state, never document state: nothing about it is committed,
+/// and it is cleared by the things that would make it stale — a new gesture,
+/// a page change, Escape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedText {
+    pub page: PageIndex,
+    /// Where the words are, for drawing the selection after the hand is gone.
+    pub quads: Vec<PageQuad>,
+    pub text: String,
 }
 
 /// What a click-placed mark is.
@@ -920,6 +1004,64 @@ mod tests {
             crate::annotate::AnnotationKind::Highlight,
             "the sweep fixed its kind when it began"
         );
+    }
+
+    #[test]
+    fn a_select_text_sweep_holds_the_words_and_commits_nothing() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::SelectText));
+        interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+        interaction.extend(PagePoint::new(300.0, 50.0));
+        interaction.set_selection_result(
+            vec![PageQuad::from_rect(PageRect::new(50.0, 44.0, 300.0, 58.0))],
+            "the selected words".into(),
+        );
+        assert_eq!(interaction.finish(&page()), GestureOutcome::Nothing);
+        let held = interaction.held_text().expect("the selection outlives it");
+        assert_eq!(held.text, "the selected words");
+        assert_eq!(held.page, PageIndex(0));
+        assert_eq!(interaction.selection_text(), "the selected words");
+    }
+
+    #[test]
+    fn a_select_text_sweep_over_nothing_holds_nothing() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::SelectText));
+        interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+        interaction.extend(PagePoint::new(300.0, 50.0));
+        assert_eq!(interaction.finish(&page()), GestureOutcome::Nothing);
+        assert!(interaction.held_text().is_none());
+        assert_eq!(interaction.selection_text(), "");
+    }
+
+    #[test]
+    fn a_new_gesture_puts_down_the_held_selection() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::SelectText));
+        interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+        interaction.set_selection_result(
+            vec![PageQuad::from_rect(PageRect::new(50.0, 44.0, 300.0, 58.0))],
+            "the first words".into(),
+        );
+        interaction.finish(&page());
+        assert!(interaction.held_text().is_some());
+        interaction.arm(Some(AnnotationTool::Ink));
+        interaction.begin(PageIndex(0), PagePoint::new(10.0, 10.0));
+        assert!(interaction.held_text().is_none());
+    }
+
+    #[test]
+    fn a_page_change_puts_down_the_held_selection() {
+        let mut interaction = AnnotationInteraction::new();
+        interaction.arm(Some(AnnotationTool::SelectText));
+        interaction.begin(PageIndex(0), PagePoint::new(50.0, 50.0));
+        interaction.set_selection_result(
+            vec![PageQuad::from_rect(PageRect::new(50.0, 44.0, 300.0, 58.0))],
+            "the selected words".into(),
+        );
+        interaction.finish(&page());
+        interaction.clear_transient();
+        assert!(interaction.held_text().is_none());
     }
 
     #[test]

@@ -151,9 +151,10 @@ fn panel<Message: Clone + 'static>(
             // reason (§8.1).
             if armed {
                 let cursor = match annotations.tool {
-                    Some(pulpit_core::annotation::AnnotationTool::Highlighter) => {
-                        iced::mouse::Interaction::Text
-                    }
+                    Some(
+                        pulpit_core::annotation::AnnotationTool::Highlighter
+                        | pulpit_core::annotation::AnnotationTool::SelectText,
+                    ) => iced::mouse::Interaction::Text,
                     _ => iced::mouse::Interaction::Crosshair,
                 };
                 area.interaction(cursor).into()

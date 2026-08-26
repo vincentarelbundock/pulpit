@@ -110,6 +110,9 @@ pub enum Icon {
     Picture,
     /// The band copies the text under it: `text-select`.
     TextRegion,
+    /// The select-text tool, which sweeps characters rather than bounding an
+    /// area: `text-cursor`, the I-beam it also wears as a cursor.
+    TextCursor,
     /// The previous page: `chevron-left`.
     ChevronLeft,
     /// The next page: `chevron-right`.
@@ -176,6 +179,7 @@ impl Icon {
             Icon::Lasso => include_bytes!("../../assets/icons/lasso-select.svg"),
             Icon::Picture => include_bytes!("../../assets/icons/image.svg"),
             Icon::TextRegion => include_bytes!("../../assets/icons/text-select.svg"),
+            Icon::TextCursor => include_bytes!("../../assets/icons/text-cursor.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
@@ -200,7 +204,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 48] = [
+    const ALL: [Icon; 49] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -237,6 +241,7 @@ impl Icon {
         Icon::Lasso,
         Icon::Picture,
         Icon::TextRegion,
+        Icon::TextCursor,
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Outline,

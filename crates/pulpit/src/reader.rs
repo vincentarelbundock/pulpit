@@ -2096,37 +2096,53 @@ impl ReaderSession {
         }
     }
 
-    /// The unfinished gesture on `page`, if it is there and worth drawing.
+    /// The unfinished gesture on `page`, if it is there and worth drawing —
+    /// or the select-text tool's held selection, once its sweep has ended.
     ///
     /// Only ink and a text selection draw anything: an eraser sweep shows its
     /// effect by taking marks away, and a click-placed note has no gesture at
-    /// all. Nothing here outlives the gesture, so it cannot become a second
-    /// copy of a committed mark (A1).
+    /// all. The held selection is the one thing here that outlives a gesture,
+    /// and it can never become a second copy of a committed mark (A1),
+    /// because its whole point is that nothing was committed.
     fn preview_for(
         &self,
         page: PageIndex,
     ) -> Option<crate::widgets::document::preview::GesturePreview> {
         use pulpit_core::annotate::Gesture;
 
-        let gesture = self.interaction.gesture()?;
-        if gesture.page() != page {
-            return None;
-        }
-        let (points, quads, markup, style) = match gesture {
-            Gesture::Ink { points, style, .. } => (
-                points.iter().map(|point| point.at).collect(),
-                Vec::new(),
-                pulpit_core::annotation::MarkupKind::default(),
-                *style,
-            ),
-            Gesture::Selecting {
-                quads, kind, style, ..
-            } => (Vec::new(), quads.clone(), *kind, *style),
-            // The band is chrome and is drawn with the selection, not here:
-            // this layer paints marks in their own colour, and the band is
-            // not a mark.
-            Gesture::Erasing { .. } | Gesture::Transforming { .. } | Gesture::Marquee { .. } => {
-                return None
+        let (points, quads, markup, style) = match self.interaction.gesture() {
+            Some(gesture) if gesture.page() == page => match gesture {
+                Gesture::Ink { points, style, .. } => (
+                    points.iter().map(|point| point.at).collect(),
+                    Vec::new(),
+                    pulpit_core::annotation::MarkupKind::default(),
+                    *style,
+                ),
+                Gesture::Selecting {
+                    quads, kind, style, ..
+                } => (Vec::new(), quads.clone(), *kind, *style),
+                // The band is chrome and is drawn with the selection, not
+                // here: this layer paints marks in their own colour, and the
+                // band is not a mark.
+                Gesture::Erasing { .. }
+                | Gesture::Transforming { .. }
+                | Gesture::Marquee { .. } => return None,
+            },
+            // No open gesture on this page: the held selection, if it is
+            // here. A selection the hand has let go of still has to be
+            // visible, because copying it and reading it aloud both happen
+            // after the release.
+            _ => {
+                let held = self.interaction.held_text()?;
+                if held.page != page {
+                    return None;
+                }
+                (
+                    Vec::new(),
+                    held.quads.clone(),
+                    pulpit_core::annotation::MarkupKind::Highlight,
+                    pulpit_core::annotate::MarkStyle::selection(),
+                )
             }
         };
         let preview = crate::widgets::document::preview::GesturePreview {
@@ -2687,19 +2703,22 @@ impl ReaderSession {
         ))
     }
 
-    /// Put down whatever is held, without committing anything. What Escape
-    /// does when there is a selection but no open gesture.
+    /// Put down whatever is held — marks and the text selection both —
+    /// without committing anything. What Escape does when there is a
+    /// selection but no open gesture.
     pub fn clear_selection(&mut self) -> bool {
-        let had = !self.interaction.selection().is_empty();
+        let had =
+            !self.interaction.selection().is_empty() || self.interaction.held_text().is_some();
         self.interaction.select(None);
+        self.interaction.clear_held_text();
         had
     }
 
     /// What the open gesture wants the engine to resolve, if anything.
     ///
-    /// Only the highlighter has one: it selects *text*, and only the engine
-    /// knows where the text is. The query is read-only and never moves the
-    /// revision (§6.3).
+    /// Only the highlighter and the select-text tool have one: both select
+    /// *text*, and only the engine knows where the text is. The query is
+    /// read-only and never moves the revision (§6.3).
     pub fn pending_selection(&self) -> Option<(PageIndex, TextSelection)> {
         let (page, anchor, head) = self.interaction.pending_selection()?;
         Some((page, TextSelection::Range { anchor, head }))
@@ -2742,18 +2761,17 @@ impl ReaderSession {
         self.finish_gesture()
     }
 
-    /// The text under the selection now being swept, for speech (issue #20).
-    ///
-    /// This is the *live* gesture's text, which is all there is: a selection
-    /// that outlives the drag has nowhere to live yet — issue #9 is what
-    /// gives it one, and "speak the selection" gets much more useful when it
-    /// lands. Until then this answers during a sweep and is empty after it,
+    /// The text under the selection, for the clipboard and speech (issue
+    /// #20): the sweep now in progress, or what the select-text tool is
+    /// still holding after one (issue #9). Empty when there is neither,
     /// which the caller turns into a sentence rather than a silent no-op.
     pub fn selection_text(&self) -> String {
-        match self.interaction.gesture() {
-            Some(pulpit_core::annotate::gesture::Gesture::Selecting { text, .. }) => text.clone(),
-            _ => String::new(),
-        }
+        self.interaction.selection_text()
+    }
+
+    /// Is the select-text tool holding a selection that outlived its sweep?
+    pub fn has_held_text(&self) -> bool {
+        self.interaction.held_text().is_some()
     }
 
     /// Is a release waiting on a selection answer? While it is, the toolbar
@@ -6544,6 +6562,42 @@ mod tests {
         assert_eq!(transaction.len(), 1);
         assert_eq!(transaction.label(), "Add Highlight");
         assert!(!session.is_awaiting_selection());
+    }
+
+    #[test]
+    fn a_select_text_sweep_holds_the_words_and_never_touches_the_document() {
+        // The select-text tool is the highlighter's sweep with nothing at
+        // the end of it: the release resolves through the engine exactly the
+        // same way, commits nothing, and what it holds answers the clipboard
+        // and speech after the hand has let go (issue #9).
+        let mut session = open(2);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::SelectText)));
+        session.pointer_moved(PageIndex(0), 72.0, 100.0);
+        assert!(session.pointer_pressed());
+        session.pointer_moved(PageIndex(0), 300.0, 100.0);
+        let Released::AwaitingSelection { .. } = session.pointer_released() else {
+            panic!("a select-text release waits for the engine")
+        };
+        let quads = vec![pulpit_core::page::PageQuad::from_rect(
+            pulpit_core::page::PageRect::new(72.0, 92.0, 300.0, 108.0),
+        )];
+        assert!(
+            session
+                .selection_resolved(quads, "the selected words".into(), true)
+                .is_none(),
+            "holding text is not a document edit"
+        );
+        assert!(!session.is_awaiting_selection());
+        assert!(session.has_held_text(), "the selection outlives the drag");
+        assert_eq!(session.selection_text(), "the selected words");
+        // The held selection stays visible where the sweep was made…
+        assert!(session.preview_for(PageIndex(0)).is_some());
+        assert!(session.preview_for(PageIndex(1)).is_none());
+        // …until Escape puts it down.
+        assert!(session.clear_selection());
+        assert!(!session.has_held_text());
+        assert_eq!(session.selection_text(), "");
+        assert!(session.preview_for(PageIndex(0)).is_none());
     }
 
     #[test]

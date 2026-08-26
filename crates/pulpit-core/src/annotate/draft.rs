@@ -179,6 +179,20 @@ impl MarkStyle {
         }
     }
 
+    /// The style the select-text tool sweeps in: a cyan wash, fixed.
+    ///
+    /// Not the highlighter's yellow, so a sweep that will leave no mark never
+    /// looks like one that will; cyan at a wash's translucency is what a text
+    /// selection looks like on the rest of the desktop. Fixed because the
+    /// tool has no options: a selection is chrome, not a mark anybody styles.
+    pub fn selection() -> MarkStyle {
+        MarkStyle {
+            color: InkColor::Cyan,
+            opacity: 0.35,
+            ..MarkStyle::default()
+        }
+    }
+
     /// The style a sticky note is born with: opaque yellow.
     ///
     /// A note is an icon on the page rather than a stroke over it, and `/C` is

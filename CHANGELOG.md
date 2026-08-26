@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Text can be selected, copied, and read aloud.** A new *Select text* tool —
+  digit `8` in both palettes, wearing the I-beam — sweeps the page's own text
+  exactly as the highlighter does and leaves no mark: what it holds outlives
+  the drag, lit up on the page in both modes and for the audience.
+  `Ctrl+C` (`Cmd+C` on macOS) copies it, and the read-page key reads the
+  selection instead of the page while one is held — the menu row now says
+  "Read page or selection". The selection is put down by the things that
+  would make it stale: a new gesture, a change of tool, a page change,
+  Escape.
+
 - **Pulpit can read a document aloud.** `R` reads the whole document, turning
   pages as it goes; `Shift+R` reads the current page; either key pauses its
   own reading, and `Shift+←`/`Shift+→` step by sentence. Speech follows the

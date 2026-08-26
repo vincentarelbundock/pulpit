@@ -48,12 +48,15 @@ pub enum Action {
     /// hardest. Its partner is [`Action::SpeakPageToggle`]: same behaviour,
     /// smaller scope.
     SpeakToggle,
-    /// Read this page aloud, or pause it.
+    /// Read this page aloud — or, when text is selected, just the selection —
+    /// or pause it.
     ///
     /// Toggling is per scope: pressing this while the *document* is being
     /// read starts reading the page, rather than pausing something else. A
     /// key that does a different thing depending on hidden state is worse
-    /// than no key.
+    /// than no key. The selection is not hidden state — it is lit up on the
+    /// page — so the one key narrows to it when there is one, rather than a
+    /// third key nobody would find.
     SpeakPageToggle,
     /// Stop reading and forget the place.
     SpeakStop,
@@ -91,6 +94,11 @@ pub enum Action {
     /// keymap that names the spotlight still resolves here.
     #[serde(alias = "annotate-spotlight")]
     AnnotatePointer,
+    /// The select-text tool: sweep the page's own text and hold it, for the
+    /// clipboard and for reading aloud, without marking anything.
+    AnnotateSelectText,
+    /// Put the held text selection on the clipboard.
+    CopySelection,
     UndoAnnotation,
     RedoAnnotation,
     ClearAnnotations,
@@ -196,6 +204,8 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
             Action::AnnotateNote,
             Action::AnnotateEraser,
             Action::AnnotatePointer,
+            Action::AnnotateSelectText,
+            Action::CopySelection,
             Action::UndoAnnotation,
             Action::RedoAnnotation,
             Action::ClearAnnotations,
@@ -241,7 +251,7 @@ pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer]
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 47] = [
+    pub const ALL: [Action; 49] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -270,6 +280,8 @@ impl Action {
         Action::AnnotateNote,
         Action::AnnotateEraser,
         Action::AnnotatePointer,
+        Action::AnnotateSelectText,
+        Action::CopySelection,
         Action::UndoAnnotation,
         Action::RedoAnnotation,
         Action::ClearAnnotations,
@@ -315,7 +327,7 @@ impl Action {
             Action::ShowLayouts => "Layouts",
             Action::ShowShortcuts => "Keyboard shortcuts",
             Action::SpeakToggle => "Read the document aloud / pause",
-            Action::SpeakPageToggle => "Read this page aloud / pause",
+            Action::SpeakPageToggle => "Read page or selection aloud / pause",
             Action::SpeakStop => "Stop reading",
             Action::SpeakNextSentence => "Next sentence",
             Action::SpeakPreviousSentence => "Previous sentence",
@@ -326,6 +338,8 @@ impl Action {
             Action::AnnotateNote => "Leave a note on the page",
             Action::AnnotateEraser => "Erase annotations",
             Action::AnnotatePointer => "Point at the page",
+            Action::AnnotateSelectText => "Select text on the page",
+            Action::CopySelection => "Copy the selected text",
             Action::UndoAnnotation => "Undo the last stroke",
             Action::RedoAnnotation => "Redo the last stroke",
             Action::ClearAnnotations => "Clear annotations",
@@ -706,6 +720,14 @@ impl Default for Keymap {
                 // The pointer has no document-mode counterpart to line up
                 // with, so it takes the digit after them.
                 named("7", Action::AnnotatePointer),
+                // The text selection takes the digit after the pointer's, in
+                // both modes: 7 stays the pointer's even though document mode
+                // has no pointer, so that 8 means "select text" everywhere.
+                named("8", Action::AnnotateSelectText),
+                // The one clipboard chord everybody will try. It reaches the
+                // held text selection; the band's copies commit on release
+                // and need no key.
+                with("c", Mods::primary(), Action::CopySelection),
                 // Editing convention first, then the familiar Vim undo.
                 with("z", Mods::primary(), Action::UndoAnnotation),
                 named("u", Action::UndoAnnotation),
