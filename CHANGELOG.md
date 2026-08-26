@@ -8,6 +8,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Ctrl+P prints.** Pulpit could not print at all: the only `Print` in the
+  tree was the one it refused when a form's own script asked to print itself.
+  That refusal stays — a script asking is not the reader asking — and beside
+  it there is now a print path.
+
+  The dialog asks the two questions only pulpit can answer: which pages — all
+  of them, the one you are looking at, or a typed range like `1-3, 7` — and
+  whether the paper carries what you have done to the document or what is
+  saved on disk. Everything else a print dialog usually asks about, paper
+  sizes and duplex and trays and colour, belongs to your system's print
+  machinery, so pulpit hands the file over rather than answering it a second
+  time badly.
+
+  Printing "with my marks and entries" prints what is on the screen, not what
+  was last saved: the annotations you have drawn and the form fields as you
+  have filled them, including the characters still in the field the caret is
+  in. Pulpit writes a temporary copy carrying them, sends that, and deletes
+  it. That copy is never offered as your document, and for a signed document
+  it is not the signed one.
+
+  A document whose permission bits ask that it not be printed says so, and
+  prints if you say so. Quietly ignoring the request and quietly obeying it
+  are both worse than showing you what the document asked for: every other
+  reader on your machine will print the same file, so pretending to enforce
+  it would be a pretence.
+
+  Printing is a capability, not an assumption. A session with no spooler says
+  so plainly instead of appearing to print into nothing. Linux and macOS go
+  through CUPS, which takes the page range, the copy count and the printer.
+  Windows hands the file to the shell's print verb, which takes none of
+  those — so a page range or a second copy is refused there by name rather
+  than printing the whole document and letting you find out at the printer.
+
 - **DjVu books open.** `.djvu` and `.djv` are read the way a PDF is: pages
   turn, render, zoom and fit, the overview grid is a contact sheet of the
   book, and pulpit remembers where you were. Scanned books are exactly the

@@ -39,6 +39,9 @@ pub enum Action {
     ToggleAudienceFullscreen,
     OpenDocument,
     ReloadDocument,
+    /// Open the print dialog. Ctrl+P everywhere, which is the one shortcut a
+    /// reader will try before looking for a menu.
+    Print,
     /// The whole deck as thumbnails, to jump by eye rather than by number.
     ShowOverview,
     /// Mount the next usable layout in library order, wrapping at the end.
@@ -118,6 +121,7 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
         actions: &[
             Action::OpenDocument,
             Action::ReloadDocument,
+            Action::Print,
             Action::CycleLayout,
             Action::ShowLayouts,
             Action::ShowShortcuts,
@@ -199,7 +203,7 @@ pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer]
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 45] = [
+    pub const ALL: [Action; 46] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -215,6 +219,7 @@ impl Action {
         Action::ToggleAudienceFullscreen,
         Action::OpenDocument,
         Action::ReloadDocument,
+        Action::Print,
         Action::ShowOverview,
         Action::CycleLayout,
         Action::ShowLayouts,
@@ -264,6 +269,7 @@ impl Action {
             Action::ToggleAudienceFullscreen => "Audience fullscreen",
             Action::OpenDocument => "Open…",
             Action::ReloadDocument => "Reload document",
+            Action::Print => "Print…",
             Action::ShowOverview => "Page overview",
             Action::CycleLayout => "Next layout",
             Action::ShowLayouts => "Layouts",
@@ -595,6 +601,7 @@ impl Default for Keymap {
                 // as it does in every other application. Quit especially: a
                 // bare "q" next to "w" is a talk ended by a typo.
                 with("o", Mods::ctrl(), Action::OpenDocument),
+                with("p", Mods::ctrl(), Action::Print),
                 // Ctrl+F and "/" find; F3 and Shift+F3 step through matches.
                 // Iced reports the slash character as "/", so the binding
                 // must use the character rather than the key-cap name.

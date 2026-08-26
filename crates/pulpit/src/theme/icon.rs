@@ -55,6 +55,8 @@ pub enum Icon {
     Trash,
     /// Write the marks out as a file: `save`.
     Save,
+    /// Send the document to a printer: `printer`.
+    Printer,
     /// The audience can see the marks: `eye`.
     Eye,
     /// The marks are the presenter's alone: `eye-off`.
@@ -161,6 +163,7 @@ impl Icon {
             Icon::Ellipsis => include_bytes!("../../assets/icons/ellipsis.svg"),
             Icon::Gear => include_bytes!("../../assets/icons/settings.svg"),
             Icon::Save => include_bytes!("../../assets/icons/save.svg"),
+            Icon::Printer => include_bytes!("../../assets/icons/printer.svg"),
             Icon::StickyNote => include_bytes!("../../assets/icons/sticky-note.svg"),
             Icon::Stamp => include_bytes!("../../assets/icons/stamp.svg"),
             Icon::Select => include_bytes!("../../assets/icons/mouse-pointer.svg"),
@@ -197,7 +200,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 47] = [
+    const ALL: [Icon; 48] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -221,6 +224,7 @@ impl Icon {
         Icon::Ellipsis,
         Icon::Gear,
         Icon::Save,
+        Icon::Printer,
         Icon::StickyNote,
         Icon::Stamp,
         Icon::Select,

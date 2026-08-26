@@ -203,6 +203,12 @@ impl PlatformServices for MacosServices {
             media_keys: true,
             notifications: true,
             image_clipboard: true,
+            // macOS's print system is CUPS, and `lp` ships with it. Asked of
+            // the path all the same, so a stripped environment answers for
+            // itself rather than being answered for by the operating system.
+            printing: crate::platform::cups::available(),
+            // CUPS takes a page range, a copy count and a named queue.
+            print_options: true,
         }
     }
 
@@ -273,6 +279,14 @@ impl PlatformServices for MacosServices {
     /// whether the session offers a clipboard at all, which the outcome says.
     fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
         crate::platform::clipboard::copy_image(image)
+    }
+
+    fn printers(&self) -> Vec<String> {
+        crate::platform::cups::printers()
+    }
+
+    fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        crate::platform::cups::print(job)
     }
 
     fn inhibit(&self) -> InhibitState {

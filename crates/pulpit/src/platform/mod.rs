@@ -28,6 +28,8 @@
 pub mod appearance;
 pub mod capabilities;
 pub mod clipboard;
+#[cfg(unix)]
+pub mod cups;
 pub mod inhibit;
 pub mod input;
 pub mod instance;

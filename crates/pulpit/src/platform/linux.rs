@@ -100,6 +100,12 @@ impl PlatformServices for LinuxServices {
             // Wayland means a connection and a thread for a question nobody
             // has asked yet.
             image_clipboard: self.x11 || self.wayland,
+            // CUPS, asked for by name. A desktop with no `lp` on the path
+            // has no spooler this adapter knows how to reach, and saying so
+            // is what keeps the command disabled rather than silent.
+            printing: crate::platform::cups::available(),
+            // CUPS takes a page range, a copy count and a named queue.
+            print_options: true,
         }
     }
 
@@ -215,6 +221,14 @@ impl PlatformServices for LinuxServices {
             // than give up the whole copy.
         }
         crate::platform::clipboard::copy_image(image)
+    }
+
+    fn printers(&self) -> Vec<String> {
+        crate::platform::cups::printers()
+    }
+
+    fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        crate::platform::cups::print(job)
     }
 
     fn inhibit(&self) -> InhibitState {

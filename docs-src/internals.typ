@@ -914,7 +914,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard],
+  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard, sending a document to a printer],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -986,8 +986,8 @@ the strength of the parts that were — said the event loop was innocent.
 (`Stable` → `Connector` → `Geometric` → `None`), whether arbitrary placement
 and safe un-fullscreening are possible, whether appearance
 and high contrast can be read, whether sleep can be inhibited, and whether
-native dialogs, menus, an accessibility bridge, media keys, notifications and
-an image clipboard exist. `report()` renders it for the diagnostics bundle and
+native dialogs, menus, an accessibility bridge, media keys, notifications, an
+image clipboard and printing exist. `report()` renders it for the diagnostics bundle and
 the settings page; `limitations()` yields the ones worth telling the presenter
 about.
 
@@ -1010,6 +1010,59 @@ the file manager's.
 The X11 adapter claims placement; the Wayland adapter does not, on any
 compositor. The UI adapts on the resulting capability claim alone — never on
 `cfg!(target_os = ...)`.
+
+== Printing: the file goes out, not the pixels
+
+The renderer worker draws any page at any scale, so pushing bitmaps at a
+printer was available. It is the wrong half of the job to take. Duplex, paper
+sizes, trays, margins and colour management belong to the platform's own print
+system, along with the dialog that lets someone choose between them, and none
+of them are improved by being written a second time here. So pulpit answers
+only the two questions nobody else can — which pages, and whether the reader's
+own marks and form entries are on them — writes a PDF that says exactly that,
+and hands the file over. `crates/pulpit/src/printing.rs` is that decision; the
+spooler is `PlatformServices::print`.
+
+Printing "as I have marked it up" means the annotations and the field values
+as they are *on screen*, which is not what is on disk until a Save As has been
+made. Rather than make the reader save first, printing asks the worker for the
+same copy Save As would write, to a scratch directory, spools that and deletes
+it. Two things hold about that copy and the code says both: it is never
+offered as the document, and for a signed document it is not the signed one —
+new bytes, a new file, and a name (`printing::spool_name`) that says what it
+is. The print queue still shows the *document's* name, because a reader
+looking at their queue should not have to recognise "(to print 4213)".
+
+Two capabilities rather than one. `printing` is whether there is anything here
+to hand a file to at all. `print_options` is whether the spooler takes the
+job's particulars — a page range, a copy count, a named queue — because CUPS
+does and a shell `print` verb does not, and a dialog offering a page range
+that cannot be honoured is worse than one that says it cannot. Where a job
+names something its spooler cannot do, the adapter answers `Unsupported`
+rather than printing the document whole: forty pages when four were asked for
+is not a partial success, and the reader finds out at the printer.
+
+`crates/pulpit/src/platform/cups.rs` is `lp` and `lpstat`, shared by the Linux
+and macOS adapters because there is nothing platform-specific about printing
+on either. It waits for `lp` to exit rather than spawning it, because the file
+it just handed over may be a scratch copy about to be deleted.
+
+Two things remain. On Linux, `org.freedesktop.portal.Print` is the better
+answer than `lp` and is not what runs yet: it is a two-call handshake —
+`PreparePrint` puts up the system dialog and answers on a `Response` signal,
+then `Print` takes the settings back with a file descriptor — and the Linux
+adapter has no machinery for waiting on a portal response at all, since every
+portal call it makes today is fire-and-forget. On Windows the shell's `print`
+verb takes no range and no copy count, so those are refused there; `PrintDlgEx`
+with a device context, or writing the wanted pages into the spooled copy, is
+what lifts it.
+
+The document's own `/P` print bits are reported and never quietly obeyed or
+quietly ignored. They are a request made by whoever produced the file, to a
+viewer that is not obliged to honour them and could not be made to — every
+other reader on the machine will print the same file. pulpit says what the
+document asked for and makes the reader answer it, which is the one behaviour
+that is neither a lie to the reader nor a pretence of enforcement.
 
 = The design system
 

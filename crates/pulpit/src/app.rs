@@ -285,6 +285,8 @@ pub enum Message {
     ReviewRequiredFields,
     /// Decline the save and change nothing else.
     CancelSaveReview,
+    /// Everything the print dialog does.
+    Print(PrintMsg),
     DismissToast(u64),
     DismissAllToasts,
     /// Put the diagnostics report on the clipboard.
@@ -810,6 +812,38 @@ pub struct FormNavigation {
     pub what: String,
 }
 
+/// What the print dialog can be asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrintMsg {
+    /// Ctrl+P, the toolbar button, the menu entry.
+    Open,
+    /// Put the dialog away, printing nothing.
+    Close,
+    ChoosePages(crate::printing::PageChoice),
+    /// The range box, as typed.
+    TypeRange(String),
+    ChooseMarks(crate::printing::Marks),
+    TypeCopies(String),
+    /// A queue by name, or `None` for the platform's default.
+    ChooseDestination(Option<String>),
+    /// The reader has read what the document asked for and said print it
+    /// anyway.
+    AcceptPermission,
+    /// The Print button.
+    Send,
+}
+
+/// What a form commit that is being waited on is being waited on *for*.
+///
+/// Save As and printing both read what is in the form, and both have to let
+/// the caret's field commit first. Naming the reason rather than keeping a
+/// flag per caller is what stops the two resuming into each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterFormCommit {
+    Save,
+    Print,
+}
+
 /// The required-and-empty fields a save found, and what the offer says about
 /// them (§6.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1083,18 +1117,28 @@ pub struct App {
     /// Which entry in `document_signatures`, if any, has its detail view
     /// expanded.
     pub signature_panel_expanded: Option<usize>,
-    /// A Save As that is waiting for the caret to leave the field it is in.
+    /// An operation that is waiting for the caret to leave the field it is in.
     ///
-    /// Losing focus is what commits an in-progress form edit, so a save asked
-    /// for while a field holds the caret is an ordered operation and not one
-    /// call: defocus, let the commit come back through the ordinary
-    /// [`Self::form_changed`] path — one revision, one undo entry, a refreshed
-    /// field list, a redraw — and only then review and write. Saving first
-    /// would write a file without the characters the reader can see.
-    save_waits_for_form_commit: bool,
-    /// The commit came back and the save can go on. Held rather than run: the
+    /// Losing focus is what commits an in-progress form edit, so a save — or
+    /// a print, which reads the same values — asked for while a field holds
+    /// the caret is an ordered operation and not one call: defocus, let the
+    /// commit come back through the ordinary [`Self::form_changed`] path —
+    /// one revision, one undo entry, a refreshed field list, a redraw — and
+    /// only then go on. Writing first would put a file on disk, or paper in
+    /// a tray, without the characters the reader can see.
+    waits_for_form_commit: Option<AfterFormCommit>,
+    /// The commit came back and it can go on. Held rather than run: the
     /// worker pump has no `Task` to hand back, so the next tick starts it.
-    resume_save_after_form_commit: bool,
+    resume_after_form_commit: Option<AfterFormCommit>,
+    /// The print dialog, while it is open.
+    pub print_dialog: Option<crate::printing::PrintDialog>,
+    /// The scratch copy a marked-up print is being spooled from, while the
+    /// worker is still writing it. Recognised in [`Self::pump_reader`] the
+    /// same way the signing copy is: this is not a save the reader made, so
+    /// it is not announced and the document is not told about it.
+    pub print_scratch: Option<PathBuf>,
+    /// What that copy is to be printed as, once it exists.
+    pub print_pending: Option<crate::printing::PrintPlan>,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -1921,8 +1965,11 @@ impl App {
             document_signatures: Vec::new(),
             signature_panel_open: false,
             signature_panel_expanded: None,
-            save_waits_for_form_commit: false,
-            resume_save_after_form_commit: false,
+            waits_for_form_commit: None,
+            resume_after_form_commit: None,
+            print_dialog: None,
+            print_scratch: None,
+            print_pending: None,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -3287,6 +3334,7 @@ impl App {
                 Task::none()
             }
             Message::Sign(msg) => self.handle_sign(msg),
+            Message::Print(msg) => self.handle_print(msg),
             Message::AcceptAppendOnly => {
                 self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
                 self.pending_append_only_offer = false;
@@ -4688,6 +4736,7 @@ impl App {
                 self.reconcile()
             }
             Action::OpenDocument => self.update(Message::OpenDialog),
+            Action::Print => self.handle_print(PrintMsg::Open),
             Action::ReloadDocument => {
                 let now = self.now;
                 let actions = self.documents.open_initial(now);
@@ -5014,8 +5063,10 @@ impl App {
 
         // 1b-ii. A Save As that stopped to let a field commit. The commit has
         //        landed, so the review and the file picker go on from here.
-        if std::mem::take(&mut self.resume_save_after_form_commit) {
-            tasks.push(self.review_then_save_document());
+        match std::mem::take(&mut self.resume_after_form_commit) {
+            Some(AfterFormCommit::Save) => tasks.push(self.review_then_save_document()),
+            Some(AfterFormCommit::Print) => tasks.push(self.open_print_dialog()),
+            None => {}
         }
 
         // 1c. Has the overview stopped moving? A grid that scrolls out from
@@ -6163,7 +6214,16 @@ impl App {
         self.form_clipboard = None;
         self.form_clipboard_text = None;
         self.pending_form_goto = None;
-        self.save_waits_for_form_commit = false;
+        self.waits_for_form_commit = None;
+        // A print whose scratch copy will now never be written. The dialog
+        // is gone, so this is the only place it would be dropped, and a
+        // pending print left behind would be spooled by the *next*
+        // document's first save.
+        self.print_dialog = None;
+        self.print_pending = None;
+        if let Some(scratch) = self.print_scratch.take() {
+            let _ = std::fs::remove_file(scratch);
+        }
         // A new document gets to explain its own refusals once.
         self.form_refusal_told = false;
     }
@@ -6374,9 +6434,8 @@ impl App {
                     // A save that was waiting on a commit that will not come
                     // is a save, not a hang: nothing was committed, so nothing
                     // is lost by going on to write what the document has.
-                    if self.save_waits_for_form_commit {
-                        self.save_waits_for_form_commit = false;
-                        self.resume_save_after_form_commit = true;
+                    if let Some(after) = self.waits_for_form_commit.take() {
+                        self.resume_after_form_commit = Some(after);
                     }
                     // Said once per document, not once per keystroke: a locked
                     // form refuses every letter typed at it, and a banner per
@@ -6403,6 +6462,13 @@ impl App {
                 }
                 crate::reader_link::Told::Properties(properties) => {
                     self.document_properties_failed = None;
+                    // A print dialog that opened before this landed asked
+                    // for it. It shows the document's own answer about
+                    // printing as soon as there is one.
+                    if let Some(dialog) = self.print_dialog.as_mut() {
+                        dialog.permission =
+                            Some(crate::printing::Permission::read(&properties.permissions));
+                    }
                     self.document_properties = Some(properties);
                 }
                 crate::reader_link::Told::PropertiesFailed { message } => {
@@ -6472,6 +6538,16 @@ impl App {
                     // not settle the journal, because the edits are still
                     // unsaved as far as the open document is concerned. The
                     // signature is made from it and it is deleted.
+                    // The copy a print is spooled from is not a save the
+                    // reader made either: nothing is announced, the
+                    // document's remembered layout is not handed on, and
+                    // the edits are still unsaved as far as the open
+                    // document is concerned. It is printed and deleted.
+                    if self.print_scratch.as_deref() == Some(saved.path.as_path()) {
+                        self.print_scratch = None;
+                        self.print_scratch_landed(saved.path.clone());
+                        continue;
+                    }
                     if self.signing_temp.as_deref() == Some(saved.path.as_path()) {
                         self.save_reviewed = false;
                         self.signing_source = Some(saved.path.clone());
@@ -6566,6 +6642,13 @@ impl App {
                     // the source document is untouched either way.
                     if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
                         self.end_sign_flow();
+                    }
+                    // A print waiting on a scratch copy is waiting on the
+                    // same kind of answer. Dropped for the same reason, and
+                    // whatever half-written file is there goes with it.
+                    self.print_pending = None;
+                    if let Some(scratch) = self.print_scratch.take() {
+                        let _ = std::fs::remove_file(scratch);
                     }
                     // A refusal is reported and the reader carries on; a lost
                     // worker closes document mode, because nothing more will
@@ -7741,9 +7824,8 @@ impl App {
         // commit is in the revision, in the undo history and in the field list
         // — so the save can go on, and does on the next tick because this is
         // the pump and there is no `Task` to hand back from here.
-        if self.save_waits_for_form_commit {
-            self.save_waits_for_form_commit = false;
-            self.resume_save_after_form_commit = true;
+        if let Some(after) = self.waits_for_form_commit.take() {
+            self.resume_after_form_commit = Some(after);
         }
     }
 
@@ -8379,6 +8461,7 @@ impl App {
                 task
             }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
+            ReadCommand::Print => self.handle_print(PrintMsg::Open),
             ReadCommand::Sign => self.handle_sign(crate::signing::SignMsg::Start),
             ReadCommand::SignField(name) => {
                 self.handle_sign(crate::signing::SignMsg::StartInField(name.clone()))
@@ -9154,20 +9237,25 @@ impl App {
         // holds the caret holds characters PDFium has not committed yet. The
         // save resumes at [`Self::review_then_save_document`] when the commit
         // has come back through the ordinary path.
-        if self.ask_form_commit_before_save().succeeded() {
+        if self
+            .ask_form_commit_first(AfterFormCommit::Save)
+            .succeeded()
+        {
             return Task::none();
         }
         self.review_then_save_document()
     }
 
-    /// Ask the worker to take focus off the field the caret is in, so the edit
-    /// in progress is committed before the file is written.
+    /// Ask the worker to take focus off the field the caret is in, so the
+    /// edit in progress is committed before the file is written — or before
+    /// the print dialog reads what is in the form.
     ///
-    /// `Done` means the save is now waiting on that answer; `Refused` that no
-    /// field holds the caret, which is every save of a deck without a form;
-    /// `Failed` that there is no worker to ask, in which case there is also no
-    /// document to save and the caller's own check will say so.
-    fn ask_form_commit_before_save(&mut self) -> crate::platform::Outcome {
+    /// `Done` means the operation is now waiting on that answer, and will be
+    /// resumed from the tick; `Refused` that no field holds the caret, which
+    /// is every save of a deck without a form; `Failed` that there is no
+    /// worker to ask, in which case there is also no document and the
+    /// caller.s own check will say so.
+    fn ask_form_commit_first(&mut self, after: AfterFormCommit) -> crate::platform::Outcome {
         use pulpit_render::document::protocol::FormInputEvent;
 
         let Some(page) = self.reader.focused_widget().map(|widget| widget.page) else {
@@ -9177,7 +9265,7 @@ impl App {
         if !sent {
             return crate::platform::Outcome::failed("the document worker took no event");
         }
-        self.save_waits_for_form_commit = true;
+        self.waits_for_form_commit = Some(after);
         crate::platform::Outcome::Done
     }
 
@@ -9294,6 +9382,250 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    // --- Printing --------------------------------------------------------
+
+    /// Ctrl+P, and everything the dialog it opens can be asked afterwards.
+    fn handle_print(&mut self, message: PrintMsg) -> Task<Message> {
+        use crate::printing::PageChoice;
+
+        match message {
+            PrintMsg::Open => {
+                self.menu_open = false;
+                self.recent_menu_open = false;
+                // A field holding the caret holds characters PDFium has not
+                // committed yet, and the whole point of printing "as it is on
+                // screen" is that those characters are on the paper. The
+                // dialog opens from the tick once the commit has come back.
+                if self
+                    .ask_form_commit_first(AfterFormCommit::Print)
+                    .succeeded()
+                {
+                    return Task::none();
+                }
+                self.open_print_dialog()
+            }
+            PrintMsg::Close => {
+                self.print_dialog = None;
+                Task::none()
+            }
+            PrintMsg::ChoosePages(choice) => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.choice = choice;
+                }
+                Task::none()
+            }
+            PrintMsg::TypeRange(text) => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.custom = text;
+                    // Typing in the box is choosing it: a reader who types a
+                    // range and presses Print meant the range, not "all".
+                    dialog.choice = PageChoice::Custom;
+                }
+                Task::none()
+            }
+            PrintMsg::ChooseMarks(marks) => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.marks = marks;
+                }
+                Task::none()
+            }
+            PrintMsg::TypeCopies(text) => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.set_copies(&text);
+                }
+                Task::none()
+            }
+            PrintMsg::ChooseDestination(destination) => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.destination = destination;
+                }
+                Task::none()
+            }
+            PrintMsg::AcceptPermission => {
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    dialog.permission_answered = true;
+                }
+                Task::none()
+            }
+            PrintMsg::Send => {
+                let Some(dialog) = self.print_dialog.take() else {
+                    return Task::none();
+                };
+                let Some(source) = self
+                    .documents
+                    .active()
+                    .map(|document| document.path.clone())
+                else {
+                    self.notify("There is no document open to print.".into());
+                    return Task::none();
+                };
+                let page_count = self.reader.page_count();
+                let current = self.reader.current_page();
+                // Asked once more here rather than trusted from the view: the
+                // button is drawn from the same answer, but the document can
+                // have closed between the draw and the press.
+                if let Some(reason) = dialog.blocked(current, page_count) {
+                    // Put the dialog back: the reader has something to
+                    // correct, and taking it away would take the correction
+                    // with it.
+                    self.print_dialog = Some(dialog);
+                    self.notify(reason);
+                    return Task::none();
+                }
+                let Ok(plan) = dialog.plan(&source, current, page_count) else {
+                    self.print_dialog = Some(dialog);
+                    return Task::none();
+                };
+                if plan.needs_a_copy {
+                    self.print_scratch_copy(&source, plan);
+                } else {
+                    self.spool(&source, &plan, false);
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Put the dialog up, with what this session can actually offer in it.
+    fn open_print_dialog(&mut self) -> Task<Message> {
+        if !self.platform.capabilities.printing {
+            // Said, and said visibly, rather than a dialog that ends in
+            // nothing. This is the whole reason the capability exists.
+            self.notify(
+                "Nothing in this session can print: pulpit found no spooler to hand the \
+                 document to."
+                    .into(),
+            );
+            return Task::none();
+        }
+        if self.documents.active().is_none() {
+            self.notify("There is no document open to print.".into());
+            return Task::none();
+        }
+        // A deck open for presenting has no document worker behind it, and
+        // it is the worker that would write the copy and answer for the
+        // permission bits. Said here rather than in a dialog whose Print
+        // button could only fail.
+        if self.reader_link.is_none() {
+            self.notify(
+                "This document is open for presenting only. Read it, and Ctrl+P prints from \
+                 there."
+                    .into(),
+            );
+            return Task::none();
+        }
+        let destinations = if self.platform.capabilities.print_options {
+            self.platform.services.printers()
+        } else {
+            // A picker that cannot pick is worse than no picker.
+            Vec::new()
+        };
+        let mut dialog = crate::printing::PrintDialog::open(destinations, self.reader.can_undo());
+        // What the document itself asks for. Already answered for a document
+        // whose properties have been read; asked for otherwise, and the
+        // dialog shows the caution as soon as it lands. Not knowing is not
+        // the same as being forbidden, so nothing waits on it.
+        dialog.permission = self
+            .document_properties
+            .as_ref()
+            .map(|properties| crate::printing::Permission::read(&properties.permissions));
+        if dialog.permission.is_none() {
+            self.ask_document_properties();
+        }
+        self.print_dialog = Some(dialog);
+        Task::none()
+    }
+
+    /// Ask the worker for the copy a marked-up print is spooled from.
+    ///
+    /// The same write Save As makes, to a scratch directory rather than
+    /// somewhere the reader chose. It is picked up again at `Told::Saved`.
+    fn print_scratch_copy(
+        &mut self,
+        source: &std::path::Path,
+        pending: crate::printing::PrintPlan,
+    ) {
+        let directory = self.platform.services.directories().cache.join("print");
+        // One at a time. The scratch name is this process's, so a second
+        // print started while the first is still being written would target
+        // the same bytes — and the answer that came back would be matched to
+        // whichever plan was set last.
+        if self.print_scratch.is_some() {
+            self.notify("A print is already on its way. Wait for it, then try again.".into());
+            return;
+        }
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            self.notify(format!("pulpit could not make room for the print: {error}"));
+            return;
+        }
+        let scratch = directory.join(crate::printing::spool_name(source, std::process::id()));
+        // A6 all the same: the scratch name is derived from the source, and a
+        // document already living in the cache directory could collide with
+        // it. Printing must never write over what the reader opened.
+        if Self::same_path(source, &scratch) {
+            self.notify("pulpit cannot print this document from where it is.".into());
+            return;
+        }
+        let Some(link) = self.reader_link.as_mut() else {
+            self.notify("There is no document open to print.".into());
+            return;
+        };
+        link.ask(crate::reader_link::Ask::SaveAs {
+            destination: scratch.clone(),
+            options: pulpit_render::document::SaveOptions::verified(),
+        });
+        self.print_scratch = Some(scratch);
+        self.print_pending = Some(pending);
+    }
+
+    /// The scratch copy exists. Spool it, then take it away again.
+    fn print_scratch_landed(&mut self, path: PathBuf) {
+        let Some(pending) = self.print_pending.take() else {
+            // Nothing asked for this copy, which should not happen; deleting
+            // it is still the right thing to do with it.
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+        self.spool(&path, &pending, true);
+    }
+
+    /// Hand a file to the platform and say what came of it.
+    fn spool(
+        &mut self,
+        file: &std::path::Path,
+        pending: &crate::printing::PrintPlan,
+        scratch: bool,
+    ) {
+        let job = crate::platform::services::PrintJob {
+            file: file.to_path_buf(),
+            title: pending.title.clone(),
+            pages: pending.pages.ranges().to_vec(),
+            copies: pending.copies,
+            destination: pending.destination.clone(),
+        };
+        let outcome = self.platform.services.print(&job);
+        // The copy is pulpit's, and it goes whether the job was taken or not:
+        // a scratch file left behind after a refused print is a copy of a
+        // document the reader never asked for, sitting in a cache directory.
+        // `lp` has read it by the time the call returns — which is why the
+        // adapter waits rather than spawning.
+        if scratch {
+            if let Err(error) = std::fs::remove_file(file) {
+                tracing::warn!(%error, path = %file.display(), "the print copy could not be removed");
+            }
+        }
+        match outcome.describe() {
+            Some(problem) => self.notify_error(format!("The print did not go: {problem}"), None),
+            None => {
+                let where_to = match pending.destination.as_deref() {
+                    Some(queue) => format!(" to {queue}"),
+                    None => String::new(),
+                };
+                self.notify_done(format!("Sent “{}”{where_to} to print.", pending.title));
+            }
+        }
     }
 
     // --- Signing profiles ----------------------------------------------
@@ -14900,6 +15232,11 @@ mod append_only_tests {
         }
         // Signing is the one addition append-only mode exists to permit.
         assert!(!App::read_command_mutates(&ReadCommand::Sign));
+        // Printing is not a change to the document either. It writes a
+        // scratch copy for a marked-up print, the same way signing does, and
+        // reading a signed document and printing it is most of what anyone
+        // does with one.
+        assert!(!App::read_command_mutates(&ReadCommand::Print));
         assert!(!App::read_command_mutates(&ReadCommand::Arm(None)));
     }
 }

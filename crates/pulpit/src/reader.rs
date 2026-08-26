@@ -3628,6 +3628,7 @@ impl ReaderSession {
             | ReadCommand::Undo
             | ReadCommand::Redo
             | ReadCommand::SaveAs
+            | ReadCommand::Print
             // The Sign flow is the application's own dialog (§31.1); the
             // reader session has nothing to lay out for it. A field click
             // that starts it is the same story.
@@ -5398,6 +5399,7 @@ mod tests {
             ReadCommand::Undo,
             ReadCommand::Redo,
             ReadCommand::SaveAs,
+            ReadCommand::Print,
         ] {
             assert!(!session.apply(&command), "{command:?} is not a re-render");
         }

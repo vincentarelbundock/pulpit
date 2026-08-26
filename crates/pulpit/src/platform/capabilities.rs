@@ -80,6 +80,23 @@ pub struct Capabilities {
     pub media_keys: bool,
     /// Desktop notifications are available.
     pub notifications: bool,
+    /// A document can be sent to a printer.
+    ///
+    /// Not "this machine has a printer": a session with a spooler and no
+    /// queues configured can still be printed from, and the queue is where
+    /// that is found out. This is whether there is anything here to hand a
+    /// file to at all.
+    pub printing: bool,
+    /// The spooler takes the job's particulars: which pages, how many copies,
+    /// which queue.
+    ///
+    /// One flag for all three because they arrive together. A spooler either
+    /// takes a job description — CUPS does — or it is a shell verb that
+    /// prints a file to the default printer and takes nothing else, in which
+    /// case none of the three can be honoured and the dialog must not offer
+    /// them. False here never means "printing does not work"; that is
+    /// [`Capabilities::printing`].
+    pub print_options: bool,
     /// An image can be put on the system clipboard.
     ///
     /// Separate from "there is a clipboard": every session pulpit runs in
@@ -106,6 +123,10 @@ impl Default for Capabilities {
             accessibility_bridge: false,
             media_keys: true,
             notifications: false,
+            // The null adapter must never send anything to a real printer,
+            // and a desktop that has not been taught to print says so.
+            printing: false,
+            print_options: false,
             // Nothing to put a clipboard on: the null adapter must never
             // touch the real one.
             image_clipboard: false,
@@ -152,6 +173,11 @@ impl Capabilities {
                 "file dialogs: none — open files from the command line",
             ),
             flag(
+                self.printing,
+                "printing: available",
+                "printing: NOT available — no spooler answered",
+            ),
+            flag(
                 self.accessibility_bridge,
                 "accessibility bridge: present",
                 "accessibility bridge: absent",
@@ -170,6 +196,9 @@ impl Capabilities {
         }
         if !self.native_dialogs {
             out.push("opening files through a dialog");
+        }
+        if !self.printing {
+            out.push("printing");
         }
         if self.identity < IdentityQuality::Connector {
             out.push("remembering displays across a reconnect");
@@ -199,6 +228,8 @@ mod tests {
         assert!(!capabilities.limitations().is_empty());
 
         let full = Capabilities {
+            printing: true,
+            print_options: true,
             arbitrary_placement: true,
             system_appearance: true,
             sleep_inhibition: true,

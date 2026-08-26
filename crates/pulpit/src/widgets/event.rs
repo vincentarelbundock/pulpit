@@ -355,6 +355,12 @@ pub enum ReadCommand {
     /// Write the annotated document somewhere else. Never over the source
     /// (A6), which is why there is no plain "Save".
     SaveAs,
+    /// Open the print dialog.
+    ///
+    /// Not "print": what goes on the paper — which pages, and whether the
+    /// reader.s own marks and entries are on them — is a question only the
+    /// reader can answer, and answering it wrongly costs paper.
+    Print,
     /// Open the Sign dialog (SPEC-signing.md §31.1).
     Sign,
     /// A signature dead-field on the page was clicked: open the Sign dialog

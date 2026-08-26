@@ -2438,6 +2438,14 @@ fn document_tools_band<Message: Clone + 'static>(
             on_event,
         ))
         .push(document_command_button(
+            theme::Icon::Printer,
+            "Print…",
+            ReadCommand::Print,
+            false,
+            state.live && state.open,
+            on_event,
+        ))
+        .push(document_command_button(
             theme::Icon::Stamp,
             "Sign…",
             ReadCommand::Sign,
@@ -2685,6 +2693,12 @@ fn document_tools_overflow_menu<Message: Clone + 'static>(
             theme::Icon::Save,
             "Save as…",
             ReadCommand::SaveAs,
+            state.open,
+        ),
+        (
+            theme::Icon::Printer,
+            "Print…",
+            ReadCommand::Print,
             state.open,
         ),
         (theme::Icon::Stamp, "Sign…", ReadCommand::Sign, state.open),

@@ -144,6 +144,7 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
             Some(review) => save_review_dialog(review),
             None => blank(),
         },
+        layer(app.print_dialog.is_some(), || print_dialog(app)),
         // The alarm popup is a top-level overlay rather than something
         // drawn inside the clock's pane: a clock can be a narrow cell in a
         // strip, and a popup anchored there would be clipped by its own
@@ -3106,6 +3107,169 @@ fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'stat
     // A press on the ground behind declines it: staying where you are is the
     // answer that changes nothing, so it is the safe one to make easy.
     panel(body, Some(Message::DeclineFormNavigation))
+}
+
+/// What goes on the paper.
+///
+/// Two questions and nothing else, because everything a print dialog usually
+/// asks — paper size, duplex, trays, colour — belongs to the platform's own
+/// dialog and its drivers, and pulpit hands the file over rather than
+/// answering them a second time. What is left is what only pulpit knows:
+/// which pages, and whether the reader's own marks and entries are on them.
+fn print_dialog(app: &App) -> Element<'_, Message> {
+    use crate::printing::{Marks, PageChoice};
+    let Some(dialog) = app.print_dialog.as_ref() else {
+        return blank();
+    };
+    let close = Message::Print(crate::app::PrintMsg::Close);
+    let page_count = app.reader.page_count();
+    let current = app.reader.current_page();
+
+    let mut body = column![theme::typography::title("Print")].spacing(gap::M);
+
+    // What the document itself asks for, when it asks for anything. Shown
+    // before the choices rather than after them: it may change what the
+    // reader does next.
+    if let Some(caution) = dialog
+        .permission
+        .and_then(crate::printing::Permission::caution)
+    {
+        let mut notice = column![theme::typography::body(caution)].spacing(gap::S);
+        if dialog
+            .permission
+            .is_some_and(crate::printing::Permission::needs_an_answer)
+            && !dialog.permission_answered
+        {
+            notice = notice.push(
+                button(theme::typography::label("Print it anyway"))
+                    .padding(gap::S)
+                    .style(theme::ambient::alert_button)
+                    .on_press(Message::Print(crate::app::PrintMsg::AcceptPermission)),
+            );
+        }
+        body = body.push(notice);
+    }
+
+    // Which pages. The range box is always there rather than appearing when
+    // "Pages" is chosen: a box that appears under the pointer as it arrives
+    // is a box that gets missed.
+    let mut pages = row![].spacing(gap::S).align_y(Alignment::Center);
+    for choice in [PageChoice::All, PageChoice::Current, PageChoice::Custom] {
+        let chosen = dialog.choice == choice;
+        pages = pages.push(
+            button(theme::typography::label(choice.label()))
+                .padding(gap::S)
+                .style(if chosen {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                })
+                .on_press(Message::Print(crate::app::PrintMsg::ChoosePages(choice))),
+        );
+    }
+    pages = pages.push(
+        text_input("1-3, 7", &dialog.custom)
+            .on_input(|value| Message::Print(crate::app::PrintMsg::TypeRange(value)))
+            .style(theme::ambient::text_field)
+            .padding(gap::S)
+            .width(Length::Fixed(120.0)),
+    );
+    body = body.push(dialog_section("Pages", pages));
+
+    // What is on them.
+    let mut marks = row![].spacing(gap::S);
+    for kind in [Marks::AsMarkedUp, Marks::AsOnDisk] {
+        let chosen = dialog.marks == kind;
+        marks = marks.push(
+            button(theme::typography::label(kind.label()))
+                .padding(gap::S)
+                .style(if chosen {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                })
+                .on_press(Message::Print(crate::app::PrintMsg::ChooseMarks(kind))),
+        );
+    }
+    body = body.push(dialog_section("What to print", marks));
+    if dialog.marks == Marks::AsMarkedUp {
+        // Said plainly, because it is the one thing about this print that is
+        // not obvious: a copy is written, and it is not the document.
+        body = body.push(theme::typography::note(
+            "pulpit writes a temporary copy carrying your marks and form entries, sends \
+             that to the printer, and deletes it. The document you opened is not changed.",
+        ));
+    }
+
+    // Copies and the queue, where the spooler takes them at all.
+    if app.platform.capabilities.print_options {
+        let mut particulars = row![dialog_section(
+            "Copies",
+            text_input("1", &dialog.copies.to_string())
+                .on_input(|value| Message::Print(crate::app::PrintMsg::TypeCopies(value)))
+                .style(theme::ambient::text_field)
+                .padding(gap::S)
+                .width(Length::Fixed(70.0)),
+        )]
+        .spacing(gap::M)
+        .align_y(Alignment::End);
+        // Only when there is a choice to make. One queue, or none the
+        // platform will name, is the platform's default and nothing to ask
+        // about.
+        if dialog.destinations.len() > 1 {
+            let names: Vec<String> = dialog.destinations.clone();
+            let chosen = dialog
+                .destination
+                .clone()
+                .unwrap_or_else(|| names[0].clone());
+            particulars = particulars.push(dialog_section(
+                "Printer",
+                pick_list(names, Some(chosen), |name| {
+                    Message::Print(crate::app::PrintMsg::ChooseDestination(Some(name)))
+                })
+                .width(Length::Fixed(200.0))
+                .style(theme::ambient::drop_down)
+                .menu_style(theme::ambient::drop_down_menu),
+            ));
+        }
+        body = body.push(particulars);
+    } else {
+        // The honest version of a dialog with no controls in it: this
+        // session's spooler takes a file and nothing else.
+        body = body.push(theme::typography::note(
+            "This session prints to the default printer, and cannot be told a page range \
+             or a number of copies from here.",
+        ));
+    }
+
+    let blocked = dialog.blocked(current, page_count);
+    let mut print = button(theme::typography::label("Print"))
+        .padding(gap::S)
+        .style(theme::ambient::alert_button);
+    if blocked.is_none() {
+        print = print.on_press(Message::Print(crate::app::PrintMsg::Send));
+    }
+    body = body.push(
+        row![
+            button(theme::typography::label("Cancel"))
+                .padding(gap::S)
+                .style(theme::ambient::tool_button)
+                .on_press(close.clone()),
+            print,
+            // What this is about to cost in paper, or what is stopping it.
+            // One line, in the place the reader is already looking.
+            theme::typography::note(match blocked.as_deref() {
+                Some(reason) => reason.to_string(),
+                None => dialog.summary(current, page_count),
+            }),
+        ]
+        .spacing(gap::S)
+        .align_y(Alignment::Center),
+    );
+
+    // The ground behind cancels: printing nothing is the answer that costs
+    // nothing.
+    panel(body, Some(close))
 }
 
 /// What a save would leave empty, before it is written (§6.4).

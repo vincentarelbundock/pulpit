@@ -123,6 +123,14 @@ impl PlatformServices for NullPlatform {
         }
     }
 
+    /// Recorded, and never sent anywhere. The null adapter exists so a test
+    /// can watch what the application asked for; a printer is the last thing
+    /// it should be able to reach.
+    fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        self.record(format!("print {}", job.file.display()));
+        Outcome::Unsupported { what: "Printing" }
+    }
+
     fn inhibit(&self) -> InhibitState {
         self.inhibit_calls.fetch_add(1, Ordering::Relaxed);
         self.record("inhibit");
@@ -165,7 +173,18 @@ mod tests {
             platform.reveal(Path::new("/tmp/deck.pdf")),
             Outcome::Unsupported { .. }
         ));
-        assert_eq!(platform.calls().len(), 2, "every request is recorded");
+        assert!(matches!(
+            platform.print(&crate::platform::services::PrintJob {
+                file: PathBuf::from("/tmp/deck.pdf"),
+                title: "deck".into(),
+                pages: Vec::new(),
+                copies: 1,
+                destination: None,
+            }),
+            Outcome::Unsupported { .. }
+        ));
+        // Nothing reached a printer, and the attempt is on the record.
+        assert_eq!(platform.calls().len(), 3, "every request is recorded");
     }
 
     #[test]

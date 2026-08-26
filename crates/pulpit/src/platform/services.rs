@@ -24,6 +24,58 @@ pub struct Notification {
     pub urgency: Urgency,
 }
 
+/// One document, on its way to a printer.
+///
+/// The pages are a *request*. An adapter whose spooler cannot take a range
+/// must say [`Outcome::Unsupported`] rather than print the whole document:
+/// forty pages when four were asked for is not a partial success, and the
+/// reader finds out at the printer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrintJob {
+    /// The file to spool. Always a PDF, and always one this process may read
+    /// until the call returns.
+    pub file: PathBuf,
+    /// What the queue should call the job — the document's name, never the
+    /// scratch file's.
+    pub title: String,
+    /// The pages wanted, one-based. Empty means the whole document.
+    pub pages: Vec<std::ops::RangeInclusive<u32>>,
+    pub copies: u16,
+    /// The queue to send to, or `None` for the platform's default.
+    pub destination: Option<String>,
+}
+
+impl PrintJob {
+    /// The range in the spelling CUPS reads: `1-3,7`. `None` for everything.
+    pub fn cups_range(&self) -> Option<String> {
+        cups_range(&self.pages)
+    }
+}
+
+/// Page ranges in the spelling CUPS reads: `1-3,7,9-11`.
+///
+/// `None` for an empty list, so a caller passes no range argument at all
+/// rather than one naming every page. Written once, here, because the print
+/// dialog needs the same string to show as the adapter needs to send.
+pub fn cups_range(pages: &[std::ops::RangeInclusive<u32>]) -> Option<String> {
+    if pages.is_empty() {
+        return None;
+    }
+    Some(
+        pages
+            .iter()
+            .map(|range| {
+                if range.start() == range.end() {
+                    range.start().to_string()
+                } else {
+                    format!("{}-{}", range.start(), range.end())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
 /// What the desktop can do for the application.
 ///
 /// Every method returns an explicit [`Outcome`] or an `Option`, so a caller
@@ -69,6 +121,31 @@ pub trait PlatformServices: Send + Sync {
         Outcome::Unsupported {
             what: "copying an image to the clipboard",
         }
+    }
+
+    /// The printers this session can send a job to, most-preferred first.
+    ///
+    /// Empty means "ask the platform for its own default", not "there are no
+    /// printers": a session with a spooler but no way to enumerate queues
+    /// still prints, and a dialog offering no choice is the right thing to
+    /// show for it.
+    fn printers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Send a PDF to a printer.
+    ///
+    /// pulpit hands the file over rather than rasterising pages and pushing
+    /// bitmaps: duplex, paper sizes, trays, margins and colour management are
+    /// the platform's and are not improved by being written again here. See
+    /// [`crate::printing`] for the whole of that reasoning.
+    ///
+    /// The default is [`Outcome::Unsupported`], so a desktop that has not
+    /// been taught to print — and the null adapter, which must never send
+    /// anything to a real printer — reports a command to disable rather than
+    /// a job that went nowhere.
+    fn print(&self, _job: &PrintJob) -> Outcome {
+        Outcome::Unsupported { what: "printing" }
     }
 
     /// Begin inhibiting sleep and idle.

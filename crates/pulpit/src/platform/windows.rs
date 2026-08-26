@@ -180,6 +180,14 @@ impl PlatformServices for WindowsServices {
             // decision rather than a runtime one.
             notifications: false,
             image_clipboard: true,
+            // The shell's `print` verb hands a PDF to whatever is registered
+            // for it. Every Windows install has *something*; whether that
+            // something can print is between it and the machine, and the
+            // outcome of the call is where that is found out.
+            printing: true,
+            // …and the verb takes nothing else: no range, no copies, no
+            // queue. See `print` below.
+            print_options: false,
         }
     }
 
@@ -281,6 +289,64 @@ impl PlatformServices for WindowsServices {
     /// whether the session offers a clipboard at all, which the outcome says.
     fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
         crate::platform::clipboard::copy_image(image)
+    }
+
+    /// Print through the shell's `print` verb.
+    ///
+    /// This is the hand-off in its plainest form: the file goes to whatever
+    /// application is registered for PDFs, which prints it on the default
+    /// printer. That is the whole of what the verb does — it takes no page
+    /// range, no copy count and no queue — which is why this adapter reports
+    /// `print_options: false` and why a job that names any of them is
+    /// refused here rather than silently printed whole. Forty pages when
+    /// four were asked for is not a partial success.
+    ///
+    /// The way out of that is `PrintDlgEx` and a GDI device context, or
+    /// writing the wanted pages into the spooled copy before handing it over.
+    /// Neither is a thing to do on the way past.
+    fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        if !job.pages.is_empty() {
+            return Outcome::Unsupported {
+                what: "Printing a range of pages on Windows",
+            };
+        }
+        if job.copies > 1 {
+            return Outcome::Unsupported {
+                what: "Printing more than one copy on Windows",
+            };
+        }
+        if job.destination.is_some() {
+            return Outcome::Unsupported {
+                what: "Choosing a printer on Windows",
+            };
+        }
+        if !job.file.is_file() {
+            return Outcome::failed("there is nothing at that path to print");
+        }
+        let operation = wide("print");
+        let file = wide(&job.file.to_string_lossy());
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        match result as usize {
+            code if code > 32 => Outcome::Done,
+            // SE_ERR_NOASSOC / SE_ERR_ASSOCINCOMPLETE: nothing on this
+            // machine has registered itself as able to print a PDF.
+            27 | 31 => Outcome::Unsupported {
+                what: "Printing PDFs on this machine",
+            },
+            2 | 3 => Outcome::failed("that file no longer exists"),
+            5 => Outcome::refused("Windows denied access to that file"),
+            code => Outcome::failed(format!("the shell refused to print it (code {code})")),
+        }
     }
 
     fn inhibit(&self) -> InhibitState {

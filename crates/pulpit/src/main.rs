@@ -23,6 +23,7 @@ mod layout_renderer;
 mod media;
 mod panel;
 mod platform;
+mod printing;
 mod reader;
 mod reader_journal;
 mod reader_link;
