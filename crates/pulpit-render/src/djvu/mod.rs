@@ -12,7 +12,9 @@
 //!
 //! What lives where:
 //!
-//! * [`sys`] — the `dlopen`'d slice of `ddjvuapi`, and the discovery order.
+//! * [`discover`] — where an installed djvulibre might be, and why looking
+//!   only at the loader path is not enough (§55.4).
+//! * [`sys`] — the `dlopen`'d slice of `ddjvuapi`.
 //! * [`backend`] — the renderer's view.
 //! * [`document`] — the reader's view, where every PDF semantic reports
 //!   `Unsupported` (§60.1).
@@ -33,8 +35,9 @@ use std::path::Path;
 #[cfg(feature = "djvu")]
 pub mod backend;
 #[cfg(feature = "djvu")]
-pub mod document;
+pub mod discover;
 #[cfg(feature = "djvu")]
+pub mod document;
 pub mod sys;
 #[cfg(feature = "djvu")]
 pub(crate) mod text;
@@ -76,26 +79,18 @@ pub fn is_djvu(path: &Path) -> bool {
 /// one calls a missing PDFium a broken installation, because every package
 /// ships it. This is a normal state on a normal machine, so this message says
 /// how to change it rather than what went wrong.
+///
+/// One sentence, and it is the fix — "installing djvulibre would open this"
+/// says the library is missing without a sentence spent saying so. No install table, and nothing the
+/// caller has already said — this is shown under a heading that names the
+/// file that would not open and inside an error that names the backend, so
+/// repeating either here is one sentence of noise in front of somebody who is
+/// about to give a talk. The install instructions are in the manual, and
+/// `reason` — the loader's own account of the names it tried — goes to the log,
+/// where a library that is installed but not found is diagnosed.
 pub fn missing_djvu_message(reason: &str) -> String {
-    [
-        "pulpit cannot open this document: it is a DjVu file, and no DjVu",
-        "library is installed on this machine.",
-        "",
-        "DjVu support is a capability of the machine, not of this build —",
-        "pulpit never bundles a format library other than PDFium. Install",
-        "djvulibre and it will be found the next time:",
-        "",
-        "  Debian / Ubuntu   apt install libdjvulibre21",
-        "  Fedora / RHEL     dnf install djvulibre-libs",
-        "  Arch              pacman -S djvulibre",
-        "  macOS             brew install djvulibre",
-        "  Nix / NixOS       add djvulibre to the environment",
-        "",
-        "  Anywhere          PULPIT_DJVU_PATH=/dir/with/libdjvulibre pulpit book.djvu",
-        "",
-        &format!("Tried: {reason}"),
-    ]
-    .join("\n")
+    tracing::debug!(%reason, "no djvulibre found");
+    "Install djvulibre to open this DjVu file.".into()
 }
 
 #[cfg(test)]
@@ -113,16 +108,22 @@ mod tests {
     }
 
     /// §61.1 and §61.2: the refusal names the format and what would install
-    /// it, and never suggests the file is damaged.
+    /// it, never suggests the file is damaged, and stays short enough to read
+    /// at a glance — the loader's diagnostic belongs in the log, not in front
+    /// of somebody about to give a talk.
     #[test]
     fn the_refusal_names_djvu_and_does_not_call_the_file_broken() {
         let message = missing_djvu_message("libdjvulibre.so.21: not found");
         assert!(message.contains("DjVu"));
         assert!(message.contains("djvulibre"));
-        assert!(message.contains("PULPIT_DJVU_PATH"));
         assert!(
-            message.contains("libdjvulibre.so.21: not found"),
-            "names what was tried"
+            !message.contains("libdjvulibre.so.21"),
+            "the loader's account of what it tried is a log line: {message}"
+        );
+        assert!(
+            message.lines().count() == 1 && message.len() < 80,
+            "short enough to read at a glance, and it repeats nothing the \
+             caller already said: {message}"
         );
         for wrong in ["damaged", "corrupt", "invalid"] {
             assert!(

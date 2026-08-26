@@ -1,18 +1,18 @@
 //! The slice of djvulibre's `ddjvuapi` that pulpit uses, bound at run time.
 //!
-//! `SPEC-reader-formats.md` Â§55.3 is the rule this file exists to obey:
+//! `SPEC-reader-formats.md` §55.3 is the rule this file exists to obey:
 //! **no Class B library is ever bundled.** djvulibre is discovered through the
 //! system loader, never shipped beside the binary and never linked in, so a
 //! build carrying this module still runs on a machine with no DjVu library at
-//! all â it reports the format unsupported and names what is missing (Â§61.1).
+//! all — it reports the format unsupported and names what is missing (§61.1).
 //!
 //! That is also why this is hand-written `dlopen` FFI rather than a published
 //! `-sys` crate: those link at build time, which would make DjVu a capability
-//! of the *build*. Â§55.4 requires it to be a capability of the *machine*.
+//! of the *build*. §55.4 requires it to be a capability of the *machine*.
 //!
 //! Several `ddjvuapi` entry points are C macros over other functions rather
-//! than symbols of their own. Those are reproduced here as Rust methods â
-//! [`Api::document_release`] and friends â because `dlsym` cannot find a
+//! than symbols of their own. Those are reproduced here as Rust methods —
+//! [`Api::document_release`] and friends — because `dlsym` cannot find a
 //! macro, and a binding that looked for one would fail at load with a
 //! confusing "symbol not found" for a call that was never a symbol.
 
@@ -63,7 +63,7 @@ pub const MESSAGE_ERROR: c_int = 0;
 /// `ddjvu_render_mode_t::DDJVU_RENDER_COLOR`.
 ///
 /// "Colour page or stencil": a photographic page renders in colour and a
-/// bitonal scan renders as its stencil, which is the whole point â a scanned
+/// bitonal scan renders as its stencil, which is the whole point — a scanned
 /// book and a colour comic are the same call.
 pub const RENDER_COLOR: c_int = 0;
 
@@ -76,7 +76,7 @@ pub const RENDER_COLOR: c_int = 0;
 /// produce follows the host's endianness, and the alpha channel would have to
 /// come from the optional fourth "xor" argument. Trading a byte-order
 /// argument that cannot be exercised in CI against one linear pass over a
-/// frame is not a trade worth making; Â§62 says measure first.
+/// frame is not a trade worth making; §62 says measure first.
 pub const FORMAT_RGB24: c_int = 1;
 
 /// `ddjvu_rect_t`.
@@ -100,7 +100,7 @@ pub struct PageInfo {
     pub width: c_int,
     pub height: c_int,
     pub dpi: c_int,
-    /// `ddjvu_page_rotation_t`: 0, 1, 2, 3 for 0Â°, 90Â°, 180Â°, 270Â°
+    /// `ddjvu_page_rotation_t`: 0, 1, 2, 3 for 0°, 90°, 180°, 270°
     /// counter-clockwise.
     pub rotation: c_int,
     pub version: c_int,
@@ -204,50 +204,13 @@ pub unsafe fn cdr(p: MiniExp) -> MiniExp {
     }
 }
 
-/// The file names a system-installed djvulibre goes by.
-///
-/// Bare names on purpose: they are handed to the platform loader, which
-/// resolves them against the machine's own library path. No directory beside
-/// the executable is searched, unlike the PDFium binding â a copy found there
-/// would be a bundled one, and Â§65.1 forbids bundling a Class B library.
-fn library_names() -> &'static [&'static str] {
-    // Naming a shared library is the platform boundary's business, not a
-    // capability question, so this is the one place a target check belongs.
-    if cfg!(target_os = "windows") {
-        &["libdjvulibre.dll", "djvulibre.dll"]
-    } else if cfg!(target_os = "macos") {
-        &["libdjvulibre.21.dylib", "libdjvulibre.dylib"]
-    } else {
-        &["libdjvulibre.so.21", "libdjvulibre.so"]
-    }
-}
-
-/// Every place a djvulibre might be, most specific first.
-///
-/// `PULPIT_DJVU_PATH` names either the library file itself or a directory
-/// holding it, which is what lets somebody test against a build the loader
-/// would not otherwise find.
-fn candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(configured) = std::env::var_os("PULPIT_DJVU_PATH") {
-        let configured = PathBuf::from(configured);
-        if configured.is_dir() {
-            candidates.extend(library_names().iter().map(|name| configured.join(name)));
-        } else {
-            candidates.push(configured);
-        }
-    }
-    candidates.extend(library_names().iter().map(PathBuf::from));
-    candidates
-}
-
 macro_rules! api {
     ($( $field:ident : $symbol:literal : unsafe extern "C" fn($($arg:ty),* $(,)?) $(-> $ret:ty)? ),* $(,)?) => {
         /// djvulibre's entry points, and the loaded library they came from.
         pub struct Api {
             /// Every function pointer below borrows from this. Function
             /// pointers have no destructor, so field order does not matter
-            /// for soundness â but the library must not be unloaded while an
+            /// for soundness — but the library must not be unloaded while an
             /// [`Api`] lives, which is why it is owned here rather than
             /// leaked.
             _library: libloading::Library,
@@ -333,10 +296,10 @@ impl Api {
     ///
     /// Returns the accumulated per-candidate failure on the way out, because
     /// the list of names already tried is the useful half of the diagnostic
-    /// (Â§61.1).
+    /// (§61.1).
     pub fn load() -> std::result::Result<Api, String> {
         let mut failures = Vec::new();
-        for candidate in candidates() {
+        for candidate in crate::djvu::discover::candidates() {
             // SAFETY: loading a shared library runs its initialisers, which
             // is why this is unsafe at all. The name is either one the
             // platform loader resolves or one the operator supplied.

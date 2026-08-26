@@ -497,10 +497,10 @@ fn run_djvu_document_worker(source: PathBuf) {
 #[cfg(not(feature = "djvu"))]
 fn run_djvu_document_worker(source: PathBuf) {
     let _ = source;
-    eprintln!(
-        "{}",
-        pulpit_render::missing_djvu_message("this build was compiled without the djvu feature")
-    );
+    // Its own sentence, not `missing_djvu_message`: that one tells the reader
+    // to install djvulibre, and on a build with no DjVu backend in it
+    // installing djvulibre would change nothing.
+    eprintln!("This build of pulpit was compiled without DjVu support.");
     std::process::exit(1);
 }
 
