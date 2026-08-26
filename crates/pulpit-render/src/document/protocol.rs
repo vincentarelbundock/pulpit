@@ -852,6 +852,10 @@ impl From<&super::DocumentError> for DocumentFailure {
             | E::FieldReadOnly(_)
             | E::SourceIsDestination => DocumentFailure::Refused(error.to_string()),
             E::Unsupported(what) => DocumentFailure::Unsupported(what.clone()),
+            // Verbatim: the message is a whole sentence naming the format
+            // and the way forward (§61.1), and nothing was touched before it
+            // was refused.
+            E::UnsupportedFormat(why) => DocumentFailure::Refused(why.clone()),
             E::Backend(_) | E::Save(_) | E::Io(_) => DocumentFailure::Engine(error.to_string()),
         }
     }

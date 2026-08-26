@@ -49,7 +49,7 @@ impl ImageDocument {
         // §61.2 and §61.4: a format pulpit does not read is named, not
         // reported as a damaged archive.
         if let Some(message) = crate::formats::unsupported_format(source) {
-            return Err(DocumentError::Unsupported(message.to_string()));
+            return Err(DocumentError::UnsupportedFormat(message.to_string()));
         }
         let resolved = resolve_source(source).ok_or_else(|| {
             DocumentError::Backend(format!(
@@ -409,15 +409,37 @@ mod tests {
         ));
     }
 
+    /// §61.1 and §61.4 in the reader: a format pulpit does not read is
+    /// refused by name here too, and the message reaches the presenter as
+    /// written.
+    ///
+    /// `UnsupportedFormat` rather than `Unsupported` is the whole point.
+    /// `Unsupported` takes a verb phrase and prints "this document cannot
+    /// {it}", which turned a refusal into "this document cannot RAR archives
+    /// (.cbr) are not supported" — neither fact, and the presenter reads it.
     #[test]
-    fn a_rar_comic_is_refused_by_name_in_the_reader_too() {
+    fn a_format_pulpit_does_not_read_is_refused_by_name_in_the_reader_too() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("comic.cbr");
-        std::fs::write(&path, b"Rar!\x1a\x07\x00").unwrap();
-        let Err(error) = ImageDocument::open(&path) else {
-            panic!("§54.7: a RAR is refused, not opened");
-        };
-        assert!(matches!(error, DocumentError::Unsupported(_)));
-        assert!(error.to_string().contains("RAR"), "{error}");
+        for (name, expected) in [
+            ("comic.cbr", "RAR"),
+            ("talk.ps", "PostScript"),
+            ("book.epub", "EPUB"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"not that it is ever read").unwrap();
+            let Err(error) = ImageDocument::open(&path) else {
+                panic!("{name} is refused, not opened");
+            };
+            assert!(
+                matches!(error, DocumentError::UnsupportedFormat(_)),
+                "{name}"
+            );
+            let said = error.to_string();
+            assert!(said.contains(expected), "{said}");
+            assert!(
+                !said.contains("this document cannot"),
+                "a refusal is a whole sentence, not a verb phrase — {said}"
+            );
+        }
     }
 }

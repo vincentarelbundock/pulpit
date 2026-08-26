@@ -87,6 +87,16 @@ pub enum DocumentError {
     SourceIsDestination,
     #[error("this document cannot {0}")]
     Unsupported(String),
+    /// A format pulpit does not read, refused by name before the document is
+    /// opened at all (`SPEC-reader-formats.md` §61.1, §61.4).
+    ///
+    /// Separate from [`DocumentError::Unsupported`], which takes a verb
+    /// phrase and reads as "this document cannot *annotate*". A format refusal
+    /// is a whole sentence — it names the format and says what to do instead —
+    /// and prefixing it produced "this document cannot EPUB (.epub) is not
+    /// supported", which is neither fact.
+    #[error("{0}")]
+    UnsupportedFormat(String),
     #[error("the engine failed: {0}")]
     Backend(String),
     #[error("saving failed: {0}")]

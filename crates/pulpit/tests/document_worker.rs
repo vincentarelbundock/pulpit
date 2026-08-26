@@ -233,6 +233,47 @@ fn a_worker_that_cannot_open_its_document_reports_it_rather_than_hanging() {
     }
 }
 
+/// `SPEC-reader-formats.md` §61.4, end to end as a real child process: a
+/// format pulpit does not read is named on the way out, and never described
+/// as a damaged file (§61.2).
+///
+/// The route matters as much as the message. Before the refusal table, every
+/// one of these extensions fell through to the PDF backend, so the presenter
+/// was told a perfectly good book was a broken PDF — or, on a machine without
+/// PDFium, that PDFium was missing. Refusing before any library is bound is
+/// what §65.2 asks for, and running the real binary is the only way to see it.
+#[test]
+fn a_format_pulpit_does_not_read_is_named_by_a_real_worker() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    for (extension, expected) in [("epub", "EPUB"), ("ps", "PostScript"), ("cbr", "RAR")] {
+        let source = directory.path().join(format!("thing.{extension}"));
+        std::fs::write(&source, b"not that it is ever read").unwrap();
+        let Some(program) = executable() else {
+            eprintln!("skipping: the pulpit executable was not built beside this test");
+            return;
+        };
+
+        let output = std::process::Command::new(program)
+            .arg(format!("--document-worker={}", source.display()))
+            .output()
+            .expect("the worker starts");
+        assert!(!output.status.success(), ".{extension} must be refused");
+
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            complaint.contains(expected),
+            ".{extension} must be refused by name (§61.1): {complaint}"
+        );
+        let lower = complaint.to_lowercase();
+        for wrong in ["corrupt", "damaged", "malformed"] {
+            assert!(
+                !lower.contains(wrong),
+                ".{extension} says {wrong} (§61.2): {complaint}"
+            );
+        }
+    }
+}
+
 /// A one-page AcroForm with a single text field named `name`.
 ///
 /// Written by hand for the same reason the JavaScript fixtures in
