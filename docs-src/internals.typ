@@ -686,6 +686,55 @@ the palette holds — a check or a cross — and it is deliberately not
 `StampMark`, whose third variant carries a picture: a picture is something a
 reader supplies rather than a mode a button can be in.
 
+=== The annotations panel
+
+The sidebar's third tab lists every mark in the document, and it is a view of
+the file's annotations in exactly the sense above: its rows are built from
+`AnnotationSummary`, nothing is stored beside them, and a row deleted from the
+list makes the same `AnnotationCommand::Delete` transaction a delete on the
+page makes — one revision, one undo entry, in user action order with
+everything else. It is reached by pressing its icon in the rail a reader has
+already opened and by nothing else: the marks are worth a tab, and a reader
+who has not opened the sidebar is not looking for them, so there is no key.
+Like the form tab, it is offered only where it could hold something — a
+document pulpit cannot annotate never grows one.
+
+Three things had to be decided.
+
+*Whose list.* Okular shows an author and a date per annotation because its
+reviews panel is built for several people marking up one document. Pulpit's
+marks carry neither, and this panel is an index rather than a review tool: a
+row says what a mark is, what page it is on, and what it says — the Typst
+source for a mark pulpit wrote, `/Contents` otherwise, and for an ink stroke,
+which says nothing at all, its kind and its page. Writing `/T` and `/M` is a
+decision about the model, and can be made later without changing the panel.
+
+*How the whole document is enumerated.* `ListAnnotations` answers one page and
+a panel is about all of them, so it sweeps the document a chunk at a time
+behind the window's own pages and shows what has arrived while it fills — the
+shape search already uses for the same problem, down to what the bound counts.
+It bounds what is *outstanding*, not what one call may ask for, and that
+distinction is the whole of it: the pump runs on every tick and again on every
+answer the worker sends, so a per-call bound would let each answered page
+start another chunk and the queue would grow by a chunk per answer until every
+page of a five-hundred-page document sat in front of the render the reader is
+waiting on. The window's own pages are counted in the same bound, because they
+go to the same worker through the same queue.
+
+*Keeping it current.* Every edit names the pages it touched, and those pages'
+annotation lists are dropped — which the eraser's hit-testing already
+depended on. The panel is rebuilt from that same drop and the sweep asks for
+the dirty pages again, so the list follows `DocumentRevision` rather than a
+timer. It is also built only while it is the rail's view: every page that
+scrolls past reports its marks, and rebuilding a list nobody has open would be
+work done for no reader.
+
+Marks the document arrived with are listed beside the reader's own, with their
+`AnnotationSupport` said in words — `read-only`, `not editable here`,
+`malformed` — and no delete control, because deleting is a rewrite and pulpit
+does not rewrite what it does not model (A5). A dimmed button that refuses
+when pressed would say less and promise more.
+
 == One render pipeline for slides and pages
 
 The reader's pages are rendered by the same supervised worker pool, through

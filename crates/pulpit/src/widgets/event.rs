@@ -70,6 +70,12 @@ pub enum PanelCommand {
     ShowSearch,
     /// Show the outline in the shared document sidebar.
     ShowOutline,
+    /// Show the document's marks in the shared document sidebar.
+    ///
+    /// Reached by pressing the rail's own icon and by nothing else: the marks
+    /// are worth a tab, and a reader who has not opened the sidebar is not
+    /// looking for them (§8.4).
+    ShowAnnotations,
 }
 
 /// What the search pane can ask for.
@@ -217,6 +223,21 @@ pub enum ReadCommand {
         page: pulpit_core::page::PageIndex,
         name: String,
     },
+    /// Go to one mark and pick it up: a press in the annotations panel.
+    ///
+    /// The identity travels alone. Which page a mark is on is what the panel
+    /// was built from, so asking the session for it again cannot disagree
+    /// with what the reader pressed — and if the mark has since been deleted
+    /// there is no page, which is the right answer rather than a jump to
+    /// wherever it used to be.
+    GoToAnnotation(pulpit_core::annotate::AnnotationId),
+    /// Take one mark out of the document, named rather than selected (§8.4).
+    ///
+    /// [`ReadCommand::DeleteSelected`] takes what the hand is holding, which
+    /// is on the page in front of the reader; this takes a mark from a list,
+    /// which is the only reasonable way to remove one from a page nobody is
+    /// looking at.
+    DeleteAnnotation(pulpit_core::annotate::AnnotationId),
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
     MoveOutlineFocus(i32),

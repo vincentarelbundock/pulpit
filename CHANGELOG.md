@@ -26,6 +26,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   all — a check placed before this was an annotation in the file and on
   nobody's screen. It is never described as a signature.
 
+- **The marks in a document are listed.** A third tab in the sidebar that
+  already holds the outline and the search results — its own icon, no
+  shortcut, and offered only for a document that can carry marks — lists every
+  annotation in the file in page order: what it says, what kind it is and what
+  page it is on. Pressing a row goes to the mark and picks it up; the trash
+  beside it takes the mark out of the document as one edit, which is the only
+  reasonable way to remove a mark from a page nobody is looking at. Marks the
+  document arrived with are listed beside your own and say when pulpit will
+  not rewrite them — `read-only`, `not editable here`, `malformed` — rather
+  than offering a control that would refuse. The list walks the whole document
+  a chunk of pages at a time and fills in as the answers arrive, and it
+  follows the document's revision rather than a timer, so a mark deleted on
+  the page leaves the list in the same instant.
+
 ### Fixed
 
 - **A typeset text mark no longer disappears when it is dragged.** Every edit

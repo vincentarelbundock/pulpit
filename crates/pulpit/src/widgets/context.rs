@@ -434,6 +434,16 @@ pub struct ReaderData<'a> {
     /// The document's fields, in the order the file lists them, as the engine
     /// last reported them. Empty for everything that is not a form.
     pub fields: std::sync::Arc<Vec<pulpit_render::document::FormField>>,
+    /// Every mark the document is known to carry, in page order (§8.4).
+    ///
+    /// Meaningful only while the rail is showing them: the session keeps this
+    /// list up to date for the panel and for nothing else, so a reader who
+    /// has never opened it will find it empty.
+    pub annotations: std::sync::Arc<Vec<crate::widgets::document::model::AnnotationRow>>,
+    /// How much of the document the annotation sweep has covered: pages
+    /// known, of pages there are. The panel says so while it fills, because a
+    /// list still growing is not the same answer as a list that is complete.
+    pub annotation_scan: (usize, usize),
     /// The calendar open over a date field, if one is (§8.6).
     pub date_picker: Option<&'a crate::reader::DatePicker>,
     /// The hour and minute steppers open over a time field, if any are (§8.6).
