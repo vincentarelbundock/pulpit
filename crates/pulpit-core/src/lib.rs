@@ -6,6 +6,7 @@
 
 pub mod annotate;
 pub mod annotation;
+pub mod autoadvance;
 pub mod document;
 pub mod generation;
 pub mod history;
@@ -22,6 +23,7 @@ pub use annotate::{AnnotationCommand, AnnotationDraft, AnnotationId, AnnotationI
 pub use annotation::{
     AnnotationStyle, AnnotationTool, Annotations, InkColor, InkStroke, MarkupKind, StrokeKind,
 };
+pub use autoadvance::Autoadvance;
 pub use document::{DocumentId, DocumentInfo, LinkTarget, PageLink, PageSize};
 pub use generation::RenderGeneration;
 pub use history::{NavHistory, Place};

@@ -17,6 +17,11 @@ pub enum Action {
     Previous,
     First,
     Last,
+    /// Unattended page turning: start it, or stop it. Held loops resume
+    /// from the same key, because "the loop is off" and "the loop is
+    /// waiting for me to stop touching it" are the same thing to the hand
+    /// reaching for the key.
+    ToggleAutoadvance,
     PreviewNext,
     PreviewPrevious,
     CommitPreview,
@@ -136,6 +141,7 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
             Action::First,
             Action::Last,
             Action::ShowOverview,
+            Action::ToggleAutoadvance,
         ],
     },
     ShortcutGroup {
@@ -203,11 +209,12 @@ pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer]
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 46] = [
+    pub const ALL: [Action; 47] = [
         Action::Next,
         Action::Previous,
         Action::First,
         Action::Last,
+        Action::ToggleAutoadvance,
         Action::PreviewNext,
         Action::PreviewPrevious,
         Action::CommitPreview,
@@ -258,6 +265,7 @@ impl Action {
             Action::Previous => "Previous page",
             Action::First => "First page",
             Action::Last => "Last page",
+            Action::ToggleAutoadvance => "Autoadvance",
             Action::PreviewNext => "Preview next",
             Action::PreviewPrevious => "Preview previous",
             Action::CommitPreview => "Show the previewed page",
@@ -598,6 +606,11 @@ impl Default for Keymap {
                 named("Home", Action::First),
                 named("End", Action::Last),
                 with("g", Mods::shift(), Action::Last),
+                // "p" for play: the unattended loop, started and stopped from
+                // one key. Bare rather than modified because the hand that
+                // stops a running loop is usually reaching in a hurry, and
+                // free because printing is Ctrl+P like everywhere else.
+                named("p", Action::ToggleAutoadvance),
                 // Blanking is the most reflexive key at a lectern, so it does
                 // not move for anyone — `b` is a vim word motion, but a
                 // presenter has no words to move over. It is the only
@@ -1381,6 +1394,22 @@ mod tests {
                 binding.describe()
             );
         }
+    }
+
+    #[test]
+    fn autoadvance_is_one_bare_key_in_both_directions() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.resolve(Some("p"), None),
+            Some(Action::ToggleAutoadvance),
+            "starting and stopping are the same key"
+        );
+        // Printing keeps the modified form, which is the reason the bare
+        // letter was free to take.
+        assert_eq!(
+            keymap.resolve_with_mods(Some("p"), Mods::primary(), None),
+            Some(Action::Print),
+        );
     }
 
     #[test]

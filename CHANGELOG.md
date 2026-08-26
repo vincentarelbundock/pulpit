@@ -8,6 +8,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Pages turn on their own.** `P` starts an unattended loop and stops it: the
+  poster in the corridor, the lobby screen, the deck left running before the
+  room fills. The dwell, whether it starts again at the first page, and
+  whether a hand on the controls holds it are in Settings, because the person
+  who sets a screen up in the morning is not the person who launched it.
+
+  It is not a mode and not a layout. Autoadvance turns the page in whichever
+  viewer is up — presenting or reading, fullscreen or in a window, either
+  entered before the other or after — and in whatever that viewer has open: a
+  deck, a book, a scan, a comic archive, a folder of images. There is one
+  place in pulpit that means "forward", and this is a clock pressing it, so
+  there was nothing to teach it about formats.
+
+  What it will not do is turn a page out from under someone. Anything that
+  owns the keyboard — a mark being written, the overview grid, the search
+  pane, a form field with the caret in it, a dialog, the settings page — holds
+  the loop while it is up, and with holding on, a key, a click or the wheel
+  puts it aside until you press `P` again. The dwell is the page's, not the
+  renderer's: a page that took half a second to draw still gets its full time
+  on the screen, and a laptop that spent an hour with its lid shut owes one
+  page turn rather than seven hundred.
+
+  A running loop asks the session to stay awake, which it used to do only for
+  a fullscreen audience window — an unattended screen that blanks itself after
+  ten minutes is not unattended. Without wrapping it stops at the last page
+  and says so, rather than ticking at a page that will not turn.
+
+
 - **Ctrl+P prints.** Pulpit could not print at all: the only `Print` in the
   tree was the one it refused when a form's own script asked to print itself.
   That refusal stays — a script asking is not the reader asking — and beside

@@ -15,7 +15,7 @@
   table.cell(colspan: 4)[#smallcaps[Move through pages]],
   [`→` `PgDn` (`J`)], [Next page], [`←` `PgUp` (`K`)], [Previous page],
   [`Home`], [First page], [`End` (`Shift+G`)], [Last page],
-  [`O`], [Page overview], [], [],
+  [`O`], [Page overview], [`P`], [Autoadvance],
   table.cell(colspan: 4)[#smallcaps[Present]],
   [`B`], [Blank], [`T`], [Start/pause timer],
   [`Shift+T`], [Reset timer], [`S`], [Swap displays],

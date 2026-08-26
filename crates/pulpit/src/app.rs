@@ -258,6 +258,12 @@ pub enum Message {
     SignatureProfile(crate::signature_profiles::ProfileMsg),
     SetAppearance(crate::platform::Appearance),
     SetBlankColor(crate::settings::BlankColor),
+    /// The autoadvance dwell, as typed. Held as text while it is being
+    /// edited: a field that refused an empty box could not be cleared to
+    /// type a different number into it.
+    TypeAutoadvanceInterval(String),
+    SetAutoadvanceWrap(bool),
+    SetAutoadvancePause(bool),
     SetMotion(crate::platform::MotionSetting),
     /// A key came up. Only interactive overlays care; pulpit's own
     /// bindings all act on the press. Raw modifier flags, as for `Key`.
@@ -957,6 +963,18 @@ pub struct App {
     /// place just left onto the stack and make back oscillate between two
     /// pages for ever.
     navigating_history: bool,
+    /// Unattended page turning, in whichever viewer is up.
+    ///
+    /// Beside the presentation state rather than inside it: that state
+    /// machine is the deck, and this turns reader pages too.
+    pub autoadvance: pulpit_core::Autoadvance,
+    /// The place the running dwell belongs to, so a page turned by any
+    /// means — the loop, a key, a link — restarts it rather than inheriting
+    /// the last one's remainder.
+    autoadvance_place: Option<pulpit_core::Place>,
+    /// The dwell as it is being typed in settings, which is not always a
+    /// number: an empty box is a step on the way to a different one.
+    pub autoadvance_interval_draft: String,
     /// Which page the presenter window is showing.
     pub page: crate::designer::Page,
     pub layouts: LayoutStore,
@@ -1935,6 +1953,12 @@ impl App {
             state: PresentationState::default(),
             nav_history: pulpit_core::NavHistory::new(),
             navigating_history: false,
+            autoadvance: pulpit_core::Autoadvance::new(
+                settings.autoadvance.interval(),
+                settings.autoadvance.wrap_at_end,
+            ),
+            autoadvance_place: None,
+            autoadvance_interval_draft: settings.autoadvance.interval_seconds.to_string(),
             page: crate::designer::Page::Presenter,
             layouts,
             active_layout,
@@ -3551,6 +3575,33 @@ impl App {
                 self.persist();
                 Task::none()
             }
+            Message::TypeAutoadvanceInterval(text) => {
+                let digits: String = text.chars().filter(char::is_ascii_digit).take(6).collect();
+                self.autoadvance_interval_draft = digits.clone();
+                if let Ok(seconds) = digits.parse::<u64>() {
+                    if seconds > 0 {
+                        self.settings.autoadvance.interval_seconds = seconds;
+                        // A loop already running re-dwells from now, so the
+                        // number just typed can be judged against the page in
+                        // front of the person who typed it.
+                        self.autoadvance
+                            .set_interval(self.settings.autoadvance.interval(), self.now);
+                        self.persist();
+                    }
+                }
+                Task::none()
+            }
+            Message::SetAutoadvanceWrap(wrap) => {
+                self.settings.autoadvance.wrap_at_end = wrap;
+                self.autoadvance.wrap = wrap;
+                self.persist();
+                Task::none()
+            }
+            Message::SetAutoadvancePause(pause) => {
+                self.settings.autoadvance.pause_on_interaction = pause;
+                self.persist();
+                Task::none()
+            }
             Message::SetBlankColor(color) => {
                 self.settings.display.blank_color = color;
                 // A blank already on screen follows the new choice at once,
@@ -3591,6 +3642,9 @@ impl App {
                 Task::none()
             }
             Message::Wheel { x, y } => {
+                // Scrolling is reading, and a reader who is reading is holding
+                // the controls as surely as one pressing a key.
+                self.autoadvance_touched();
                 // A wheel over an interactive overlay scrolls the page, not
                 // the deck; anywhere else pulpit keeps its own behaviour.
                 let over = self.overlay_under_cursor();
@@ -4649,6 +4703,12 @@ impl App {
     }
 
     fn on_action(&mut self, action: Action) -> Task<Message> {
+        // A hand on the keys is a hand taking the controls, and the loop
+        // steps aside rather than turning the page under it. Its own key is
+        // the exception, or starting a loop would immediately hold it.
+        if action != Action::ToggleAutoadvance {
+            self.autoadvance_touched();
+        }
         match action {
             Action::ToggleReader => self.toggle_reader(),
             // The rail collapses in place, wherever the layout put it, and a
@@ -4712,6 +4772,7 @@ impl App {
             // straight to the presentation state whatever was on screen, so
             // in a reading layout the arrows moved the deck behind the
             // document and the document stayed where it was.
+            Action::ToggleAutoadvance => self.toggle_autoadvance(),
             Action::Next => self.step_sequentially(true),
             Action::Previous => self.step_sequentially(false),
             Action::First => self.go_to_edge(false),
@@ -5262,6 +5323,13 @@ impl App {
             self.flush_settings();
         }
 
+        // 5. The unattended page turn. Last, after the reader has been pumped
+        //    and reconciliation is queued, so it acts on where the document
+        //    actually is this tick rather than on where it was last one.
+        if let Some(task) = self.service_autoadvance(now) {
+            tasks.push(task);
+        }
+
         Task::batch(tasks)
     }
 
@@ -5281,6 +5349,10 @@ impl App {
         // A stale snapshot from before the sleep must not be trusted — and
         // neither may the cached desktop appearance: the theme could have
         // changed while the machine slept.
+        // The dwell is owed however many turns the machine slept through.
+        // It owes one at most, and a reader coming back to the screen should
+        // see the page it was left on for a full dwell.
+        self.autoadvance.clock_jumped(self.now);
         self.refresh_appearance_probe();
         self.apply_appearance();
         self.coordinator.refresh();
@@ -8400,6 +8472,15 @@ impl App {
 
         if matches!(command, ReadCommand::PagePressed) {
             self.keyboard_region = KeyboardRegion::Document;
+        }
+
+        // A click on the page is the third way a hand takes the controls,
+        // after the keys and the wheel. The other read commands are not
+        // touches: most of them are the application talking to itself — a
+        // restore landing, a form answering — and the loop this turned off
+        // would be one nobody had touched.
+        if matches!(command, ReadCommand::PagePressed) {
+            self.autoadvance_touched();
         }
 
         // §31.3, A9: append-only mode refuses every content-mutating path —
@@ -11581,6 +11662,145 @@ impl App {
         }
     }
 
+    /// Turn the page if the dwell has run out, and keep the dwell honest.
+    ///
+    /// Called once per tick. Autoadvance deliberately does not hold the fast
+    /// tick: the settled tick is a quarter of a second and the shortest dwell
+    /// is a second, so a lobby loop left running overnight wakes the machine
+    /// no more often than an idle one — and a quarter-second of jitter on a
+    /// five-second page is not a thing anyone can see.
+    fn service_autoadvance(&mut self, now: Instant) -> Option<Task<Message>> {
+        if !self.autoadvance.is_on() {
+            self.autoadvance_place = None;
+            return None;
+        }
+
+        // A frame is on its way to the GPU. Both halves of this matter: the
+        // dwell must not start before the page it belongs to is up, and the
+        // page must not turn again while the last turn is still landing.
+        let landing = self.uploads_settle_by.is_some_and(|at| now < at);
+
+        // The page changed — by the loop, by a key, by a link — so the dwell
+        // starts again from the page that is actually there.
+        let place = self.current_place();
+        if self.autoadvance_place != Some(place) {
+            if landing {
+                return None;
+            }
+            self.autoadvance_place = Some(place);
+            self.autoadvance.page_landed(now);
+            return None;
+        }
+
+        if landing || !self.autoadvance.due(now) || self.autoadvance_holds() {
+            return None;
+        }
+        Some(self.advance_automatically())
+    }
+
+    /// Whether something on the screen must not have the page turned out from
+    /// under it.
+    ///
+    /// Read off the key ladder rather than from a list of dialogs: every rung
+    /// above the document viewer is, by construction, a surface that owns the
+    /// keyboard — a mark being typed, the overview grid, a confirmation, the
+    /// search workspace, the settings page. If it owns the keyboard it owns
+    /// the page, and a rung added later holds the loop without anyone having
+    /// to remember this function exists.
+    ///
+    /// [`Rung::CapturedWidget`] is the one rung skipped: it is a fact about a
+    /// key press, and there is no press here. The caret it stands for is
+    /// asked about directly instead.
+    fn autoadvance_holds(&self) -> bool {
+        let press = crate::keyladder::KeyPress {
+            key: None,
+            text: None,
+            scancode: None,
+            mods: crate::settings::Mods::NONE,
+            captured: false,
+        };
+        crate::keyladder::LADDER
+            .iter()
+            .take_while(|rung| **rung != crate::keyladder::Rung::DocumentViewer)
+            .filter(|rung| **rung != crate::keyladder::Rung::CapturedWidget)
+            .any(|rung| self.rung_active(*rung, &press))
+            || self.reader.form_holds_the_caret()
+    }
+
+    /// One page forward, unattended.
+    ///
+    /// Not `step_sequentially`: that clamps at the last page, and wrapping is
+    /// the whole difference between a lobby loop and a talk. Routed through
+    /// `go_to_place`, whose history suppression is what keeps an overnight
+    /// loop from filling the back stack with ten thousand entries.
+    fn advance_automatically(&mut self) -> Task<Message> {
+        let (at, count) = if self.uses_document_viewer() {
+            (self.reader.controls().page.get(), self.reader.page_count())
+        } else {
+            (self.state.committed(), self.state.slide_count())
+        };
+        match pulpit_core::autoadvance::step(at, count, self.autoadvance.wrap) {
+            Some(next) => {
+                let place = if self.uses_document_viewer() {
+                    pulpit_core::Place::Page(next)
+                } else {
+                    pulpit_core::Place::Slide(next)
+                };
+                self.autoadvance_place = Some(place);
+                self.autoadvance.page_landed(self.now);
+                self.go_to_place(place)
+            }
+            // The end of a document that does not wrap. Stopping is the
+            // honest thing: a loop that has run out is not still running, and
+            // the indicator should say so rather than tick at a page that
+            // never turns.
+            None => {
+                self.autoadvance.stop();
+                self.autoadvance_place = None;
+                self.notify("Autoadvance reached the end of the document.".into());
+                Task::none()
+            }
+        }
+    }
+
+    /// Someone took the controls.
+    ///
+    /// Held rather than stopped, and only when the reader asked for that:
+    /// with `pause_on_interaction` off, a hand on the keys means the loop
+    /// keeps its own time, which is what an unattended screen with a
+    /// caretaker wants.
+    fn autoadvance_touched(&mut self) {
+        if self.settings.autoadvance.pause_on_interaction && self.autoadvance.is_on() {
+            let was_running = !self.autoadvance.is_suspended();
+            self.autoadvance.suspend();
+            if was_running {
+                self.notify("Autoadvance held. Press the key again to resume.".into());
+            }
+        }
+    }
+
+    /// The key: start, or stop. Resuming a held loop is starting it.
+    fn toggle_autoadvance(&mut self) -> Task<Message> {
+        if self.autoadvance.is_on() && !self.autoadvance.is_suspended() {
+            self.autoadvance.stop();
+            self.autoadvance_place = None;
+            self.notify("Autoadvance off.".into());
+        } else {
+            self.autoadvance
+                .set_interval(self.settings.autoadvance.interval(), self.now);
+            self.autoadvance.wrap = self.settings.autoadvance.wrap_at_end;
+            self.autoadvance.start(self.now);
+            self.autoadvance_place = Some(self.current_place());
+            let seconds = self.autoadvance.interval().as_secs();
+            self.notify(format!("Autoadvance on: a page every {seconds}s."));
+        }
+        // Inhibition follows a running loop as well as a fullscreen
+        // audience: an unattended screen that blanks itself after ten
+        // minutes is not unattended.
+        self.apply_inhibition();
+        Task::none()
+    }
+
     /// Which PDF page a given slide shows.
     ///
     /// The inverse of `slide_showing`, and asked of the mapping for the same
@@ -12752,17 +12972,33 @@ impl App {
             .reconciler
             .note_windows(&self.coordinator.windows);
 
-        // Inhibition follows the audience output, not the application.
-        let fullscreen = self.coordinator.windows.audience.mode == WindowMode::Fullscreen;
-        if self.settings.display.inhibit_screensaver {
-            let state = self
-                .inhibitor
-                .set_desired(fullscreen, self.platform.services.as_ref())
-                .clone();
-            self.diagnostics.note(state.describe());
-        }
+        self.apply_inhibition();
 
         Task::batch(tasks)
+    }
+
+    /// Ask the session to stay awake, or stop asking.
+    ///
+    /// Two reasons, one claim. The audience output being fullscreen is the
+    /// old one: a projector must not blank mid-talk. A running autoadvance is
+    /// the new one, and it is the reason this had to become a function — an
+    /// unattended loop in a *windowed* reader, with no audience window at
+    /// all, was the one case where nobody was pressing a key and nothing was
+    /// fullscreen. Still a capability rather than an assumption: the
+    /// `Outcome` the inhibitor reports is what the diagnostics record.
+    fn apply_inhibition(&mut self) {
+        if !self.settings.display.inhibit_screensaver {
+            return;
+        }
+        let fullscreen = self.coordinator.windows.audience.mode == WindowMode::Fullscreen;
+        let state = self
+            .inhibitor
+            .set_desired(
+                fullscreen || self.autoadvance.is_on(),
+                self.platform.services.as_ref(),
+            )
+            .clone();
+        self.diagnostics.note(state.describe());
     }
 
     fn window_id(&self, role: Role) -> Option<window::Id> {
