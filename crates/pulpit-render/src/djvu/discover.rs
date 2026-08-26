@@ -639,9 +639,14 @@ mod tests {
             .iter()
             .position(|candidate| candidate == Path::new(library_names()[0]))
             .expect("the bare names are always asked");
-        assert!(
-            candidates.iter().skip(bare).any(|c| c.is_absolute()),
-            "derived and well-known directories come after the loader"
+        let loader_names = library_names()
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidates.get(bare..bare + loader_names.len()),
+            Some(loader_names.as_slice()),
+            "every bare loader name is asked, in order, before derived candidates"
         );
         assert!(
             candidates.iter().all(|candidate| candidate
