@@ -2015,26 +2015,26 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         .into(),
     ));
 
-    // Blanking. Which colour is wanted is a property of the room, not the
-    // deck: black vanishes in a dark hall, white reads as deliberate under
-    // bright house lights.
-    let mut blank_colors = Row::new().spacing(gap::S);
-    for color in crate::settings::BlankColor::ALL {
-        blank_colors = blank_colors.push(
-            selectable(
-                button(theme::typography::label(color.label())),
-                app.settings.display.blank_color == color,
-            )
-            .on_press(Message::SetBlankColor(color)),
-        );
-    }
+    // Blanking. One key does it, so the only thing left to say is which
+    // colour, and that is a property of the room rather than the deck: black
+    // vanishes in a dark hall, white reads as deliberate under bright house
+    // lights. Two colours is one binary choice, so it is a tick box.
+    let blanks_white = app.settings.display.blank_color == crate::settings::BlankColor::White;
     body = body.push(section(
         "Blank screen",
         column![
-            blank_colors,
+            checkbox(blanks_white)
+                .label("Blank to white instead of black")
+                .size(type_scale::BODY)
+                .text_size(type_scale::BODY)
+                .on_toggle(|white| Message::SetBlankColor(if white {
+                    crate::settings::BlankColor::White
+                } else {
+                    crate::settings::BlankColor::Black
+                })),
             theme::typography::caption(
                 "What the blank key turns the audience screen into. \
-                 Both colours stay available as separate shortcuts."
+                 The same key brings the deck back."
             ),
         ]
         .spacing(gap::S)
@@ -3754,9 +3754,35 @@ mod tests {
                 .map(|index| SHORTCUT_GROUPS[*index].actions.len())
                 .sum::<usize>()
         };
-        assert!(
-            actions(SHORTCUT_TABLE_LEFT).abs_diff(actions(SHORTCUT_TABLE_RIGHT)) <= 1,
-            "the two tables should remain balanced"
+
+        // Every group goes to exactly one side, and none is left out.
+        let mut placed: Vec<usize> = SHORTCUT_TABLE_LEFT
+            .iter()
+            .chain(SHORTCUT_TABLE_RIGHT)
+            .copied()
+            .collect();
+        placed.sort_unstable();
+        assert_eq!(placed, (0..SHORTCUT_GROUPS.len()).collect::<Vec<_>>());
+
+        // A group is indivisible, so perfect halves are not always reachable.
+        // The standing invariant is that the chosen split is as even as any
+        // split of these groups can be — which keeps the constants honest as
+        // actions come and go without pretending a group can be cut in half.
+        let total: usize = SHORTCUT_GROUPS.iter().map(|g| g.actions.len()).sum();
+        let best = (0..1u32 << SHORTCUT_GROUPS.len())
+            .map(|mask| {
+                let left: usize = (0..SHORTCUT_GROUPS.len())
+                    .filter(|index| mask & (1 << index) != 0)
+                    .map(|index| SHORTCUT_GROUPS[index].actions.len())
+                    .sum();
+                left.abs_diff(total - left)
+            })
+            .min()
+            .expect("there is at least one split");
+        assert_eq!(
+            actions(SHORTCUT_TABLE_LEFT).abs_diff(actions(SHORTCUT_TABLE_RIGHT)),
+            best,
+            "the two tables should be as balanced as whole groups allow"
         );
     }
 

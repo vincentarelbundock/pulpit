@@ -565,13 +565,12 @@ pub struct DisplaySettings {
     pub poll_ms: u64,
     /// Keep the screensaver away while the audience output is fullscreen.
     pub inhibit_screensaver: bool,
-    /// What the primary blank key turns the audience screen into.
+    /// What the blank key turns the audience screen into.
     ///
-    /// Both colours remain available as explicit actions; this only decides
-    /// which one the single most-reached-for key produces. Black disappears
-    /// in a dark room, white is the one that reads as deliberate under bright
-    /// house lights, and which is wanted is a property of the venue rather
-    /// than of the deck.
+    /// Blanking is one key, so this is the only place the colour is chosen.
+    /// Black disappears in a dark room, white is the one that reads as
+    /// deliberate under bright house lights, and which is wanted is a
+    /// property of the venue rather than of the deck.
     pub blank_color: BlankColor,
 }
 
@@ -585,15 +584,6 @@ pub enum BlankColor {
 }
 
 impl BlankColor {
-    pub const ALL: [BlankColor; 2] = [BlankColor::Black, BlankColor::White];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            BlankColor::Black => "Black",
-            BlankColor::White => "White",
-        }
-    }
-
     /// The presentation state this colour asks for.
     pub fn blank(self) -> pulpit_core::Blank {
         match self {
@@ -1288,31 +1278,17 @@ mod tests {
     }
 
     #[test]
-    fn the_alternate_blank_is_always_the_colour_the_primary_is_not() {
-        // The pairing is what lets one setting control both keys without a
-        // second setting that could contradict it.
-        for primary in BlankColor::ALL {
-            let alternate = BlankColor::ALL
-                .into_iter()
-                .find(|other| *other != primary)
-                .expect("there are exactly two colours");
-            assert_ne!(primary.blank(), alternate.blank());
-        }
-    }
-
-    #[test]
     fn a_keymap_stored_before_the_setting_existed_keeps_working() {
         use crate::settings::keys::{Action, Keymap};
         // `b` used to mean "blank black" outright. Loading that keymap must
-        // give the presenter the primary blank key, not an unbound `b`.
+        // give the presenter the blank key, not an unbound `b`. `w` named the
+        // second blanking key, which no longer exists: that binding goes, and
+        // the file still loads.
         let older = r#"{"bindings":[[{"kind":"named","key":"b"},"blank-black"],
                                     [{"kind":"named","key":"w"},"blank-white"]]}"#;
         let keymap: Keymap = serde_json::from_str(older).expect("should load");
         assert_eq!(keymap.resolve(Some("b"), None), Some(Action::Blank));
-        assert_eq!(
-            keymap.resolve(Some("w"), None),
-            Some(Action::BlankAlternate)
-        );
+        assert_eq!(keymap.resolve(Some("w"), None), None);
     }
 
     #[test]

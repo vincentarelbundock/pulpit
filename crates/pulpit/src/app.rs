@@ -4625,16 +4625,12 @@ impl App {
             }
             Action::CommitPreview => self.update(Message::Nav(Nav::CommitPreview)),
             Action::CancelPreview => self.update(Message::Nav(Nav::CancelPreview)),
-            // The venue decides which colour "blank" means; the alternate key
-            // is always the other one, so both stay within reach without a
-            // visit to the settings page.
+            // One key, and the venue decides which colour it means. There is
+            // no second key for the other colour: nothing anyone needs
+            // mid-sentence is worth a key a hand can hit while reaching.
             Action::Blank => match self.settings.display.blank_color {
                 crate::settings::BlankColor::Black => self.update(Message::Nav(Nav::ToggleBlack)),
                 crate::settings::BlankColor::White => self.update(Message::Nav(Nav::ToggleWhite)),
-            },
-            Action::BlankAlternate => match self.settings.display.blank_color {
-                crate::settings::BlankColor::Black => self.update(Message::Nav(Nav::ToggleWhite)),
-                crate::settings::BlankColor::White => self.update(Message::Nav(Nav::ToggleBlack)),
             },
             Action::ToggleTimer => self.update(Message::Nav(Nav::ToggleTimer)),
             Action::ResetTimer => self.update(Message::Nav(Nav::ResetTimer)),

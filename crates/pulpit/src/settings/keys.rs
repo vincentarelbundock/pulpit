@@ -21,19 +21,18 @@ pub enum Action {
     PreviewPrevious,
     CommitPreview,
     CancelPreview,
-    /// Blank in whichever colour the venue setting names. This is the key a
-    /// presenter reaches for mid-talk, and which colour it produces is a
-    /// property of the room rather than of the deck.
+    /// Blank in whichever colour the venue setting names. This is the only
+    /// blanking key: pressing it again brings the deck back, and which colour
+    /// it produces is a property of the room rather than of the deck.
     ///
     /// The old `blank-black` binding loads as this one: a stored keymap must
     /// keep working, and black is the default colour, so the behaviour a
-    /// presenter had is the behaviour they keep.
+    /// presenter had is the behaviour they keep. `blank-white` and
+    /// `blank-alternate` named the retired second key; a keymap holding
+    /// either loses that binding rather than failing to parse — see
+    /// [`Keymap`].
     #[serde(alias = "blank-black")]
     Blank,
-    /// Blank in the colour the setting did *not* name, for anyone who wants
-    /// both within reach without visiting the settings page.
-    #[serde(alias = "blank-white")]
-    BlankAlternate,
     ToggleTimer,
     ResetTimer,
     SwapDisplays,
@@ -139,7 +138,6 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 6] = [
         title: "Present",
         actions: &[
             Action::Blank,
-            Action::BlankAlternate,
             Action::ToggleTimer,
             Action::ResetTimer,
             Action::SwapDisplays,
@@ -197,12 +195,11 @@ pub const QUICK_START_ACTIONS: [Action; 7] = [
 ];
 
 /// Keys worth teaching specifically for live presentation.
-pub const PRESENTING_ACTIONS: [Action; 3] =
-    [Action::Blank, Action::BlankAlternate, Action::ToggleTimer];
+pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer];
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 46] = [
+    pub const ALL: [Action; 45] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -212,7 +209,6 @@ impl Action {
         Action::CommitPreview,
         Action::CancelPreview,
         Action::Blank,
-        Action::BlankAlternate,
         Action::ToggleTimer,
         Action::ResetTimer,
         Action::SwapDisplays,
@@ -262,7 +258,6 @@ impl Action {
             Action::CommitPreview => "Show the previewed page",
             Action::CancelPreview => "Cancel preview",
             Action::Blank => "Blank",
-            Action::BlankAlternate => "Alternate blank colour",
             Action::ToggleTimer => "Start/pause timer",
             Action::ResetTimer => "Reset timer",
             Action::SwapDisplays => "Swap displays",
@@ -471,7 +466,18 @@ pub struct Keymap {
 /// keymap written against the old `"ShiftZ"` spelling keeps working.
 #[derive(Deserialize)]
 struct KeymapWire {
-    bindings: Vec<(KeyBinding, Action)>,
+    bindings: Vec<(KeyBinding, StoredAction)>,
+}
+
+/// An action name as it was stored, which may name an action that no longer
+/// exists — `blank-white` and `blank-alternate` are the retired second
+/// blanking key. A keymap is a presenter's own file: one stale name in it
+/// costs that binding, never the whole file.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredAction {
+    Known(Action),
+    Retired(String),
 }
 
 impl From<KeymapWire> for Keymap {
@@ -479,7 +485,10 @@ impl From<KeymapWire> for Keymap {
         let mut bindings: Vec<_> = wire
             .bindings
             .into_iter()
-            .map(|(binding, action)| (binding.normalized(), action))
+            .filter_map(|(binding, action)| match action {
+                StoredAction::Known(action) => Some((binding.normalized(), action)),
+                StoredAction::Retired(_) => None,
+            })
             // Retired bindings go from stored keymaps too, or existing users
             // would keep a key that fresh installs stopped advertising.
             // Preview stepping is controlled by the scrubber rather than the
@@ -542,10 +551,12 @@ impl Default for Keymap {
                 named("End", Action::Last),
                 with("g", Mods::shift(), Action::Last),
                 // Blanking is the most reflexive key at a lectern, so it does
-                // not move for anyone — `b` and `w` are vim word motions, but
-                // a presenter has no words to move over.
+                // not move for anyone — `b` is a vim word motion, but a
+                // presenter has no words to move over. It is the only
+                // blanking key: pressing it again brings the deck back, and
+                // the colour it blanks to is a setting rather than a second
+                // key to hit by accident.
                 named("b", Action::Blank),
-                named("w", Action::BlankAlternate),
                 named("t", Action::ToggleTimer),
                 with("t", Mods::shift(), Action::ResetTimer),
                 named("s", Action::SwapDisplays),
@@ -1483,7 +1494,7 @@ mod default_repair_tests {
         // The presenter has put the overview on their remote's blue button
         // and uses "o" for something else.
         stored.bind(KeyBinding::scancode(191), Action::ShowOverview);
-        stored.bind(KeyBinding::named("o"), Action::BlankAlternate);
+        stored.bind(KeyBinding::named("o"), Action::ToggleAnnotationAudience);
 
         stored.restore_missing_defaults();
 
@@ -1494,7 +1505,7 @@ mod default_repair_tests {
         );
         assert_eq!(
             stored.resolve(Some("o"), None),
-            Some(Action::BlankAlternate),
+            Some(Action::ToggleAnnotationAudience),
             "and the default does not steal a key they have used"
         );
     }
