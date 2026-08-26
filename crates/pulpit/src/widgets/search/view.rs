@@ -35,14 +35,19 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
         search,
         ctx.context.mode.interactive(),
         widget.kind() == crate::widgets::WidgetKind::DocumentOutline,
+        ctx.context.reader.annotatable(),
         ctx.on_event,
     )
 }
 
+/// `annotatable` reaches only the shared sidebar's tabs: search draws the
+/// icon row when it is standing in the outline's slot, and the marks tab is
+/// offered there under the same rule the rail itself offers it.
 pub fn pane<Message: Clone + 'static>(
     search: SearchData<'_>,
     live: bool,
     shares_outline_sidebar: bool,
+    annotatable: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let state = search.state;
@@ -133,7 +138,10 @@ pub fn pane<Message: Clone + 'static>(
     let mut pane = Column::new().spacing(theme::space::XS);
     if shares_outline_sidebar {
         pane = pane.push(crate::widgets::document::view::sidebar_tabs(
-            true, live, on_event,
+            crate::widgets::document::model::SidebarTab::Search,
+            annotatable,
+            live,
+            on_event,
         ));
     }
     pane = pane

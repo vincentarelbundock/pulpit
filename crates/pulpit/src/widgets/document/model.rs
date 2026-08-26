@@ -647,14 +647,30 @@ pub enum OutlineView {
     /// empty for a deck of slides is a control that teaches the reader to
     /// ignore the rail.
     Fields,
+    /// Every mark in the document, in page order (§8.4).
+    ///
+    /// Reached from the sidebar's own icon row rather than from the small tab
+    /// row below it: the marks in a document are not a way of looking at its
+    /// authored structure, they are a second thing the sidebar can hold,
+    /// beside the outline and the search results.
+    Annotations,
 }
 
 /// Stable identity of an item in one of the outline rail's finite views.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutlineItemId {
-    Bookmark { source_ordinal: usize },
+    Bookmark {
+        source_ordinal: usize,
+    },
     Page(PageIndex),
-    Field { name: String, source_ordinal: usize },
+    Field {
+        name: String,
+        source_ordinal: usize,
+    },
+    /// One annotation, by the identity the document carries (`/NM`), so a row
+    /// survives the list being rebuilt after an edit — which it is, on every
+    /// revision that touches the page it is on.
+    Annotation(pulpit_core::annotate::AnnotationId),
 }
 
 impl OutlineView {
@@ -663,8 +679,139 @@ impl OutlineView {
             OutlineView::Bookmarks => "Outline",
             OutlineView::Thumbnails => "Pages",
             OutlineView::Fields => "Fields",
+            OutlineView::Annotations => "Annotations",
         }
     }
+}
+
+/// Which of the three things the document's one shared sidebar is holding.
+///
+/// The outline rail and the search pane are drawn by different widgets and
+/// each draws the icon row; this is what the row highlights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    Outline,
+    Search,
+    Annotations,
+}
+
+/// The longest a row's description runs before it is cut.
+///
+/// A `/Contents` may be a page of selected text; a rail row is two lines. The
+/// cut is made here rather than by the renderer so the row's height is known
+/// without measuring the text.
+const ANNOTATION_ROW_TEXT: usize = 140;
+
+/// One mark, as the annotations panel lists it.
+///
+/// Built from the engine's `AnnotationSummary` and carrying only what a row
+/// shows: the panel is a *view* of what the document says is on its pages
+/// (A1), never a second store of the marks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationRow {
+    pub id: pulpit_core::annotate::AnnotationId,
+    pub page: PageIndex,
+    pub kind: pulpit_core::annotate::AnnotationKind,
+    /// What the mark says, on one line: its Typst source where it has one,
+    /// its `/Contents` otherwise, and empty for an ink stroke that says
+    /// nothing at all.
+    pub text: String,
+    /// True when the text shown is shorter than the text the mark carries,
+    /// either because the engine cut it or because this row did.
+    pub truncated: bool,
+    pub support: pulpit_render::document::AnnotationSupport,
+    /// The colour the mark is drawn in, for the row's swatch.
+    pub color: pulpit_core::annotation::InkColor,
+}
+
+impl AnnotationRow {
+    pub fn of(summary: &pulpit_render::document::AnnotationSummary) -> Self {
+        // The Typst source first: for a mark pulpit wrote, `/Contents` holds
+        // the typeset result and the source is what the reader typed, which
+        // is the thing they would recognise in a list.
+        let (text, source_truncated) = match &summary.contents.pulpit_source {
+            Some(source) => (source.as_str(), false),
+            None => (summary.contents.text.as_str(), summary.contents.truncated),
+        };
+        let (text, cut) = one_line(text, ANNOTATION_ROW_TEXT);
+        Self {
+            id: summary.id.clone(),
+            page: summary.page,
+            kind: summary.kind,
+            text,
+            truncated: cut || source_truncated,
+            support: summary.support,
+            color: summary.style.color,
+        }
+    }
+
+    /// What the row says when the mark says nothing: an ink stroke carries no
+    /// text at all, and a row that was blank would read as a mark that failed
+    /// to load rather than one that is a line on a page.
+    pub fn description(&self) -> String {
+        if self.text.is_empty() {
+            format!("{} on page {}", self.kind.label(), self.page.get() + 1)
+        } else if self.truncated {
+            format!("{}…", self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+
+    /// Can this mark be taken out of the document from the list?
+    ///
+    /// Only what pulpit round-trips. Deleting is a rewrite, and pulpit does
+    /// not rewrite what it does not model (A5) — so the row says what the
+    /// mark is instead of offering a control that would refuse.
+    pub fn deletable(&self) -> bool {
+        self.support.is_editable()
+    }
+
+    /// What the row says about a mark pulpit did not fully understand, in
+    /// words rather than by dimming a control (§10.1).
+    pub fn support_note(&self) -> Option<&'static str> {
+        use pulpit_render::document::AnnotationSupport;
+
+        match self.support {
+            AnnotationSupport::Editable => None,
+            AnnotationSupport::ReadOnlySupported => Some("read-only"),
+            AnnotationSupport::Unsupported => Some("not editable here"),
+            AnnotationSupport::Malformed => Some("malformed"),
+        }
+    }
+}
+
+/// Collapse a mark's text onto one line and cut it to `limit` characters.
+///
+/// Characters rather than bytes: the cut is for a row of a rail, and a
+/// boundary in the middle of a code point is not a place a string can be cut
+/// at all.
+fn one_line(text: &str, limit: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut written = 0usize;
+    let mut spaced = true;
+    let mut cut = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            if !spaced && !out.is_empty() {
+                out.push(' ');
+                written += 1;
+                spaced = true;
+            }
+            continue;
+        }
+        if written >= limit {
+            cut = true;
+            break;
+        }
+        out.push(character);
+        written += 1;
+        spaced = false;
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    (out, cut)
 }
 
 /// A page rectangle, converted to the sheet it is drawn on (§8.6).
@@ -1082,5 +1229,94 @@ mod tests {
         .inflated(3.0, sheet);
         assert_eq!(far.left + far.width, 600.0);
         assert_eq!(far.top + far.height, 800.0);
+    }
+
+    fn summary(
+        contents: pulpit_render::document::AnnotationContents,
+        kind: pulpit_core::annotate::AnnotationKind,
+        support: pulpit_render::document::AnnotationSupport,
+    ) -> pulpit_render::document::AnnotationSummary {
+        pulpit_render::document::AnnotationSummary {
+            id: pulpit_core::annotate::IdGenerator::new(1).next_id(),
+            page: PageIndex(11),
+            kind,
+            bounds: pulpit_core::page::PageRect::new(10.0, 10.0, 100.0, 40.0),
+            style: pulpit_core::annotate::MarkStyle::default(),
+            contents,
+            support,
+            revision: pulpit_render::document::DocumentRevision::INITIAL,
+            path: Vec::new(),
+            quads: Vec::new(),
+            geometry_elided: false,
+        }
+    }
+
+    /// What a reader would recognise is what they typed, not the typeset
+    /// result pulpit put in `/Contents` for other viewers to draw.
+    #[test]
+    fn a_row_shows_the_typst_source_of_a_mark_pulpit_wrote() {
+        use pulpit_core::annotate::AnnotationKind;
+        use pulpit_render::document::{AnnotationContents, AnnotationSupport};
+
+        let row = AnnotationRow::of(&summary(
+            AnnotationContents {
+                text: "E = mc²".into(),
+                truncated: false,
+                pulpit_source: Some("$E = m c^2$".into()),
+            },
+            AnnotationKind::FreeText,
+            AnnotationSupport::Editable,
+        ));
+        assert_eq!(row.text, "$E = m c^2$");
+        assert_eq!(row.description(), "$E = m c^2$");
+        assert!(row.deletable());
+        assert_eq!(row.support_note(), None);
+    }
+
+    /// A `/Contents` may be a page of selected text and a row is one line.
+    #[test]
+    fn a_row_collapses_the_text_onto_one_line_and_cuts_it() {
+        use pulpit_core::annotate::AnnotationKind;
+        use pulpit_render::document::{AnnotationContents, AnnotationSupport};
+
+        let long = "word ".repeat(60);
+        let row = AnnotationRow::of(&summary(
+            AnnotationContents {
+                text: format!("  two\n\nlines  {long}"),
+                truncated: false,
+                pulpit_source: None,
+            },
+            AnnotationKind::Highlight,
+            AnnotationSupport::Editable,
+        ));
+        assert!(row.text.starts_with("two lines word"), "{}", row.text);
+        assert!(!row.text.contains('\n'));
+        assert!(row.truncated);
+        assert!(row.description().ends_with('…'));
+    }
+
+    /// An ink stroke says nothing at all, and a blank row would read as a
+    /// mark that failed to load rather than as a line on a page.
+    #[test]
+    fn a_row_for_a_mark_with_no_text_says_what_it_is_and_where() {
+        use pulpit_core::annotate::AnnotationKind;
+        use pulpit_render::document::{AnnotationContents, AnnotationSupport};
+
+        let row = AnnotationRow::of(&summary(
+            AnnotationContents::default(),
+            AnnotationKind::Ink,
+            AnnotationSupport::Malformed,
+        ));
+        assert_eq!(row.description(), "Ink on page 12");
+        // A mark pulpit only preserves says so, and offers no delete: the
+        // words are the answer, never a dimmed control (§10.1).
+        assert_eq!(row.support_note(), Some("malformed"));
+        assert!(!row.deletable());
+    }
+
+    #[test]
+    fn the_marks_are_a_view_of_their_own_with_a_name() {
+        assert_eq!(OutlineView::Annotations.label(), "Annotations");
+        assert_eq!(OutlineView::default(), OutlineView::Bookmarks);
     }
 }

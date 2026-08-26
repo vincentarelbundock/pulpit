@@ -417,7 +417,9 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
         scroll: app.search_scroll,
         viewport: app.search_viewport.clone(),
     };
-    crate::widgets::search::view::pane(search, true, false, interaction)
+    // A transient rail beside a presenter layout draws no tab row, so whether
+    // the document can carry marks does not reach it.
+    crate::widgets::search::view::pane(search, true, false, false, interaction)
 }
 
 /// A blank, transparent, click-through filler for one slot in a fixed

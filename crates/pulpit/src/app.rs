@@ -50,6 +50,16 @@ const READER_DRAIN_BUDGET: usize = 32;
 /// strict amount of event-loop work before yielding to drawing.
 const RENDER_DRAIN_BUDGET: usize = 16;
 const MEDIA_DRAIN_BUDGET: usize = 32;
+/// How many pages the annotations panel's document-wide sweep asks about per
+/// tick (§8.4).
+///
+/// The worker answers one request at a time, and the pages the reader is
+/// looking at are asked for through the same queue: a sweep that asked for
+/// five hundred pages at once would queue every one of them ahead of the
+/// renders the reader is waiting on. A chunk this size fills a panel over a
+/// long document in a second or two without ever being the reason a page is
+/// late.
+const ANNOTATION_SWEEP_CHUNK: usize = 8;
 
 /// How long a newly cached frame keeps the fast tick, so the windows can get
 /// it onto the GPU before the next page turn asks them to draw it.
@@ -7273,7 +7283,15 @@ impl App {
         // What is on the pages in the window, which is what the eraser and
         // the selection tool hit-test against. Asked for once per page and
         // dropped again the moment that page is edited.
-        let pages = self.reader.annotations_wanted();
+        let mut pages = self.reader.annotations_wanted();
+        // …and, while the annotations panel is the rail's view, a chunk of
+        // whatever else has not been read. The panel is about the whole
+        // document and this request answers one page, so it walks a chunk at
+        // a time behind the window's own pages and the list fills in as the
+        // answers arrive (§8.4).
+        if self.annotations_panel_open() {
+            pages.extend(self.reader.annotations_sweep(ANNOTATION_SWEEP_CHUNK));
+        }
         if let Some(link) = self.reader_link.as_mut() {
             for page in pages {
                 link.ask(crate::reader_link::Ask::ListAnnotations { page });
@@ -8955,6 +8973,32 @@ impl App {
                 .reader
                 .focused_outline_command()
                 .map_or_else(Task::none, |command| self.on_read_command(command)),
+            ReadCommand::GoToAnnotation(id) => {
+                // A jump like any other, and recorded like one: the reader
+                // who followed a mark from the list can come back with the
+                // navigation band rather than by finding their page again.
+                let origin = (!self.navigating_history).then(|| self.current_place());
+                if !self.reader.reveal_annotation(id) {
+                    // The mark has been deleted since the row was drawn.
+                    // Nothing to go to, and nowhere is better than wherever
+                    // it used to be.
+                    return Task::none();
+                }
+                if let Some(origin) = origin {
+                    self.nav_history.record_jump(origin, self.current_place());
+                }
+                self.request_reader_renders();
+                self.scroll_surface_to_reader()
+            }
+            ReadCommand::DeleteAnnotation(id) => {
+                // One mark, one transaction, one undo entry — the same shape
+                // as every other edit (§9.1), so a mark taken out of the list
+                // comes back with one press of undo.
+                if let Some(transaction) = self.reader.delete_annotation(id) {
+                    self.commit_to_document(transaction);
+                }
+                Task::none()
+            }
             // Handled above the session: the history is the application's,
             // and where these land may not even be a page in this document.
             ReadCommand::HistoryBack => self.nav_back(),
@@ -11150,6 +11194,7 @@ impl App {
                 | ReadCommand::CommitMark
                 | ReadCommand::ComposeMark(_)
                 | ReadCommand::DeleteSelected
+                | ReadCommand::DeleteAnnotation(_)
                 | ReadCommand::EditSelected
                 | ReadCommand::PickDate(_)
                 | ReadCommand::PickTime
@@ -11675,7 +11720,7 @@ impl App {
         } else {
             crate::widgets::scroll::reveal_offset(
                 index,
-                crate::widgets::document::view::OUTLINE_ROW_HEIGHT,
+                self.reader.outline_row_height(),
                 current,
                 viewport,
                 self.reader.outline_len(),
@@ -11722,6 +11767,21 @@ impl App {
         match command {
             PanelCommand::ShowSearch => self.open_search(),
             PanelCommand::ShowOutline => self.close_search(false),
+            PanelCommand::ShowAnnotations => {
+                // The tab row is drawn in the rail's header, which stays
+                // visible while the body is collapsed — so pressing this
+                // opens the body too, rather than selecting a view the
+                // reader cannot see.
+                let close_search = self.close_search(false);
+                let show =
+                    self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineView(
+                        crate::widgets::document::model::OutlineView::Annotations,
+                    ));
+                let open = self.on_read_command(
+                    crate::widgets::event::ReadCommand::SetOutlineCollapsed(false),
+                );
+                Task::batch([close_search, show, open])
+            }
             PanelCommand::CloseSidebar => {
                 let close_search = self.close_search(false);
                 let collapse_outline = self.on_read_command(
@@ -11748,6 +11808,20 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Is the annotations panel the thing the shared sidebar is showing?
+    ///
+    /// What the document-wide sweep asks before it walks: a panel nobody has
+    /// open is not worth one list request per page, and the pages in the
+    /// window are asked for either way.
+    fn annotations_panel_open(&self) -> bool {
+        use crate::widgets::document::model::OutlineView;
+
+        self.uses_document_viewer()
+            && !self.search_workspace
+            && !self.reader.controls().outline_collapsed
+            && self.reader.controls().outline == OutlineView::Annotations
     }
 
     fn open_search(&mut self) -> Task<Message> {
@@ -16130,6 +16204,11 @@ mod append_only_tests {
             ReadCommand::Arm(Some(pulpit_core::annotation::AnnotationTool::Ink)),
             ReadCommand::CommitMark,
             ReadCommand::DeleteSelected,
+            // Deleting from the annotations panel is the same removal reached
+            // from a list rather than from the page, and is refused the same.
+            ReadCommand::DeleteAnnotation(
+                pulpit_core::annotate::AnnotationId::imported("mark").expect("a usable name"),
+            ),
             ReadCommand::EditSelected,
             ReadCommand::PickTime,
             ReadCommand::SaveAs,
