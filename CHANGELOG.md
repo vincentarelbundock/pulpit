@@ -165,6 +165,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only the ink, so a highlight or a note on the page can be taken back from
   presentation too.
 
+- **Every key descends one ladder.** Which surface owns a press — a label
+  being typed, held marks, the overview grid, a text box with the caret, the
+  open panels innermost first, the document viewer, and finally the
+  shortcuts — was decided by a long chain of hand-ordered checks; it is now
+  one written-down priority order, walked top rung first. Nothing moves on
+  the keyboard: the same key still means the right thing in each place, and
+  Escape still closes the nearest open thing before the next one out. What
+  changes is that the order is now something the tests hold still, so a new
+  panel or popup cannot quietly steal a key from an old one.
+
+  On macOS, Command and Control are no longer the same key to pulpit: ⌘Q
+  quits and ⌘F finds, as they should, and a Control combination is not
+  mistaken for them. Elsewhere nothing changes — Ctrl remains the commanding
+  modifier, and saved keymaps carry forward as they are.
+
+  Ctrl+B and Ctrl+F now reach the outline and the search from any text box,
+  not only the search box: a commanding chord is a command wherever the
+  caret is, while a bare letter in a field stays a letter.
+
 ## [0.0.9] — 2026-08-25
 
 ### Changed
