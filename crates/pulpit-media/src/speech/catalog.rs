@@ -171,6 +171,113 @@ pub fn host_arch() -> &'static str {
     }
 }
 
+/// The shipped voice catalog, in its compact spelling.
+///
+/// The publisher's layout is mechanical — every URL and filename derives from
+/// the voice id alone — so the asset stores each fact once: a URL template
+/// and the file suffixes on the family, the language names once per tag, and
+/// one row per voice holding only what cannot be derived (the id, the sample
+/// rate, and a sha256 pin with a byte count per file). A different
+/// synthesiser is a second family with its own template, not a change to
+/// this code; a voice hosted somewhere the template cannot spell would be
+/// exactly that too.
+#[derive(Deserialize)]
+struct ShippedFamily {
+    engine: String,
+    /// `{family}`, `{language}`, `{speaker}`, `{quality}`, `{id}` and
+    /// `{file}` — the last is the entry from `files`, suffix included.
+    template: String,
+    /// Suffix of each file a voice needs, in the order the rows pin them.
+    /// The first is the model.
+    files: Vec<String>,
+    /// Language tag → [name in English, country]. Once per tag rather than
+    /// once per voice, because it is a fact about the tag.
+    languages: std::collections::BTreeMap<String, (String, String)>,
+    /// `[id, sample_rate, sha256, bytes, sha256, bytes, …]` — one hash and
+    /// size pair per entry in `files`.
+    voices: Vec<serde_json::Value>,
+}
+
+impl ShippedFamily {
+    /// Expand every row into the full [`Voice`] the rest of the crate reads.
+    ///
+    /// Panics on a malformed asset, like everything in [`Catalog::builtin`]:
+    /// the file is compiled in, so a mistake here is a build mistake, and the
+    /// tests below expand the real thing.
+    fn expand(&self) -> Vec<Voice> {
+        self.voices.iter().map(|row| self.voice(row)).collect()
+    }
+
+    fn voice(&self, row: &serde_json::Value) -> Voice {
+        let row = row.as_array().expect("a voice row is an array");
+        assert_eq!(
+            row.len(),
+            2 + 2 * self.files.len(),
+            "a voice row pins every file: {row:?}"
+        );
+        let id = row[0].as_str().expect("a voice id is a string");
+        let sample_rate = row[1].as_u64().expect("a sample rate is a number") as u32;
+
+        // The id is `{language}-{speaker}-{quality}`, and the pieces fill the
+        // template. The speaker may contain underscores but never a dash.
+        let mut parts = id.split('-');
+        let (language_part, speaker, quality) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(language), Some(speaker), Some(quality)) if parts.next().is_none() => {
+                (language, speaker, quality)
+            }
+            _ => panic!("voice id {id} is not language-speaker-quality"),
+        };
+        let family = language_part.split('_').next().expect("split never empty");
+        let language = LanguageTag::parse(&language_part.replace('_', "-"))
+            .expect("a voice id starts with a language tag");
+        let (language_name, country) = self
+            .languages
+            .get(&language.to_string())
+            .unwrap_or_else(|| panic!("{id} names a language the catalog does not"))
+            .clone();
+
+        let files = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, suffix)| {
+                let sha256 = row[2 + 2 * index]
+                    .as_str()
+                    .expect("a pin is a string")
+                    .to_string();
+                let bytes = row[3 + 2 * index].as_u64().expect("a size is a number");
+                let url = self
+                    .template
+                    .replace("{family}", family)
+                    .replace("{language}", language_part)
+                    .replace("{speaker}", speaker)
+                    .replace("{quality}", quality)
+                    .replace("{id}", id)
+                    .replace("{file}", suffix);
+                VoiceFile {
+                    name: format!("{id}{suffix}"),
+                    url,
+                    sha256,
+                    bytes,
+                }
+            })
+            .collect();
+
+        Voice {
+            id: id.to_string(),
+            engine: self.engine.clone(),
+            language,
+            speaker: speaker.to_string(),
+            language_name,
+            country,
+            quality: serde_json::from_value(serde_json::Value::String(quality.into()))
+                .unwrap_or_else(|_| panic!("{id} ends in a known quality")),
+            sample_rate,
+            files,
+        }
+    }
+}
+
 /// Everything installable, as shipped.
 #[derive(Debug, Clone)]
 pub struct Catalog {
@@ -185,8 +292,10 @@ impl Catalog {
     /// mistake rather than anything a user can cause — and a test below
     /// parses them, so it is caught in CI rather than on a stage.
     pub fn builtin() -> Catalog {
+        let family: ShippedFamily =
+            serde_json::from_str(VOICES).expect("shipped voices.json parses");
         Catalog {
-            voices: serde_json::from_str(VOICES).expect("shipped voices.json parses"),
+            voices: family.expand(),
             engines: serde_json::from_str(ENGINES).expect("shipped engines.json parses"),
         }
     }
@@ -426,6 +535,39 @@ mod tests {
                 assert!(file.bytes > 0);
             }
         }
+    }
+
+    /// The compact asset derives URLs and filenames from the voice id; this
+    /// pins the derivation to one literal so a template edit that changes
+    /// where downloads actually go cannot pass silently.
+    #[test]
+    fn the_template_expands_to_the_publishers_real_layout() {
+        let catalog = Catalog::builtin();
+        let voice = catalog.voice("ar_JO-kareem-low").expect("shipped");
+        assert_eq!(voice.language.to_string(), "ar-JO");
+        assert_eq!(voice.speaker, "kareem");
+        assert_eq!(voice.quality, Quality::Low);
+        assert_eq!(voice.language_name, "Arabic");
+        assert_eq!(voice.country, "Jordan");
+        let model = voice.model().expect("has a model");
+        assert_eq!(model.name, "ar_JO-kareem-low.onnx");
+        assert_eq!(
+            model.url,
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/\
+             ar/ar_JO/kareem/low/ar_JO-kareem-low.onnx"
+        );
+        assert_eq!(voice.files[1].name, "ar_JO-kareem-low.onnx.json");
+
+        // And the one quality whose spelling could plausibly diverge between
+        // the id and the enum.
+        let x_low = catalog
+            .voices()
+            .iter()
+            .find(|voice| voice.id.ends_with("-x_low"))
+            .expect("an x_low voice is shipped");
+        assert_eq!(x_low.quality, Quality::XLow);
+        let expected = format!("/x_low/{}.onnx", x_low.id);
+        assert!(x_low.model().unwrap().url.ends_with(&expected));
     }
 
     #[test]
