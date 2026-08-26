@@ -348,7 +348,12 @@ fn run_document_worker(source: PathBuf) {
     // must not be refused because one is missing (SPEC-images.md §45.3,
     // SPEC-reader-formats.md §56.1). Checked before the binding below, which
     // is the whole point of the ordering.
-    if pulpit_render::images::unsupported_archive(&source).is_some()
+    //
+    // A format pulpit refuses outright takes the same door, for the same
+    // reason: naming it costs nothing, so a machine without PDFium must still
+    // be told its `.epub` is an EPUB rather than that PDFium is missing
+    // (§61.4, §65.2).
+    if pulpit_render::unsupported_format(&source).is_some()
         || pulpit_render::images::resolve_source(&source).is_some()
     {
         run_image_document_worker(source);

@@ -5848,12 +5848,12 @@ impl App {
         // because everything below replaces the identity this position
         // belongs to.
         self.record_reading_position();
-        // A comic archive pulpit deliberately does not read is refused *by
-        // name*, before anything is opened: "pulpit cannot read this kind of
-        // file" and "this file is damaged" are different facts, and telling a
+        // A format pulpit deliberately does not read is refused *by name*,
+        // before anything is opened: "pulpit cannot read this kind of file"
+        // and "this file is damaged" are different facts, and telling a
         // presenter the second sends them looking for a problem that does not
-        // exist (§54.7, §61.1, §61.2).
-        if let Some(message) = pulpit_render::images::unsupported_archive(&path) {
+        // exist (§61.1, §61.2, §61.4).
+        if let Some(message) = pulpit_render::unsupported_format(&path) {
             self.notify_error(
                 format!("pulpit cannot open {}", path.display()),
                 Some(message.to_string()),

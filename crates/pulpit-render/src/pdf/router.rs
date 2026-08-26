@@ -163,12 +163,13 @@ impl PdfBackend for RoutingBackend {
     }
 
     fn open(&mut self, source: &Path) -> Result<BackendDocumentId> {
-        // Before anything is routed: a comic archive pulpit does not read is
-        // neither an image document nor a PDF, and falling through to the PDF
-        // backend would report a perfectly good `.cbr` as a damaged PDF —
-        // exactly the mistake §61.2 forbids. Refused here, by name
-        // (`SPEC-reader-formats.md` §54.7, §61.1).
-        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+        // Before anything is routed: a format pulpit does not read is neither
+        // an image document nor a PDF, and the last arm below sends everything
+        // it does not recognise to the PDF backend — so without this a
+        // perfectly good `.cbr`, `.ps` or `.epub` is reported as a damaged
+        // PDF, exactly the mistake §61.2 forbids. Refused here, by name, and
+        // before any library is bound (`SPEC-reader-formats.md` §61.1, §61.4).
+        if let Some(message) = crate::formats::unsupported_format(source) {
             return Err(PdfError::Open {
                 path: source.display().to_string(),
                 reason: message.to_string(),
@@ -377,18 +378,28 @@ mod tests {
     /// to the image backend: `resolve_source` says no to a `.cbr`, so without
     /// this it fell through to the PDF backend and was reported as a damaged
     /// PDF — a perfectly good comic, described as broken (§61.2).
+    ///
+    /// §63.3 makes it table-driven over every format in §64: each is refused
+    /// by name, none of them reads as a damaged file, and no library is bound
+    /// on the way — refusing a format must not need PDFium to be installed
+    /// (§65.2).
     #[test]
-    fn a_comic_format_pulpit_refuses_never_reaches_the_pdf_backend() {
+    fn no_format_pulpit_refuses_ever_reaches_the_pdf_backend() {
         let binds = Arc::new(AtomicUsize::new(0));
         let mut router = router(Arc::clone(&binds));
-        for name in ["/comics/book.cbr", "/comics/book.cb7"] {
-            let error = router.open(Path::new(name)).unwrap_err().to_string();
-            assert!(error.contains(".cbz"), "{name}: {error}");
-            assert!(
-                !error.to_lowercase().contains("corrupt")
-                    && !error.to_lowercase().contains("damaged"),
-                "{name}: {error}"
-            );
+        for format in crate::formats::UNSUPPORTED_FORMATS {
+            for extension in format.extensions {
+                let name = format!("/documents/thing.{extension}");
+                let error = router.open(Path::new(&name)).unwrap_err().to_string();
+                assert!(
+                    error.contains(format.message),
+                    "{name} must be refused by name (§61.1): {error}"
+                );
+                let lower = error.to_lowercase();
+                for wrong in ["corrupt", "damaged", "malformed"] {
+                    assert!(!lower.contains(wrong), "{name} says {wrong}: {error}");
+                }
+            }
         }
         assert_eq!(
             binds.load(Ordering::SeqCst),

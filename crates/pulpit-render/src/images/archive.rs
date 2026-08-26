@@ -30,27 +30,6 @@ use crate::images::table::{is_supported_image, ImageEntry, ListError};
 /// that puts them in scope at all.
 pub const ARCHIVE_EXTENSIONS: &[&str] = &["cbz", "cbt"];
 
-/// Comic archives pulpit deliberately does not read, and what to say about
-/// each (§54.7, §61.1).
-///
-/// Refused **by name**, saying what the format is: "pulpit cannot read this
-/// kind of file" and "this file is damaged" are different facts, and telling
-/// a presenter the second when the first is true sends them looking for a
-/// problem that does not exist (§61.2).
-pub const UNSUPPORTED_ARCHIVES: &[(&str, &str)] = &[
-    (
-        "cbr",
-        "RAR archives (.cbr) are not supported. RAR needs the unrar library, \
-         whose licence this project cannot carry. Repacking the comic as a \
-         .cbz — a plain zip of the same images — opens here.",
-    ),
-    (
-        "cb7",
-        "7z archives (.cb7) are not supported yet. Repacking the comic as a \
-         .cbz — a plain zip of the same images — opens here.",
-    ),
-];
-
 /// How the entries of one archive are stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveKind {
@@ -74,15 +53,6 @@ impl ArchiveKind {
             None
         }
     }
-}
-
-/// Is this an archive pulpit refuses to read, and what should it say?
-pub fn unsupported_archive(path: &Path) -> Option<&'static str> {
-    let extension = path.extension().and_then(|e| e.to_str())?;
-    UNSUPPORTED_ARCHIVES
-        .iter()
-        .find(|(known, _)| extension.eq_ignore_ascii_case(known))
-        .map(|(_, message)| *message)
 }
 
 /// The largest an entry may claim to be, or turn out to be (§54.4).
@@ -655,20 +625,15 @@ mod tests {
         ));
     }
 
-    // §54.7, §61.1
+    /// §54.7's message lives in the one refusal table now
+    /// (`crate::formats`). What is still this module's claim is that a comic
+    /// format pulpit refuses is not mistaken for an archive it reads.
     #[test]
-    fn rar_is_refused_by_name_and_says_what_would_work() {
-        let message = unsupported_archive(Path::new("/comics/book.cbr")).expect("§54.7");
-        assert!(message.contains("RAR"), "{message}");
-        assert!(message.contains(".cbz"), "{message}");
-        assert!(
-            !message.to_lowercase().contains("damaged")
-                && !message.to_lowercase().contains("corrupt"),
-            "§61.2: a refusal is not a corruption report — {message}"
-        );
-        assert!(unsupported_archive(Path::new("/comics/book.CBR")).is_some());
-        assert!(unsupported_archive(Path::new("/comics/book.cb7")).is_some());
-        assert!(unsupported_archive(Path::new("/comics/book.cbz")).is_none());
+    fn a_refused_comic_format_is_not_an_archive_kind() {
+        for name in ["/comics/book.cbr", "/comics/book.cb7"] {
+            assert_eq!(ArchiveKind::of(Path::new(name)), None);
+            assert!(crate::formats::unsupported_format(Path::new(name)).is_some());
+        }
     }
 
     #[test]

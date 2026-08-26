@@ -35,7 +35,7 @@ pub mod decode;
 pub mod document;
 pub mod table;
 
-pub use archive::{unsupported_archive, ArchiveKind, ARCHIVE_EXTENSIONS};
+pub use archive::{ArchiveKind, ARCHIVE_EXTENSIONS};
 pub use backend::ImageBackend;
 pub use decode::{DecodedCache, ImageFailure};
 pub use document::ImageDocument;

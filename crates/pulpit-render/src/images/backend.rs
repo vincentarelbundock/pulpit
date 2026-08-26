@@ -173,10 +173,10 @@ impl PdfBackend for ImageBackend {
         // what makes opening a screenshot an image viewer; the application
         // says so out loud before any navigation happens (§40.3).
         //
-        // A `.cbr` or `.cb7` is refused by name here too, not only in the
-        // application: a worker handed one directly must say what the format
-        // is rather than report a damaged archive (§54.7, §61.2).
-        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+        // A format pulpit refuses is refused by name here too, not only in
+        // the application: a worker handed one directly must say what the
+        // format is rather than report a damaged archive (§61.2, §61.4).
+        if let Some(message) = crate::formats::unsupported_format(source) {
             return Err(PdfError::Open {
                 path: source.display().to_string(),
                 reason: message.to_string(),

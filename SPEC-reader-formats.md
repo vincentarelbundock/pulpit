@@ -8,11 +8,16 @@ main purpose is to say **which of those pulpit should do, which it should
 refuse, and why** — so that "why not EPUB?" has a written answer rather than
 being re-litigated.
 
-**Class A (§54) and Class B DjVu (§55.5) are implemented.** `.cbz` and
-`.cbt` are read; `.cbr` and `.cb7` are refused by name. DjVu is bound to an
-installed djvulibre, discovered at run time and never bundled. Nothing else
-in Class B is, Class C is not started, and sections marked **Not planned**
-are decisions rather than backlog.
+**What has shipped is no longer specified here.** Class A (`.cbz`, `.cbt`,
+with `.cbr` and `.cb7` refused by name) and Class B DjVu (bound to an
+installed djvulibre, discovered at run time, never bundled) are implemented
+and their clauses have been deleted; the code and its tests are the record.
+What remains below is what is **not** built: the contract the *next* Class B
+backend must meet, the deferred and not-planned formats, and Class C — plus
+the refusal rules of §61, which every future entry in §64 must satisfy.
+
+Section numbers are kept stable because other specs cite them; gaps are
+deletions, not omissions.
 
 ---
 
@@ -23,12 +28,14 @@ division decides everything else:
 
 - **Class A — archives of images.** `.cbz .cbt .cb7 .cbr`. A container around
   content pulpit already renders. Extends `SPEC-images.md` almost unchanged.
+  **Implemented** for `.cbz`/`.cbt`.
 - **Class B — paginated, native-library.** DjVu, XPS, PostScript, DVI. Pages
   exist, have fixed sizes, and render independently. Fits `PdfBackend` as it
-  stands. Blocked on packaging, not architecture.
+  stands. Blocked on packaging, not architecture. **DjVu implemented**; the
+  rest are deferred or not planned (§55).
 - **Class C — reflowable.** EPUB, Mobipocket, FB2, CHM, Markdown, ODT. **No
   page count or page size exists until a viewport is chosen.** This is a
-  different document model wearing a file extension.
+  different document model wearing a file extension. **Not started.**
 
 **§53.2** A format MUST be placed in a class before any code is written for
 it. The classes have different backend contracts, different failure modes and
@@ -38,37 +45,18 @@ different answers on whether they ship at all.
 
 ## 54. Class A — archives of images
 
-**§54.1** An image archive is presented exactly as `SPEC-images.md`'s
-directory: entries in natural sort order (§40.4), one image per page, file
-name as page identity (§43).
+**Implemented and deleted.** `.cbz` and `.cbt` are read as
+`SPEC-images.md`'s directory made into one file; entries are bounded before
+extraction, never written to disk, and flattened in natural sort order.
+`.cbr` and `.cb7` are refused by name before any backend is bound.
 
-**§54.2** The archive **replaces the directory as the source**, so the
-document is one file again. Reload therefore returns to `SourceStamp::File`
-(§44.3) and the digest machinery of §42.3 is unnecessary: an archive is
-rewritten atomically or it is not rewritten.
+**§54.6 (open)** `.cb7` is in scope **if** a maintained pure-Rust 7z decoder
+is available at the time, and is otherwise deferred rather than taking a
+native dependency. It is refused by name today; adopting a decoder is a
+dependency decision, not a design one.
 
-**§54.3** Entries MUST be filtered by the §41.2 extension set, and directory
-entries inside the archive MUST be flattened rather than recursed into — a
-`.cbz` with chapter subfolders is common and its reading order is still the
-sorted full path.
-
-**§54.4** Archive entries MUST be bounded before extraction: entry count,
-per-entry uncompressed size, and total uncompressed size. A zip bomb reaches
-this code path from an untrusted download and §47.2's pixel bound is applied
-*after* decompression, too late.
-
-**§54.5** Entries MUST NOT be extracted to disk. They are read into memory,
-decoded, and fed to §47.1's decoded-image cache like any other page.
-
-**§54.6** `.cbz` and `.cbt` (zip, tar) are pure Rust and in scope. `.cb7` (7z)
-is in scope if a maintained pure-Rust decoder is available at the time, and is
-otherwise deferred rather than taking a native dependency.
-
-**§54.7** **`.cbr` is not planned.** RAR needs `unrar`, whose licence forbids
-using it to create a RAR compressor and is not a licence this project will
-carry or ship. Okular gets away with it because a distribution packages it
-separately. If a `.cbr` is opened, pulpit MUST say the format is unsupported
-and name RAR — not fail as a corrupt archive.
+**§54.7 (standing)** `.cbr` is **not planned**: RAR needs `unrar`, whose
+licence this project will not carry. See §65.6.
 
 ---
 
@@ -94,15 +82,13 @@ Chromium over shipping either.
 the build, which is consistent with the standing rule that the application
 asks what the session can do rather than what it is.
 
-**§55.5 DjVu.** Roughly 2MB, mature, page-oriented, and the format most likely
-to be worth doing: scanned books are exactly the "document" case document mode
-was built for. **Implemented.** The renderer backend, the reader engine, the
-router’s DjVu route and the refusal message all bind an installed djvulibre,
-never a bundled one.
+**§55.5 DjVu.** Implemented; specification deleted. It is the worked example
+for §56, and §56.5 and §56.6 are what that example cost.
 
-**§55.6 XPS.** Page-oriented and structurally close to PDF. Low value —
-almost nothing produces XPS that does not also produce PDF — and it is listed
-here only so the answer is written down.
+**§55.6 XPS.** Page-oriented and structurally close to PDF. **Deferred, low
+value** — almost nothing produces XPS that does not also produce PDF — and it
+is listed here only so the answer is written down. If it is ever built, it is
+a §56 backend and nothing above the backend changes.
 
 **§55.7 PostScript.** libspectre is thin glue over **Ghostscript**: 20–40MB
 with fonts, and **AGPL-3.0** against this project's `MIT OR Apache-2.0`.
@@ -110,7 +96,8 @@ Under §55.3 it would be discovered rather than bundled, which keeps the
 licences separate, but a presenter without Ghostscript gets nothing. Given
 that essentially every `.ps` in circulation converts to PDF cleanly, the
 better answer is to **tell the presenter to convert it**, and pulpit SHOULD
-say so by name when a `.ps` is opened.
+say so by name when a `.ps` is opened. The advice is given (§61.4); the
+backend is not planned.
 
 **§55.8 DVI.** **Not planned.** Rendering DVI requires resolving fonts
 through a TeX installation; without one there is nothing to draw. A machine
@@ -120,12 +107,13 @@ with a TeX installation can produce a PDF, which pulpit already opens.
 
 ## 56. The Class B backend contract
 
-Written for the first Class B format and now met by it: DjVu implements every
-clause below.
+Written for the first Class B format and met by it. It stands as the contract
+**the next one must meet**, and §56.5 and §56.6 in particular are findings
+rather than preferences: they were paid for once and should not be rediscovered.
 
 **§56.1** Binding MUST be lazy and per-document, through §45.2's router. A
-missing DjVu library MUST NOT prevent the worker from opening a PDF or an
-image, and vice versa.
+missing library for one format MUST NOT prevent the worker from opening a PDF
+or an image, and vice versa.
 
 **§56.2** A Class B backend MUST NOT be trusted with untrusted input any more
 than PDFium is. It runs in the same supervised worker process, under the same
@@ -242,13 +230,14 @@ runs.
 
 ## 59. Text, search and notes by class
 
-**§59.1** Class A has **no text layer**. `find_text` MUST report unsupported,
-never an empty result (§48.2).
+**§59.1** Class A has no text layer and reports `find_text` unsupported.
+Implemented; deleted.
 
-**§59.2** Class B DjVu and XPS may carry text. A backend that exposes it
-SHOULD implement `find_text` over the same matcher the PDF path uses, so a hit
-found in the presenter is the hit found in the reader. A backend that cannot
-MUST report unsupported.
+**§59.2** Class B DjVu and XPS may carry text. The DjVu backend currently
+reports `find_text` unsupported, which §48.2 permits and which is honest, but
+djvulibre does expose a text layer. A backend that exposes it SHOULD implement
+`find_text` over the same matcher the PDF path uses, so a hit found in the
+presenter is the hit found in the reader. **Open** for DjVu.
 
 **§59.3** Class C has text by construction, and the hard part is not finding
 it but mapping a hit to a rectangle on a paginated render — which only exists
@@ -261,30 +250,24 @@ at the pinned width (§57.3).
 
 ## 60. Document mode across the classes
 
-**§60.1** Every class reports `Unsupported` for all `DocumentBackend`
-operations, as §48.1 requires of images: annotations, form fields, text
-selection, save, signing.
-
-**§60.2** This is the largest limitation of the whole design and it MUST be
-stated to the presenter rather than discovered by pressing a control that
-refuses. A reader that cannot annotate a scanned DjVu book is a materially
-less useful reader, and that is the trade being made in exchange for not
-carrying a mutation model per format.
+**§60.1–§60.2** Implemented and deleted: every non-PDF class reports
+`Unsupported` for all `DocumentBackend` operations, and the reader states the
+limitation rather than leaving it to be discovered by pressing a control that
+refuses.
 
 **§60.3** Annotation of Class A and Class B documents is **not planned**. It
 would require a per-format sidecar — the one thing `SPEC-document.md` A1
 explicitly refuses for PDF, on the grounds that a second copy of the
 annotations can drift from the document. Introducing exactly that for other
-formats would undo the invariant rather than extend it.
+formats would undo the invariant rather than extend it. See §65.4.
 
 ---
 
 ## 61. What is refused, and how
 
 **§61.1** An unsupported format MUST be refused **by name**, saying what it
-is and what would be needed: "RAR archives are not supported" (§54.7),
-"PostScript needs Ghostscript; converting to PDF is usually easier" (§55.7),
-"this build has no DjVu library installed" (§55.3).
+is and what would be needed. Implemented for every format §64 names, in one
+table (`crates/pulpit-render/src/formats.rs`), plus the missing-DjVu message.
 
 **§61.2** A refusal MUST NOT be reported as a corrupt file. "pulpit cannot
 read this kind of file" and "this file is damaged" are different facts, and
@@ -293,40 +276,58 @@ problem that does not exist.
 
 **§61.3** Format detection for refusal messages MAY sniff content, unlike the
 listing rule in §41.1. Naming the format correctly is worth reading sixteen
-bytes.
+bytes. **Not done**, and it is a MAY: the extension is right often enough
+that the refusal is honest, and a wrong guess costs a wrong name in a message
+rather than a wrong render. Worth revisiting only if renamed files turn out to
+be common.
+
+**§61.4** Every format §64 names MUST be refused with **its own message and
+its own reason** — deferred, not planned, or convert-instead — and the refusal
+MUST be reached **before any library is bound**, so that naming a format never
+depends on PDFium or djvulibre being installed (§65.2).
+
+Implemented. One table in `crates/pulpit-render/src/formats.rs`, consulted at
+the top of the router's `open`, both image open paths, the worker's routing in
+`main.rs`, and the application's `open_document`. Before it, the router refused
+`.cbr` and `.cb7` by name and sent **everything else** to the PDF backend, so a
+`.ps`, `.epub`, `.xps`, `.dvi`, `.mobi`, `.chm` or `.odt` failed as a damaged
+PDF — the §61.2 violation — and §55.7's advice to convert PostScript was never
+given anywhere.
 
 ---
 
 ## 62. Ordering
 
-If any of this is ever built, the order is fixed by risk, not appetite:
+What is left, in order of risk rather than appetite:
 
-**§62.1** Class A `.cbz`/`.cbt` first. Pure Rust, no new dependency, and it
-reuses `SPEC-images.md` almost entirely — mostly a source adapter and §54.4's
-bounds.
+**§62.1** §61.4's refusal table. **Done.**
 
-**§62.2** Class B DjVu second. **Done.** It is the proof that §55.3’s
-discovered-not-bundled rule and §45.2’s router work for a second native
-library, and §56.5 and §56.6 are what that proof cost.
+**§62.2** §59.2's DjVu text layer, if a scanned book's search is wanted. It is
+contained inside a shipped backend and changes nothing above it.
 
-**§62.3** Class C last, if ever, and only for document mode. §57.2 is a real
+**§62.3** §54.6's `.cb7`, only if a maintained pure-Rust 7z decoder exists.
+
+**§62.4** Class C last, if ever, and only for document mode. §57.2 is a real
 architectural conflict and it should not be attempted while anything else is
 outstanding.
+
+XPS (§55.6) and PostScript (§55.7) are not in this list: they are deferred
+decisions, and the only thing owed to them is a refusal message (§61.4).
 
 ---
 
 ## 63. Testing
 
-**§63.1** Class A: archive listings, flattening, natural sort across nested
-paths, and each of §54.4's bounds refusing rather than allocating. No native
-dependency, so all of it runs in CI.
+**§63.1–§63.2** Class A's bounds and listing tests, and Class B's
+skip-with-a-message convention when the library is absent, are in place.
 
-**§63.2** Class B: cannot run in CI without the library installed, so it
-follows the PDFium precedent — tests skip with a message, and the skip is
-visible rather than silent, since a green run that skipped the meaningful
-tests is the failure mode that matters.
+**§63.3** §61.4's refusal table MUST be table-driven and tested per extension:
+that the message names the format, that it is not the corrupt-file message,
+that it says what to do instead, and that the PDF backend is never bound. Done,
+in `formats.rs` and in the router's own test, both iterating the table rather
+than naming extensions — a format added to §64 without a message fails a test.
 
-**§63.3** Class C: pagination at a pinned width MUST be a golden test — same
+**§63.4** Class C: pagination at a pinned width MUST be a golden test — same
 input, same width, same page count — or §57.5's identity guarantee is
 unverifiable.
 
@@ -336,15 +337,18 @@ unverifiable.
 
 | Format | Class | Decision |
 |---|---|---|
-| `.cbz` `.cbt` | A | In scope, first |
-| `.cb7` | A | In scope if a pure-Rust decoder exists, else deferred |
+| `.cbz` `.cbt` | A | **Implemented** |
+| `.cb7` | A | Deferred — refused by name; in scope if a pure-Rust decoder exists (§54.6) |
 | `.cbr` | A | **Not planned** — unrar licence (§54.7) |
-| DjVu | B | **Implemented** — discovered djvulibre, view-only (§55.5, §56) |
+| DjVu | B | **Implemented** — discovered djvulibre, view-only; text layer open (§59.2) |
 | XPS | B | Deferred; low value (§55.6) |
 | PostScript | B | Deferred; advise conversion to PDF instead (§55.7) |
 | DVI | B | **Not planned** — needs a TeX installation (§55.8) |
 | EPUB, Mobi, FB2, CHM, Markdown | C | **Not planned for the presenter**; document mode only, after §57 (§57.6) |
 | ODT | C | **Not planned** — lossy conversion, and its producers export PDF |
+
+Every format in this table that pulpit does not read is refused by name, with
+its own message and its own way forward (§61.4).
 
 ---
 
@@ -360,6 +364,13 @@ exception and it is the reason the application exists.
 **§65.4** Never introduce an annotation sidecar (§60.3).
 
 **§65.5** Never report "unsupported" as "corrupt" (§61.2).
+
+**§65.6** Never take a dependency whose licence the package cannot carry
+(§54.7), and never take a native dependency where a maintained pure-Rust one
+would do (§54.6).
+
+**§65.7** Never extract an archive entry to disk, and never decompress one
+unbounded (Class A, implemented).
 
 ---
 

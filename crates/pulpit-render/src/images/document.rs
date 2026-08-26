@@ -46,9 +46,9 @@ impl ImageDocument {
     /// directory (§40.2) and a comic archive is the document itself (§54.1),
     /// exactly as the renderer's backend does.
     pub fn open(source: &Path) -> Result<ImageDocument> {
-        // §54.7 and §61.2: a format pulpit does not read is named, not
+        // §61.2 and §61.4: a format pulpit does not read is named, not
         // reported as a damaged archive.
-        if let Some(message) = crate::images::archive::unsupported_archive(source) {
+        if let Some(message) = crate::formats::unsupported_format(source) {
             return Err(DocumentError::Unsupported(message.to_string()));
         }
         let resolved = resolve_source(source).ok_or_else(|| {
