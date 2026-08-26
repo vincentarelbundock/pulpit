@@ -7,17 +7,16 @@
 //! queues are configured, what the default is — are answers CUPS gives, not
 //! branches this code takes.
 //!
-//! ## Why `lp` and not the portal
+//! ## What this is now, and what is above it
 //!
-//! `org.freedesktop.portal.Print` is the better answer on Linux and is not
-//! what runs here yet. It is a two-call handshake: `PreparePrint` puts up the
-//! system dialog and answers on a `Response` signal, then `Print` takes the
-//! settings back along with a file descriptor. The Linux adapter has no
-//! machinery for waiting on a portal response at all — every portal call it
-//! makes today is fire-and-forget — and writing that handshake is its own
-//! piece of work. It changes nothing above this module when it lands: the
-//! views ask [`crate::platform::Capabilities::printing`], and `lp` stays as
-//! the fallback for a session that has CUPS and no portal.
+//! `lp` is the fallback rather than the front door. Where the session has a
+//! print dialog of its own — the portal on Linux
+//! (`platform::portal_print`), the AppKit panel on macOS — that is
+//! what the reader sees, and it does its own spooling. This module is what
+//! answers when there is CUPS and no such dialog: a session with no portal
+//! running, a build that did not link Quartz. It still prints, and pulpit's
+//! own dialog asks the page range and the copy count in that case, because
+//! `lp` will honour them and nothing else is going to ask.
 
 use std::process::{Command, Stdio};
 

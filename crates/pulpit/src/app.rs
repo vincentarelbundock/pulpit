@@ -837,6 +837,24 @@ pub enum PrintMsg {
     AcceptPermission,
     /// The Print button.
     Send,
+    /// The platform is finished with the job — spooled, cancelled or failed.
+    ///
+    /// Printing leaves the event loop: where the desktop has a print dialog
+    /// of its own, the call that puts it up does not return until the reader
+    /// has answered it, and waiting for that on the event loop would freeze
+    /// both windows — the audience's among them. So the job goes to a thread
+    /// and comes back here.
+    Spooled {
+        outcome: crate::platform::Outcome,
+        /// What to call it in the sentence the reader reads.
+        title: String,
+        /// Named only where pulpit chose it. Where the system dialog chose,
+        /// pulpit does not know which queue it picked, and must not guess.
+        destination: Option<String>,
+        /// The scratch copy to take away again, if the print was made from
+        /// one.
+        scratch: Option<PathBuf>,
+    },
 }
 
 /// What a form commit that is being waited on is being waited on *for*.
@@ -1145,6 +1163,16 @@ pub struct App {
     pub print_scratch: Option<PathBuf>,
     /// What that copy is to be printed as, once it exists.
     pub print_pending: Option<crate::printing::PrintPlan>,
+    /// A job on its way to the platform: a system dialog the reader is
+    /// looking at, or a spooler reading the file. Nothing else may print
+    /// while it is set.
+    pub print_in_flight: bool,
+    /// A scratch copy that has landed and now has to be spooled.
+    ///
+    /// The reader pump has no `Task` to return — spooling is one now, since
+    /// it leaves the event loop — so the write is picked up on the next
+    /// tick, the way the Sign flow picks its own save up.
+    print_spool_pending: Option<(PathBuf, crate::printing::PrintPlan)>,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -1976,6 +2004,8 @@ impl App {
             print_dialog: None,
             print_scratch: None,
             print_pending: None,
+            print_in_flight: false,
+            print_spool_pending: None,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -2268,6 +2298,7 @@ impl App {
             || self.search_animation.is_animating(self.now)
             || self.search_focus_pending
             || self.sign_resume_pending
+            || self.print_spool_pending.is_some()
             // The panel over §31.1 step 3's write appears on a deadline
             // measured in a fraction of a second; the settled tick would
             // overshoot it and show the sheet after the write it explains had
@@ -5068,6 +5099,13 @@ impl App {
             )));
         }
 
+        // The copy a marked-up print is spooled from has landed. Spooling
+        // leaves the event loop now, so it is a `Task`, and the pump that
+        // took the write had none to return.
+        if let Some((path, pending)) = self.print_spool_pending.take() {
+            tasks.push(self.spool(&path, &pending, true));
+        }
+
         if std::mem::take(&mut self.search_focus_pending) {
             let input = crate::widgets::search::view::input_id();
             tasks.push(
@@ -6252,6 +6290,16 @@ impl App {
         if let Some(scratch) = self.print_scratch.take() {
             let _ = std::fs::remove_file(scratch);
         }
+        // A copy that landed and was waiting for the tick to spool it. The
+        // document it was made from is gone, so the paper would be a
+        // surprise; the file goes with it.
+        if let Some((path, _)) = self.print_spool_pending.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        // `print_in_flight` is deliberately not cleared: a job already handed
+        // to a thread is out of reach, and pretending otherwise would let a
+        // second dialog open behind the first one. It clears when the
+        // platform answers.
         // A new document gets to explain its own refusals once.
         self.form_refusal_told = false;
     }
@@ -9477,6 +9525,15 @@ impl App {
                 }
                 Task::none()
             }
+            PrintMsg::Spooled {
+                outcome,
+                title,
+                destination,
+                scratch,
+            } => {
+                self.print_spooled(outcome, title, destination, scratch);
+                Task::none()
+            }
             PrintMsg::Send => {
                 let Some(dialog) = self.print_dialog.take() else {
                     return Task::none();
@@ -9508,16 +9565,25 @@ impl App {
                 };
                 if plan.needs_a_copy {
                     self.print_scratch_copy(&source, plan);
+                    Task::none()
                 } else {
-                    self.spool(&source, &plan, false);
+                    self.spool(&source, &plan, false)
                 }
-                Task::none()
             }
         }
     }
 
     /// Put the dialog up, with what this session can actually offer in it.
     fn open_print_dialog(&mut self) -> Task<Message> {
+        if self.print_in_flight || self.print_scratch.is_some() {
+            // A system print dialog is up, a spooler is reading, or the copy
+            // one of them is about to be handed is still being written. A
+            // second dialog behind any of those is two prints the reader
+            // only asked for one of, and refusing at the Print button after
+            // letting the dialog open is a worse way to say so.
+            self.notify("A print is already on its way. Wait for it, then try again.".into());
+            return Task::none();
+        }
         if !self.platform.capabilities.printing {
             // Said, and said visibly, rather than a dialog that ends in
             // nothing. This is the whole reason the capability exists.
@@ -9544,13 +9610,24 @@ impl App {
             );
             return Task::none();
         }
-        let destinations = if self.platform.capabilities.print_options {
+        // Who asks which pages, how many copies and which queue. The
+        // desktop's own dialog asks all three where there is one, so pulpit
+        // asks none of them and this one is left with the single question no
+        // system dialog can ask.
+        let asks_particulars = self.platform.capabilities.print_options
+            && !self.platform.capabilities.system_print_dialog;
+        let destinations = if asks_particulars {
             self.platform.services.printers()
         } else {
-            // A picker that cannot pick is worse than no picker.
+            // A picker that cannot pick — or that the system dialog is about
+            // to offer properly — is worse than no picker.
             Vec::new()
         };
-        let mut dialog = crate::printing::PrintDialog::open(destinations, self.reader.can_undo());
+        let mut dialog = crate::printing::PrintDialog::open(
+            destinations,
+            self.reader.can_undo(),
+            asks_particulars,
+        );
         // What the document itself asks for. Already answered for a document
         // whose properties have been read; asked for otherwise, and the
         // dialog shows the caution as soon as it lands. Not knowing is not
@@ -9580,7 +9657,7 @@ impl App {
         // print started while the first is still being written would target
         // the same bytes — and the answer that came back would be matched to
         // whichever plan was set last.
-        if self.print_scratch.is_some() {
+        if self.print_scratch.is_some() || self.print_in_flight {
             self.notify("A print is already on its way. Wait for it, then try again.".into());
             return;
         }
@@ -9616,16 +9693,31 @@ impl App {
             let _ = std::fs::remove_file(&path);
             return;
         };
-        self.spool(&path, &pending, true);
+        // Parked rather than spooled: the pump this lands on has no way
+        // to return the `Task` that spooling is now.
+        self.print_spool_pending = Some((path, pending));
     }
 
-    /// Hand a file to the platform and say what came of it.
+    /// Hand a file to the platform, on a thread, and say what came of it.
+    ///
+    /// Two paths, chosen by what the session can do rather than by what it is
+    /// running on:
+    ///
+    /// - a desktop with a print dialog of its own gets the file and the
+    ///   title, and asks the reader everything else itself;
+    /// - a desktop with only a spooler gets the pages, the copies and the
+    ///   queue that pulpit's own dialog asked for, because nothing else was
+    ///   going to ask.
+    ///
+    /// Either way the call blocks — the first for as long as a person looks
+    /// at a dialog — so neither is made here. Both go to a thread, and the
+    /// answer arrives as [`PrintMsg::Spooled`].
     fn spool(
         &mut self,
         file: &std::path::Path,
         pending: &crate::printing::PrintPlan,
         scratch: bool,
-    ) {
+    ) -> Task<Message> {
         let job = crate::platform::services::PrintJob {
             file: file.to_path_buf(),
             title: pending.title.clone(),
@@ -9633,25 +9725,112 @@ impl App {
             copies: pending.copies,
             destination: pending.destination.clone(),
         };
-        let outcome = self.platform.services.print(&job);
+        let system_dialog = self.platform.capabilities.system_print_dialog;
+        let services = std::sync::Arc::clone(&self.platform.services);
+        let title = pending.title.clone();
+        // Not named where the system dialog chose the queue: pulpit did not
+        // pick it and cannot read it back, and "Sent to HP_LaserJet" that
+        // names the queue pulpit *would* have used is a lie about where the
+        // paper is.
+        let destination = if system_dialog {
+            None
+        } else {
+            pending.destination.clone()
+        };
+        let scratch = scratch.then(|| file.to_path_buf());
+        // The dialog is up, or the spooler is reading; a second print started
+        // over the top of it would be a second dialog and, for a marked-up
+        // print, a second write to the same scratch name.
+        self.print_in_flight = true;
+
+        // A panel AppKit will only run on the thread that owns the event
+        // loop. Called in place, and pulpit's own drawing stops until the
+        // reader closes it — which is the cost of that platform having no
+        // other way to show its print dialog. The audience window keeps the
+        // last complete frame it had throughout, so the third standing rule
+        // is not what this spends.
+        if system_dialog && self.platform.services.print_dialog_wants_main_thread() {
+            let outcome = self.platform.services.print_with_dialog(&job);
+            return Task::done(Message::Print(PrintMsg::Spooled {
+                outcome,
+                title,
+                destination,
+                scratch,
+            }));
+        }
+
+        Task::perform(
+            async move {
+                // A thread rather than the async runtime's blocking pool
+                // because the wait is unbounded: it ends when a person
+                // decides, and an executor thread parked on that is one the
+                // rest of the application does not get back.
+                let (send, receive) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("pulpit-print".into())
+                    .spawn(move || {
+                        let outcome = if system_dialog {
+                            services.print_with_dialog(&job)
+                        } else {
+                            services.print(&job)
+                        };
+                        let _ = send.send(outcome);
+                    })
+                    .map_err(|e| format!("the print could not be started: {e}"))
+                    .and_then(|_| {
+                        receive
+                            .recv()
+                            .map_err(|_| "the print ended without saying how".to_string())
+                    })
+                    .unwrap_or_else(crate::platform::Outcome::failed)
+            },
+            move |outcome| {
+                Message::Print(PrintMsg::Spooled {
+                    outcome,
+                    title: title.clone(),
+                    destination: destination.clone(),
+                    scratch: scratch.clone(),
+                })
+            },
+        )
+    }
+
+    /// The platform is done with the job.
+    fn print_spooled(
+        &mut self,
+        outcome: crate::platform::Outcome,
+        title: String,
+        destination: Option<String>,
+        scratch: Option<PathBuf>,
+    ) {
+        self.print_in_flight = false;
         // The copy is pulpit's, and it goes whether the job was taken or not:
         // a scratch file left behind after a refused print is a copy of a
         // document the reader never asked for, sitting in a cache directory.
-        // `lp` has read it by the time the call returns — which is why the
-        // adapter waits rather than spawning.
-        if scratch {
-            if let Err(error) = std::fs::remove_file(file) {
-                tracing::warn!(%error, path = %file.display(), "the print copy could not be removed");
+        // Both paths have finished reading it by the time the answer is here
+        // — `lp` reads before it queues, and the portal dups the descriptor —
+        // which is why both of them wait rather than spawn.
+        if let Some(scratch) = scratch {
+            if let Err(error) = std::fs::remove_file(&scratch) {
+                tracing::warn!(%error, path = %scratch.display(), "the print copy could not be removed");
             }
         }
-        match outcome.describe() {
-            Some(problem) => self.notify_error(format!("The print did not go: {problem}"), None),
-            None => {
-                let where_to = match pending.destination.as_deref() {
+        match outcome {
+            // Cancelling a print dialog is a thing the reader did on purpose,
+            // and reporting it as a failure would tell them their own
+            // decision went wrong. Nothing is said at all.
+            crate::platform::Outcome::Refused { .. } => {}
+            crate::platform::Outcome::Done => {
+                let where_to = match destination.as_deref() {
                     Some(queue) => format!(" to {queue}"),
                     None => String::new(),
                 };
-                self.notify_done(format!("Sent “{}”{where_to} to print.", pending.title));
+                self.notify_done(format!("Sent “{title}”{where_to} to print."));
+            }
+            other => {
+                if let Some(problem) = other.describe() {
+                    self.notify_error(format!("The print did not go: {problem}"), None);
+                }
             }
         }
     }

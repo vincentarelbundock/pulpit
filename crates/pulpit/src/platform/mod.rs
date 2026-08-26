@@ -26,6 +26,8 @@
 #![allow(dead_code)]
 
 pub mod appearance;
+#[cfg(target_os = "macos")]
+pub mod appkit_print;
 pub mod capabilities;
 pub mod clipboard;
 #[cfg(unix)]
@@ -35,6 +37,8 @@ pub mod input;
 pub mod instance;
 pub mod null;
 pub mod paths;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub mod portal_print;
 pub mod services;
 pub mod window;
 
@@ -110,7 +114,10 @@ impl Outcome {
 /// changes. Holding the adapters together makes the dependency obvious at the
 /// call site and keeps every platform decision in this crate.
 pub struct Platform {
-    pub services: Box<dyn PlatformServices>,
+    /// Shared rather than owned: printing puts a modal system dialog up and
+    /// waits for a person, which has to happen off the event loop. The thread
+    /// that waits holds one of these.
+    pub services: std::sync::Arc<dyn PlatformServices>,
     pub window: Box<dyn WindowPolicy>,
     pub input: Box<dyn InputPolicy>,
     pub capabilities: Capabilities,
@@ -132,18 +139,22 @@ impl Platform {
         // snapshot *it* reports. Nothing above this function may ask which arm
         // ran.
         #[cfg(all(unix, not(target_os = "macos")))]
-        let services: Box<dyn PlatformServices> = Box::new(linux::LinuxServices::new());
+        let services: std::sync::Arc<dyn PlatformServices> =
+            std::sync::Arc::new(linux::LinuxServices::new());
         #[cfg(target_os = "macos")]
-        let services: Box<dyn PlatformServices> = Box::new(macos::MacosServices::new());
+        let services: std::sync::Arc<dyn PlatformServices> =
+            std::sync::Arc::new(macos::MacosServices::new());
         #[cfg(target_os = "windows")]
-        let services: Box<dyn PlatformServices> = Box::new(windows::WindowsServices::new());
+        let services: std::sync::Arc<dyn PlatformServices> =
+            std::sync::Arc::new(windows::WindowsServices::new());
         // A target with no adapter still runs, and says so.
         #[cfg(not(any(
             all(unix, not(target_os = "macos")),
             target_os = "macos",
             target_os = "windows"
         )))]
-        let services: Box<dyn PlatformServices> = Box::new(null::NullPlatform::new("portable"));
+        let services: std::sync::Arc<dyn PlatformServices> =
+            std::sync::Arc::new(null::NullPlatform::new("portable"));
 
         let capabilities = services.capabilities();
         Platform {
@@ -159,7 +170,7 @@ impl Platform {
         let services = null::NullPlatform::new("null");
         let capabilities = services.capabilities();
         Platform {
-            services: Box::new(services),
+            services: std::sync::Arc::new(services),
             window: Box::new(window::DesktopWindowPolicy),
             input: Box::new(input::DesktopInput),
             capabilities,

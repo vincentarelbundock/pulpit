@@ -148,6 +148,44 @@ pub trait PlatformServices: Send + Sync {
         Outcome::Unsupported { what: "printing" }
     }
 
+    /// Put the *platform's* print dialog up, and spool whatever it says.
+    ///
+    /// Called instead of [`PlatformServices::print`] when the session has a
+    /// system print dialog to put up, which is what
+    /// [`crate::platform::Capabilities::system_print_dialog`] answers. What
+    /// pulpit contributes is [`PrintJob::file`] and [`PrintJob::title`]; the
+    /// pages, the copies and the queue are the dialog's to ask for, so those
+    /// fields are not read here. They are for the spooler-only path, where
+    /// pulpit does the asking because nothing else will.
+    ///
+    /// **This blocks while a reader looks at a modal dialog.** It must never
+    /// be called from the event loop — both windows would freeze behind the
+    /// dialog, and the audience window is one of them. [`crate::app`] runs it
+    /// on a thread of its own and takes the answer back as a message.
+    ///
+    /// [`Outcome::Refused`] is a reader who pressed Cancel, and is not an
+    /// error to report as one.
+    fn print_with_dialog(&self, _job: &PrintJob) -> Outcome {
+        Outcome::Unsupported {
+            what: "the system print dialog",
+        }
+    }
+
+    /// Whether [`PlatformServices::print_with_dialog`] has to be called on the
+    /// thread that owns the event loop.
+    ///
+    /// AppKit says yes: `runOperation` runs its panel modally and refuses to
+    /// be driven from anywhere but the main thread. The portal says no, and is
+    /// the better for it — a portal print is a D-Bus round trip, and the
+    /// application keeps drawing while the reader thinks about the dialog.
+    ///
+    /// Where this is true the application calls in place and its own drawing
+    /// stops until the panel closes. That is a real cost, taken because the
+    /// alternative on that platform is not opening the panel at all.
+    fn print_dialog_wants_main_thread(&self) -> bool {
+        false
+    }
+
     /// Begin inhibiting sleep and idle.
     fn inhibit(&self) -> InhibitState;
 
