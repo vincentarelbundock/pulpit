@@ -1732,13 +1732,22 @@ impl ReaderSession {
     /// the moment the real frame arrives. Multiplying the frame's own pixels
     /// is the same arithmetic the renderer will do, so there is nothing to
     /// settle.
+    ///
+    /// A wash, and not every mark that carries quads: an underline and a
+    /// strikeout also describe text runs, but they draw a *rule* across one
+    /// rather than filling it. Multiplying their runs into the frame paints
+    /// every quad solid — the words go black until the real frame lands, which
+    /// is a deferred render away — so they stay overlays, drawn as the rules
+    /// they are.
     pub fn retained_washes(
         &self,
         page: PageIndex,
     ) -> Vec<&crate::widgets::document::preview::GesturePreview> {
         self.retained
             .iter()
-            .filter(|mark| mark.page == page && !mark.preview.quads.is_empty())
+            .filter(|mark| {
+                mark.page == page && !mark.preview.quads.is_empty() && mark.preview.markup.is_wash()
+            })
             .map(|mark| &mark.preview)
             .collect()
     }
@@ -3960,15 +3969,20 @@ impl ReaderSession {
                         // follows the hand rather than the round trip (A2).
                         // Only ever on the page the gesture is on.
                         preview: self.preview_for(placed.page).map(turn_preview),
-                        // Retained ink only: a retained highlight is
+                        // Everything but a retained wash: a `/Highlight` is
                         // composited into the frame by the caller's `frames`,
-                        // with the multiply blend a real `/Highlight` uses,
-                        // and drawing it here as well would wash it twice.
+                        // with the multiply blend a real one uses, and drawing
+                        // it here as well would wash it twice. An underline
+                        // and a strikeout are not washes — they are rules laid
+                        // over the page, like ink — so they belong here, where
+                        // the painter draws them as the rules they are.
                         retained: self
                             .retained
                             .iter()
                             .filter(|mark| {
-                                mark.page == placed.page && mark.preview.quads.is_empty()
+                                mark.page == placed.page
+                                    && (mark.preview.quads.is_empty()
+                                        || !mark.preview.markup.is_wash())
                             })
                             .map(|mark| turn_preview(mark.preview.clone()))
                             .collect(),
@@ -6975,6 +6989,55 @@ mod tests {
         let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
         session.frame_landed(PageIndex(0), DocumentRevision(2));
         assert!(session.retained_washes(PageIndex(0)).is_empty());
+    }
+
+    #[test]
+    fn a_retained_underline_is_an_overlay_not_a_wash() {
+        // The compositor multiplies a wash over the whole of every quad it is
+        // given, which is right for a `/Highlight` and catastrophic for a
+        // rule: an underline handed to it turned the words solid black until
+        // the deferred re-render landed seconds later. A rule is drawn over
+        // the page, like ink, so it stays an overlay and the painter draws it
+        // where `rule_at` says.
+        use pulpit_core::annotate::{
+            AnnotationCommand, AnnotationDraft, HighlightDraft, MarkStyle,
+        };
+
+        for kind in [
+            pulpit_core::annotation::MarkupKind::Underline,
+            pulpit_core::annotation::MarkupKind::StrikeOut,
+        ] {
+            let mut session = open(1);
+            let draft = AnnotationDraft::Highlight(HighlightDraft {
+                kind,
+                page: PageIndex(0),
+                quads: vec![pulpit_core::page::PageQuad::from_rect(
+                    pulpit_core::page::PageRect::new(72.0, 100.0, 300.0, 114.0),
+                )],
+                text: "the words".into(),
+                style: MarkStyle::highlighter(),
+            });
+            let transaction = pulpit_render::document::DocumentTransaction::from_annotations([
+                AnnotationCommand::Create(draft),
+            ]);
+            let _ = session.retain_commit(&transaction);
+
+            assert!(
+                session.retained_washes(PageIndex(0)).is_empty(),
+                "{kind:?} is a rule, and the compositor would fill its runs"
+            );
+            let facet = session.facet(true, &no_frames, &pulpit_core::search::SearchState::new());
+            let drawn: Vec<_> = facet
+                .visible
+                .iter()
+                .flat_map(|page| page.retained.iter())
+                .collect();
+            assert_eq!(drawn.len(), 1, "{kind:?} must still be drawn");
+            assert_eq!(
+                drawn[0].markup, kind,
+                "the overlay draws the mark the reader asked for"
+            );
+        }
     }
 
     /// An answer that names the annotation it made, which is what gives a
