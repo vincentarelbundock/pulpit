@@ -11753,11 +11753,13 @@ impl App {
             // The end of a document that does not wrap. Stopping is the
             // honest thing: a loop that has run out is not still running, and
             // the indicator should say so rather than tick at a page that
-            // never turns.
+            // never turns. The indicator is the whole notice: autoadvance
+            // state changes never toast.
             None => {
                 self.autoadvance.stop();
                 self.autoadvance_place = None;
-                self.notify("Autoadvance reached the end of the document.".into());
+                self.diagnostics
+                    .note("Autoadvance reached the end of the document.");
                 Task::none()
             }
         }
@@ -11774,7 +11776,7 @@ impl App {
             let was_running = !self.autoadvance.is_suspended();
             self.autoadvance.suspend();
             if was_running {
-                self.notify("Autoadvance held. Press the key again to resume.".into());
+                self.diagnostics.note("Autoadvance held.");
             }
         }
     }
@@ -11784,7 +11786,7 @@ impl App {
         if self.autoadvance.is_on() && !self.autoadvance.is_suspended() {
             self.autoadvance.stop();
             self.autoadvance_place = None;
-            self.notify("Autoadvance off.".into());
+            self.diagnostics.note("Autoadvance off.");
         } else {
             self.autoadvance
                 .set_interval(self.settings.autoadvance.interval(), self.now);
@@ -11792,7 +11794,8 @@ impl App {
             self.autoadvance.start(self.now);
             self.autoadvance_place = Some(self.current_place());
             let seconds = self.autoadvance.interval().as_secs();
-            self.notify(format!("Autoadvance on: a page every {seconds}s."));
+            self.diagnostics
+                .note(format!("Autoadvance on: a page every {seconds}s."));
         }
         // Inhibition follows a running loop as well as a fullscreen
         // audience: an unattended screen that blanks itself after ten

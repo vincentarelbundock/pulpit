@@ -28,7 +28,7 @@ impl Intent {
     pub fn lifetime(self) -> Option<Duration> {
         match self {
             Intent::Info => Some(Duration::from_secs(4)),
-            Intent::Warning => Some(Duration::from_secs(8)),
+            Intent::Warning => Some(Duration::from_secs(5)),
             Intent::Error => None,
         }
     }
@@ -276,10 +276,10 @@ mod tests {
         assert_eq!(first, second, "the same toast was refreshed");
         assert_eq!(toasts.iter().count(), 1);
 
-        // Refreshed at 3s with an 8s life, so it is still up at 10s.
-        toasts.tick(at(10));
+        // Refreshed at 3s with a 5s life, so it is still up at 7s.
+        toasts.tick(at(7));
         assert_eq!(toasts.iter().count(), 1);
-        toasts.tick(at(12));
+        toasts.tick(at(9));
         assert!(toasts.is_empty());
     }
 
