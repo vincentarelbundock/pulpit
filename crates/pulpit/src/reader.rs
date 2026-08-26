@@ -459,6 +459,18 @@ pub struct ReaderSession {
     /// the only thing that reads it and every page that scrolls past would
     /// otherwise rebuild it for nobody.
     annotation_rows: std::sync::Arc<Vec<AnnotationRow>>,
+    /// Marks the panel has asked to delete and the worker has not answered
+    /// for yet.
+    ///
+    /// The row goes as soon as the delete is sent, which is both what a
+    /// reader expects and what stops a second press: nothing else takes the
+    /// row away until the answer arrives, and a second `Delete` for a mark
+    /// already gone comes back as a refusal — an error message about an edit
+    /// that in fact succeeded.
+    annotation_deletes: HashSet<pulpit_core::annotate::AnnotationId>,
+    /// Which view the rail was showing before the marks were opened, so the
+    /// sidebar's Outline tab has something to go back to.
+    outline_before_marks: OutlineView,
     /// Where a transform started, so movement can be measured from it.
     transform_origin: Option<PagePoint>,
     /// The marquee in flight: the page it started on, where it started, and
@@ -1554,6 +1566,18 @@ impl ReaderSession {
         self.outline_width[self.outline_slot()].get()
     }
 
+    /// What the sidebar's Outline tab should show.
+    ///
+    /// The view the rail is already on, unless it is on the marks — which
+    /// have their own tab, so the Outline tab means "back to the document's
+    /// own structure" and has to name a view that is one.
+    pub fn structural_outline_view(&self) -> OutlineView {
+        match self.controls.outline {
+            OutlineView::Annotations => self.outline_before_marks,
+            other => other,
+        }
+    }
+
     /// How tall one row of the current rail view is.
     ///
     /// Bookmarks wrap and are measured instead
@@ -1625,11 +1649,16 @@ impl ReaderSession {
             self.summaries.remove(page);
             self.annotation_requests.remove(page);
         }
-        // …and the panel's list with them, so a deleted mark leaves the list
-        // in the same turn it leaves the page. The sweep asks for the dirty
-        // pages again on the next tick and the rows come back with whatever
-        // the edit left there.
-        if !applied.dirty_pages.is_empty() {
+        // An answer has arrived, so nothing the panel sent is still waiting
+        // for one: a mark the worker did not remove is back in the list on
+        // the next rebuild, which is where a refused delete belongs.
+        let had_deletes = !self.annotation_deletes.is_empty();
+        self.annotation_deletes.clear();
+        // …and the panel's list follows the pages that changed, so a deleted
+        // mark leaves the list in the same turn it leaves the page. The sweep
+        // asks for the dirty pages again on the next tick and the rows come
+        // back with whatever the edit left there.
+        if had_deletes || !applied.dirty_pages.is_empty() {
             self.refresh_annotation_rows();
         }
 
@@ -1829,6 +1858,12 @@ impl ReaderSession {
         {
             self.retained.remove(waiting);
         }
+        // A refused delete is a mark that is still in the document, so it
+        // belongs back in the panel's list — and is deletable again.
+        if !self.annotation_deletes.is_empty() {
+            self.annotation_deletes.clear();
+            self.refresh_annotation_rows();
+        }
     }
 
     /// A frame rendered from a snapshot at `revision` landed for `page`: the
@@ -2004,9 +2039,17 @@ impl ReaderSession {
     ///
     /// The annotations panel wants every page and `ListAnnotations` answers
     /// one, so the panel is filled a chunk at a time and shows what has
-    /// arrived — the same answer search gives to the same problem. Bounded on
-    /// purpose: an unbounded sweep would queue five hundred list requests
-    /// ahead of the page renders the reader is waiting on.
+    /// arrived — the same answer search gives to the same problem, and the
+    /// same shape of answer: `budget` bounds what is *outstanding*, not what
+    /// one call may ask for.
+    ///
+    /// That distinction is the whole of it. This is called from the pump,
+    /// which runs on every tick *and* on every answer the worker sends, so a
+    /// per-call bound would let each answered page start another chunk and
+    /// the queue would grow by a chunk per answer until a five-hundred-page
+    /// document had every page in front of the renders the reader is waiting
+    /// on. Counting what is in flight — the window's own pages included,
+    /// since they share the queue — is what actually bounds it.
     ///
     /// Pages already known are skipped, and an edit drops the page it touched
     /// from that set — so the panel refreshes itself against the revision
@@ -2015,12 +2058,15 @@ impl ReaderSession {
         if !self.open || !self.level.allows_annotation() {
             return Vec::new();
         }
+        let Some(room) = budget.checked_sub(self.annotation_requests.len()) else {
+            return Vec::new();
+        };
         let wanted: Vec<PageIndex> = (0..self.pages.len())
             .map(PageIndex)
             .filter(|page| {
                 !self.annotations.contains_key(page) && !self.annotation_requests.contains(page)
             })
-            .take(budget)
+            .take(room)
             .collect();
         self.annotation_requests.extend(wanted.iter().copied());
         wanted
@@ -2051,6 +2097,10 @@ impl ReaderSession {
         let rows: Vec<AnnotationRow> = (0..self.pages.len())
             .filter_map(|index| self.summaries.get(&PageIndex(index)))
             .flatten()
+            // A mark whose deletion is in flight is already gone as far as
+            // the reader is concerned; leaving it in the list would offer a
+            // second press of a control that has already done its work.
+            .filter(|summary| !self.annotation_deletes.contains(&summary.id))
             .map(AnnotationRow::of)
             .collect();
         self.annotation_rows = std::sync::Arc::new(rows);
@@ -2123,7 +2173,11 @@ impl ReaderSession {
             .flatten()
             .find(|summary| summary.id == *id)
             .is_some_and(|summary| summary.editable());
-        if !editable {
+        // …and not one already on its way out. Two presses of a row's trash
+        // before the first answer arrives would send two deletes, and the
+        // second would be refused: an error message about an edit that
+        // succeeded.
+        if !editable || !self.annotation_deletes.insert(id.clone()) {
             return None;
         }
         // If the doomed mark is the one in hand, it is put down first — and
@@ -2134,6 +2188,11 @@ impl ReaderSession {
             self.transform_origin = None;
             self.interaction.select(None);
         }
+        // The row goes now rather than when the answer lands: a list that
+        // still shows a mark the reader has taken out is a list that is
+        // wrong for a round trip, and it is the second press this exists to
+        // prevent.
+        self.refresh_annotation_rows();
         Some(DocumentTransaction::from_annotations(std::iter::once(
             pulpit_core::annotate::AnnotationCommand::Delete { id: id.clone() },
         )))
@@ -3692,6 +3751,15 @@ impl ReaderSession {
                 true
             }
             ReadCommand::SetOutlineView(view) => {
+                // Where the sidebar's Outline tab goes back to. Remembered
+                // rather than fixed at bookmarks: a reader who was reading
+                // thumbnails, looked at the marks and pressed Outline asked
+                // for the rail they had, not for a different one.
+                if *view == OutlineView::Annotations
+                    && self.controls.outline != OutlineView::Annotations
+                {
+                    self.outline_before_marks = self.controls.outline;
+                }
                 self.controls.outline = *view;
                 // Coming to the marks builds their list from what is already
                 // known, so the panel opens with the pages the reader has
@@ -8792,19 +8860,28 @@ mod tests {
         assert_eq!(session.outline_scroll_position().0, 120.0);
     }
 
+    /// The bound is on what is *outstanding*: this is called on every tick
+    /// and again on every answer, so a bound on what one call may ask for
+    /// would grow the queue by a chunk per answer until the whole document
+    /// sat in front of the render the reader is waiting on.
     #[test]
-    fn the_sweep_walks_the_document_a_chunk_at_a_time_and_stops() {
+    fn the_sweep_bounds_what_it_leaves_outstanding_and_not_what_it_asks_for() {
         use pulpit_render::document::AnnotationSupport;
 
         let mut session = listing(5);
         let first = session.annotations_sweep(2);
         assert_eq!(first, vec![PageIndex(0), PageIndex(1)]);
-        // Pages already in flight are not asked for twice, which is what
-        // keeps a sweep from queueing one request per page per tick.
-        assert!(session
-            .annotations_sweep(2)
-            .iter()
-            .all(|page| !first.contains(page)));
+        assert!(
+            session.annotations_sweep(2).is_empty(),
+            "nothing more is asked for while two answers are still owed"
+        );
+        // One answer, one slot: the sweep moves on by exactly as much as the
+        // worker has caught up.
+        session.set_annotations(
+            PageIndex(0),
+            &[mark_on(0, 1, "note", AnnotationSupport::Editable)],
+        );
+        assert_eq!(session.annotations_sweep(2), vec![PageIndex(2)]);
         for page in 0..5 {
             session.set_annotations(
                 PageIndex(page),
@@ -8869,9 +8946,92 @@ mod tests {
         assert!(session.reveal_annotation(&id));
         assert_eq!(session.controls().page, PageIndex(2));
         assert_eq!(session.selected(), Some(&id));
+
+        // …and the window is over the mark, with a margin of air above it:
+        // `mark_on` puts its top edge 198 points down a 792-point page.
+        let top = session
+            .column
+            .offset_of(PageIndex(2))
+            .expect("the page is in the column");
+        let upright = session.controls().offset;
+        assert!(
+            (upright - (top + (198.0 - REVEAL_MARGIN) * session.scale)).abs() < 1.0,
+            "the mark landed at {upright}, page starts at {top}"
+        );
+
+        // A turned page moves a mark's top edge to one of the other three, so
+        // the same mark is a different distance down the column.
+        session.apply(&ReadCommand::RotateView);
+        assert!(session.reveal_annotation(&id));
+        assert_eq!(session.controls().page, PageIndex(2));
+        let turned_top = session
+            .column
+            .offset_of(PageIndex(2))
+            .expect("the page is still in the column");
+        let turned = session.controls().offset;
+        assert!(
+            turned >= turned_top,
+            "the reveal stayed on the mark's own page"
+        );
+        assert!(
+            (turned - turned_top - (upright - top)).abs() > 1.0,
+            "the reveal ignored the view rotation"
+        );
+
         // A mark that is no longer in the document is not a place to go.
         let stranger = pulpit_core::annotate::IdGenerator::new(99).next_id();
         assert!(!session.reveal_annotation(&stranger));
+    }
+
+    /// The row goes as soon as the delete is sent, and a second press of a
+    /// trash that is already on its way sends nothing: the worker would
+    /// refuse it, and the reader would be told an edit failed that in fact
+    /// succeeded.
+    #[test]
+    fn a_mark_already_on_its_way_out_is_not_deleted_twice() {
+        use pulpit_render::document::AnnotationSupport;
+
+        let mut session = listing(1);
+        let mark = mark_on(0, 1, "going", AnnotationSupport::Editable);
+        let id = mark.id.clone();
+        session.set_annotations(PageIndex(0), &[mark]);
+        assert_eq!(session.annotation_rows().len(), 1);
+
+        assert!(session.delete_annotation(&id).is_some());
+        assert!(
+            session.annotation_rows().is_empty(),
+            "the row goes with the press, not with the answer"
+        );
+        assert!(
+            session.delete_annotation(&id).is_none(),
+            "a second press must not send a second delete"
+        );
+
+        // A refusal puts it back: the mark is still in the document, so the
+        // list has to say so, and it can be deleted again.
+        session.commit_refused();
+        assert_eq!(session.annotation_rows().len(), 1);
+        assert!(session.delete_annotation(&id).is_some());
+    }
+
+    /// The sidebar's Outline tab has to lead somewhere from the marks, and to
+    /// the rail the reader was actually on.
+    #[test]
+    fn the_outline_tab_goes_back_to_the_view_the_marks_were_opened_from() {
+        let mut session = open(3);
+        assert_eq!(session.structural_outline_view(), OutlineView::Bookmarks);
+        session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails));
+        session.apply(&ReadCommand::SetOutlineView(OutlineView::Annotations));
+        assert_eq!(
+            session.structural_outline_view(),
+            OutlineView::Thumbnails,
+            "not a different rail from the one they had"
+        );
+        session.apply(&ReadCommand::SetOutlineView(
+            session.structural_outline_view(),
+        ));
+        assert_eq!(session.controls().outline, OutlineView::Thumbnails);
+        assert_eq!(session.structural_outline_view(), OutlineView::Thumbnails);
     }
 
     /// The command the rail's keyboard sends for the focused row is the same

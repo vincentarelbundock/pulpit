@@ -697,10 +697,13 @@ pub enum SidebarTab {
 
 /// The longest a row's description runs before it is cut.
 ///
-/// A `/Contents` may be a page of selected text; a rail row is two lines. The
-/// cut is made here rather than by the renderer so the row's height is known
-/// without measuring the text.
-const ANNOTATION_ROW_TEXT: usize = 140;
+/// A `/Contents` may be a page of selected text and a rail row has one line
+/// for it. Cut to roughly what a rail's width holds at the label size —
+/// search's own result rows cut at forty characters for the same reason — so
+/// that the line below it, which says what kind the mark is and what page it
+/// is on, is never pushed out of the row by a mark that says a lot. The row
+/// also draws its text without wrapping, so a long word cannot do it either.
+const ANNOTATION_ROW_TEXT: usize = 48;
 
 /// One mark, as the annotations panel lists it.
 ///

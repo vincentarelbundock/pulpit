@@ -50,15 +50,15 @@ const READER_DRAIN_BUDGET: usize = 32;
 /// strict amount of event-loop work before yielding to drawing.
 const RENDER_DRAIN_BUDGET: usize = 16;
 const MEDIA_DRAIN_BUDGET: usize = 32;
-/// How many pages the annotations panel's document-wide sweep asks about per
-/// tick (§8.4).
+/// How many annotation lists the panel's document-wide sweep leaves
+/// outstanding at once (§8.4).
 ///
-/// The worker answers one request at a time, and the pages the reader is
-/// looking at are asked for through the same queue: a sweep that asked for
-/// five hundred pages at once would queue every one of them ahead of the
-/// renders the reader is waiting on. A chunk this size fills a panel over a
-/// long document in a second or two without ever being the reason a page is
-/// late.
+/// Outstanding, not per tick: this pump runs on every tick *and* on every
+/// answer, so a per-call bound would grow the queue by a chunk per answer.
+/// The worker answers one request at a time and the pages the reader is
+/// looking at go through the same queue, so what has to be bounded is how
+/// much of that queue the panel may own — this many, and the panel's sweep
+/// waits behind the window's own pages for the rest.
 const ANNOTATION_SWEEP_CHUNK: usize = 8;
 
 /// How long a newly cached frame keeps the fast tick, so the windows can get
@@ -9391,11 +9391,24 @@ impl App {
                     }
                     self.persist();
                 }
-                if matches!(command, ReadCommand::SetOutlineView(_))
-                    && self.keyboard_region == KeyboardRegion::Outline
-                    && !self.reader.focus_nearest_outline_item()
-                {
-                    self.keyboard_region = KeyboardRegion::Document;
+                if matches!(command, ReadCommand::SetOutlineView(_)) {
+                    if self.keyboard_region == KeyboardRegion::Outline
+                        && !self.reader.focus_nearest_outline_item()
+                    {
+                        self.keyboard_region = KeyboardRegion::Document;
+                    }
+                    // The rail keeps a scroll offset per view and one
+                    // scrollable draws all four, so the widget is told where
+                    // the view it has just been handed was left. Without this
+                    // the session's offset and the widget's disagree the
+                    // moment a tab is changed — and they disagree hardest for
+                    // the marks, whose rows are a different height from every
+                    // other view's.
+                    let (offset, _) = self.reader.outline_scroll_position();
+                    return iced::widget::operation::scroll_to(
+                        crate::widgets::document::view::outline_scrollable_id(),
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                    );
                 }
                 if let Some(origin) = origin {
                     self.nav_history.record_jump(origin, self.current_place());
@@ -11766,7 +11779,21 @@ impl App {
         use crate::widgets::event::PanelCommand;
         match command {
             PanelCommand::ShowSearch => self.open_search(),
-            PanelCommand::ShowOutline => self.close_search(false),
+            PanelCommand::ShowOutline => {
+                // Closing search is not enough now that the rail has a fourth
+                // view: with the marks showing, "Outline" has to put the
+                // document's own structure back, or it is a lit control that
+                // does nothing when pressed.
+                let structural = self.reader.structural_outline_view();
+                let close_search = self.close_search(false);
+                if self.reader.controls().outline == structural {
+                    return close_search;
+                }
+                let show = self.on_read_command(
+                    crate::widgets::event::ReadCommand::SetOutlineView(structural),
+                );
+                Task::batch([close_search, show])
+            }
             PanelCommand::ShowAnnotations => {
                 // The tab row is drawn in the rail's header, which stays
                 // visible while the body is collapsed — so pressing this

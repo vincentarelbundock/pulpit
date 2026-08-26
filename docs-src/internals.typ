@@ -644,12 +644,16 @@ which says nothing at all, its kind and its page. Writing `/T` and `/M` is a
 decision about the model, and can be made later without changing the panel.
 
 *How the whole document is enumerated.* `ListAnnotations` answers one page and
-a panel is about all of them, so it sweeps a bounded chunk of pages per tick
-behind the window's own, and shows what has arrived while it fills — the shape
-search already uses for the same problem. The bound is the point: the worker
-answers one request at a time and the reader's page renders queue behind the
-same requests, so an unbounded sweep would put five hundred list requests in
-front of the page somebody is waiting to read.
+a panel is about all of them, so it sweeps the document a chunk at a time
+behind the window's own pages and shows what has arrived while it fills — the
+shape search already uses for the same problem, down to what the bound counts.
+It bounds what is *outstanding*, not what one call may ask for, and that
+distinction is the whole of it: the pump runs on every tick and again on every
+answer the worker sends, so a per-call bound would let each answered page
+start another chunk and the queue would grow by a chunk per answer until every
+page of a five-hundred-page document sat in front of the render the reader is
+waiting on. The window's own pages are counted in the same bound, because they
+go to the same worker through the same queue.
 
 *Keeping it current.* Every edit names the pages it touched, and those pages'
 annotation lists are dropped — which the eraser's hit-testing already

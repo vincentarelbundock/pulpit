@@ -2108,10 +2108,12 @@ fn annotations<Message: Clone + 'static>(
     let (read, pages) = reader.annotation_scan;
     let scanning = read < pages;
 
-    // The tab is not offered for a document pulpit cannot annotate, so this
-    // is only reachable by a document changing under a rail that was already
-    // showing marks. It says which of the two it is rather than sitting on
-    // "looking…" forever, since nothing will ever be looked at.
+    // Not reachable as the code stands — the tab is not offered for a
+    // document pulpit cannot annotate, and opening one resets the rail to
+    // bookmarks — but the view is a function of the state it is given, and
+    // this is what this state means. It says which of the two silences it is
+    // rather than sitting on "looking…" for a document nothing will ever
+    // look through.
     if !reader.annotatable() {
         return nothing("This document cannot carry marks.");
     }
@@ -2170,6 +2172,11 @@ fn annotations<Message: Clone + 'static>(
             let says = text(mark.description())
                 .size(theme::type_scale::LABEL)
                 .width(Length::Fill)
+                // One line, and never two: the row is a fixed height and the
+                // line below this one says what kind the mark is and what
+                // page it is on — a wrapped description would push that out
+                // of the row and take the support note with it.
+                .wrapping(iced::widget::text::Wrapping::None)
                 .color(if mark.text.is_empty() {
                     theme::ambient::muted()
                 } else {
@@ -2185,6 +2192,7 @@ fn annotations<Message: Clone + 'static>(
             }
             let about = text(about)
                 .size(theme::type_scale::CAPTION)
+                .wrapping(iced::widget::text::Wrapping::None)
                 .color(theme::ambient::muted());
 
             let open = button(column![says, about])
