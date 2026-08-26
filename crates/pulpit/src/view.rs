@@ -1433,10 +1433,12 @@ fn shortcut_group<'a>(
 
 const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 // Balanced by row count rather than by subject: the annotation group grew when
-// presentation gained document mode's tools, and the split that used to even
-// out now leaves one column noticeably longer than the other.
-const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 2, 5];
-const SHORTCUT_TABLE_RIGHT: &[usize] = &[1, 3, 4];
+// presentation gained document mode's tools, and autoadvance later joined the
+// page-movement group, each time moving where an even split falls. A group is
+// indivisible, so the constants name the evenest split there is rather than a
+// tidy subject grouping — and the test holds them to exactly that.
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 5];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[2, 3, 4];
 const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {
@@ -2051,6 +2053,43 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         limitations = limitations.push(theme::typography::caption(line));
     }
     body = body.push(section("This session", limitations.into()));
+
+    // Autoadvance. The dwell is the only number pulpit can answer for the
+    // room: how long a page stays up is a property of the screen it is left
+    // on — a lobby loop and a poster in a corridor want different seconds —
+    // and it has to be here rather than on a flag, because the person who
+    // sets a screen up is not the person who launched it.
+    let autoadvance = &app.settings.autoadvance;
+    let seconds = column![
+        row![
+            text_input("5", &app.autoadvance_interval_draft)
+                .on_input(Message::TypeAutoadvanceInterval)
+                .style(theme::ambient::text_field)
+                .padding(gap::S)
+                .width(Length::Fixed(70.0)),
+            theme::typography::body("seconds a page"),
+        ]
+        .spacing(gap::S)
+        .align_y(Alignment::Center),
+        checkbox(autoadvance.wrap_at_end)
+            .label("Start again at the first page")
+            .size(type_scale::BODY)
+            .text_size(type_scale::BODY)
+            .on_toggle(Message::SetAutoadvanceWrap),
+        checkbox(autoadvance.pause_on_interaction)
+            .label("Hold when I take the controls")
+            .size(type_scale::BODY)
+            .text_size(type_scale::BODY)
+            .on_toggle(Message::SetAutoadvancePause),
+        theme::typography::caption(
+            "Turns the page on its own, in whatever is open — a deck, a book, a scan, a \
+             folder of images — presenting or reading, fullscreen or not. Press P to start \
+             and stop it. Without wrapping it stops at the last page; holding means a key, \
+             a click or the wheel puts it aside until you press P again.",
+        ),
+    ]
+    .spacing(gap::S);
+    body = body.push(section("Autoadvance", seconds.into()));
 
     body = body.push(section("Notes mapping", mappings(app)));
 

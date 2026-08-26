@@ -51,6 +51,9 @@ pub struct Settings {
     pub rendering: RenderSettings,
     pub notes: NotesSettings,
     pub timer: TimerSettings,
+    /// Unattended page turning, which belongs to the room rather than to
+    /// the deck: a lobby loop is a property of the screen it is left on.
+    pub autoadvance: AutoadvanceSettings,
     /// The fixed runtime keymap. It is skipped on disk: shortcut
     /// customisation is intentionally unavailable until the interaction and
     /// migration design is ready to support it well.
@@ -505,6 +508,7 @@ impl Default for Settings {
             rendering: RenderSettings::default(),
             notes: NotesSettings::default(),
             timer: TimerSettings::default(),
+            autoadvance: AutoadvanceSettings::default(),
             keymap: Keymap::default(),
             recent: VecDeque::new(),
             diagnostics: DiagnosticsSettings::default(),
@@ -742,6 +746,47 @@ impl Default for TimerSettings {
     }
 }
 
+/// Unattended page turning: the kiosk case.
+///
+/// Named for what it does rather than for "slideshow", which in this codebase
+/// already means the presenter's deck. Autoadvance is neither a mode nor a
+/// layout: it turns pages in whichever viewer is up, in whatever the viewer
+/// has open.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoadvanceSettings {
+    /// How long each page stays up, in seconds. Seconds rather than
+    /// milliseconds because that is the unit the reader thinks in, and stored
+    /// rather than derived so `1:30` comes back as `1:30` next launch — the
+    /// same reason [`TimerSettings::target_seconds`] is what it is.
+    pub interval_seconds: u64,
+    /// Wrap to the first page at the end rather than stopping there. A lobby
+    /// loop wants to wrap; a talk left running does not.
+    pub wrap_at_end: bool,
+    /// A page turn, a zoom or a mark by hand holds the loop rather than
+    /// fighting the reader for control. Held until it is started again.
+    pub pause_on_interaction: bool,
+}
+
+impl AutoadvanceSettings {
+    /// The dwell, floored by the domain rather than by this file: a settings
+    /// document edited by hand can say anything.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval_seconds)
+            .max(pulpit_core::autoadvance::MIN_INTERVAL)
+    }
+}
+
+impl Default for AutoadvanceSettings {
+    fn default() -> Self {
+        Self {
+            interval_seconds: pulpit_core::autoadvance::DEFAULT_INTERVAL.as_secs(),
+            wrap_at_end: true,
+            pause_on_interaction: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceSettings {
@@ -910,6 +955,31 @@ impl Default for DiagnosticsSettings {
 mod tests {
     use super::*;
     use crate::theme::ColorRole;
+
+    #[test]
+    fn a_settings_file_written_before_autoadvance_still_loads() {
+        // The whole block is absent, which is what every file on disk today
+        // looks like. It must come back as the defaults rather than as a
+        // parse failure that costs the reader every other setting they have.
+        let settings: Settings = toml::from_str("schema = 1\n").expect("older files still load");
+        assert_eq!(
+            settings.autoadvance.interval_seconds,
+            pulpit_core::autoadvance::DEFAULT_INTERVAL.as_secs()
+        );
+        assert!(settings.autoadvance.wrap_at_end);
+        assert!(settings.autoadvance.pause_on_interaction);
+    }
+
+    #[test]
+    fn a_dwell_edited_to_nonsense_by_hand_is_floored() {
+        let settings: Settings = toml::from_str("[autoadvance]\ninterval_seconds = 0\n")
+            .expect("a hand-edited file still loads");
+        assert_eq!(
+            settings.autoadvance.interval(),
+            pulpit_core::autoadvance::MIN_INTERVAL,
+            "a zero-second dwell is a strobe, not a setting"
+        );
+    }
 
     fn position(hash: Option<&str>, path: &str, page: usize) -> ReadingPosition {
         ReadingPosition {
