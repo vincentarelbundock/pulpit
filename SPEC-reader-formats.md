@@ -83,7 +83,7 @@ the build, which is consistent with the standing rule that the application
 asks what the session can do rather than what it is.
 
 **§55.5 DjVu.** Implemented; specification deleted. It is the worked example
-for §56, and §56.5 and §56.6 are what that example cost.
+for §56, and §56.5, §56.6 and §56.7 are what that example cost.
 
 **§55.6 XPS.** Page-oriented and structurally close to PDF. **Deferred, low
 value** — almost nothing produces XPS that does not also produce PDF — and it
@@ -151,6 +151,20 @@ rotation as honoured by `ddjvu_page_render`, `ddjvu_page_get_width` and
 exactly the wrong conclusion; applying the angle again reports every rotated
 scan at the wrong aspect and letterboxes it. Each Class B library needs this
 checked against a rotated fixture rather than against its documentation.
+
+**§56.7** A Class B backend MUST NOT assume a library reports *text* in the
+same space it reports *pages*.
+
+Measured, on the same version, and the mirror image of §56.6:
+`ddjvu_document_get_pagetext` answers in the page's **stored, unturned** image
+space while `ddjvu_document_get_pageinfo` answers with that page **turned**. A
+page stored 120×80 and rotated a quarter turn reports 80×120 from one call and
+still says `(page 0 0 120 80)` in the other, and the header documents neither.
+So the rotation the renderer applies for free must be applied to the text
+coordinates by hand — counter-clockwise, and from a bottom-left origin — or
+every highlight on a rotated scan lands somewhere the word is not. Like §56.6,
+this needs checking against a rotated fixture *per call*, because getting one
+call right says nothing about the next.
 
 ---
 
@@ -233,11 +247,14 @@ runs.
 **§59.1** Class A has no text layer and reports `find_text` unsupported.
 Implemented; deleted.
 
-**§59.2** Class B DjVu and XPS may carry text. The DjVu backend currently
-reports `find_text` unsupported, which §48.2 permits and which is honest, but
-djvulibre does expose a text layer. A backend that exposes it SHOULD implement
-`find_text` over the same matcher the PDF path uses, so a hit found in the
-presenter is the hit found in the reader. **Open** for DjVu.
+**§59.2** Class B DjVu and XPS may carry text. A backend that can reach it
+MUST implement `find_text` over **the same matcher the PDF path uses**, so a
+hit found in the presenter is the hit found in the reader and the format
+contributes geometry rather than a second idea of what matching means. A
+backend that cannot reach it reports `find_text` unsupported, which §48.2
+permits: "this cannot be searched" and "there are no matches" are different
+facts. **Implemented for DjVu**, and its specification is deleted; §56.7 is
+what it cost. XPS is unbuilt (§55.6).
 
 **§59.3** Class C has text by construction, and the hard part is not finding
 it but mapping a hit to a rectangle on a paginated render — which only exists
@@ -302,8 +319,7 @@ What is left, in order of risk rather than appetite:
 
 **§62.1** §61.4's refusal table. **Done.**
 
-**§62.2** §59.2's DjVu text layer, if a scanned book's search is wanted. It is
-contained inside a shipped backend and changes nothing above it.
+**§62.2** §59.2's DjVu text layer. **Done.**
 
 **§62.3** §54.6's `.cb7`, only if a maintained pure-Rust 7z decoder exists.
 
@@ -340,7 +356,7 @@ unverifiable.
 | `.cbz` `.cbt` | A | **Implemented** |
 | `.cb7` | A | Deferred — refused by name; in scope if a pure-Rust decoder exists (§54.6) |
 | `.cbr` | A | **Not planned** — unrar licence (§54.7) |
-| DjVu | B | **Implemented** — discovered djvulibre, view-only; text layer open (§59.2) |
+| DjVu | B | **Implemented** — discovered djvulibre, view-only, searchable (§59.2) |
 | XPS | B | Deferred; low value (§55.6) |
 | PostScript | B | Deferred; advise conversion to PDF instead (§55.7) |
 | DVI | B | **Not planned** — needs a TeX installation (§55.8) |
