@@ -25,6 +25,14 @@ use crate::widgets::document::model::{
 };
 use crate::widgets::event::ReadCommand;
 
+/// How large a stamp is placed, in page points.
+///
+/// A little larger than a line of body text, which is what a check beside a
+/// paragraph or in a box on a form wants to be. It is resizable afterwards
+/// like any other freely movable mark, so this is a starting size and not a
+/// decision the reader is stuck with.
+const STAMP_POINTS: f32 = 24.0;
+
 /// How much air is left above a mark the annotations panel reveals, in page
 /// points. Roughly a line of text: enough that the mark reads as being inside
 /// the window rather than pinned to its edge.
@@ -2376,6 +2384,25 @@ impl ReaderSession {
                     pulpit_core::annotation::MarkupKind::default(),
                     *style,
                 ),
+                // The shape being pulled out, from the same `shape_outline`
+                // the mark is built with — exactly the points a line or an
+                // arrow commits, and the rectangle a box or an ellipse is
+                // drawn on. (Those two draw their border half a width inside
+                // that rectangle, which is where PDF puts a square's border;
+                // at a wide pen the mark settles a few points in from the
+                // line the hand was shown.)
+                Gesture::Shape {
+                    kind,
+                    anchor,
+                    head,
+                    style,
+                    ..
+                } => (
+                    pulpit_core::annotate::shape_outline(*kind, *anchor, *head, style.width),
+                    Vec::new(),
+                    pulpit_core::annotation::MarkupKind::default(),
+                    *style,
+                ),
                 Gesture::Selecting {
                     quads, kind, style, ..
                 } => (Vec::new(), quads.clone(), *kind, *style),
@@ -2666,6 +2693,45 @@ impl ReaderSession {
         (!commands.is_empty()).then(|| DocumentTransaction::from_annotations(commands.to_vec()))
     }
 
+    /// Place the stamp's mark where the pointer is (§8.4).
+    ///
+    /// `None` unless the stamp is the armed tool and the pointer is on a
+    /// page: a check has nothing to type into it, so the press that chooses
+    /// the spot is the whole gesture, and this is what it commits.
+    ///
+    /// The mark is centred on the click rather than hung below and right of
+    /// it, because a stamp is aimed at something — the box it goes in, the
+    /// line it is against — and a mark that landed beside what was clicked
+    /// would have to be dragged into place every time.
+    pub fn place_stamp(&self) -> Option<DocumentTransaction> {
+        if self.controls.tool != Some(AnnotationTool::Stamp) {
+            return None;
+        }
+        let (page, at) = self.cursor?;
+        let geometry = self.pages.get(page.get()).copied()?;
+        let half = STAMP_POINTS / 2.0;
+        // Clamped onto the page rather than refused off it: a mark centred on
+        // a click within half its own width of an edge would fall outside the
+        // sheet, and validation would drop it — a press that did nothing and
+        // said nothing. Nudged inside, it lands where the reader was aiming
+        // as nearly as the page allows.
+        let corner = PagePoint::new(
+            (at.x - half).clamp(0.0, (geometry.width - STAMP_POINTS).max(0.0)),
+            (at.y - half).clamp(0.0, (geometry.height - STAMP_POINTS).max(0.0)),
+        );
+        let outcome = self.interaction.place(
+            page,
+            corner,
+            pulpit_core::annotate::PlacedMark::Stamp {
+                mark: self.interaction.stamp_mark().into(),
+                size: (STAMP_POINTS, STAMP_POINTS),
+            },
+            &geometry,
+        );
+        let commands = outcome.commands();
+        (!commands.is_empty()).then(|| DocumentTransaction::from_annotations(commands.to_vec()))
+    }
+
     /// Place a mark generated from Typst markup (§7.4).
     ///
     /// A `/Stamp` whose appearance is the rendered picture and whose
@@ -2768,7 +2834,18 @@ impl ReaderSession {
             self.interaction.select(None);
             return false;
         };
-        if !hit.editable || !hit.kind.is_freely_movable() {
+        // A mark pulpit cannot describe is a mark it cannot put back. Every
+        // edit takes an annotation's appearance away, and only what pulpit
+        // can draw again comes back — so a stamp whose picture is somebody
+        // else's, or a rasterised Typst mark, is held rather than dragged: a
+        // drag that ended by making the mark vanish would be far worse than
+        // one that never started (A5).
+        let modelled = self
+            .summaries
+            .get(&page)
+            .and_then(|marks| marks.iter().find(|summary| summary.id == hit.id))
+            .is_some_and(|summary| summary.to_draft().is_some());
+        if !hit.editable || !hit.kind.is_freely_movable() || !modelled {
             // Still selected, so the reader can see what they hit and why it
             // will not move — text markup describes real text runs and cannot
             // be dragged off them (§8.4).
@@ -3893,6 +3970,23 @@ impl ReaderSession {
                 self.arm_from_panel(AnnotationTool::Highlighter);
                 false
             }
+            ReadCommand::SetShapeKind(kind) => {
+                // Like the highlighter's nib: the open gesture fixed its kind
+                // when it began, so this is always about the *next* shape.
+                self.controls.tool_overflow = tool_overflow;
+                self.controls.shape_kind = *kind;
+                self.interaction.set_shape_kind(*kind);
+                // Choosing which shape to draw is reaching for the tool.
+                self.arm_from_panel(AnnotationTool::Shape);
+                false
+            }
+            ReadCommand::SetStampMark(mark) => {
+                self.controls.tool_overflow = tool_overflow;
+                self.controls.stamp_mark = *mark;
+                self.interaction.set_stamp_mark(*mark);
+                self.arm_from_panel(AnnotationTool::Stamp);
+                false
+            }
             ReadCommand::SetSelectKind(kind) => {
                 // Changing what the band means does not disturb what it is
                 // currently holding: a reader who has gathered marks up and
@@ -3988,7 +4082,11 @@ impl ReaderSession {
         color: pulpit_core::annotation::InkColor,
     ) -> bool {
         match tool {
-            AnnotationTool::Ink => {
+            // One pen. The shape tool and the stamp both lay down the ink
+            // style — a box is drawn in the colour the pen is holding, and so
+            // is a check — so a colour chosen in either of their panels is
+            // the pen's colour, exactly as if it had been chosen in the pen's.
+            AnnotationTool::Ink | AnnotationTool::Shape | AnnotationTool::Stamp => {
                 self.controls.ink_color = color;
                 self.interaction
                     .set_ink_style(pulpit_core::annotate::MarkStyle {
@@ -5958,6 +6056,168 @@ mod tests {
         assert_eq!(transaction.label(), "Add Ink");
     }
 
+    /// A shape is drawn by dragging, like a stroke, and lands as one edit
+    /// whose undo entry says what it was.
+    #[test]
+    fn a_shape_drag_commits_one_mark_and_is_previewed_while_it_is_drawn() {
+        use pulpit_core::annotation::ShapeKind;
+
+        let mut session = open(3);
+        session.apply(&ReadCommand::SetShapeKind(ShapeKind::Rectangle));
+        assert_eq!(
+            session.controls().tool,
+            Some(AnnotationTool::Shape),
+            "choosing which shape to draw is reaching for the tool"
+        );
+        session.pointer_moved(PageIndex(1), 100.0, 100.0);
+        assert!(session.pointer_pressed());
+        session.pointer_moved(PageIndex(1), 300.0, 220.0);
+
+        // The unfinished shape is drawn by the UI, from the same arithmetic
+        // the mark itself will be made of (A2).
+        let preview = session
+            .preview_for(PageIndex(1))
+            .expect("the shape follows the hand");
+        assert_eq!(
+            preview.points.len(),
+            5,
+            "four corners and back to the first"
+        );
+        assert_eq!(
+            preview.bounds().map(|rect| (rect.left, rect.top)),
+            Some((100.0 - preview.width / 2.0, 100.0 - preview.width / 2.0))
+        );
+        assert!(session.preview_for(PageIndex(0)).is_none());
+
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("a shape commits")
+        };
+        assert_eq!(transaction.len(), 1, "one gesture is one undo entry");
+        assert_eq!(transaction.label(), "Add Rectangle");
+        assert!(session.preview_for(PageIndex(1)).is_none());
+    }
+
+    /// The other half of what the palette promises: a shape is a mark like
+    /// any other afterwards, picked up with the hand and moved, and it keeps
+    /// its identity through the move (A3).
+    #[test]
+    fn a_box_is_picked_up_and_moved_like_any_other_mark() {
+        use pulpit_core::annotate::{AnnotationCommand, AnnotationDraft, AnnotationKind};
+        use pulpit_core::page::PageRect;
+
+        let mut session = open(2);
+        let bounds = PageRect::new(100.0, 100.0, 300.0, 200.0);
+        let square = pulpit_render::document::AnnotationSummary {
+            kind: AnnotationKind::Square,
+            bounds,
+            path: Vec::new(),
+            ..stroke_at(150.0)
+        };
+        let id = square.id.clone();
+        session.set_annotations(PageIndex(0), &[square]);
+
+        // The hand takes hold of it, and the corners are offered: a shape is
+        // resizable, so the handles are not a lie.
+        assert!(holding(&mut session, (200.0, 150.0)));
+        assert_eq!(session.selected(), Some(&id));
+        assert_eq!(drawn_selection(&session).handles.len(), 4);
+
+        session.pointer_moved(PageIndex(0), 230.0, 170.0);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("a move commits")
+        };
+        assert_eq!(transaction.len(), 1);
+        let pulpit_render::document::DocumentCommand::Annotation(AnnotationCommand::Replace {
+            id: replaced,
+            replacement,
+        }) = &transaction.0[0]
+        else {
+            panic!("a move replaces the mark rather than making a second one")
+        };
+        assert_eq!(replaced, &id, "the mark keeps its identity through a move");
+        let AnnotationDraft::Shape(shape) = replacement else {
+            panic!("a box replaces a box")
+        };
+        assert_eq!(shape.rect, PageRect::new(130.0, 120.0, 330.0, 220.0));
+    }
+
+    /// A box is its border, not its interior. The headline use — a box drawn
+    /// round a figure — depends on it: a press in the middle of the figure
+    /// belongs to the figure, and an eraser swept across it must not take the
+    /// box away.
+    #[test]
+    fn a_box_is_hit_on_its_border_and_not_through_its_middle() {
+        use pulpit_core::annotate::AnnotationKind;
+        use pulpit_core::page::PageRect;
+
+        let mut session = open(2);
+        let bounds = PageRect::new(100.0, 100.0, 300.0, 200.0);
+        let square = pulpit_render::document::AnnotationSummary {
+            kind: AnnotationKind::Square,
+            bounds,
+            // What the engine reports for a shape: the outline it is drawn
+            // on, which is where the mark actually is.
+            path: pulpit_core::annotate::shape_outline(
+                pulpit_core::annotation::ShapeKind::Rectangle,
+                pulpit_core::page::PagePoint::new(bounds.left, bounds.top),
+                pulpit_core::page::PagePoint::new(bounds.right, bounds.bottom),
+                0.0,
+            ),
+            ..stroke_at(150.0)
+        };
+        session.set_annotations(PageIndex(0), &[square]);
+
+        assert!(
+            !holding(&mut session, (200.0, 150.0)),
+            "a press in the middle of a box is a press on what the box is round"
+        );
+        assert_eq!(session.selected(), None);
+        // That press took the page instead, so it is let go of before the
+        // next one: a hand that is panning is not a hand that is pressing.
+        session.pointer_released();
+
+        assert!(
+            holding(&mut session, (200.0, 100.0)),
+            "a press on its edge picks it up"
+        );
+    }
+
+    /// A mark placed on a click near the edge of the page lands on the page.
+    /// Refusing it would be a press that did nothing and said nothing.
+    #[test]
+    fn a_stamp_placed_at_the_edge_is_nudged_onto_the_page() {
+        let mut session = open(1);
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Stamp)));
+        session.pointer_moved(PageIndex(0), 2.0, 2.0);
+        assert!(
+            session.place_stamp().is_some(),
+            "a click in the corner still places a mark"
+        );
+    }
+
+    /// The stamp is placed by a click and has nothing to type into it, so the
+    /// press is the whole gesture.
+    #[test]
+    fn the_stamp_places_its_mark_centred_on_the_click() {
+        use pulpit_core::annotation::StampChoice;
+
+        let mut session = open(2);
+        session.apply(&ReadCommand::SetStampMark(StampChoice::Check));
+        assert_eq!(session.controls().tool, Some(AnnotationTool::Stamp));
+        session.pointer_moved(PageIndex(0), 200.0, 300.0);
+        assert!(
+            !session.pointer_pressed(),
+            "a placed mark takes no gesture, so the press is not the tool's"
+        );
+        let transaction = session.place_stamp().expect("a click places a stamp");
+        assert_eq!(transaction.len(), 1);
+        assert_eq!(transaction.label(), "Add Stamp");
+
+        // …and nothing is placed when the stamp is not what is armed.
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        assert!(session.place_stamp().is_none());
+    }
+
     /// The same fixture as [`open`], for a document that has fields in it.
     fn open_with_form(pages: usize) -> ReaderSession {
         let mut session = ReaderSession::new();
@@ -6945,6 +7205,7 @@ mod tests {
             path: vec![PagePoint::new(50.0, y), PagePoint::new(400.0, y)],
             quads: Vec::new(),
             geometry_elided: false,
+            stamp: None,
         }
     }
 

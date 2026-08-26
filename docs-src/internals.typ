@@ -620,6 +620,72 @@ and region, and again through a real PDF in
 `pulpit-render/tests/presenter_ink.rs` — a mark that moves between the talk and
 the file is a bug nobody would find until afterwards.
 
+=== Shapes, and which subtype each one becomes
+
+A box round a figure, a circle round a number and an arrow pointing at the
+thing you mean are one tool with a mode — `ShapeKind` — for the same reason
+the highlighter has three nibs and the band has three kinds: the gesture is
+one drag, and only what it leaves behind differs. Four more buttons would have
+made the palette a rail of icons.
+
+What they become in the file is *not* one family, and that is a decision
+rather than an oversight:
+
+- A box is a `/Square` and an ellipse is a `/Circle`. Those are the
+  annotations PDF has for exactly them; Okular and Acrobat draw them as
+  shapes and let their own users edit them. Neither needs an entry pulpit
+  cannot write: `/Rect` is the whole of their geometry.
+- A line and an arrow are `/Ink`. `/Line` keeps its endpoints in `/L` and its
+  arrowheads in `/LE`, both arrays, and PDFium's annotation API can write
+  neither — it offers strings, a rectangle, a colour, a border, flags, quad
+  points and ink strokes, and nothing that writes an array of numbers or of
+  names. A `/Line` without `/L` is malformed. The alternatives were a
+  rasterised `/Stamp`, which is a picture in every other viewer and cannot be
+  edited anywhere, and this: a real, editable, universally drawn stroke that
+  happens to be straight. An arrow is one stroke that doubles back —
+  shaft, tip, barb, tip, barb — so its head is part of the same mark and not
+  three marks to erase separately.
+
+Both halves are drawn from one piece of arithmetic. `shape_outline` returns
+the polyline a shape is previewed as while the hand is still moving, and for
+a line and an arrow it is *also* what is committed as the `/InkList`: a
+preview built from different arithmetic than the mark is a preview that can
+disagree with what lands on the page. A box and an ellipse are drawn on that
+same rectangle, with their border half a width inside it — where PDF 12.5.6.8
+puts a square's border — so at a wide pen the committed mark settles a few
+points in from the line the hand was shown.
+
+`/Square` and `/Circle` carry an appearance pulpit writes itself, for the
+reason a note's icon does (§7.4): PDFium generates one from its own reading of
+`/C`, `/IC` and the border, and a mark that looks different in each viewer is
+not the mark the reader made. The shape is inset by half the border width,
+which is where PDF 12.5.6.8 puts a square's border — drawn on the rectangle
+itself, half the stroke would fall outside `/Rect` and be clipped. Nothing
+writes `/IC`: a box round a figure has to leave the figure visible.
+
+An appearance is only ever *re*generated over a mark pulpit drew. A move
+rewrites the rectangle and leaves the drawing alone otherwise, because
+regenerating one over an annotation pulpit did not draw replaces what the
+file says with what pulpit would have said — another producer's filled,
+dashed, cloud-bordered ellipse becomes a plain stroke, and its `/Contents`
+becomes the word "Rectangle". `Writing` is the distinction, and A5 is the
+reason for it. A stamp is stricter still: nothing readable in a `/Stamp` says
+whether its picture is a check, a cross or a rasterised Typst mark, so a
+summary of one has to guess, and a move that acted on the guess would turn
+every stamp it touched into the guess. A stamp's appearance is written when
+the mark is made and when a rewritten Typst mark hands over a new picture,
+and at no other time.
+
+The stamp is the same story a step along. Its machinery already existed —
+`StampMark`, `StampDraft`, the `/Stamp` subtype, an icon — and was reachable
+only as an implementation detail of the text tool, which carries a rasterised
+Typst mark as a picture. What was missing was a way to arm it and an
+appearance for the two marks that are not pictures; a check placed without one
+was an annotation in `/Annots` and on nobody's screen. `StampChoice` is what
+the palette holds — a check or a cross — and it is deliberately not
+`StampMark`, whose third variant carries a picture: a picture is something a
+reader supplies rather than a mode a button can be in.
+
 === The annotations panel
 
 The sidebar's third tab lists every mark in the document, and it is a view of

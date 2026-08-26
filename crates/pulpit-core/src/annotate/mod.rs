@@ -22,9 +22,9 @@ pub mod stroke;
 pub mod text_box;
 
 pub use draft::{
-    AnnotationCommand, AnnotationDraft, AnnotationKind, DraftError, FreeTextDraft, HighlightDraft,
-    InkDraft, MarkStyle, NoteDraft, StampDraft, StampMark, TextSource, MAX_ANNOTATION_TEXT,
-    MAX_QUADS, NOTE_ICON_POINTS,
+    shape_outline, AnnotationCommand, AnnotationDraft, AnnotationKind, DraftError, FreeTextDraft,
+    HighlightDraft, InkDraft, MarkStyle, NoteDraft, ShapeDraft, ShapeOutline, StampDraft,
+    StampMark, TextSource, MAX_ANNOTATION_TEXT, MAX_QUADS, NOTE_ICON_POINTS,
 };
 pub use gesture::{
     AnnotationInteraction, AnnotationTool, Corner, Gesture, GestureOutcome, PlacedMark,

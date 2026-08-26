@@ -58,6 +58,19 @@ pub enum AnnotationTool {
     /// Document mode only, and never described as a cryptographic signature
     /// (§1 of `SPEC-document.md`).
     Stamp,
+    /// Draws a box, an ellipse, a line or an arrow by dragging, according to
+    /// the [`ShapeKind`] it is set to.
+    ///
+    /// One tool with a mode rather than four tools, for the same reason the
+    /// highlighter has three nibs and the band has three kinds: the gesture is
+    /// identical — press, drag, let go — and only the mark left behind
+    /// differs. Four more buttons would make the palette a rail of icons.
+    ///
+    /// Document mode only, like the stamp. A box around a figure is a mark
+    /// made while reading a paper; drawing one at the lectern is the
+    /// presenter's transient painting path, which is a separate engine (§5.3)
+    /// and a separate decision.
+    Shape,
     /// Drags a rubber band over the page, and does one of three things with
     /// what it encloses, according to the [`SelectKind`] it is set to.
     ///
@@ -215,19 +228,120 @@ impl MarkupKind {
     }
 }
 
+/// Which mark [`AnnotationTool::Shape`] draws.
+///
+/// A mode inside one tool rather than four tools, for the same reason
+/// [`MarkupKind`] and [`SelectKind`] are: the gesture is one drag, and only
+/// what it leaves behind differs. Chosen in the tool's options, beside the
+/// colour and the width it is drawn with.
+///
+/// The four are not one family in the file, and deliberately so. A box and an
+/// ellipse become the `/Square` and `/Circle` annotations PDF has for exactly
+/// them, which Okular and Acrobat show as shapes and let their own users
+/// edit. A line and an arrow become `/Ink`: `/Line` carries its endpoints in
+/// `/L` and its arrowheads in `/LE`, both of them arrays, and PDFium's
+/// annotation API can write neither — a `/Line` without `/L` is malformed,
+/// and a malformed annotation travels worse than an honest stroke. An arrow
+/// drawn as ink is a real, editable, universally drawn mark in every viewer,
+/// which a rasterised stamp of one would not be.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShapeKind {
+    /// A box: `/Square`. The default, and what "put a box around this figure"
+    /// means.
+    #[default]
+    Rectangle,
+    /// An ellipse inscribed in the drag: `/Circle`.
+    Ellipse,
+    /// A straight line from where the drag began to where it ended: `/Ink`.
+    Line,
+    /// A line with a head at the end the drag finished on: `/Ink`.
+    ///
+    /// The end, not the start, because an arrow is aimed: the hand starts
+    /// away from the thing and finishes on it.
+    Arrow,
+}
+
+impl ShapeKind {
+    /// Every kind, in the order the options panel offers them: the box first,
+    /// because it is what the tool is reached for.
+    pub const ALL: [ShapeKind; 4] = [
+        ShapeKind::Rectangle,
+        ShapeKind::Ellipse,
+        ShapeKind::Line,
+        ShapeKind::Arrow,
+    ];
+
+    /// The word the option's tooltip says. The buttons are icon-only, like the
+    /// highlighter's and the band's, so this one word is the explanation.
+    pub fn label(self) -> &'static str {
+        match self {
+            ShapeKind::Rectangle => "Rectangle",
+            ShapeKind::Ellipse => "Ellipse",
+            ShapeKind::Line => "Line",
+            ShapeKind::Arrow => "Arrow",
+        }
+    }
+
+    /// Is this one of the two the drag *bounds*, rather than one it draws
+    /// between two points?
+    ///
+    /// The question every piece of geometry about these asks: a box and an
+    /// ellipse are described by the rectangle the hand pulled, and a line and
+    /// an arrow by its two corners in the order they were visited — which a
+    /// rectangle cannot express, since a drag up-left and a drag down-right
+    /// bound the same box.
+    pub fn is_bounded(self) -> bool {
+        matches!(self, ShapeKind::Rectangle | ShapeKind::Ellipse)
+    }
+}
+
+/// Which mark [`AnnotationTool::Stamp`] puts down.
+///
+/// The two a button can hold, and only those. A stamp can also carry a
+/// picture — `StampMark::Image` — but a picture is something a reader
+/// supplies rather than a mode a palette offers, so it is not one of these.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StampChoice {
+    /// A tick: "read", "done", "yes".
+    #[default]
+    Check,
+    /// A cross. Never "wrong" in the interface's own words — what a mark
+    /// means is the reader's, and the tooltip says what it draws.
+    Cross,
+}
+
+impl StampChoice {
+    pub const ALL: [StampChoice; 2] = [StampChoice::Check, StampChoice::Cross];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StampChoice::Check => "Check",
+            StampChoice::Cross => "Cross",
+        }
+    }
+}
+
 impl AnnotationTool {
     /// The tools the presenter's palette offers a control for, in the order it
     /// draws them. [`AnnotationTool::Spotlight`] is absent because it is armed
     /// from the pointer control's options rather than from a button of its own.
     ///
-    /// The same marks as [`AnnotationTool::DOCUMENT`], in the same order, plus
-    /// the pointer. Every mark a presenter makes is an annotation in the open
-    /// document (A1), so a tool that document mode has and presentation does
-    /// not is not a restraint on what goes into the file — it is only a mark
-    /// the presenter has to stop and change mode to make. What presentation
-    /// has and document mode does not is the pointer, which makes no mark at
-    /// all: it is a thing you do to a slide in front of an audience, and there
-    /// is nothing to keep afterwards.
+    /// Every mark [`AnnotationTool::DOCUMENT`] offers is here too, in the same
+    /// order, plus the pointer. Every mark a presenter makes is an annotation
+    /// in the open document (A1), so a tool that document mode has and
+    /// presentation does not is not a restraint on what goes into the file —
+    /// it is only a mark the presenter has to stop and change mode to make.
+    /// What presentation has and document mode does not is the pointer, which
+    /// makes no mark at all: it is a thing you do to a slide in front of an
+    /// audience, and there is nothing to keep afterwards.
+    ///
+    /// The two document mode has and this does not are the stamp and the
+    /// shape tool, which are placed and drawn by pointing at a page rather
+    /// than at a slide, and which the presenter's own transient painting path
+    /// (§5.3) has no gesture for. That is a gap in this palette rather than a
+    /// rule about it, and closing it is its own piece of work.
     pub const ALL: [AnnotationTool; 8] = [
         AnnotationTool::Pointer,
         AnnotationTool::Select,
@@ -242,31 +356,39 @@ impl AnnotationTool {
     /// The tools a document layout's `AnnotationTools` widget offers, in the
     /// order it draws them.
     ///
-    /// [`AnnotationTool::ALL`] without the pointer, for the reason given
-    /// there.
-    pub const DOCUMENT: [AnnotationTool; 7] = [
+    /// [`AnnotationTool::ALL`] without the pointer — which makes no mark and
+    /// has nothing to leave behind — and with the two marks a page is pointed
+    /// at to make: the stamp and the shape tool. See `ALL` for why that is a
+    /// gap in the palette there rather than a rule here.
+    pub const DOCUMENT: [AnnotationTool; 9] = [
         AnnotationTool::Select,
         AnnotationTool::Ink,
         AnnotationTool::Highlighter,
+        // Beside the pen: the shape tool is the pen for the marks a hand
+        // cannot draw straight.
+        AnnotationTool::Shape,
         AnnotationTool::Text,
         AnnotationTool::Note,
+        // Beside the note: both are placed by a click rather than drawn, and
+        // both say something about the page rather than marking it.
+        AnnotationTool::Stamp,
         AnnotationTool::Eraser,
         AnnotationTool::SelectText,
     ];
 
     /// Has this tool anything to configure — a colour, a size, a mode?
     ///
-    /// The stamp palette has none of the three: what a stamp puts down is
-    /// chosen from its own palette rather than from a slider, and a control
-    /// that opens an options panel with nothing in it teaches people not to
-    /// open options panels. The band has no colour and no size — a rubber
-    /// band is a shape the hand makes — but it does have a [`SelectKind`],
-    /// which is the same sort of choice as the highlighter's colour and
-    /// belongs in the same place. The text selection has none either: a
-    /// selection looks the way selections look, and a colour chooser for one
-    /// would be a control that changes nothing anyone keeps.
+    /// The band has no colour and no size — a rubber band is a shape the hand
+    /// makes — but it does have a [`SelectKind`], which is the same sort of
+    /// choice as the highlighter's colour and belongs in the same place. The
+    /// text selection has none: a selection looks the way selections look,
+    /// and a colour chooser for one would be a control that changes nothing
+    /// anyone keeps. Everything else has at least a mark to choose or a
+    /// colour to choose it in — the stamp has both, now that which mark it
+    /// puts down is a mode of the tool rather than a palette of its own and
+    /// it puts that mark down in the pen's ink.
     pub fn has_options(self) -> bool {
-        !matches!(self, AnnotationTool::Stamp | AnnotationTool::SelectText)
+        !matches!(self, AnnotationTool::SelectText)
     }
 
     /// Does this tool make a durable PDF annotation when its gesture ends?
@@ -274,6 +396,7 @@ impl AnnotationTool {
         match self {
             AnnotationTool::Ink
             | AnnotationTool::Highlighter
+            | AnnotationTool::Shape
             | AnnotationTool::Text
             | AnnotationTool::Note
             | AnnotationTool::Stamp => true,
@@ -298,6 +421,7 @@ impl AnnotationTool {
             AnnotationTool::Text => "Text",
             AnnotationTool::Note => "Note",
             AnnotationTool::Stamp => "Stamp",
+            AnnotationTool::Shape => "Shape",
             AnnotationTool::Select => "Select",
             AnnotationTool::SelectText => "Select text",
         }
@@ -1674,18 +1798,20 @@ mod tests {
     fn every_tool_with_a_panel_has_something_in_it() {
         // A control that opens an options panel with nothing in it teaches
         // people not to open options panels, so this is not cosmetic: it is
-        // what decides whether the arrow is drawn at all. The stamp chooses
-        // from its own palette, and the text selection has nothing to
-        // configure at all; every other tool has a colour, a size or a mode.
+        // what decides whether the arrow is drawn at all. The text selection
+        // has nothing to configure at all; every other tool has a colour, a
+        // size or a mode — the stamp included, now that which mark it puts
+        // down is a mode of the tool.
         for tool in AnnotationTool::ALL {
-            let expected = !matches!(tool, AnnotationTool::Stamp | AnnotationTool::SelectText);
+            let expected = !matches!(tool, AnnotationTool::SelectText);
             assert_eq!(
                 tool.has_options(),
                 expected,
                 "{tool:?} draws an options arrow with nothing behind it, or hides one"
             );
         }
-        assert!(!AnnotationTool::Stamp.has_options());
+        assert!(AnnotationTool::Stamp.has_options());
+        assert!(AnnotationTool::Shape.has_options());
     }
 
     #[test]

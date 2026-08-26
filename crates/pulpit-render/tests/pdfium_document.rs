@@ -162,6 +162,99 @@ fn saving_and_reopening_preserves_identity_geometry_and_style() {
     assert!(summary.editable());
 }
 
+/// The shapes reach the file as the subtypes PDF has for them, survive a save
+/// and come back as the same kinds — which is the whole of the argument for
+/// drafting them as `/Square` and `/Circle` rather than as pictures.
+#[test]
+fn shapes_and_stamps_round_trip_as_their_own_subtypes() {
+    use pulpit_core::annotate::{AnnotationKind, ShapeDraft, ShapeOutline, StampDraft, StampMark};
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("shapes");
+    let path = source(&directory);
+    let destination = directory.join("shaped.pdf");
+
+    let shape = |outline, rect| {
+        DocumentCommand::Annotation(AnnotationCommand::Create(AnnotationDraft::Shape(
+            ShapeDraft {
+                page: PageIndex(0),
+                outline,
+                rect,
+                style: MarkStyle::default(),
+            },
+        )))
+    };
+    let stamp = DocumentCommand::Annotation(AnnotationCommand::Create(AnnotationDraft::Stamp(
+        StampDraft {
+            page: PageIndex(0),
+            rect: PageRect::new(300.0, 300.0, 324.0, 324.0),
+            mark: StampMark::Check,
+            style: MarkStyle::default(),
+            source: None,
+        },
+    )));
+
+    {
+        let mut document = open(backend, &path);
+        let mut revision = DocumentRevision::INITIAL;
+        for command in [
+            shape(ShapeOutline::Box, PageRect::new(72.0, 72.0, 272.0, 172.0)),
+            shape(
+                ShapeOutline::Ellipse,
+                PageRect::new(72.0, 200.0, 272.0, 300.0),
+            ),
+            stamp,
+        ] {
+            revision = document
+                .apply(revision, DocumentTransaction::one(command))
+                .expect("the mark commits")
+                .document_revision;
+        }
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .expect("Save As writes the file");
+    }
+
+    let reopened = PdfiumDocument::open(backend, &destination).unwrap();
+    let document = PdfDocument::new(Box::new(reopened), 11);
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    assert_eq!(
+        annotations
+            .iter()
+            .map(|summary| summary.kind)
+            .collect::<Vec<_>>(),
+        [
+            AnnotationKind::Square,
+            AnnotationKind::Circle,
+            AnnotationKind::Stamp
+        ],
+        "each mark came back as the subtype it was written as"
+    );
+    for summary in &annotations {
+        assert!(
+            summary.editable(),
+            "a shape pulpit wrote is one pulpit can edit"
+        );
+        // The rectangle is the whole of a shape's geometry, so it is what a
+        // move or a resize is built from.
+        assert!(summary.bounds.width() > 1.0 && summary.bounds.height() > 1.0);
+        assert!(
+            summary.to_draft().is_some(),
+            "{:?} must be modelled, not merely preserved",
+            summary.kind
+        );
+    }
+    let box_mark = &annotations[0];
+    assert!(
+        (box_mark.bounds.left - 72.0).abs() < 1.0 && (box_mark.bounds.top - 72.0).abs() < 1.0,
+        "geometry moved: {:?}",
+        box_mark.bounds
+    );
+}
+
 #[test]
 fn the_source_file_is_never_written() {
     let Some(mut guard) = common::pdfium("the PDFium document tests") else {
@@ -742,6 +835,316 @@ fn a_frame_rendered_after_a_commit_contains_the_mark() {
         )
         .unwrap();
     assert_eq!(after, again, "two renders of one revision differ");
+}
+
+/// The appearance streams pulpit writes for the marks it draws itself are
+/// valid enough to put ink on the page.
+///
+/// A `/Square`, a `/Circle` and a check carry an `/AP` this application
+/// generated; a stream PDFium refuses, or one whose operators say nothing,
+/// leaves an annotation that is in `/Annots` and on nobody's screen — which
+/// is exactly what a check placed before this change was.
+#[test]
+fn the_marks_pulpit_draws_itself_are_on_the_rendered_page() {
+    use pulpit_core::annotate::{ShapeDraft, ShapeOutline, StampDraft, StampMark};
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("appearance");
+    let path = source(&directory);
+    let (width, height) = (306u32, 396u32);
+
+    let marks = [
+        DocumentCommand::Annotation(AnnotationCommand::Create(AnnotationDraft::Shape(
+            ShapeDraft {
+                page: PageIndex(0),
+                outline: ShapeOutline::Box,
+                rect: PageRect::new(72.0, 72.0, 272.0, 172.0),
+                style: MarkStyle::default(),
+            },
+        ))),
+        DocumentCommand::Annotation(AnnotationCommand::Create(AnnotationDraft::Shape(
+            ShapeDraft {
+                page: PageIndex(0),
+                outline: ShapeOutline::Ellipse,
+                rect: PageRect::new(72.0, 200.0, 272.0, 300.0),
+                style: MarkStyle::default(),
+            },
+        ))),
+        DocumentCommand::Annotation(AnnotationCommand::Create(AnnotationDraft::Stamp(
+            StampDraft {
+                page: PageIndex(0),
+                rect: PageRect::new(300.0, 72.0, 348.0, 120.0),
+                mark: StampMark::Check,
+                style: MarkStyle::default(),
+                source: None,
+            },
+        ))),
+    ];
+
+    for (index, mark) in marks.into_iter().enumerate() {
+        // One document per mark, so each is measured against a clean page
+        // rather than against the one the mark before it drew on.
+        let mut document = open(backend, &path);
+        let region = pulpit_core::notes::Region::FULL;
+        let before = document
+            .render_page(PageIndex(0), region, width, height, None)
+            .expect("the page renders");
+        document
+            .apply(DocumentRevision::INITIAL, DocumentTransaction::one(mark))
+            .expect("the mark commits");
+        let after = document
+            .render_page(PageIndex(0), region, width, height, None)
+            .expect("the page renders again");
+        assert_ne!(
+            before, after,
+            "mark {index} put nothing on the page: its appearance stream was \
+             refused, or says nothing"
+        );
+    }
+}
+
+/// Moving a mark moves it — it does not redraw it as something else, and it
+/// does not make it disappear.
+///
+/// Both are live risks for a `/Stamp`. Every edit clears the appearance
+/// PDFium is holding, and `/Stamp` is a subtype PDFium generates nothing to
+/// replace it with, so a stamp that is not redrawn after a move is gone; and
+/// a stamp records no readable trace of what drew it, so a stamp redrawn from
+/// a guess comes back as the guess. `/Name` is what closes both: pulpit
+/// writes which mark it placed, and reads it back to draw the same one where
+/// the mark moved to.
+#[test]
+fn moving_a_stamp_keeps_the_mark_it_was_placed_with() {
+    use pulpit_core::annotate::{StampDraft, StampMark};
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("stamp-move");
+    let path = source(&directory);
+    let region = pulpit_core::notes::Region::FULL;
+    let (width, height) = (306u32, 396u32);
+
+    // The same journey for each mark: placed, then dragged an inch down the
+    // page by the summary's own draft, which is how the application moves one.
+    let mut moved = Vec::new();
+    for mark in [StampMark::Cross, StampMark::Check] {
+        let mut document = open(backend, &path);
+        let blank = document
+            .render_page(PageIndex(0), region, width, height, None)
+            .expect("the page renders");
+        let applied = document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::one(DocumentCommand::Annotation(AnnotationCommand::Create(
+                    AnnotationDraft::Stamp(StampDraft {
+                        page: PageIndex(0),
+                        rect: PageRect::new(72.0, 72.0, 120.0, 120.0),
+                        mark,
+                        style: MarkStyle::default(),
+                        source: None,
+                    }),
+                ))),
+            )
+            .expect("the mark commits");
+        let id = created_id(&applied);
+        let summary = document.annotation(&id).unwrap();
+        assert!(
+            summary.stamp.is_some(),
+            "the file did not record which mark this stamp shows"
+        );
+        let shifted = summary
+            .to_draft()
+            .expect("a mark pulpit drew is one it can describe")
+            .translated(0.0, 200.0)
+            .expect("a stamp moves");
+        document
+            .apply(
+                DocumentRevision(1),
+                DocumentTransaction::one(DocumentCommand::Annotation(AnnotationCommand::Replace {
+                    id: id.clone(),
+                    replacement: shifted,
+                })),
+            )
+            .expect("the move commits");
+        assert!(
+            (document.annotation(&id).unwrap().bounds.top - 272.0).abs() < 1.0,
+            "the mark did not move"
+        );
+        let after = document
+            .render_page(PageIndex(0), region, width, height, None)
+            .expect("the page renders again");
+        assert_ne!(
+            after, blank,
+            "the mark vanished when it was moved: its appearance was cleared \
+             by the edit and nothing drew it again"
+        );
+        moved.push(after);
+    }
+
+    // Two marks, one journey, identical geometry: whatever the drag did to
+    // the rectangle it did to both. If the pictures are the same afterwards,
+    // both were redrawn as the same guess and the cross is gone.
+    assert_ne!(
+        moved[0], moved[1],
+        "a cross and a check are the same picture after a move — the stamp \
+         was redrawn from a guess rather than from what the file records"
+    );
+}
+
+/// The other half of the same rule: what pulpit did not draw, it does not
+/// offer to rewrite.
+///
+/// A rasterised Typst mark is a picture in a `/Stamp` with no `/Name` of
+/// pulpit's, and there is nothing in the file to draw it again from. Saying
+/// it could be moved would be saying it could be made to vanish.
+#[test]
+fn a_stamp_pulpit_did_not_draw_is_not_offered_for_rewriting() {
+    use pulpit_core::annotate::{StampDraft, StampMark};
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("stamp-picture");
+    let path = source(&directory);
+    let mut document = open(backend, &path);
+
+    let applied = document
+        .apply(
+            DocumentRevision::INITIAL,
+            DocumentTransaction::one(DocumentCommand::Annotation(AnnotationCommand::Create(
+                AnnotationDraft::Stamp(StampDraft {
+                    page: PageIndex(0),
+                    rect: PageRect::new(72.0, 72.0, 136.0, 136.0),
+                    // Four pixels of picture, which is all it takes to be one.
+                    mark: StampMark::Image {
+                        pixel_width: 2,
+                        pixel_height: 2,
+                        rgba: vec![255; 16],
+                    },
+                    style: MarkStyle::default(),
+                    source: Some("$x^2$".into()),
+                }),
+            ))),
+        )
+        .expect("the picture commits");
+    let summary = document.annotation(&created_id(&applied)).unwrap();
+    assert!(summary.editable(), "it is still pulpit's to delete");
+    assert!(
+        summary.stamp.is_none(),
+        "a picture is not one of the two marks the palette places"
+    );
+    assert!(
+        summary.to_draft().is_none(),
+        "a picture pulpit cannot draw again must not be described as one it can"
+    );
+    // …and the source is still there to reopen, which is the edit that *is*
+    // offered for it: rewriting the markup re-renders the picture (§7.4).
+    assert_eq!(summary.contents.pulpit_source.as_deref(), Some("$x^2$"));
+}
+
+/// A5: pulpit does not rewrite what it does not model. A `/Square` another
+/// producer wrote is editable — its rectangle is the whole of its geometry —
+/// but its description is its own, and moving it is not a comment on it.
+#[test]
+fn moving_a_foreign_square_leaves_its_own_comment_alone() {
+    use pulpit_core::annotate::{ShapeDraft, ShapeOutline};
+
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let directory = temp_dir("foreign-square");
+    let path = source(&directory);
+    let destination = directory.join("foreign.pdf");
+
+    // Stand in for the other reader, the way the note test does: a square
+    // pulpit made, stripped of the one key pulpit uses to recognise its own
+    // work — and given the sort of comment a reviewer leaves on one.
+    {
+        let mut document = open(backend, &path);
+        let applied = document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::one(DocumentCommand::Annotation(AnnotationCommand::Create(
+                    AnnotationDraft::Shape(ShapeDraft {
+                        page: PageIndex(0),
+                        outline: ShapeOutline::Box,
+                        rect: PageRect::new(72.0, 72.0, 272.0, 172.0),
+                        style: MarkStyle::default(),
+                    }),
+                ))),
+            )
+            .expect("the box commits");
+        let _ = created_id(&applied);
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .expect("Save As writes the file");
+    }
+    let stripped = String::from_utf8_lossy(&std::fs::read(&destination).unwrap())
+        .replace("/NM", "/XX")
+        .replace("Rectangle", "see revised figure")
+        .into_bytes();
+    std::fs::write(&destination, stripped).unwrap();
+
+    let reopened = PdfiumDocument::open(backend, &destination).unwrap();
+    let mut document = PdfDocument::new(Box::new(reopened), 13);
+    let region = pulpit_core::notes::Region::FULL;
+    let (width, height) = (306u32, 396u32);
+    let square = document
+        .annotations(PageIndex(0))
+        .unwrap()
+        .into_iter()
+        .find(|summary| summary.kind == pulpit_core::annotate::AnnotationKind::Square)
+        .expect("the other reader's square is there");
+    let id = square.id.clone();
+    assert!(
+        !id.looks_generated(),
+        "the stand-in still looks like pulpit's own work"
+    );
+    assert_eq!(square.contents.text, "see revised figure");
+    let before = document
+        .render_page(PageIndex(0), region, width, height, None)
+        .expect("the page renders");
+
+    let moved = square
+        .to_draft()
+        .expect("a square is modelled")
+        .translated(10.0, 10.0)
+        .expect("a square moves");
+    document
+        .apply(
+            document.revision(),
+            DocumentTransaction::one(DocumentCommand::Annotation(AnnotationCommand::Replace {
+                id: id.clone(),
+                replacement: moved,
+            })),
+        )
+        .expect("the move commits");
+    let after = document.annotation(&id).unwrap();
+    assert_eq!(
+        after.contents.text, "see revised figure",
+        "moving a mark rewrote what it says"
+    );
+    assert!((after.bounds.left - 82.0).abs() < 1.0, "{:?}", after.bounds);
+    // …and it is still on the page: pulpit did not redraw it, and a square is
+    // a subtype the engine draws from its own dictionary.
+    let drawn = document
+        .render_page(PageIndex(0), region, width, height, None)
+        .expect("the page renders again");
+    assert_ne!(drawn, before, "the mark did not move on the page");
+    let blank_page = document
+        .render_page(PageIndex(2), region, width, height, None)
+        .expect("an unmarked page renders");
+    assert_ne!(
+        drawn, blank_page,
+        "the mark vanished when it was moved: nothing drew it again"
+    );
 }
 
 /// §9.4: a partial repaint is a *crop* of the full render, not a second way of

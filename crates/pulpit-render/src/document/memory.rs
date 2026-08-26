@@ -266,6 +266,22 @@ impl MemoryDocument {
             path,
             quads,
             geometry_elided: false,
+            // This document keeps the draft itself, so a stamp's mark is
+            // never lost the way it is in a file — but the summary is a view
+            // of what a *file* would say, and a file says only what its
+            // `/Name` says.
+            stamp: match draft {
+                AnnotationDraft::Stamp(stamp) => match stamp.mark {
+                    pulpit_core::annotate::StampMark::Check => {
+                        Some(pulpit_core::annotation::StampChoice::Check)
+                    }
+                    pulpit_core::annotate::StampMark::Cross => {
+                        Some(pulpit_core::annotation::StampChoice::Cross)
+                    }
+                    pulpit_core::annotate::StampMark::Image { .. } => None,
+                },
+                _ => None,
+            },
         }
     }
 

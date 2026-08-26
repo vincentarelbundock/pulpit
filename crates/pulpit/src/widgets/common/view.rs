@@ -20,6 +20,24 @@ pub fn markup_kind_glyph(kind: pulpit_core::annotation::MarkupKind) -> theme::Ic
     }
 }
 
+pub fn shape_kind_glyph(kind: pulpit_core::annotation::ShapeKind) -> theme::Icon {
+    match kind {
+        pulpit_core::annotation::ShapeKind::Rectangle => theme::Icon::Rectangle,
+        pulpit_core::annotation::ShapeKind::Ellipse => theme::Icon::Ellipse,
+        pulpit_core::annotation::ShapeKind::Line => theme::Icon::Line,
+        pulpit_core::annotation::ShapeKind::Arrow => theme::Icon::Arrow,
+    }
+}
+
+pub fn stamp_mark_glyph(mark: pulpit_core::annotation::StampChoice) -> theme::Icon {
+    match mark {
+        pulpit_core::annotation::StampChoice::Check => theme::Icon::Check,
+        // The dismiss glyph, which is the cross this application already
+        // draws: two marks that look different would read as two marks.
+        pulpit_core::annotation::StampChoice::Cross => theme::Icon::Close,
+    }
+}
+
 pub fn select_kind_glyph(kind: pulpit_core::annotation::SelectKind) -> theme::Icon {
     match kind {
         pulpit_core::annotation::SelectKind::Marks => theme::Icon::Lasso,
