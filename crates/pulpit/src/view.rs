@@ -9,8 +9,8 @@
 //! the editor is exactly what appears here.
 
 use iced::widget::{
-    button, canvas, checkbox, column, container, image, mouse_area, opaque, pick_list, responsive,
-    row, scrollable, space, stack, text, text_input, tooltip, Column, Row,
+    button, canvas, checkbox, column, container, image, mouse_area, opaque, pick_list, radio,
+    responsive, row, scrollable, space, stack, text, text_input, tooltip, Column, Row,
 };
 use iced::{window, Alignment, Color, ContentFit, Element, Length};
 
@@ -2018,24 +2018,24 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     // Blanking. One key does it, so the only thing left to say is which
     // colour, and that is a property of the room rather than the deck: black
     // vanishes in a dark hall, white reads as deliberate under bright house
-    // lights. Two colours is one binary choice, so it is a tick box.
-    let blanks_white = app.settings.display.blank_color == crate::settings::BlankColor::White;
+    // lights. Two colours is one exclusive choice, so it is a radio group.
+    let blank_color = app.settings.display.blank_color;
+    let mut colours = Row::new().spacing(gap::M);
+    for (colour, label) in [
+        (crate::settings::BlankColor::Black, "Black"),
+        (crate::settings::BlankColor::White, "White"),
+    ] {
+        colours = colours.push(
+            radio(label, colour, Some(blank_color), Message::SetBlankColor)
+                .size(type_scale::BODY)
+                .text_size(type_scale::BODY),
+        );
+    }
     body = body.push(section(
         "Blank screen",
         column![
-            checkbox(blanks_white)
-                .label("Blank to white instead of black")
-                .size(type_scale::BODY)
-                .text_size(type_scale::BODY)
-                .on_toggle(|white| Message::SetBlankColor(if white {
-                    crate::settings::BlankColor::White
-                } else {
-                    crate::settings::BlankColor::Black
-                })),
-            theme::typography::caption(
-                "What the blank key turns the audience screen into. \
-                 The same key brings the deck back."
-            ),
+            colours,
+            theme::typography::caption("What the blank key turns the audience screen into."),
         ]
         .spacing(gap::S)
         .into(),
