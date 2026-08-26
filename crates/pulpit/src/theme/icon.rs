@@ -216,7 +216,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 49] = [
+    const ALL: [Icon; 53] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -243,6 +243,10 @@ impl Icon {
         Icon::Printer,
         Icon::StickyNote,
         Icon::Stamp,
+        Icon::Rectangle,
+        Icon::Ellipse,
+        Icon::Line,
+        Icon::Arrow,
         Icon::Select,
         Icon::ZoomIn,
         Icon::ZoomOut,
@@ -267,6 +271,14 @@ impl Icon {
         Icon::Pause,
         Icon::Reset,
     ];
+
+    /// Every variant is in `ALL`, at the slot its own discriminant names.
+    ///
+    /// `ALL` is what the handle cache is indexed by, so a variant added to
+    /// the enum and not to the list is a panic the first time something
+    /// draws it — which is how the shape tools shipped once. `Reset` is the
+    /// last variant; keep it that way, or move this anchor with it.
+    const _COMPLETE: () = assert!(Icon::ALL.len() == Icon::Reset as usize + 1);
 
     /// The handle for this icon, built once per process.
     ///
