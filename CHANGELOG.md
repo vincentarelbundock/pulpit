@@ -13,13 +13,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   That refusal stays — a script asking is not the reader asking — and beside
   it there is now a print path.
 
-  The dialog asks the two questions only pulpit can answer: which pages — all
-  of them, the one you are looking at, or a typed range like `1-3, 7` — and
-  whether the paper carries what you have done to the document or what is
-  saved on disk. Everything else a print dialog usually asks about, paper
-  sizes and duplex and trays and colour, belongs to your system's print
-  machinery, so pulpit hands the file over rather than answering it a second
-  time badly.
+  Where your desktop has a print dialog of its own, that is the dialog you
+  get — the same one every other application on the machine opens, with your
+  printers, page ranges, copies, duplex, paper sizes and trays in it. Pulpit
+  asks one question first, because no system dialog can ask it: whether the
+  paper carries what you have done to the document, or what is saved on disk.
+  Then it hands the file over and your desktop takes it from there. On Linux
+  that dialog is the desktop portal's; on macOS it is the standard print
+  panel, with a preview of the pages in it.
+
+  Where there is no system print dialog, pulpit asks the questions your
+  spooler will actually honour — which pages, how many copies, which
+  printer — because otherwise nobody asks and you find out at the printer.
+  Windows is that case today: its shell print verb takes a file and nothing
+  else, so a page range or a second copy is refused there by name rather than
+  printing the whole document and letting you discover it on paper.
 
   Printing "with my marks and entries" prints what is on the screen, not what
   was last saved: the annotations you have drawn and the form fields as you
@@ -35,11 +43,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it would be a pretence.
 
   Printing is a capability, not an assumption. A session with no spooler says
-  so plainly instead of appearing to print into nothing. Linux and macOS go
-  through CUPS, which takes the page range, the copy count and the printer.
-  Windows hands the file to the shell's print verb, which takes none of
-  those — so a page range or a second copy is refused there by name rather
-  than printing the whole document and letting you find out at the printer.
+  so plainly instead of appearing to print into nothing. On Linux, waiting at
+  a print dialog no longer stops the rest of pulpit: the job goes out on its
+  own thread, so both windows keep drawing while you choose a printer. On
+  macOS the panel is modal, as AppKit requires, and the audience window holds
+  the frame it had until you are done with it. Cancelling a print dialog says
+  nothing at all, because cancelling is a decision rather than a fault.
 
 - **DjVu books open.** `.djvu` and `.djv` are read the way a PDF is: pages
   turn, render, zoom and fit, the overview grid is a contact sheet of the

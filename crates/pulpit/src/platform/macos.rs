@@ -203,12 +203,18 @@ impl PlatformServices for MacosServices {
             media_keys: true,
             notifications: true,
             image_clipboard: true,
-            // macOS's print system is CUPS, and `lp` ships with it. Asked of
-            // the path all the same, so a stripped environment answers for
-            // itself rather than being answered for by the operating system.
-            printing: crate::platform::cups::available(),
-            // CUPS takes a page range, a copy count and a named queue.
-            print_options: true,
+            // As on Linux: either way of reaching a printer counts, and a
+            // build with Quartz but no `lp` still prints through the panel.
+            printing: crate::platform::cups::available()
+                || crate::platform::appkit_print::available(),
+            // CUPS takes a page range, a copy count and a named queue, and is
+            // asked for them only where the panel is not there to ask.
+            print_options: crate::platform::cups::available(),
+            // PDFKit draws the pages into an `NSPrintOperation`, so the
+            // panel's paper, duplex, range and copies are applied by Apple's
+            // code to Apple's rendering rather than translated by ours. `lp`
+            // stays underneath for a build that did not link Quartz.
+            system_print_dialog: crate::platform::appkit_print::available(),
         }
     }
 
@@ -287,6 +293,15 @@ impl PlatformServices for MacosServices {
 
     fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
         crate::platform::cups::print(job)
+    }
+
+    fn print_with_dialog(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        crate::platform::appkit_print::print_with_dialog(job)
+    }
+
+    /// AppKit runs its print panel on the main thread and nowhere else.
+    fn print_dialog_wants_main_thread(&self) -> bool {
+        true
     }
 
     fn inhibit(&self) -> InhibitState {

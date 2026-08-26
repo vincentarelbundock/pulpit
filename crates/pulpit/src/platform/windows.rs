@@ -180,6 +180,13 @@ impl PlatformServices for WindowsServices {
             // decision rather than a runtime one.
             notifications: false,
             image_clipboard: true,
+            // Windows has no "show the print dialog for this file" call:
+            // the shell verb takes no options and shows nothing, and the
+            // dialog `PrintDlgEx` puts up hands back a device context for
+            // the application to draw every page onto. Drawing pages is the
+            // job `crate::printing` says pulpit does not take on, so this
+            // platform has no system print dialog until it does.
+            system_print_dialog: false,
             // The shell's `print` verb hands a PDF to whatever is registered
             // for it. Every Windows install has *something*; whether that
             // something can print is between it and the machine, and the

@@ -1,10 +1,12 @@
 //! What to print, and what the print should contain.
 //!
-//! This module is the part of printing that has no desktop in it: which pages
-//! the reader asked for, whether the paper should carry the marks they have
-//! made, what the document's own permission bits say about any of it, and the
-//! name of the temporary copy a marked-up print is spooled from. The platform
-//! half — the spooler, the printers, the drivers — is
+//! This module is the part of printing that has no desktop in it: whether the
+//! paper should carry the marks the reader has made, which pages they asked
+//! for where nobody else will ask, what the document's own permission bits
+//! say about any of it, and the name of the temporary copy a marked-up print
+//! is spooled from. The platform half — the dialog, the spooler, the printers,
+//! the drivers — is
+//! [`crate::platform::services::PlatformServices::print_with_dialog`] and
 //! [`crate::platform::services::PlatformServices::print`].
 //!
 //! ## Why pulpit hands a file over rather than rasterising pages itself
@@ -14,9 +16,26 @@
 //! job to take on: duplex, paper sizes, tray selection, margins, colour
 //! management and the dialog that lets someone choose between them are the
 //! platform's, and are not improved by being written a second time here. So
-//! pulpit decides only the two things nobody else can — which pages, and
-//! whether the reader's marks are on them — writes a PDF that says exactly
+//! pulpit decides only what nobody else can, writes a PDF that says exactly
 //! that, and hands it over.
+//!
+//! ## Who asks the reader what
+//!
+//! "Only what nobody else can" is a smaller set on some sessions than on
+//! others, and [`PrintDialog::asks_particulars`] is which. Where the desktop
+//! has a print dialog of its own, it is about to ask which pages, how many
+//! copies and which printer — better than this dialog would, and with duplex
+//! and paper beside them — so this dialog asks none of the three and its plan
+//! carries none of them. What is left is the marks question, which is here
+//! because no system print dialog can ask it: the marks are not in the file
+//! yet, and a system dialog is being handed a file.
+//!
+//! Where there is no system dialog, this one asks whatever the spooler will
+//! honour, because otherwise nobody asks and the reader finds out at the
+//! printer.
+//!
+//! Both must never ask. A reader who types a range here and then meets a
+//! system dialog set to "all pages" has been overruled without being told.
 //!
 //! ## Why the marked-up print is a separate file
 //!
@@ -286,6 +305,16 @@ pub struct PrintDialog {
     pub permission: Option<Permission>,
     /// Set when the reader has answered a withheld permission.
     pub permission_answered: bool,
+    /// Whether *this* dialog asks which pages, how many copies and which
+    /// queue.
+    ///
+    /// False where the desktop has a print dialog of its own: it is about to
+    /// ask all three, and better, and asking them twice would mean a reader
+    /// setting a page range here and then finding the system dialog set back
+    /// to every page. What is left is the marks question, which no system
+    /// dialog can ask because no system dialog knows the reader has drawn on
+    /// anything.
+    pub asks_particulars: bool,
 }
 
 /// The largest number of copies the dialog will take. Not a printer limit —
@@ -293,7 +322,7 @@ pub struct PrintDialog {
 pub const MAX_COPIES: u16 = 99;
 
 impl PrintDialog {
-    pub fn open(destinations: Vec<String>, has_edits: bool) -> PrintDialog {
+    pub fn open(destinations: Vec<String>, has_edits: bool, asks_particulars: bool) -> PrintDialog {
         PrintDialog {
             choice: PageChoice::All,
             custom: String::new(),
@@ -309,6 +338,7 @@ impl PrintDialog {
             destinations,
             permission: None,
             permission_answered: false,
+            asks_particulars,
         }
     }
 
@@ -344,6 +374,12 @@ impl PrintDialog {
         current: Option<PageIndex>,
         page_count: usize,
     ) -> Result<Pages, PageListError> {
+        // The system dialog is about to ask; whatever this dialog is
+        // carrying in its range box is not what the reader will be shown,
+        // and must not become what is printed.
+        if !self.asks_particulars {
+            return Ok(Pages::everything());
+        }
         match self.choice {
             PageChoice::All => Ok(Pages::everything()),
             // No current page is every page, not none: the reader asked for
@@ -370,14 +406,30 @@ impl PrintDialog {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "Document".to_string()),
             pages: self.pages(current, page_count)?,
-            copies: self.copies,
-            destination: self.destination.clone(),
+            // Both the system dialog's to ask for, and neither of them
+            // pulpit's to send alongside a job it is about to be asked
+            // about again.
+            copies: if self.asks_particulars {
+                self.copies
+            } else {
+                1
+            },
+            destination: if self.asks_particulars {
+                self.destination.clone()
+            } else {
+                None
+            },
             needs_a_copy: self.marks == Marks::AsMarkedUp,
         })
     }
 
     /// What the dialog says under the buttons: the paper this will use.
     pub fn summary(&self, current: Option<PageIndex>, page_count: usize) -> String {
+        // A sheet count would be a promise about paper this dialog has not
+        // been told anything about. The system dialog counts its own.
+        if !self.asks_particulars {
+            return String::new();
+        }
         let Ok(pages) = self.pages(current, page_count) else {
             return String::new();
         };
@@ -414,6 +466,89 @@ mod tests {
     /// asserting on what actually reaches the spooler.
     fn cups(pages: &Pages) -> Option<String> {
         crate::platform::services::cups_range(pages.ranges())
+    }
+
+    /// The reason `asks_particulars` exists: whatever a reader typed into a
+    /// range box before the session grew a system dialog must not become the
+    /// pages that print. The system dialog is about to ask, and its answer is
+    /// the only one.
+    #[test]
+    fn a_dialog_the_system_will_ask_for_sends_the_whole_document() {
+        let mut dialog = PrintDialog::open(Vec::new(), true, false);
+        dialog.choice = PageChoice::Custom;
+        dialog.custom = "2-4".into();
+        dialog.copies = 7;
+        dialog.destination = Some("office".into());
+
+        let pages = dialog.pages(None, 10).expect("every page");
+        assert!(pages.is_everything());
+
+        let plan = dialog
+            .plan(std::path::Path::new("/tmp/Lease.pdf"), None, 10)
+            .expect("a plan");
+        assert!(plan.pages.is_everything());
+        // Not seven, and not "office": the system dialog asks for both, and a
+        // job carrying pulpit's answers alongside would be pulpit voting
+        // twice.
+        assert_eq!(plan.copies, 1);
+        assert_eq!(plan.destination, None);
+        // The one question that is still pulpit's, and it survives.
+        assert!(plan.needs_a_copy);
+        assert_eq!(plan.title, "Lease.pdf");
+    }
+
+    /// The same dialog where pulpit does the asking, so the two paths are
+    /// pinned against each other rather than one of them alone.
+    #[test]
+    fn a_dialog_pulpit_asks_for_sends_what_the_reader_typed() {
+        let mut dialog = PrintDialog::open(vec!["office".into()], true, true);
+        dialog.choice = PageChoice::Custom;
+        dialog.custom = "2-4".into();
+        dialog.copies = 7;
+        dialog.destination = Some("office".into());
+
+        let plan = dialog
+            .plan(std::path::Path::new("/tmp/Lease.pdf"), None, 10)
+            .expect("a plan");
+        assert_eq!(cups(&plan.pages).as_deref(), Some("2-4"));
+        assert_eq!(plan.copies, 7);
+        assert_eq!(plan.destination.as_deref(), Some("office"));
+    }
+
+    /// A half-typed range is not something to refuse a print over when the
+    /// range box is not the one being read.
+    #[test]
+    fn a_bad_range_cannot_block_a_print_nobody_asked_a_range_for() {
+        let mut dialog = PrintDialog::open(Vec::new(), false, false);
+        dialog.choice = PageChoice::Custom;
+        dialog.custom = "not a page".into();
+        assert_eq!(dialog.blocked(None, 10), None);
+        // …and the same text does block the print where the box is read.
+        let mut asking = dialog.clone();
+        asking.asks_particulars = true;
+        assert!(asking.blocked(None, 10).is_some());
+    }
+
+    /// The sheet count is a promise about paper. Where the system dialog
+    /// picks the pages, pulpit has no business making one.
+    #[test]
+    fn no_sheet_count_is_promised_for_pages_pulpit_has_not_been_told() {
+        let system = PrintDialog::open(Vec::new(), false, false);
+        assert_eq!(system.summary(None, 12), "");
+        let asking = PrintDialog::open(Vec::new(), false, true);
+        assert_eq!(asking.summary(None, 12), "12 sides");
+    }
+
+    /// The permission the *document* asks for is answered by the reader in
+    /// pulpit's dialog either way: no system print dialog knows a PDF has
+    /// permission bits, so this is not a question that can be handed on.
+    #[test]
+    fn a_withheld_permission_still_blocks_a_system_dialog_print() {
+        let mut dialog = PrintDialog::open(Vec::new(), false, false);
+        dialog.permission = Some(Permission::Withheld);
+        assert!(dialog.blocked(None, 10).is_some());
+        dialog.permission_answered = true;
+        assert_eq!(dialog.blocked(None, 10), None);
     }
 
     #[test]
@@ -487,7 +622,7 @@ mod tests {
 
     #[test]
     fn the_current_page_is_resolved_when_the_print_is_made() {
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         dialog.choice = PageChoice::Current;
         let pages = dialog.pages(Some(PageIndex(6)), 20).expect("one page");
         // One-based on the paper, zero-based in the document.
@@ -501,15 +636,21 @@ mod tests {
     fn a_document_with_nothing_written_on_it_prints_the_file_on_disk() {
         // Spooling a copy of a document nobody has touched is a write for
         // nothing, so the default follows whether there is anything to carry.
-        assert_eq!(PrintDialog::open(Vec::new(), false).marks, Marks::AsOnDisk);
-        assert_eq!(PrintDialog::open(Vec::new(), true).marks, Marks::AsMarkedUp);
+        assert_eq!(
+            PrintDialog::open(Vec::new(), false, true).marks,
+            Marks::AsOnDisk
+        );
+        assert_eq!(
+            PrintDialog::open(Vec::new(), true, true).marks,
+            Marks::AsMarkedUp
+        );
     }
 
     #[test]
     fn a_withheld_permission_has_to_be_answered_before_the_button_works() {
         let mut permissions = pulpit_render::document::DocumentPermissions::UNRESTRICTED;
         permissions.print = false;
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         dialog.permission = Some(Permission::read(&permissions));
         assert_eq!(dialog.permission, Some(Permission::Withheld));
         assert!(dialog.blocked(None, 10).is_some());
@@ -536,7 +677,7 @@ mod tests {
 
     #[test]
     fn a_bad_range_blocks_the_button_and_says_why() {
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         dialog.choice = PageChoice::Custom;
         dialog.custom = "40".into();
         let blocked = dialog.blocked(None, 10).expect("a reason");
@@ -549,7 +690,7 @@ mod tests {
 
     #[test]
     fn a_typo_in_the_copy_count_cannot_become_a_ream() {
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         dialog.set_copies("3");
         assert_eq!(dialog.copies, 3);
         dialog.set_copies("100000");
@@ -562,7 +703,7 @@ mod tests {
 
     #[test]
     fn the_summary_counts_the_paper_this_will_use() {
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         assert_eq!(dialog.summary(None, 12), "12 sides");
         dialog.copies = 2;
         assert_eq!(dialog.summary(None, 12), "24 sides");
@@ -574,7 +715,7 @@ mod tests {
     #[test]
     fn the_plan_names_the_document_and_not_the_scratch_copy() {
         let source = Path::new("/home/reader/Lease agreement.pdf");
-        let mut dialog = PrintDialog::open(vec!["office".into()], true);
+        let mut dialog = PrintDialog::open(vec!["office".into()], true, true);
         dialog.destination = Some("office".into());
         dialog.copies = 3;
         dialog.choice = PageChoice::Custom;
@@ -598,7 +739,7 @@ mod tests {
     fn a_plan_from_a_bad_range_is_an_error_rather_than_a_whole_document() {
         // The failure mode this guards is the expensive one: a range that
         // could not be read becoming "print everything".
-        let mut dialog = PrintDialog::open(Vec::new(), false);
+        let mut dialog = PrintDialog::open(Vec::new(), false, true);
         dialog.choice = PageChoice::Custom;
         dialog.custom = "seven".into();
         assert!(dialog.plan(Path::new("/tmp/a.pdf"), None, 10).is_err());

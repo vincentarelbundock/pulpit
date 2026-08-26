@@ -1,6 +1,6 @@
 //! The capability snapshot.
 //!
-//! Views ask this, never `cfg!(target_os = …)`. It is immutable: when the
+//! Views ask this, never `cfg!(target_os = â¦)`. It is immutable: when the
 //! session changes, a *new* snapshot is taken, exactly as with display
 //! topology, so nothing can hold a stale belief about what is possible.
 
@@ -34,7 +34,7 @@ impl IdentityQuality {
 ///
 /// Iced 0.14 has no AccessKit integration and exposes no accessibility tree,
 /// so no label, role or description pulpit writes reaches assistive technology
-/// — on any platform, under any desktop, however well equipped the session is.
+/// â on any platform, under any desktop, however well equipped the session is.
 /// Every adapter's `accessibility_bridge` is therefore gated on this, and the
 /// gate is what keeps a platform that *can* detect a session bus from
 /// reporting one pulpit cannot put anything on.
@@ -47,7 +47,7 @@ pub const TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE: bool = false;
 /// What the running desktop can actually do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
-    /// Session/window backend, for diagnostics: `x11`, `wayland`, `win32`, …
+    /// Session/window backend, for diagnostics: `x11`, `wayland`, `win32`, â¦
     pub backend: String,
     pub identity: IdentityQuality,
     /// Position a window at chosen coordinates.
@@ -73,7 +73,7 @@ pub struct Capabilities {
     /// from here, and reporting that as a bridge would tell a screen-reader
     /// user the one thing they most need to be told the truth about. Both
     /// halves have to hold: the session must offer a bridge *and* the toolkit
-    /// must publish a tree to put on it — see
+    /// must publish a tree to put on it â see
     /// [`TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE`].
     pub accessibility_bridge: bool,
     /// Media and presenter-remote keys reach the application.
@@ -91,12 +91,27 @@ pub struct Capabilities {
     /// which queue.
     ///
     /// One flag for all three because they arrive together. A spooler either
-    /// takes a job description — CUPS does — or it is a shell verb that
+    /// takes a job description â CUPS does â or it is a shell verb that
     /// prints a file to the default printer and takes nothing else, in which
     /// case none of the three can be honoured and the dialog must not offer
     /// them. False here never means "printing does not work"; that is
     /// [`Capabilities::printing`].
     pub print_options: bool,
+    /// The platform puts *its own* print dialog up, and asks the reader
+    /// which pages, which printer, how many copies, duplex, paper and the
+    /// rest of it.
+    ///
+    /// When this is true pulpit asks none of those: the system dialog is the
+    /// dialog, and pulpit's own asks only what no system dialog can know —
+    /// whether the paper carries the reader's marks. When it is false pulpit
+    /// asks the ones its spooler can honour, which is what
+    /// [`Capabilities::print_options`] governs.
+    ///
+    /// A separate flag rather than a stronger `print_options` because the two
+    /// are independent: a session can have a spooler that takes a page range
+    /// and no dialog to ask for one — CUPS with no portal is exactly that —
+    /// and which of them is true decides who does the asking.
+    pub system_print_dialog: bool,
     /// An image can be put on the system clipboard.
     ///
     /// Separate from "there is a clipboard": every session pulpit runs in
@@ -127,6 +142,7 @@ impl Default for Capabilities {
             // and a desktop that has not been taught to print says so.
             printing: false,
             print_options: false,
+            system_print_dialog: false,
             // Nothing to put a clipboard on: the null adapter must never
             // touch the real one.
             image_clipboard: false,
@@ -150,32 +166,37 @@ impl Capabilities {
             flag(
                 self.arbitrary_placement,
                 "window placement: yes",
-                "window placement: NO — manual placement may be required",
+                "window placement: NO â manual placement may be required",
             ),
             flag(
                 self.safe_unfullscreen,
                 "leaving fullscreen: safe",
-                "leaving fullscreen: unsafe — windows are left as they are",
+                "leaving fullscreen: unsafe â windows are left as they are",
             ),
             flag(
                 self.system_appearance,
                 "system appearance: detected",
-                "system appearance: not detectable — using the dark palette",
+                "system appearance: not detectable â using the dark palette",
             ),
             flag(
                 self.sleep_inhibition,
                 "sleep inhibition: available",
-                "sleep inhibition: NOT available — the screen may blank",
+                "sleep inhibition: NOT available â the screen may blank",
             ),
             flag(
                 self.native_dialogs,
                 "file dialogs: native",
-                "file dialogs: none — open files from the command line",
+                "file dialogs: none â open files from the command line",
             ),
             flag(
                 self.printing,
                 "printing: available",
-                "printing: NOT available — no spooler answered",
+                "printing: NOT available â no spooler answered",
+            ),
+            flag(
+                self.system_print_dialog,
+                "print dialog: the system's own",
+                "print dialog: pulpit's — no system print dialog answered",
             ),
             flag(
                 self.accessibility_bridge,
@@ -230,6 +251,7 @@ mod tests {
         let full = Capabilities {
             printing: true,
             print_options: true,
+            system_print_dialog: true,
             arbitrary_placement: true,
             system_appearance: true,
             sleep_inhibition: true,

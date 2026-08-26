@@ -914,7 +914,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard, sending a document to a printer],
+  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard, sending a document to a printer, or to the platform's own print dialog],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -1018,10 +1018,13 @@ printer was available. It is the wrong half of the job to take. Duplex, paper
 sizes, trays, margins and colour management belong to the platform's own print
 system, along with the dialog that lets someone choose between them, and none
 of them are improved by being written a second time here. So pulpit answers
-only the two questions nobody else can — which pages, and whether the reader's
-own marks and form entries are on them — writes a PDF that says exactly that,
-and hands the file over. `crates/pulpit/src/printing.rs` is that decision; the
-spooler is `PlatformServices::print`.
+only what nobody else can — whether the reader's own marks and form entries
+are on the paper, and, where the session has no print dialog of its own, which
+pages — writes a PDF that says exactly that, and hands the file over.
+`crates/pulpit/src/printing.rs` is that decision; the dialog is
+`PlatformServices::print_with_dialog` and the bare spooler behind it is
+`PlatformServices::print`.
+
 
 Printing "as I have marked it up" means the annotations and the field values
 as they are *on screen*, which is not what is on disk until a Save As has been
@@ -1033,29 +1036,92 @@ new bytes, a new file, and a name (`printing::spool_name`) that says what it
 is. The print queue still shows the *document's* name, because a reader
 looking at their queue should not have to recognise "(to print 4213)".
 
-Two capabilities rather than one. `printing` is whether there is anything here
-to hand a file to at all. `print_options` is whether the spooler takes the
-job's particulars — a page range, a copy count, a named queue — because CUPS
-does and a shell `print` verb does not, and a dialog offering a page range
-that cannot be honoured is worse than one that says it cannot. Where a job
-names something its spooler cannot do, the adapter answers `Unsupported`
-rather than printing the document whole: forty pages when four were asked for
-is not a partial success, and the reader finds out at the printer.
+Three capabilities rather than one. `printing` is whether there is anything
+here to hand a file to at all â a spooler or a system dialog, since a
+sandboxed session can have the portal and no `lp` and prints perfectly well. `system_print_dialog` is whether the desktop
+puts up a print dialog of its own. `print_options` is whether the spooler
+takes the job's particulars — a page range, a copy count, a named queue —
+because CUPS does and a shell `print` verb does not. Which of the three are
+set decides who asks the reader what, and the views ask the capability rather
+than the operating system:
+
+- With a system dialog, pulpit's own is down to one question — the marks —
+  and everything else is asked next, properly, by the desktop. The Print
+  button says `Print…` because there is more to answer.
+- With a spooler and no dialog, pulpit asks the particulars its spooler will
+  honour, because otherwise nobody asks.
+- With neither, the dialog says so rather than offering controls that do
+  nothing. Where a job names something its spooler cannot do, the adapter
+  answers `Unsupported` rather than printing the document whole: forty pages
+  when four were asked for is not a partial success, and the reader finds out
+  at the printer.
+
+The two must not both ask. A range typed into pulpit's dialog and then a
+system dialog opening at "all pages" is a reader overruled by the application
+without being told, so where `system_print_dialog` is set `PrintDialog`
+carries `asks_particulars: false` and its plan sends no range, no copy count
+and no queue at all.
 
 `crates/pulpit/src/platform/cups.rs` is `lp` and `lpstat`, shared by the Linux
 and macOS adapters because there is nothing platform-specific about printing
 on either. It waits for `lp` to exit rather than spawning it, because the file
-it just handed over may be a scratch copy about to be deleted.
+it just handed over may be a scratch copy about to be deleted. It is now the
+fallback under both system dialogs rather than the only path.
 
-Two things remain. On Linux, `org.freedesktop.portal.Print` is the better
-answer than `lp` and is not what runs yet: it is a two-call handshake —
-`PreparePrint` puts up the system dialog and answers on a `Response` signal,
-then `Print` takes the settings back with a file descriptor — and the Linux
-adapter has no machinery for waiting on a portal response at all, since every
-portal call it makes today is fire-and-forget. On Windows the shell's `print`
-verb takes no range and no copy count, so those are refused there; `PrintDlgEx`
-with a device context, or writing the wanted pages into the spooled copy, is
-what lifts it.
+=== The system dialog on each platform
+
+On Linux it is `org.freedesktop.portal.Print`
+(`platform/portal_print.rs`): a two-call handshake, `PreparePrint` to put the
+dialog up and `Print` to hand over a file descriptor with the token that
+stands for what the reader chose. The request's object path is *derived* from
+the `handle_token` and subscribed to before `PreparePrint` is called, because
+the portal may answer before the call returns and a subscription taken
+afterwards loses that race; the returned path is compared against the derived
+one rather than trusted, since a mismatch would otherwise be a wait that never
+ends. There is no parent window: obtaining one means holding a native handle
+across an event-loop turn, which the second rule forbids, and the
+specification's answer for that case is the empty string.
+
+On macOS it is `NSPrintOperation` (`platform/appkit_print.rs`), reached
+through PDFKit. macOS has no call that shows a print panel for a *file*: the
+panel comes attached to an operation, and an operation asks something to draw
+the pages. `-[PDFDocument printOperationForPrintInfo:scalingMode:autoRotate:]`
+is what makes that something Apple's code rather than ours, so the panel's
+paper, duplex, tray, range and copies are applied by PDFKit to PDFKit's
+rendering and pulpit still contributes only a file and a job name. The
+rejected alternative is worth naming: reading settings back out of an
+`NSPrintInfo` and spooling with `lp` is a third of the code, and every setting
+nobody remembered to translate becomes a control the reader set and the
+printer ignored. A dialog whose choices silently do nothing is worse than no
+dialog.
+
+Windows has no system print dialog here and reports none. Its shell `print`
+verb takes no options and shows nothing; the dialog `PrintDlgEx` puts up hands
+back a device context for the application to draw every page onto, which is
+the half of the job this section exists to refuse. Lifting it means taking
+that half on for one platform, and it has not been taken.
+
+=== Printing leaves the event loop
+
+A modal dialog the reader is looking at is a call that does not return for as
+long as they look at it. Made from the event loop, that would freeze both
+windows â the audience's among them â so `spool` hands the job to a thread and
+takes the answer back as `PrintMsg::Spooled`. `print_in_flight` is what stops
+a second dialog opening behind the first, and it is deliberately *not* cleared
+when the document closes: a job already on a thread is out of reach, and
+pretending otherwise buys a second dialog.
+
+AppKit is the exception and says so through
+`PlatformServices::print_dialog_wants_main_thread`. `runOperation` refuses to
+be driven from anywhere but the main thread, so on macOS the call is made in
+place and pulpit's own drawing stops until the panel closes. AppKit services
+the panel from its own modal run loop, so the panel stays live; what stops is
+pulpit. The audience window keeps the last complete frame it had throughout,
+which is all the third rule asks of it.
+
+A cancelled dialog is `Outcome::Refused`, and nothing is said to the reader
+about it. Reporting a cancel as a failure tells someone their own decision
+went wrong.
 
 The document's own `/P` print bits are reported and never quietly obeyed or
 quietly ignored. They are a request made by whoever produced the file, to a

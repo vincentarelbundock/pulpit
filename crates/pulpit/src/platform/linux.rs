@@ -100,12 +100,22 @@ impl PlatformServices for LinuxServices {
             // Wayland means a connection and a thread for a question nobody
             // has asked yet.
             image_clipboard: self.x11 || self.wayland,
-            // CUPS, asked for by name. A desktop with no `lp` on the path
-            // has no spooler this adapter knows how to reach, and saying so
-            // is what keeps the command disabled rather than silent.
-            printing: crate::platform::cups::available(),
-            // CUPS takes a page range, a copy count and a named queue.
-            print_options: true,
+            // Either way of reaching a printer counts. A sandboxed session
+            // can have the portal and no `lp` on its path at all, and it
+            // prints perfectly well; asking only about `lp` there would grey
+            // out a command that works. What this must not do is say yes
+            // when neither answered.
+            printing: crate::platform::cups::available()
+                || crate::platform::portal_print::available(),
+            // CUPS takes a page range, a copy count and a named queue. It
+            // matters only where there is no portal to ask for them, since
+            // where there is one it does the asking.
+            print_options: crate::platform::cups::available(),
+            // The portal is the desktop's own print dialog, and where it
+            // answers it asks every question pulpit would otherwise ask
+            // badly. `lp` stays underneath it for a session that has CUPS
+            // and no portal.
+            system_print_dialog: crate::platform::portal_print::available(),
         }
     }
 
@@ -229,6 +239,10 @@ impl PlatformServices for LinuxServices {
 
     fn print(&self, job: &crate::platform::services::PrintJob) -> Outcome {
         crate::platform::cups::print(job)
+    }
+
+    fn print_with_dialog(&self, job: &crate::platform::services::PrintJob) -> Outcome {
+        crate::platform::portal_print::print_with_dialog(job)
     }
 
     fn inhibit(&self) -> InhibitState {

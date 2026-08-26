@@ -3111,11 +3111,20 @@ fn form_navigation_dialog(request: &crate::app::FormNavigation) -> Element<'stat
 
 /// What goes on the paper.
 ///
-/// Two questions and nothing else, because everything a print dialog usually
+/// As little as the session allows, because everything a print dialog usually
 /// asks — paper size, duplex, trays, colour — belongs to the platform's own
 /// dialog and its drivers, and pulpit hands the file over rather than
-/// answering them a second time. What is left is what only pulpit knows:
-/// which pages, and whether the reader's own marks and entries are on them.
+/// answering them a second time.
+///
+/// Where the desktop has a print dialog of its own this is down to a single
+/// question: whether the paper carries the reader's marks and form entries.
+/// That one is here because no system dialog can ask it — the marks are not
+/// in the file yet, and the dialog is being handed a file. Everything else
+/// comes next, from the desktop.
+///
+/// Where there is no system dialog, pulpit asks the ones its spooler will
+/// honour, because otherwise nobody asks and the reader finds out at the
+/// printer.
 fn print_dialog(app: &App) -> Element<'_, Message> {
     use crate::printing::{Marks, PageChoice};
     let Some(dialog) = app.print_dialog.as_ref() else {
@@ -3150,31 +3159,33 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
         body = body.push(notice);
     }
 
-    // Which pages. The range box is always there rather than appearing when
-    // "Pages" is chosen: a box that appears under the pointer as it arrives
-    // is a box that gets missed.
-    let mut pages = row![].spacing(gap::S).align_y(Alignment::Center);
-    for choice in [PageChoice::All, PageChoice::Current, PageChoice::Custom] {
-        let chosen = dialog.choice == choice;
+    // Which pages, but only where nothing else is going to ask. The range box
+    // is always there rather than appearing when "Pages" is chosen: a box that
+    // appears under the pointer as it arrives is a box that gets missed.
+    if dialog.asks_particulars {
+        let mut pages = row![].spacing(gap::S).align_y(Alignment::Center);
+        for choice in [PageChoice::All, PageChoice::Current, PageChoice::Custom] {
+            let chosen = dialog.choice == choice;
+            pages = pages.push(
+                button(theme::typography::label(choice.label()))
+                    .padding(gap::S)
+                    .style(if chosen {
+                        theme::ambient::selected_button
+                    } else {
+                        theme::ambient::tool_button
+                    })
+                    .on_press(Message::Print(crate::app::PrintMsg::ChoosePages(choice))),
+            );
+        }
         pages = pages.push(
-            button(theme::typography::label(choice.label()))
+            text_input("1-3, 7", &dialog.custom)
+                .on_input(|value| Message::Print(crate::app::PrintMsg::TypeRange(value)))
+                .style(theme::ambient::text_field)
                 .padding(gap::S)
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                })
-                .on_press(Message::Print(crate::app::PrintMsg::ChoosePages(choice))),
+                .width(Length::Fixed(120.0)),
         );
+        body = body.push(dialog_section("Pages", pages));
     }
-    pages = pages.push(
-        text_input("1-3, 7", &dialog.custom)
-            .on_input(|value| Message::Print(crate::app::PrintMsg::TypeRange(value)))
-            .style(theme::ambient::text_field)
-            .padding(gap::S)
-            .width(Length::Fixed(120.0)),
-    );
-    body = body.push(dialog_section("Pages", pages));
 
     // What is on them.
     let mut marks = row![].spacing(gap::S);
@@ -3201,8 +3212,17 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
         ));
     }
 
-    // Copies and the queue, where the spooler takes them at all.
-    if app.platform.capabilities.print_options {
+    // Copies and the queue. Three ways this can go, and the session decides
+    // which: the desktop's own dialog is about to ask, or pulpit asks because
+    // the spooler will honour the answers, or nobody can ask at all.
+    if !dialog.asks_particulars && app.platform.capabilities.system_print_dialog {
+        // Not silence: a reader who came here for a page range needs to know
+        // where it went, or they will think pulpit lost it.
+        body = body.push(theme::typography::note(
+            "Your printer, which pages, how many copies and the paper come next, in this \
+             desktop's own print dialog.",
+        ));
+    } else if app.platform.capabilities.print_options {
         let mut particulars = row![dialog_section(
             "Copies",
             text_input("1", &dialog.copies.to_string())
@@ -3243,7 +3263,15 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
     }
 
     let blocked = dialog.blocked(current, page_count);
-    let mut print = button(theme::typography::label("Print"))
+    // An ellipsis because there is more to answer: the desktop's dialog
+    // opens next. Without it the button promises paper, and the reader who
+    // gets a second dialog thinks something went wrong.
+    let label = if dialog.asks_particulars {
+        "Print"
+    } else {
+        "Print…"
+    };
+    let mut print = button(theme::typography::label(label))
         .padding(gap::S)
         .style(theme::ambient::alert_button);
     if blocked.is_none() {
