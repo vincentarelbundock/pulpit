@@ -304,6 +304,16 @@ pub enum DocumentRequest {
         page: PageIndex,
         rect: PageRect,
     },
+    /// The whole text layer of one page, for reading it aloud (issue #20).
+    ///
+    /// Distinct from [`DocumentRequest::SelectText`] because speech wants the
+    /// page, not a span the reader pointed at, and distinct from
+    /// [`DocumentRequest::FindText`] because it is not looking for anything.
+    /// One page per request, like everything else that crosses this wire, and
+    /// bounded by the same text limit.
+    PageText {
+        page: PageIndex,
+    },
     /// Find a string in the text layer of a run of pages.
     ///
     /// A run rather than the whole document because a five-hundred-page deck
@@ -764,6 +774,9 @@ pub enum DocumentResponse {
         text: String,
         truncated: bool,
     },
+    /// One page's text layer. Empty means the page genuinely has none — a
+    /// scan, a full-bleed photograph — which is a fact and not a failure.
+    PageText(String),
     /// The hits in one run of pages. A run with none answers with an empty
     /// chunk, which is how the caller knows to move its frontier along.
     Found(HitChunk),
@@ -883,6 +896,7 @@ impl DocumentRequest {
             | DocumentRequest::GetAnnotation { .. }
             | DocumentRequest::SelectText { .. }
             | DocumentRequest::AreaText { .. }
+            | DocumentRequest::PageText { .. }
             | DocumentRequest::FindText { .. }
             | DocumentRequest::ListFields
             | DocumentRequest::Outline
@@ -973,6 +987,9 @@ impl DocumentResponse {
                 selection.quads.len(),
                 limits::MAX_QUADS_PER_SELECTION,
             ),
+            DocumentResponse::PageText(text) => {
+                limits::within("bytes of page text", text.len(), limits::MAX_TEXT_BYTES)
+            }
             DocumentResponse::PageGeometries(pages) => {
                 limits::within("page geometries", pages.len(), MAX_PAGE_GEOMETRIES)
             }

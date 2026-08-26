@@ -112,6 +112,13 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
             Some(removal) => signature_profile_removal(app, removal),
             None => blank(),
         },
+        // The document turned out to be in a language with no installed
+        // voice. Asked rather than papered over: reading Polish aloud in an
+        // American accent is a worse answer than a question.
+        match app.speech.prompt.as_ref() {
+            Some(prompt) => missing_voice_dialog(prompt),
+            None => blank(),
+        },
         // What the open document asked to do to the reader's place in it.
         // Above the page, because it is a question about the page.
         match app.pending_form_goto.as_ref() {
@@ -1263,6 +1270,64 @@ fn menu(app: &App) -> Element<'_, Message> {
             shortcut(Action::ToggleAudienceFullscreen),
             Message::Do(Action::ToggleAudienceFullscreen),
         ));
+        // Speech. In the menu as well as on a key, because a feature nobody
+        // knows exists is one nobody uses — and because the reader most
+        // likely to want it is the least likely to be hunting for an
+        // unlabelled keystroke. What it offers depends on what this session
+        // can actually do, which is the whole point of the tri-state.
+        {
+            use crate::platform::capabilities::Speech as Cap;
+            use pulpit_core::speech::{Scope, SpeechState};
+
+            items = items.push(heading("Read aloud"));
+            match &app.platform.capabilities.speech {
+                Cap::Unavailable { .. } => {
+                    // Not a disabled row with no explanation: the settings
+                    // page says why, and this points at it.
+                    items = items.push(entry(
+                        "Not available in this session…",
+                        None,
+                        Message::ShowSettings,
+                    ));
+                }
+                Cap::Downloadable { .. } => {
+                    items = items.push(entry("Download a voice…", None, Message::ShowSettings));
+                }
+                Cap::Ready { .. } => {
+                    let state = app.speech.state();
+                    let reading = app.speech.scope();
+                    // One row per scope, each naming what its key will do
+                    // *now* — so the menu answers "what happens if I press
+                    // this" rather than making the reader infer it from a
+                    // label that never changes.
+                    let label = |scope: Scope, idle: &'static str| match (state.clone(), reading) {
+                        (SpeechState::Idle, _) => idle,
+                        (_, Some(active)) if active != scope => idle,
+                        (SpeechState::Paused, _) => "Resume",
+                        _ => "Pause",
+                    };
+                    items = items.push(entry(
+                        label(Scope::Document, "Read the whole document"),
+                        shortcut(Action::SpeakToggle),
+                        Message::SpeakToggleScope(Scope::Document),
+                    ));
+                    items = items.push(entry(
+                        label(Scope::Page, "Read this page"),
+                        shortcut(Action::SpeakPageToggle),
+                        Message::SpeakToggleScope(Scope::Page),
+                    ));
+                    if state != SpeechState::Idle {
+                        items = items.push(entry(
+                            "Stop reading",
+                            shortcut(Action::SpeakStop),
+                            Message::SpeakStop,
+                        ));
+                    }
+                    items = items.push(entry("Speech settings…", None, Message::ShowSettings));
+                }
+            }
+        }
+
         items = items.push(heading("Timer"));
         // The timer has no control of its own unless a clock widget is on the
         // layout, so its two commands are always reachable from here as well.
@@ -1436,9 +1501,11 @@ const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 // presentation gained document mode's tools, and autoadvance later joined the
 // page-movement group, each time moving where an even split falls. A group is
 // indivisible, so the constants name the evenest split there is rather than a
-// tidy subject grouping — and the test holds them to exactly that.
-const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 5];
-const SHORTCUT_TABLE_RIGHT: &[usize] = &[2, 3, 4];
+// tidy subject grouping — and the test holds them to exactly that. Where the
+// counts allow a choice, the split follows what the keys are *for*: running a
+// talk on the left, working through a document on the right.
+const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 1, 2, 3];
+const SHORTCUT_TABLE_RIGHT: &[usize] = &[4, 5, 6];
 const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {
@@ -2093,6 +2160,8 @@ fn settings_page(app: &App) -> Element<'_, Message> {
 
     body = body.push(section("Notes mapping", mappings(app)));
 
+    body = body.push(section("Speech", speech_settings(app)));
+
     body = body.push(section("Signatures", signature_profiles_settings(app)));
 
     // Diagnostics. Rebuilt at most once a second: the report is a multi-KB
@@ -2135,6 +2204,382 @@ fn settings_page(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::ambient::scrollbar)
         .into()
+}
+
+/// The Speech section (issue #20).
+///
+/// One place for the whole feature: what this session can do, the controls
+/// that decide how it sounds, and the voice library it is downloaded from.
+/// Deliberately not split between a settings page and some other dialog —
+/// choosing a voice and getting a voice are the same errand, and a reader who
+/// discovers they have none should be one click from fixing it.
+fn speech_settings(app: &App) -> Element<'_, Message> {
+    use crate::platform::capabilities::Speech as Cap;
+
+    let mut body = Column::new().spacing(gap::M);
+
+    // 1. What this session can do, in words. Never a greyed-out control with
+    //    no explanation: "cannot" and "not yet" are different, and the reader
+    //    can act on exactly one of them.
+    match &app.platform.capabilities.speech {
+        Cap::Unavailable { why } => {
+            body = body.push(theme::typography::note(format!(
+                "This session cannot read documents aloud: {why}. \
+                 Downloading a voice would not change that."
+            )));
+            // Nothing below would do anything, so nothing below is drawn.
+            return body.into();
+        }
+        Cap::Downloadable {
+            bytes,
+            needs_engine,
+        } => {
+            let what = if *needs_engine {
+                "A voice and the speech engine need to be downloaded"
+            } else {
+                "A voice needs to be downloaded"
+            };
+            body = body.push(theme::typography::note(format!(
+                "{what} before pulpit can read aloud — about {}. \
+                 Choose a language below.",
+                pulpit_media::speech::human_bytes(*bytes)
+            )));
+        }
+        Cap::Ready { voices } => {
+            let current = app
+                .speech
+                .current_voice()
+                .map(|voice| voice.label())
+                .unwrap_or_else(|| "none chosen".into());
+            body = body.push(theme::typography::caption(format!(
+                "{voices} voice{} installed. Reading with {current}.",
+                if *voices == 1 { "" } else { "s" }
+            )));
+            // What it is doing right now, when it is doing anything. The
+            // settings page is a plausible place to be while speech runs —
+            // adjusting the speed is exactly what brings a reader here — so
+            // it should not be the one page that cannot see the state.
+            if let Some(scope) = app.speech.scope() {
+                let state = match app.speech.state() {
+                    pulpit_core::speech::SpeechState::Paused => "Paused",
+                    pulpit_core::speech::SpeechState::AwaitingText(_) => "Loading",
+                    _ => "Reading",
+                };
+                body = body.push(theme::typography::caption(format!(
+                    "{state} {}.",
+                    scope.label()
+                )));
+            }
+        }
+    }
+
+    // 2. A download in progress, or one that has just ended.
+    if let Some(download) = app.speech.download() {
+        body = body.push(download_panel(app, download));
+    }
+
+    // 3. Speed. A slider rather than presets: the useful range is wide and
+    //    the right value is personal — a screen-reader user may want three
+    //    times what anyone else can follow.
+    let rate = app.settings.speech.rate;
+    body = body.push(
+        column![
+            row![
+                theme::typography::label("Speed"),
+                space::horizontal(),
+                theme::typography::label(rate.label()),
+            ]
+            .align_y(Alignment::Center),
+            iced::widget::slider(
+                pulpit_core::speech::SpeechRate::SLOWEST..=pulpit_core::speech::SpeechRate::FASTEST,
+                rate.get(),
+                Message::SetSpeechRate,
+            )
+            .step(0.05_f32),
+            theme::typography::caption(
+                "Takes effect at the next sentence, so a change while reading \
+                 is heard at a natural break rather than cutting a word in half."
+            ),
+        ]
+        .spacing(gap::S),
+    );
+
+    // There is deliberately no scope control here. Each scope has its own
+    // key — `r` reads the document, `Shift+R` this page — so a persisted
+    // preference would be a row nothing consults; a control that changes
+    // nothing teaches the reader the page is broken.
+
+    // 4. Language. `Auto` must always show what it resolved to — an opaque
+    //    "Auto" that picks wrong is worse than a wrong explicit choice,
+    //    because the reader cannot see what happened or why.
+    body = body.push(language_setting(app));
+
+    // 6. The voice library, which is also where downloads happen.
+    body = body.push(voice_library(app));
+
+    body.into()
+}
+
+/// The `Auto` row, its resolved value, and the pinned-language picker.
+fn language_setting(app: &App) -> Element<'_, Message> {
+    use pulpit_core::speech::LanguageSetting;
+
+    let is_auto = matches!(app.settings.speech.language, LanguageSetting::Auto);
+    let mut choices = Row::new().spacing(gap::S).push(
+        selectable(button(theme::typography::label("Auto")), is_auto)
+            .on_press(Message::SetSpeechLanguage(None)),
+    );
+
+    // Only languages with something installed can be pinned: offering the
+    // other forty would be offering a choice that cannot be honoured.
+    let installed = app.speech.installed();
+    let mut seen: Vec<pulpit_core::speech::LanguageTag> = Vec::new();
+    for voice in &installed {
+        let bare = voice.language.without_region();
+        if seen.contains(&bare) {
+            continue;
+        }
+        seen.push(bare.clone());
+        let selected = matches!(
+            &app.settings.speech.language,
+            LanguageSetting::Explicit(tag) if tag.same_language(&bare)
+        );
+        choices = choices.push(
+            selectable(
+                button(theme::typography::label(voice.language_name.clone())),
+                selected,
+            )
+            .on_press(Message::SetSpeechLanguage(Some(bare))),
+        );
+    }
+
+    let explanation = if is_auto {
+        match app.speech.current_language() {
+            Some(language) => format!(
+                "Following the document — currently {language}. A page has to \
+                 be clearly in another language before the voice changes, so \
+                 one quoted line will not switch it."
+            ),
+            None => "Following the document. The language is decided from the \
+                     first page that has enough text to be sure."
+                .to_string(),
+        }
+    } else {
+        "Every page is read in this language, whatever the document says.".to_string()
+    };
+
+    let mut body = column![
+        theme::typography::label("Language"),
+        choices,
+        theme::typography::caption(explanation),
+    ]
+    .spacing(gap::S);
+
+    // A way back from "don't ask me again", which is otherwise a decision
+    // with no undo.
+    if !app.settings.speech.declined.is_empty() {
+        let declined = app
+            .settings
+            .speech
+            .declined
+            .iter()
+            .map(|tag| tag.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        body = body.push(
+            row![
+                theme::typography::caption(format!("Not offering downloads for: {declined}.")),
+                space::horizontal(),
+                button(theme::typography::label("Offer again"))
+                    .padding(gap::XS)
+                    .style(theme::ambient::tool_button)
+                    .on_press(Message::ForgetDeclinedLanguages),
+            ]
+            .align_y(Alignment::Center),
+        );
+    }
+
+    body.into()
+}
+
+/// Progress, or the result, of the running download.
+fn download_panel<'a>(
+    _app: &'a App,
+    download: &'a crate::speech::DownloadState,
+) -> Element<'a, Message> {
+    let mut body = Column::new().spacing(gap::S);
+    match &download.outcome {
+        None => {
+            let fraction = download.progress.fraction();
+            body = body
+                .push(theme::typography::label(format!(
+                    "Downloading {}…",
+                    download.what
+                )))
+                .push(iced::widget::progress_bar(0.0..=1.0, fraction))
+                .push(
+                    row![
+                        theme::typography::caption(match &download.progress {
+                            pulpit_media::speech::Progress::Advanced { done, total } => format!(
+                                "{} of {}",
+                                pulpit_media::speech::human_bytes(*done),
+                                pulpit_media::speech::human_bytes(*total)
+                            ),
+                            pulpit_media::speech::Progress::Finishing =>
+                                "Checking and unpacking…".to_string(),
+                        }),
+                        space::horizontal(),
+                        button(theme::typography::label("Cancel"))
+                            .padding(gap::XS)
+                            .style(theme::ambient::tool_button)
+                            .on_press(Message::CancelVoiceDownload),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+        }
+        Some(Ok(())) => {
+            body = body.push(
+                row![
+                    theme::typography::label(format!("{} is installed.", download.what)),
+                    space::horizontal(),
+                    button(theme::typography::label("Dismiss"))
+                        .padding(gap::XS)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::ClearVoiceDownload),
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        Some(Err(reason)) => {
+            body = body
+                .push(theme::typography::label("The download did not finish."))
+                .push(theme::typography::caption(reason.clone()))
+                .push(
+                    row![
+                        space::horizontal(),
+                        button(theme::typography::label("Dismiss"))
+                            .padding(gap::XS)
+                            .style(theme::ambient::tool_button)
+                            .on_press(Message::ClearVoiceDownload),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+        }
+    }
+    container(body)
+        .padding(gap::M)
+        .width(Length::Fill)
+        .style(theme::ambient::surface)
+        .into()
+}
+
+/// Voices by language: installed first, one language expanded at a time.
+fn voice_library(app: &App) -> Element<'_, Message> {
+    let groups = crate::speech::browsable(app.speech.catalog(), app.speech.store());
+    let busy = app
+        .speech
+        .download()
+        .is_some_and(crate::speech::DownloadState::is_running);
+
+    let mut list = Column::new().spacing(gap::XS);
+    for (name, tag, voices) in groups {
+        let installed_here = voices.iter().filter(|voice| voice.installed).count();
+        let expanded = app.expanded_speech_language.as_ref() == Some(&tag);
+
+        let summary = if installed_here > 0 {
+            format!("{installed_here} installed")
+        } else {
+            format!("{} available", voices.len())
+        };
+        list = list.push(
+            button(
+                row![
+                    theme::typography::label(name.clone()),
+                    space::horizontal(),
+                    theme::typography::caption(summary),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(gap::S)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::ToggleSpeechLanguage(tag.clone())),
+        );
+
+        if !expanded {
+            continue;
+        }
+        for voice in voices {
+            let chosen = app.settings.speech.voice.as_deref() == Some(voice.id.as_str());
+            let mut controls = Row::new().spacing(gap::S).align_y(Alignment::Center);
+            if voice.installed {
+                controls = controls.push(
+                    selectable(button(theme::typography::label("Use")), chosen)
+                        .on_press(Message::SetSpeechVoice(voice.id.clone())),
+                );
+                controls = controls.push(
+                    button(theme::typography::label("Remove"))
+                        .padding(gap::S)
+                        .style(theme::ambient::tool_button)
+                        .on_press(Message::RemoveVoice(voice.id.clone())),
+                );
+            } else {
+                // The size is on the button, not in a tooltip: a reader on a
+                // conference network is entitled to know what they are about
+                // to spend before they spend it.
+                let label = format!(
+                    "Download — {}",
+                    pulpit_media::speech::human_bytes(voice.bytes)
+                );
+                let mut download = button(theme::typography::label(label))
+                    .padding(gap::S)
+                    .style(theme::ambient::tool_button);
+                if !busy {
+                    download = download.on_press(Message::DownloadVoice(voice.id.clone()));
+                }
+                controls = controls.push(download);
+            }
+
+            list = list.push(
+                container(
+                    row![
+                        column![
+                            theme::typography::label(voice.label.clone()),
+                            theme::typography::caption(format!("{} Hz", voice.sample_rate)),
+                        ]
+                        .spacing(gap::XS),
+                        space::horizontal(),
+                        controls,
+                    ]
+                    .align_y(Alignment::Center),
+                )
+                .padding(iced::Padding {
+                    left: gap::L,
+                    ..iced::Padding::from(gap::S)
+                })
+                .width(Length::Fill),
+            );
+        }
+    }
+
+    column![
+        theme::typography::label("Voices"),
+        theme::typography::caption(format!(
+            "Voices are downloaded once and kept in {}. Each is checked \
+             against a published checksum before it is used, and discarded if \
+             it does not match.",
+            crate::speech::store_location(&crate::platform::Directories::detect().data).display()
+        )),
+        container(
+            scrollable(list)
+                .height(Length::Fixed(300.0))
+                .style(theme::ambient::scrollbar)
+        )
+        .style(theme::ambient::surface)
+        .width(Length::Fill),
+    ]
+    .spacing(gap::S)
+    .into()
 }
 
 fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
@@ -2543,6 +2988,45 @@ fn signature_profile_removal<'a>(
         body,
         Some(Message::SignatureProfile(ProfileMsg::CancelRemove)),
     )
+}
+
+/// "This page is in German. Download a German voice?"
+///
+/// The dialog that makes `Auto` honest. Declining is remembered for the rest
+/// of the session so a bilingual document asks once rather than at every page
+/// turn, and the settings page has the way back.
+fn missing_voice_dialog(prompt: &crate::speech::MissingVoicePrompt) -> Element<'_, Message> {
+    let actions = row![
+        button(theme::typography::label("Not for this language"))
+            .padding(gap::S)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::AnswerVoicePrompt(false)),
+        button(theme::typography::label(format!(
+            "Download — {}",
+            pulpit_media::speech::human_bytes(prompt.bytes)
+        )))
+        .padding(gap::S)
+        .style(theme::ambient::selected_button)
+        .on_press(Message::AnswerVoicePrompt(true)),
+    ]
+    .spacing(gap::S);
+
+    let body = column![
+        theme::typography::title(format!("This page is in {}", prompt.language_name)),
+        theme::typography::body(format!(
+            "No {} voice is installed, so pulpit cannot read this page properly. \
+             {} can be downloaded now.",
+            prompt.language_name, prompt.voice_label
+        )),
+        theme::typography::caption(
+            "Declining keeps the current voice and stops asking about this \
+             language. Settings ▸ Speech can offer it again later."
+        ),
+        actions,
+    ]
+    .spacing(gap::M);
+
+    panel(body, Some(Message::AnswerVoicePrompt(false)))
 }
 
 fn color_editor(app: &App) -> Element<'_, Message> {

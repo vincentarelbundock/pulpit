@@ -235,6 +235,18 @@ pub trait DocumentBackend {
         ))
     }
 
+    /// The whole text layer of one page (issue #20).
+    ///
+    /// [`DocumentError::Unsupported`] by default rather than an empty string,
+    /// for the same reason [`DocumentBackend::find_text`] is: a backend with
+    /// no text layer and a page with no text are different facts, and the
+    /// reader who pressed "speak" needs to be told which one they have.
+    fn page_text(&self, _page: PageIndex) -> Result<String> {
+        Err(DocumentError::Unsupported(
+            "be read aloud: this backend has no text layer".into(),
+        ))
+    }
+
     /// Find `query` in the text layer of `pages`, a half-open range.
     ///
     /// The default is [`DocumentError::Unsupported`] rather than an empty
@@ -397,6 +409,22 @@ impl<'a> PdfDocument<'a> {
             truncated = true;
         }
         Ok((text, truncated))
+    }
+
+    /// One page's text, for reading it aloud.
+    ///
+    /// Read-only, so it never touches the revision, and bounded here rather
+    /// than by the caller: a page's text layer is document-controlled input,
+    /// and a deck built to hold a megabyte of invisible text on one page must
+    /// not be able to make this answer a megabyte long.
+    pub fn page_text(&self, page: PageIndex) -> Result<String> {
+        self.check_page(page)?;
+        let mut text = self.backend.page_text(page)?;
+        if text.len() > limits::MAX_TEXT_BYTES {
+            let cut = floor_char_boundary(&text, limits::MAX_TEXT_BYTES);
+            text.truncate(cut);
+        }
+        Ok(text)
     }
 
     /// Find a string in a run of pages.

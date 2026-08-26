@@ -13,13 +13,17 @@ problem rather than as polish.
 
 The workspace is five crates under `crates/`:
 
-- `pulpit-core` — presentation state, notes mapping, timer, generations. Pure.
+- `pulpit-core` — presentation state, notes mapping, timer, generations, and
+  the decision half of speech (sentences, reading cursor, language). Pure.
 - `pulpit-display` — the display identity ladder, snapshots, roles and the
   single `reconcile()` function, plus X11/Wayland/Niri adapters.
 - `pulpit-render` — PDF backends (PDFium, fixture), the worker IPC protocol,
   supervised worker processes, and the byte-bounded frame cache.
-- `pulpit-media` — media and interactive overlays, driven by an installed
-  Chromium-family browser over CDP in a separate worker process.
+- `pulpit-media` — the runtimes pulpit launches rather than links: media and
+  interactive overlays, driven by an installed Chromium-family browser over
+  CDP in a separate worker process, and `speech`, which drives an installed
+  synthesiser and audio player as child processes. The two share no types,
+  only that policy.
 - `pulpit` — the Iced application and everything only it uses: the
   presenter layout tree and widgets, the document watcher, the platform
   boundary, settings and diagnostics.

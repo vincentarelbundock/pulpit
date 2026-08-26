@@ -22,6 +22,7 @@ pub use store::{load_or_default, SettingsStore};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use pulpit_core::speech::{LanguageSetting, LanguageTag, SpeechRate};
 use pulpit_core::NotesMapping;
 use pulpit_display::DisplayRoles;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,69 @@ pub struct Settings {
     pub appearance: AppearanceSettings,
     pub reading: ReadingSettings,
     pub signatures: SignatureSettings,
+    pub speech: SpeechSettings,
+}
+
+/// Reading aloud (issue #20).
+///
+/// The voice is stored by catalog id rather than by language, because a
+/// reader who chose a particular speaker meant that speaker; `language`
+/// separately governs what `Auto` does when a page turns out to be in
+/// something else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeechSettings {
+    /// Catalog id of the preferred voice, if one has been chosen.
+    ///
+    /// `None` means "whichever installed voice fits the page", which is the
+    /// honest default before anything has been downloaded.
+    pub voice: Option<String>,
+    /// `Auto`, or a language the reader pinned.
+    pub language: LanguageSetting,
+    pub rate: SpeechRate,
+    // There is deliberately no default-scope field. Each scope has its own
+    // key — `r` reads the document, `Shift+R` this page — so a persisted
+    // preference would be a setting nothing consults, which is worse than no
+    // setting: the reader changes it, nothing happens, and the honest
+    // conclusion is that the page is broken. (One existed briefly; a stored
+    // `scope` value in an old settings file is ignored on load.)
+    /// Languages the reader has declined to download a voice for.
+    ///
+    /// Without this, a bilingual document asks on every page turn, which is
+    /// the sort of thing that makes a reader turn the whole feature off.
+    pub declined: Vec<LanguageTag>,
+}
+
+impl Default for SpeechSettings {
+    fn default() -> Self {
+        SpeechSettings {
+            voice: None,
+            language: LanguageSetting::Auto,
+            rate: SpeechRate::NORMAL,
+
+            declined: Vec::new(),
+        }
+    }
+}
+
+impl SpeechSettings {
+    /// Whether the reader has already said no to this language.
+    pub fn has_declined(&self, language: &LanguageTag) -> bool {
+        self.declined
+            .iter()
+            .any(|declined| declined.same_language(language))
+    }
+
+    pub fn decline(&mut self, language: LanguageTag) {
+        if !self.has_declined(&language) {
+            self.declined.push(language);
+        }
+    }
+
+    /// Forget every refusal, so `Auto` starts offering downloads again.
+    pub fn clear_declined(&mut self) {
+        self.declined.clear();
+    }
 }
 
 /// Reusable signing identities known to this installation.
@@ -516,6 +580,7 @@ impl Default for Settings {
             appearance: AppearanceSettings::default(),
             reading: ReadingSettings::default(),
             signatures: SignatureSettings::default(),
+            speech: SpeechSettings::default(),
         }
     }
 }

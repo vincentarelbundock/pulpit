@@ -265,6 +265,39 @@ pub enum Message {
     SetAutoadvanceWrap(bool),
     SetAutoadvancePause(bool),
     SetMotion(crate::platform::MotionSetting),
+
+    // Speech (issue #20). The controls a reader touches mid-document —
+    // start, pause, stop, skip — and the settings that decide how it sounds.
+    /// Start reading at this scope, or pause it if that scope is already
+    /// going. Two keys send this, one per scope.
+    SpeakToggleScope(pulpit_core::speech::Scope),
+    SpeakStop,
+    SpeakSkip(pulpit_core::speech::Direction),
+    /// Read whatever is selected in the reader.
+    ///
+    /// Nothing sends this yet, and that is issue #9's doing rather than an
+    /// oversight: a text selection currently lives only for the duration of
+    /// the drag that makes it, so there is no moment at which a reader could
+    /// ask for it to be spoken. The path below it is complete and tested, so
+    /// when a selection gains somewhere to live this becomes one menu entry.
+    #[allow(dead_code)]
+    SpeakSelection,
+    SetSpeechRate(f32),
+    SetSpeechVoice(String),
+    /// `Auto`, or a language the reader pinned. `None` means `Auto`.
+    SetSpeechLanguage(Option<pulpit_core::speech::LanguageTag>),
+    /// Fetch a voice from the settings page, or from the missing-voice prompt.
+    DownloadVoice(String),
+    CancelVoiceDownload,
+    /// Dismiss a finished download's panel.
+    ClearVoiceDownload,
+    RemoveVoice(String),
+    /// Answer the "this page is in German, download a voice?" prompt.
+    AnswerVoicePrompt(bool),
+    /// Start offering downloads for languages that were declined before.
+    ForgetDeclinedLanguages,
+    /// Expand or collapse a language's voices in the settings list.
+    ToggleSpeechLanguage(pulpit_core::speech::LanguageTag),
     /// A key came up. Only interactive overlays care; pulpit's own
     /// bindings all act on the press. Raw modifier flags, as for `Key`.
     KeyReleased {
@@ -1231,6 +1264,18 @@ pub struct App {
     last_session: Option<crate::session::SessionSnapshot>,
     /// Corner notices. Never shown on the audience window.
     pub toasts: Toasts,
+    /// Reading the document aloud (issue #20).
+    ///
+    /// Always present, even where nothing can speak: a session that cannot is
+    /// a state this reports, not a reason to be absent, and the settings page
+    /// needs it to say why and to offer the download.
+    pub speech: crate::speech::Speech,
+    /// A page turn speech asked for, run by the next tick — which can carry
+    /// the iced task the turn needs, where speech's own callers cannot.
+    speech_nav: Option<pulpit_core::page::PageIndex>,
+    /// Which language's voices are open in the settings list. One at a time:
+    /// forty-six expanded groups is a list nobody can find anything in.
+    pub expanded_speech_language: Option<pulpit_core::speech::LanguageTag>,
     /// Whether the main menu is open.
     pub menu_open: bool,
     /// Whether the main menu is showing its recent-document submenu.
@@ -1817,7 +1862,16 @@ impl App {
 
         // The desktop, behind its contracts. Everything the views ask about
         // capabilities comes from this snapshot, never from an OS name.
-        let platform = Platform::detect();
+        let mut platform = Platform::detect();
+        // Speech is probed here rather than in a window backend, because
+        // whether a voice is on disk is not something a window backend knows.
+        // The answer is folded into the same snapshot so views keep asking
+        // exactly one thing about what this session can do.
+        let speech = crate::speech::Speech::new(
+            &crate::platform::Directories::detect().data,
+            &settings.speech,
+        );
+        platform.capabilities.speech = speech.capability();
         let system_appearance = platform.services.system_appearance();
         let motion_probe = platform.services.reduced_motion();
         let preference = settings.appearance.appearance;
@@ -2042,6 +2096,9 @@ impl App {
             last_session: None,
             platform,
             toasts: Toasts::new(),
+            speech,
+            speech_nav: None,
+            expanded_speech_language: None,
             menu_open: false,
             recent_menu_open: false,
             shortcuts_open: false,
@@ -2296,6 +2353,156 @@ impl App {
     /// no animation or short deadline is live the application settles to the
     /// watchdog cadence, and an idle presentation costs wakeups a hand can
     /// count instead of twenty a second.
+    /// Which page "read this page" means.
+    ///
+    /// Not `state.committed()`, which counts slides and stays where it is
+    /// while a Reader scrolls — reading the whole document from page one
+    /// however far down you had scrolled. The two viewers count in different
+    /// units, so this asks the same question `current_place` does and answers
+    /// it in the unit speech needs.
+    fn speech_page(&self) -> pulpit_core::page::PageIndex {
+        if self.uses_document_viewer() {
+            return self.reader.controls().page;
+        }
+        // A slide is not always a page. On a deck whose notes are paired into
+        // the same file, slide three lives on PDF page six — and speech asks
+        // the document worker for a *physical* page, so the mapping has to be
+        // applied or a paired deck reads the wrong half of the wrong sheet.
+        let mapped = self.state.document().and_then(|document| {
+            self.state
+                .mapping()
+                .audience_source(self.state.committed(), document.pdf_pages)
+        });
+        match mapped {
+            Some(source) => pulpit_core::page::PageIndex(source.pdf_page),
+            None => pulpit_core::page::PageIndex(self.state.committed()),
+        }
+    }
+
+    /// Re-read what speech can do into the capability snapshot.
+    ///
+    /// Called after anything that could change the answer — a download, a
+    /// removal — because `Capabilities` is what every view asks, and a stale
+    /// snapshot would leave a download button offering something already
+    /// installed.
+    fn refresh_speech_capability(&mut self) {
+        self.platform.capabilities.speech = self.speech.capability();
+    }
+
+    /// Drain speech events and download progress.
+    fn poll_speech(&mut self) {
+        let settings = self.settings.speech.clone();
+        let outgoing = self.speech.poll(&settings);
+        if !outgoing.is_empty() {
+            self.apply_speech(outgoing);
+        }
+        // A download that has just finished changes what is installed.
+        let current = self.speech.capability();
+        if self.platform.capabilities.speech != current {
+            self.platform.capabilities.speech = current;
+        }
+    }
+
+    /// Whatever the reader has selected, for "speak the selection".
+    ///
+    /// `None` when nothing is selected, which the coordinator turns into a
+    /// sentence rather than a silent no-op.
+    fn selected_text(&self) -> Option<String> {
+        let text = self.reader.selection_text();
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Carry out what the speech coordinator asked for.
+    ///
+    /// The coordinator does no I/O and holds no handles, so everything it
+    /// wants comes back through here — which is also what keeps its whole
+    /// state machine testable without an event loop.
+    fn apply_speech(&mut self, outgoing: Vec<crate::speech::Outgoing>) {
+        use crate::speech::Outgoing;
+        for action in outgoing {
+            match action {
+                Outgoing::NeedText(page) => {
+                    // No document worker means no text layer to read, and
+                    // saying so beats going quiet: with nothing to look at,
+                    // silence is indistinguishable from speech that is
+                    // working. This is the case an image directory and a
+                    // failed document worker both land in.
+                    match self.reader_link.as_mut() {
+                        Some(link) => {
+                            link.ask(crate::reader_link::Ask::PageText { page });
+                        }
+                        None => {
+                            // Two different absences, and the remedy differs:
+                            // open a file, versus this file has nothing to
+                            // read. Saying "no text layer" when nothing is
+                            // open at all would send the reader looking for a
+                            // problem in a document they have not chosen yet.
+                            let reason = if self.state.document().is_none() {
+                                "no document is open — open one first"
+                            } else {
+                                "this document has no text layer to read"
+                            };
+                            let settings = self.settings.speech.clone();
+                            let stopped = self.speech.cannot_speak(reason.into(), &settings);
+                            for action in stopped {
+                                if let Outgoing::Toast(message) = action {
+                                    self.toasts.push(Intent::Info, message, None, self.now);
+                                }
+                            }
+                        }
+                    }
+                }
+                Outgoing::ShowPage(page) => {
+                    // Speech has run past the end of the page it was on.
+                    // Reaching past the last page is the end of the document,
+                    // and is answered here rather than by asking the worker
+                    // for a page that does not exist: the count is already
+                    // known, and a refusal round trip would read as an error
+                    // rather than as an ending.
+                    // Physical pages, not slides: speech counts in the unit
+                    // the document worker answers in, and on a paired deck
+                    // there are twice as many pages as slides.
+                    let pages = self
+                        .state
+                        .document()
+                        .map(|document| document.pdf_pages)
+                        .unwrap_or_else(|| self.state.slide_count());
+                    if page.get() >= pages {
+                        let settings = self.settings.speech.clone();
+                        let finished = self.speech.no_such_page(page, &settings);
+                        // One level deep only: `no_such_page` ends the
+                        // reading, and an ended reading asks for nothing more.
+                        for action in finished {
+                            if let Outgoing::Toast(message) = action {
+                                self.toasts.push(Intent::Info, message, None, self.now);
+                            }
+                        }
+                        continue;
+                    }
+                    // Deferred to the next tick rather than performed here.
+                    // `on_read_command` returns an iced task — the scroll
+                    // that actually moves the reader's column — and this
+                    // method has callers with no way to run one: the reader
+                    // pump returns a bool. An earlier version called it here
+                    // and discarded the task, which turned the page in every
+                    // data structure while the screen stayed where it was.
+                    // The tick, which always runs at the fast cadence while
+                    // speech is live, picks this up and runs the task
+                    // properly; one tick of latency is nothing against the
+                    // synthesis gap a page turn already carries.
+                    self.speech_nav = Some(page);
+                }
+                Outgoing::Toast(message) => {
+                    self.diagnostics.note(message.clone());
+                    self.toasts.push(Intent::Info, message, None, self.now);
+                }
+                // Nothing to clear: reading having ended is fully expressed
+                // by the speech state the views already ask.
+                Outgoing::Finished => {}
+            }
+        }
+    }
+
     fn is_live(&self) -> bool {
         // Worker completions use doorbells, so work merely being in flight is
         // not a reason to rebuild every window twenty times a second.
@@ -2310,6 +2517,11 @@ impl App {
             // settled tick would overshoot every deadline in the list.
             || !self.presenter_refocus_deadlines.is_empty()
             || !self.toasts.is_empty()
+            // Speech advances between sentences and a download moves a
+            // progress bar. Both need the fast tick to be polled at all; at
+            // the settled cadence speech would pause for seconds between
+            // sentences and the bar would jump in visible steps.
+            || self.speech.is_live()
             // A cue going off is animating: at the settled tick the pulse
             // would arrive in about five steps and read as a stutter rather
             // than a fade.
@@ -2755,6 +2967,15 @@ impl App {
         for attempt in self.inhibitor.state().attempts() {
             report.push_str(&format!("- tried {attempt}\n"));
         }
+        // Speech: which engine and player were found, which voice is in use,
+        // and what `Auto` resolved the language to. All four are things a
+        // reader reporting "it will not read this document" would otherwise
+        // have to be asked for one at a time.
+        report.push_str("\n## Speech\n");
+        for line in self.speech.report() {
+            report.push_str(&format!("- {line}\n"));
+        }
+
         report.push_str("\n## Frame cache\n");
         let stats = self.cache.stats();
         // Source bytes only: the cache cannot see the image handles or GPU
@@ -3656,6 +3877,104 @@ impl App {
                 self.settings.appearance.motion = setting;
                 self.apply_appearance();
                 self.persist();
+                Task::none()
+            }
+            // ---- Speech (issue #20) ----
+            Message::SpeakToggleScope(scope) => {
+                let settings = self.settings.speech.clone();
+                let page = self.speech_page();
+                let outgoing = self.speech.toggle(scope, page, &settings);
+                self.apply_speech(outgoing);
+                Task::none()
+            }
+            Message::SpeakStop => {
+                let settings = self.settings.speech.clone();
+                let outgoing = self.speech.stop(&settings);
+                self.apply_speech(outgoing);
+                Task::none()
+            }
+            Message::SpeakSkip(direction) => {
+                let settings = self.settings.speech.clone();
+                let outgoing = self.speech.skip(direction, &settings);
+                self.apply_speech(outgoing);
+                Task::none()
+            }
+            Message::SpeakSelection => {
+                let settings = self.settings.speech.clone();
+                let page = self.speech_page();
+                let selected = self.selected_text().unwrap_or_default();
+                let outgoing = self.speech.speak_selection(selected, page, &settings);
+                self.apply_speech(outgoing);
+                Task::none()
+            }
+            Message::SetSpeechRate(rate) => {
+                self.settings.speech.rate = pulpit_core::speech::SpeechRate::new(rate);
+                // Not restarted: the change takes effect on the next
+                // sentence, which is a boundary the reader can hear. Cutting
+                // the current one off to apply it immediately would be a
+                // worse answer to a slider drag.
+                self.persist();
+                Task::none()
+            }
+            Message::SetSpeechVoice(id) => {
+                self.settings.speech.voice = Some(id);
+                let settings = self.settings.speech.clone();
+                self.speech.reprobe(&settings);
+                self.refresh_speech_capability();
+                self.persist();
+                Task::none()
+            }
+            Message::SetSpeechLanguage(language) => {
+                self.settings.speech.language = match language {
+                    Some(tag) => pulpit_core::speech::LanguageSetting::Explicit(tag),
+                    None => pulpit_core::speech::LanguageSetting::Auto,
+                };
+                let settings = self.settings.speech.clone();
+                self.speech.reprobe(&settings);
+                self.persist();
+                Task::none()
+            }
+            Message::DownloadVoice(id) => {
+                let outgoing = self.speech.begin_voice_download(&id);
+                self.apply_speech(outgoing);
+                Task::none()
+            }
+            Message::CancelVoiceDownload => {
+                self.speech.cancel_download();
+                Task::none()
+            }
+            Message::ClearVoiceDownload => {
+                self.speech.clear_download();
+                Task::none()
+            }
+            Message::RemoveVoice(id) => {
+                let mut settings = self.settings.speech.clone();
+                let outgoing = self.speech.remove_voice(&id, &mut settings);
+                self.settings.speech = settings;
+                self.apply_speech(outgoing);
+                self.refresh_speech_capability();
+                self.persist();
+                Task::none()
+            }
+            Message::AnswerVoicePrompt(download) => {
+                let mut settings = self.settings.speech.clone();
+                let outgoing = self.speech.answer_prompt(download, &mut settings);
+                self.settings.speech = settings;
+                self.apply_speech(outgoing);
+                self.persist();
+                Task::none()
+            }
+            Message::ForgetDeclinedLanguages => {
+                self.settings.speech.clear_declined();
+                self.persist();
+                Task::none()
+            }
+            Message::ToggleSpeechLanguage(tag) => {
+                if self.expanded_speech_language.as_ref() == Some(&tag) {
+                    self.expanded_speech_language = None;
+                } else {
+                    self.expanded_speech_language = Some(tag);
+                }
                 Task::none()
             }
             Message::EditColorScheme(scheme) => {
@@ -4710,6 +5029,21 @@ impl App {
             self.autoadvance_touched();
         }
         match action {
+            // Speech, routed through the same messages the settings page and
+            // the menu use, so there is one path into the coordinator.
+            Action::SpeakToggle => self.update(Message::SpeakToggleScope(
+                pulpit_core::speech::Scope::Document,
+            )),
+            Action::SpeakPageToggle => {
+                self.update(Message::SpeakToggleScope(pulpit_core::speech::Scope::Page))
+            }
+            Action::SpeakStop => self.update(Message::SpeakStop),
+            Action::SpeakNextSentence => {
+                self.update(Message::SpeakSkip(pulpit_core::speech::Direction::Forward))
+            }
+            Action::SpeakPreviousSentence => {
+                self.update(Message::SpeakSkip(pulpit_core::speech::Direction::Back))
+            }
             Action::ToggleReader => self.toggle_reader(),
             // The rail collapses in place, wherever the layout put it, and a
             // layout without an outline pane simply has nothing to collapse.
@@ -4901,6 +5235,11 @@ impl App {
         if let Some(supervisor) = self.supervisor.as_mut() {
             supervisor.shutdown();
         }
+        // Speech, for the same reason and by the same rule: a child process
+        // must not outlive the process that started it. An audio player left
+        // running finishes the sentence it was handed, so the window closes
+        // and the room keeps hearing the document.
+        self.speech.shutdown();
         // Synchronous on purpose: a helper thread would race process exit
         // and the last settings change would be the one that vanished.
         self.settings_dirty = false;
@@ -5138,6 +5477,18 @@ impl App {
 
         // 1. Expire routine toasts. Failures stay until dismissed.
         self.toasts.tick(now);
+
+        // 1a. Speech: engine events and download progress. Both are polled
+        //     rather than given a doorbell because they are sentence- and
+        //     chunk-scale — a tick's worth of latency is inaudible on one and
+        //     invisible on the other.
+        self.poll_speech();
+        // A page turn speech asked for is run here, where the task it
+        // returns — the scroll that moves the reader's column — has somewhere
+        // to go. See `Outgoing::ShowPage` in `apply_speech`.
+        if let Some(page) = self.speech_nav.take() {
+            tasks.push(self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(page)));
+        }
 
         // 1b. Collect what the document worker has said and ask for whatever
         //     the reader now needs drawn. On the tick rather than in a view
@@ -6104,6 +6455,11 @@ impl App {
         // left the previous document's marks to be drawn over this one's pages
         // the moment it was reopened.
         self.search.clear();
+        // Speech was reading the document being put down; nothing about that
+        // reading — the utterance, the language, a refusal, a pending
+        // download prompt — carries over to the next one.
+        let speech_settings = self.settings.speech.clone();
+        self.speech.document_changed(&speech_settings);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -6324,6 +6680,11 @@ impl App {
     /// half that stops the form following the pointer.
     fn reader_link_died(&mut self) {
         self.reader.closed();
+        // A dead worker can never answer the page-text request speech is
+        // waiting on; ending the reading now beats leaving it in
+        // `AwaitingText` for ever.
+        let speech_settings = self.settings.speech.clone();
+        self.speech.document_changed(&speech_settings);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -6635,6 +6996,17 @@ impl App {
                 }
                 crate::reader_link::Told::Fields(fields) => {
                     self.reader.set_fields(fields);
+                }
+                crate::reader_link::Told::PageText { page, text } => {
+                    let mut settings = self.settings.speech.clone();
+                    let outgoing = self.speech.text_arrived(page, text, &mut settings);
+                    self.settings.speech = settings;
+                    self.apply_speech(outgoing);
+                }
+                crate::reader_link::Told::CannotSpeak { reason } => {
+                    let settings = self.settings.speech.clone();
+                    let outgoing = self.speech.cannot_speak(reason, &settings);
+                    self.apply_speech(outgoing);
                 }
                 crate::reader_link::Told::Selection { result, finalising } => {
                     // The worker is free again: the newest waiting sample, if

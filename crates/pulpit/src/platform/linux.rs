@@ -116,6 +116,10 @@ impl PlatformServices for LinuxServices {
             // badly. `lp` stays underneath it for a session that has CUPS
             // and no portal.
             system_print_dialog: crate::platform::portal_print::available(),
+            // Filled in by the application once the speech catalog has been
+            // probed. Whether a voice is installed on disk is not a question
+            // a window backend can answer.
+            speech: crate::platform::capabilities::Speech::default(),
         }
     }
 

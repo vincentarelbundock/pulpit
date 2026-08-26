@@ -215,6 +215,10 @@ impl PlatformServices for MacosServices {
             // code to Apple's rendering rather than translated by ours. `lp`
             // stays underneath for a build that did not link Quartz.
             system_print_dialog: crate::platform::appkit_print::available(),
+            // Filled in by the application once the speech catalog has been
+            // probed. Whether a voice is installed on disk is not a question
+            // a window backend can answer.
+            speech: crate::platform::capabilities::Speech::default(),
         }
     }
 

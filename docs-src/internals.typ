@@ -24,6 +24,8 @@ Application (iced daemon, one update loop)
 ├── images::PageTable        a folder or comic archive as pages pulpit-render
 ├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
+├── Reading (speech)         cursor, sentences, language        pulpit-core
+├── Speaker                  engines, voices, downloads         pulpit-media
 └── Settings & Diagnostics   atomic, versioned, reportable      pulpit::settings
 ```
 
@@ -270,6 +272,80 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   MUST NOT draw a custom title bar to look the same everywhere. Inside the
   frame it uses one deliberate visual language rather than imitating GTK,
   WinUI or AppKit.
+
+== Reading aloud
+
+Speech is split the same way rendering is, and for the same reason: the part
+that decides is pure and the part that touches the world is not.
+
+`pulpit_core::speech` holds the whole decision half — sentence segmentation,
+the reading cursor, language identification and the `Auto` policy — and reads
+no clock, opens no device and spawns nothing. That is what makes the awkward
+cases ordinary tests: a page whose text arrives after speech has moved on, a
+`Finished` that races a pause, a page with no text layer, the end of the
+document. None of them need a sound card to reproduce.
+
+`pulpit-media::speech` holds the other half and links *nothing*. The
+synthesiser is an installed program driven over a pipe; the audio player is
+another one. No inference runtime, no audio library, no engine of any kind is
+compiled in.
+
+That is also why speech lives in `pulpit-media` rather than in a crate of its
+own. The two halves of that crate share no types and are not one mechanism;
+what they share is the policy that gives the crate its shape — a heavy runtime
+pulpit *launches* rather than links, discovered honestly, supervised, and
+reported on when it is absent. A browser renders an overlay and a synthesiser
+renders a sentence, and neither puts an engine inside the presenter binary.
+
+Three things follow from linking nothing, and all three are the point:
+
++ *Isolation is already there.* A synthesiser that crashes is a child process
+  this code spawned, not a library inside the event loop, so speech gets a
+  thread where rendering needs a worker process. `pulpit-media` states the
+  rule: a runtime that only *launches* an installed program lives in the
+  application's own executable; only one that *links* an optional library
+  needs a separate binary.
++ *Stopping is a `kill`.* The one thing this feature is judged on is whether
+  it stops when told, and killing a player is as immediate as that gets.
++ *The licence boundary is a process boundary.* The current piper is GPL.
+  Driving an installed copy over a pipe is not a derivative work; linking one
+  into an MIT/Apache binary would be a problem to solve rather than avoid.
+
+Engines and voices are *data*, not code — a catalog of pinned URLs, hashes,
+languages and sample rates. Supporting a different synthesiser is an entry in
+that catalog. The abandonment risk worth designing against is not that a model
+stops being maintained (a pinned `.onnx` keeps working indefinitely) but that
+the *program* which runs it is replaced, and a manifest absorbs that.
+
+Three invariants:
+
++ *Nothing unverified is used.* Every downloaded artifact is checked against a
+  sha256 pinned in the binary before first use and deleted if it does not
+  match; nothing appears under its final name until it has passed. This is a
+  runtime fetch onto a stranger's machine that is then executed, so the hash
+  is a security boundary rather than the reproducibility nicety it is for
+  `make pdfium`.
++ *Sample rate travels with the audio.* It is a property of the voice — never
+  of the engine, the quality tier or the platform. The shipped catalog holds
+  16000, 22050 and 44100 Hz voices, and two voices of the same language and
+  the same tier disagree. Assuming it produces chipmunk or slow-motion speech.
++ *Availability is three-valued.* `Capabilities::speech` distinguishes "this
+  session cannot" from "one download away" from "ready", because the two
+  negative answers have different remedies and a greyed-out control expresses
+  neither. This is the `accessibility_bridge` argument applied again.
+
+Latency is paid once. A synthesiser is spawned per sentence — which makes the
+end of an utterance unambiguous, since a closed stdout *is* the frame boundary
+— and the cost of the next spawn is hidden under the sentence currently
+playing. Measured on the shipped engine: a voice loads in about 0.13 s and
+synthesises at roughly twenty times real time, so the gap is inaudible except
+before the first sentence and at a page turn, where the next page's text has
+not been asked for yet.
+
+The known limitation is reading order. PDF text extraction returns content in
+content-stream order, which on a two-column page interleaves the columns line
+by line. Speech is where that becomes audible rather than merely untidy, and
+it is a property of the text layer rather than of anything above it.
 
 == Visual and interaction system
 

@@ -2742,6 +2742,20 @@ impl ReaderSession {
         self.finish_gesture()
     }
 
+    /// The text under the selection now being swept, for speech (issue #20).
+    ///
+    /// This is the *live* gesture's text, which is all there is: a selection
+    /// that outlives the drag has nowhere to live yet — issue #9 is what
+    /// gives it one, and "speak the selection" gets much more useful when it
+    /// lands. Until then this answers during a sweep and is empty after it,
+    /// which the caller turns into a sentence rather than a silent no-op.
+    pub fn selection_text(&self) -> String {
+        match self.interaction.gesture() {
+            Some(pulpit_core::annotate::gesture::Gesture::Selecting { text, .. }) => text.clone(),
+            _ => String::new(),
+        }
+    }
+
     /// Is a release waiting on a selection answer? While it is, the toolbar
     /// must not treat the gesture as finished.
     pub fn is_awaiting_selection(&self) -> bool {

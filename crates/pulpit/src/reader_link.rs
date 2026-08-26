@@ -86,6 +86,12 @@ pub enum Ask {
         page: pulpit_core::page::PageIndex,
         rect: pulpit_core::page::PageRect,
     },
+    /// One page's whole text layer, so speech can read it (issue #20).
+    ///
+    /// Read-only, and it never moves the revision. The page travels back with
+    /// the answer because speech may have turned the page while this was in
+    /// flight, and the reading cursor drops text for a page it has left.
+    PageText { page: pulpit_core::page::PageIndex },
     /// Find a string in a run of pages. Read-only, and carried with the
     /// generation it belongs to: the answer to a query the user has already
     /// typed past has to be recognisable as stale on arrival.
@@ -191,6 +197,16 @@ pub enum Told {
     AreaText {
         text: String,
         truncated: bool,
+    },
+    /// One page's text, or the empty string when the page has none.
+    PageText {
+        page: pulpit_core::page::PageIndex,
+        text: String,
+    },
+    /// This document has no text layer to read aloud at all — an image
+    /// directory, a scan. Said once, rather than as an empty page every time.
+    CannotSpeak {
+        reason: String,
     },
     /// Hits for one run of pages, or the reason there will not be any.
     ///
@@ -671,6 +687,17 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 },
             ]
         }
+        Ask::PageText { page } => vec![match session.request(DocumentRequest::PageText { page }) {
+            Ok(DocumentResponse::PageText(text)) => Told::PageText { page, text },
+            // A backend with no text layer is a standing fact about this
+            // document, not a failed request — the same distinction search
+            // makes. Speech says it once and stops, rather than treating
+            // every page as empty.
+            Ok(DocumentResponse::Failed(
+                pulpit_render::document::protocol::DocumentFailure::Unsupported(reason),
+            )) => Told::CannotSpeak { reason },
+            other => unexpected(other, "a page's text"),
+        }],
         Ask::FindText {
             generation,
             query,
