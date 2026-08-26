@@ -5018,6 +5018,7 @@ dependencies = [
  "typst-render",
  "typst-svg",
  "winresource",
+ "wl-clipboard-rs",
  "zbus",
  "zeroize",
  "zip",

@@ -98,6 +98,12 @@ pub enum Icon {
     FitHeight,
     /// Draw a rectangle on the page and read through it: `crop`.
     Crop,
+    /// The band gathers the annotations it encloses: `lasso-select`.
+    Lasso,
+    /// The band copies its region as a picture: `image`.
+    Picture,
+    /// The band copies the text under it: `text-select`.
+    TextRegion,
     /// The previous page: `chevron-left`.
     ChevronLeft,
     /// The next page: `chevron-right`.
@@ -158,6 +164,9 @@ impl Icon {
             Icon::FitPage => include_bytes!("../../assets/icons/expand.svg"),
             Icon::FitHeight => include_bytes!("../../assets/icons/move-vertical.svg"),
             Icon::Crop => include_bytes!("../../assets/icons/crop.svg"),
+            Icon::Lasso => include_bytes!("../../assets/icons/lasso-select.svg"),
+            Icon::Picture => include_bytes!("../../assets/icons/image.svg"),
+            Icon::TextRegion => include_bytes!("../../assets/icons/text-select.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
@@ -182,7 +191,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 42] = [
+    const ALL: [Icon; 45] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Eraser,
@@ -213,6 +222,9 @@ impl Icon {
         Icon::FitPage,
         Icon::FitHeight,
         Icon::Crop,
+        Icon::Lasso,
+        Icon::Picture,
+        Icon::TextRegion,
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Outline,

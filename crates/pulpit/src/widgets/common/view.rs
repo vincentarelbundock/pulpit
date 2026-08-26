@@ -6,6 +6,19 @@ use iced::{Alignment, Element, Length};
 use crate::theme;
 use crate::widgets::common::Align;
 
+/// The glyph for what a select band takes, wherever the choice is offered:
+/// the lasso that gathers marks up, the picture, and text in a dashed frame.
+///
+/// One mapping for both toolbars, so the presenter palette and the Reader
+/// cannot come to draw the same choice with different pictures.
+pub fn select_kind_glyph(kind: pulpit_core::annotation::SelectKind) -> theme::Icon {
+    match kind {
+        pulpit_core::annotation::SelectKind::Marks => theme::Icon::Lasso,
+        pulpit_core::annotation::SelectKind::Image => theme::Icon::Picture,
+        pulpit_core::annotation::SelectKind::Text => theme::Icon::TextRegion,
+    }
+}
+
 /// A caption above a value, the shape most information widgets take.
 ///
 /// Sized to the pane, like every other reading.

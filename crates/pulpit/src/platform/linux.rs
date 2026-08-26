@@ -195,9 +195,25 @@ impl PlatformServices for LinuxServices {
         )
     }
 
-    /// One clipboard library serves all three desktops; what differs is
-    /// whether the session offers a clipboard at all, which the outcome says.
+    /// On Wayland the region goes out as pixels and as a written PNG file,
+    /// so a file manager can paste it as well as an image editor; see
+    /// [`crate::platform::clipboard::copy_image_wayland`]. X11 keeps the
+    /// one-format arboard path: multiple targets there would mean owning a
+    /// selection by hand, for a session that is no longer the common case.
     fn copy_image(&self, image: &crate::platform::clipboard::ClipboardImage) -> Outcome {
+        if self.wayland {
+            let outcome = crate::platform::clipboard::copy_image_wayland(
+                image,
+                &self.directories().cache.join("clipboard"),
+            );
+            if !matches!(outcome, Outcome::Failed { .. }) {
+                return outcome;
+            }
+            // The three-format offer failed — most likely a compositor
+            // without the data-control protocol. Pixels alone still serve
+            // every paste but the file manager's, so fall through rather
+            // than give up the whole copy.
+        }
         crate::platform::clipboard::copy_image(image)
     }
 

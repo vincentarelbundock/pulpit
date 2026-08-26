@@ -282,6 +282,13 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
         let Some(dismiss) = self.on_dismiss else {
             return;
         };
+        // A click into another window is the same gesture as a click off the
+        // panel, but it arrives as a focus change rather than as a press this
+        // window can see.
+        if matches!(event, Event::Window(iced::window::Event::Unfocused)) {
+            shell.publish(dismiss.clone());
+            return;
+        }
         if !matches!(
             event,
             Event::Mouse(mouse::Event::ButtonPressed(_))
@@ -325,5 +332,22 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
         self.popup
             .as_widget_mut()
             .operate(self.tree, layout, renderer, operation);
+    }
+
+    // Without this the panel is a dead end for overlays of its own: the trait
+    // defaults to `None`, and every tooltip on a control inside the panel was
+    // silently swallowed — hover said nothing, and nothing said why.
+    fn overlay<'a>(
+        &'a mut self,
+        layout: Layout<'a>,
+        renderer: &iced::Renderer,
+    ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
+        self.popup.as_widget_mut().overlay(
+            self.tree,
+            layout,
+            renderer,
+            &layout.bounds(),
+            Vector::ZERO,
+        )
     }
 }

@@ -347,8 +347,9 @@ The select tool pulls a rectangle over the page, and its options say what the
 rectangle is for. The choice sits in the tool's own panel, next to where the
 highlighter keeps its colour, and it holds in both Reader and Presenter mode:
 
-- *Marks*, the default: hold every annotation the band encloses, to move,
-  resize or delete them together. The only kind that touches the document.
+- *Annotations*, the default: hold every annotation the band encloses, to
+  move, resize or delete them together. The only kind that touches the
+  document.
 - *Image*: copy the region to the clipboard as a picture. It is rendered
   freshly at twice the page's own scale rather than lifted off the screen, so
   what you paste does not depend on the zoom you happened to be reading at.
@@ -357,9 +358,12 @@ highlighter keeps its colour, and it holds in both Reader and Presenter mode:
   a different question from dragging through text, which follows the reading
   order from one character to another.
 
-A band set to copy leaves the selection alone, and a band set to hold marks
-never reaches the clipboard. Copying an image needs a session that can carry
-one; on a headless session Pulpit says so rather than copying nothing.
+A band set to copy leaves the selection alone, and a band set to hold
+annotations never reaches the clipboard. Copying an image needs a session that
+can carry one; on a headless session Pulpit says so rather than copying
+nothing. On Wayland the copied image is also offered as a file, so pasting
+into a file manager drops a PNG into the directory; an image editor still
+receives the pixels directly.
 
 Table extraction — dropping row and column dividers over a region and getting
 it back as a spreadsheet — is deliberately not offered.

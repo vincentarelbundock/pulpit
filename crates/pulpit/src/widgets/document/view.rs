@@ -2736,21 +2736,13 @@ fn document_tool_options_panel<Message: Clone + 'static>(
     if tool == AnnotationTool::Select {
         let mut kinds = Row::new().spacing(theme::space::XS);
         for kind in pulpit_core::annotation::SelectKind::ALL {
-            let glyph = match kind {
-                pulpit_core::annotation::SelectKind::Marks => theme::Icon::Select,
-                pulpit_core::annotation::SelectKind::Image => theme::Icon::Crop,
-                pulpit_core::annotation::SelectKind::Text => theme::Icon::Type,
-            };
-            kinds = kinds.push(hint(
-                document_command_button(
-                    glyph,
-                    kind.description(),
-                    ReadCommand::SetSelectKind(kind),
-                    state.select_kind == kind,
-                    state.live,
-                    on_event,
-                ),
+            kinds = kinds.push(document_command_button(
+                crate::widgets::common::view::select_kind_glyph(kind),
                 kind.label(),
+                ReadCommand::SetSelectKind(kind),
+                state.select_kind == kind,
+                state.live,
+                on_event,
             ));
         }
         panel = panel.row("Takes", kinds);

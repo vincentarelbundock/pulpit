@@ -82,6 +82,16 @@ typst-svg = { workspace = true }
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 pulpit-display = { workspace = true, features = ["x11", "wayland"] }
 zbus = { workspace = true }
+# The Wayland clipboard directly, past arboard, for the select band's image:
+# a file manager pastes files, not pixels, so the copied region is offered as
+# `image/png` *and* as a freshly written PNG file under `text/uri-list` and
+# `x-special/gnome-copied-files` — three offers arboard's one-format API
+# cannot make. The same crate and version arboard already resolves, so this
+# adds a name, not a dependency.
+wl-clipboard-rs = "0.9"
+# Encodes that region to PNG once for both offers. The version iced and
+# arboard already build; `png` is the only codec the clipboard needs.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Elsewhere the display crate builds without a session backend; the Win32 and
 # CoreGraphics adapters are selected by target inside the crate itself.

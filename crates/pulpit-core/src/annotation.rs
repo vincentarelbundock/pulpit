@@ -105,20 +105,15 @@ impl SelectKind {
     /// works on any page at all comes first.
     pub const ALL: [SelectKind; 3] = [SelectKind::Marks, SelectKind::Image, SelectKind::Text];
 
+    /// The word the option's tooltip says. The buttons themselves are
+    /// icon-only, so this one word is the whole of the explanation and it
+    /// names what the band takes rather than how: "Annotations", not "hold
+    /// the marks the band encloses".
     pub fn label(self) -> &'static str {
         match self {
-            SelectKind::Marks => "Marks",
+            SelectKind::Marks => "Annotations",
             SelectKind::Image => "Image",
             SelectKind::Text => "Text",
-        }
-    }
-
-    /// What the option's tooltip says it will do with the rectangle.
-    pub fn description(self) -> &'static str {
-        match self {
-            SelectKind::Marks => "Hold the annotations inside the band",
-            SelectKind::Image => "Copy the region as an image",
-            SelectKind::Text => "Copy the text inside the region",
         }
     }
 

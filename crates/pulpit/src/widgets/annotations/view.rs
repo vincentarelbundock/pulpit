@@ -757,36 +757,24 @@ fn options_panel<Message: Clone + 'static>(
     let kind_row = (armable == AnnotationTool::Select).then(|| {
         let mut kinds = Row::new().spacing(theme::space::S);
         for kind in pulpit_core::annotation::SelectKind::ALL {
-            let glyph = match kind {
-                // The arrow that picks marks up, the rectangle that takes a
-                // region, and the letter. Borrowed from the controls that
-                // already mean those things rather than drawn again: the
-                // crop control is a rectangle pulled over the page too.
-                pulpit_core::annotation::SelectKind::Marks => theme::Icon::Select,
-                pulpit_core::annotation::SelectKind::Image => theme::Icon::Crop,
-                pulpit_core::annotation::SelectKind::Text => theme::Icon::Type,
-            };
+            let glyph = crate::widgets::common::view::select_kind_glyph(kind);
             let chosen = options.select_kind == kind;
-            let mut choice = button(
-                row![
-                    theme::icon::icon(glyph, theme::type_scale::BODY),
-                    text(kind.label()).size(theme::type_scale::CAPTION),
-                ]
-                .spacing(theme::space::XS)
-                .align_y(Alignment::Center),
-            )
-            .padding(Padding::from([4.0, theme::space::S]))
-            .style(if chosen {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
+            // Icon-only, like the palette's own buttons: the panel is three
+            // choices wide and the words made it read as three commands. The
+            // tooltip carries the word instead.
+            let mut choice = button(theme::icon::icon(glyph, theme::type_scale::BODY))
+                .padding(Padding::from([4.0, theme::space::S]))
+                .style(if chosen {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                });
             if mode.interactive() {
                 choice = choice.on_press(on(WidgetEvent::Annotate(
                     AnnotationCommand::SetSelectKind(kind),
                 )));
             }
-            kinds = kinds.push(palette_hint(choice.into(), kind.description()));
+            kinds = kinds.push(palette_hint(choice.into(), kind.label()));
         }
         kinds
     });

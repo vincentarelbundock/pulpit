@@ -978,10 +978,19 @@ about.
 
 The image clipboard is the one service that reaches past the toolkit: Iced's
 clipboard carries text and nothing else, so `PlatformServices::copy_image`
-goes through `arboard` instead. It is a capability rather than an assumption
+goes around it instead. It is a capability rather than an assumption
 because a headless session and a compositor with no data-control protocol both
 have nowhere to put the pixels, and the select tool's image kind has to be able
 to say so before it spends a render on one.
+
+On Wayland the copy is three offers at once, through `wl-clipboard-rs`
+directly: `image/png` for anything that pastes pixels, and a PNG written into
+the cache offered as `text/uri-list` and `x-special/gnome-copied-files` for
+anything that pastes files — which is what a file manager is, and why a
+one-format copy pasted into Thunar as nothing at all. X11 and the other
+desktops keep the one-format `arboard` path, and a Wayland session where the
+direct offer fails falls back to it: pixels alone still serve every paste but
+the file manager's.
 
 The X11 adapter claims placement; the Wayland adapter does not, on any
 compositor. The UI adapts on the resulting capability claim alone — never on
