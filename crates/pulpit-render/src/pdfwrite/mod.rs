@@ -382,12 +382,27 @@ pub struct PdfTokenizer<'a> {
     pos: usize,
 }
 
-/// The characters that end a PDF token: whitespace, the delimiters of the
-/// specification's lexical rules, and the string parentheses.
+/// The characters that end a PDF token: §7.2.3's six whitespace characters and
+/// its eight delimiters.
+///
+/// Three were missing, and the omissions were not equivalent. `\0` and `\x0c`
+/// are whitespace the specification names, so `/Sig\x0c` tokenized as the name
+/// `Sig\u{c}` — and `extract_signature_field` compares that against `"Sig"` to
+/// decide whether a field is a signature at all, so the field was dropped from
+/// discovery entirely rather than reported as anything. `%` opens a comment,
+/// which `skip_whitespace` already knew and this did not, so a token running
+/// into one swallowed it.
+///
+/// `verify::objects`'s lexer has always had the full set. Two parsers reading
+/// the same bytes by different rules is the divergence this crate keeps
+/// finding; here the stricter one was the one that decided.
 fn is_delimiter(byte: u8) -> bool {
     matches!(
         byte,
-        b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'(' | b')'
+        // Whitespace (§7.2.3, table 1).
+        b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' '
+        // Delimiters (§7.2.3, table 2).
+        | b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
     )
 }
 
@@ -400,7 +415,7 @@ impl<'a> PdfTokenizer<'a> {
     fn skip_whitespace(&mut self) {
         while self.pos < self.data.len() {
             let byte = self.data[self.pos];
-            if byte == b' ' || byte == b'\t' || byte == b'\n' || byte == b'\r' {
+            if matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ') {
                 self.pos += 1;
             } else if byte == b'%' {
                 // Skip comment until end of line
@@ -1353,6 +1368,68 @@ mod tests {
         assert_eq!(tokenizer.next_token().unwrap(), Some(b"/Catalog".to_vec()));
         assert_eq!(tokenizer.next_token().unwrap(), Some(b">>".to_vec()));
         assert_eq!(tokenizer.next_token().unwrap(), None);
+    }
+
+    /// §7.2.3's whitespace and delimiters all end a name, including the three
+    /// this tokenizer used to miss.
+    ///
+    /// `\x0c` is the one that mattered. `extract_signature_field` decides
+    /// whether a field is a signature by comparing its `/FT` against `"Sig"`,
+    /// so a form feed after the name yielded `Sig\u{c}`, failed that
+    /// comparison, and the field was dropped from discovery — not reported
+    /// broken, simply absent. `verify::objects`'s lexer always had the full
+    /// set, so the two parsers disagreed about the same bytes and the weaker
+    /// one was the one that decided.
+    #[test]
+    fn every_delimiter_the_specification_names_ends_a_name() {
+        for (data, first) in [
+            (b"/Sig\x0c/V".as_slice(), "/Sig"),
+            (b"/Sig\0/V".as_slice(), "/Sig"),
+            (b"/Sig%comment\n/V".as_slice(), "/Sig"),
+            (b"/Sig /V".as_slice(), "/Sig"),
+            (b"/Sig\t/V".as_slice(), "/Sig"),
+            (b"/Sig\r\n/V".as_slice(), "/Sig"),
+        ] {
+            let mut tokenizer = PdfTokenizer::new(data);
+            let token = tokenizer.next_token().unwrap().expect("a name is read");
+            assert_eq!(
+                String::from_utf8_lossy(&token),
+                first,
+                "{:?} must end the name",
+                String::from_utf8_lossy(data)
+            );
+            // And whatever ended it is skipped, rather than becoming a token
+            // of its own that the next key would be read out of.
+            let next = tokenizer.next_token().unwrap().expect("a second token");
+            assert_eq!(String::from_utf8_lossy(&next), "/V");
+        }
+    }
+
+    /// The `/Contents` extent in `verify` is computed as
+    /// `tokenizer.position() - token.len()`, which is only correct while a
+    /// token's length equals the bytes it consumed. Widening the delimiter set
+    /// shortens some tokens, so the invariant is pinned here rather than left
+    /// to hold by accident.
+    #[test]
+    fn a_tokens_length_is_the_bytes_it_consumed() {
+        let data = b"<</FT/Sig\x0c/Contents <00FF> /X 1>>".as_slice();
+        let mut tokenizer = PdfTokenizer::new(data);
+        let mut previous_end = 0usize;
+        while let Some(token) = tokenizer.next_token().unwrap() {
+            let end = tokenizer.position();
+            let start = end - token.len();
+            assert!(
+                start >= previous_end,
+                "token {:?} starts at {start}, before the previous token ended at {previous_end}",
+                String::from_utf8_lossy(&token)
+            );
+            assert_eq!(
+                &data[start..end],
+                token.as_slice(),
+                "the bytes a token spans must be the token"
+            );
+            previous_end = end;
+        }
     }
 
     #[test]
