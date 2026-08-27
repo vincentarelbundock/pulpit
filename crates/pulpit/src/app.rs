@@ -3477,12 +3477,18 @@ impl App {
                 let Some(entry) = self.document_signatures.get(index) else {
                     return Task::none();
                 };
-                let (field_name, coverage) = match entry {
-                    pulpit_render::verify::SignatureVerification::Checked(status) => {
-                        (status.field_name.clone(), format!("{:?}", status.coverage))
-                    }
+                let (field_name, coverage, findings) = match entry {
+                    pulpit_render::verify::SignatureVerification::Checked(status) => (
+                        status.field_name.clone(),
+                        format!("{:?}", status.coverage),
+                        status
+                            .algorithm_findings
+                            .iter()
+                            .map(crate::view::describe_algorithm_finding)
+                            .collect::<Vec<_>>(),
+                    ),
                     pulpit_render::verify::SignatureVerification::Broken { field_name, .. } => {
-                        (field_name.clone(), "unknown".to_string())
+                        (field_name.clone(), "unknown".to_string(), Vec::new())
                     }
                 };
                 let line = crate::signing::signature_line_for_verification(entry);
@@ -3490,6 +3496,7 @@ impl App {
                     &field_name,
                     &line,
                     &coverage,
+                    &findings,
                 ))
             }
             Message::Alarm(command) => self.on_alarm_command(command),

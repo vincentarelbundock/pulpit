@@ -1058,9 +1058,23 @@ pub fn signature_line_for_verification(verification: &SignatureVerification) -> 
 }
 
 /// §31.4's plain-text report, suitable for pasting into an email.
-pub fn plain_text_report(field_name: &str, line: &SignatureLine, coverage: &str) -> String {
+pub fn plain_text_report(
+    field_name: &str,
+    line: &SignatureLine,
+    coverage: &str,
+    findings: &[String],
+) -> String {
+    // The findings go above the disclosure rather than after it, because this
+    // is the text a reader pastes into a mail asking whether a document can be
+    // trusted, and "the digest is SHA-1" is the part of the answer that the
+    // status line cannot carry. Nothing is said when there is nothing to say.
+    let notes = if findings.is_empty() {
+        String::new()
+    } else {
+        format!("\nNotes:\n{}", findings.join("\n"))
+    };
     format!(
-        "pulpit signature report\nField: {field_name}\nStatus: {}\nCoverage: {coverage}\n\n\
+        "pulpit signature report\nField: {field_name}\nStatus: {}\nCoverage: {coverage}{notes}\n\n\
          pulpit checked that this signature is intact and that it matches the certificate \
          embedded in it. It did not check whether that certificate is genuine.",
         line.summary_text()
@@ -1920,9 +1934,41 @@ mod tests {
         let line = SignatureLine::NotValid {
             reason: "byte range mismatch".into(),
         };
-        let report = plain_text_report("Sig1", &line, "EntireRevision");
+        let report = plain_text_report("Sig1", &line, "EntireRevision", &[]);
         assert!(report.contains("Sig1"));
         assert!(report.contains("EntireRevision"));
         assert!(report.contains("Signature is not valid: byte range mismatch"));
+        assert!(
+            !report.contains("Notes:"),
+            "a signature with nothing to note must not grow an empty section"
+        );
+    }
+
+    /// A weak algorithm reaches the text a reader pastes into a mail.
+    ///
+    /// The finding is computed by `verify` and was, until now, shown to
+    /// nobody: the panel printed the algorithm's name and the report did not
+    /// mention it at all, while the design comment beside the finding said
+    /// naming the algorithm was the honest whole of what pulpit could offer.
+    #[test]
+    fn plain_text_report_carries_algorithm_findings() {
+        let line = SignatureLine::SignedIdentityNotVerified {
+            signer: "CN=Someone".into(),
+            sha256_fingerprint: "AA:BB".into(),
+        };
+        let report = plain_text_report(
+            "Sig1",
+            &line,
+            "EntireFile",
+            &["SHA-1 is no longer collision resistant".to_string()],
+        );
+        assert!(report.contains("Notes:"));
+        assert!(report.contains("SHA-1 is no longer collision resistant"));
+        // Still above the disclosure, which stays the last word.
+        let notes = report.find("Notes:").expect("the notes are present");
+        let disclosure = report
+            .find("did not check")
+            .expect("the disclosure is present");
+        assert!(notes < disclosure);
     }
 }

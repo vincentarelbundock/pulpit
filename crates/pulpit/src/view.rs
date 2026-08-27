@@ -2545,6 +2545,27 @@ fn voice_library(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Say what an algorithm finding means, in words a reader can act on.
+///
+/// Reported, never enforced. A weak algorithm makes a signature worth less
+/// rather than invalid -- the bytes it covers are still the bytes that were
+/// signed -- and pulpit does no certificate path validation, so it is in no
+/// position to make a trust decision on the reader's behalf. Naming the
+/// algorithm and the key size is the honest whole of what it can offer, and
+/// until now it was computed and shown to nobody.
+pub fn describe_algorithm_finding(finding: &pulpit_render::verify::AlgorithmFinding) -> String {
+    use pulpit_render::verify::AlgorithmFinding;
+    match finding {
+        AlgorithmFinding::WeakDigest { algorithm } => format!(
+            "{algorithm} is no longer collision resistant; this signature is worth less than \
+             its algorithm name suggests"
+        ),
+        AlgorithmFinding::WeakRsaKey { bits } => format!(
+            "the signing key is {bits} bits, below the 2048-bit floor this package signs with"
+        ),
+    }
+}
+
 fn signature_profiles_settings(app: &App) -> Element<'_, Message> {
     use crate::signature_profiles::ProfileMsg;
 
@@ -3913,7 +3934,19 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
                         )),
                     ]
                     .spacing(gap::XS)
-                    .padding(gap::S),
+                    .padding(gap::S)
+                    // Algorithm findings are the one thing here that is a
+                    // judgement rather than a fact, so they are said in the
+                    // alert colour and only when there are any. pulpit does no
+                    // certificate path validation and so refuses nothing on
+                    // this basis: a weak algorithm makes a signature worth
+                    // less, not invalid, and saying so is the whole of what
+                    // this crate can honestly offer the reader.
+                    .extend(status.algorithm_findings.iter().map(|finding| {
+                        theme::typography::caption(describe_algorithm_finding(finding))
+                            .color(theme::ambient::alert())
+                            .into()
+                    })),
                 );
             }
             row_body = row_body.push(
