@@ -1058,6 +1058,53 @@ pub fn signature_line_for_verification(verification: &SignatureVerification) -> 
 }
 
 /// §31.4's plain-text report, suitable for pasting into an email.
+/// Everything worth saying about a checked signature beyond its status line.
+///
+/// Reported, never enforced. pulpit does no certificate path validation, so it
+/// is in no position to decide trust on the reader's behalf; what it can do is
+/// state facts the status line has no room for. Both the panel and the report
+/// a reader pastes into a mail draw from here, so the two cannot come to say
+/// different things about one signature.
+pub fn signature_notes(status: &pulpit_render::verify::SignatureStatus) -> Vec<String> {
+    use pulpit_render::verify::AlgorithmFinding;
+
+    let mut notes: Vec<String> = status
+        .algorithm_findings
+        .iter()
+        .map(|finding| match finding {
+            AlgorithmFinding::WeakDigest { algorithm } => format!(
+                "{algorithm} is no longer collision resistant; this signature is worth less \
+                 than its algorithm name suggests"
+            ),
+            AlgorithmFinding::WeakRsaKey { bits } => format!(
+                "the signing key is {bits} bits, below the 2048-bit floor this package signs with"
+            ),
+        })
+        .collect();
+
+    // A signing time outside the certificate's validity window is a fact about
+    // the document rather than a verdict on it, and it is the one thing the
+    // certificate summary knows that nothing was telling the reader: an
+    // expired certificate presented exactly like a current one. The time is
+    // the *claimed* one and is not attested, which is why this says the two
+    // disagree rather than that the signature is late.
+    if let Some(claimed) = status.claimed_time {
+        let cert = &status.signer_cert;
+        if claimed < cert.not_before {
+            notes.push(
+                "the claimed signing time is before the signing certificate became valid"
+                    .to_string(),
+            );
+        } else if claimed > cert.not_after {
+            notes.push(
+                "the claimed signing time is after the signing certificate expired".to_string(),
+            );
+        }
+    }
+
+    notes
+}
+
 pub fn plain_text_report(
     field_name: &str,
     line: &SignatureLine,
@@ -1927,6 +1974,77 @@ mod tests {
         apply_profile_defaults(&mut options, &profile, &presets_on(3));
         assert!(!options.visible_requested);
         assert!(options.placement.is_none());
+    }
+
+    /// A signature status with a certificate valid for the whole of 2020.
+    fn status_signed_at(claimed: Option<i64>) -> pulpit_render::verify::SignatureStatus {
+        use pulpit_render::verify::{CertificateSummary, IdentityAssurance, SignatureCoverage};
+        // 2020-01-01 and 2021-01-01, in unix seconds.
+        const VALID_FROM: i64 = 1_577_836_800;
+        const VALID_UNTIL: i64 = 1_609_459_200;
+        let cert = CertificateSummary {
+            subject: "CN=Someone".into(),
+            issuer: "CN=Someone".into(),
+            serial: "01".into(),
+            not_before: VALID_FROM,
+            not_after: VALID_UNTIL,
+            sha256_fingerprint: "aa".into(),
+        };
+        pulpit_render::verify::SignatureStatus {
+            field_name: "Sig1".into(),
+            signer_subject: "CN=Someone".into(),
+            signer_cert: cert.clone(),
+            cert_chain: vec![cert],
+            coverage: SignatureCoverage::EntireFile,
+            intact: true,
+            valid: true,
+            later_revisions: false,
+            declared_docmdp: None,
+            claimed_time: claimed,
+            attested_time: None,
+            algorithm_findings: Vec::new(),
+            identity: IdentityAssurance::NotVerified {
+                reason: "no path validation",
+            },
+            profile: None,
+            digest_algorithm: "SHA-256".into(),
+            signature_algorithm: "RSA".into(),
+        }
+    }
+
+    /// A signing time outside the certificate's window is said out loud.
+    ///
+    /// It was not: `not_before`/`not_after` were parsed, carried, and read by
+    /// nobody, so a signature made with an expired certificate presented
+    /// exactly like one made with a current certificate. The time is the
+    /// *claimed* one and is not attested, which is why the note says the two
+    /// disagree rather than that the signature is late.
+    #[test]
+    fn a_signing_time_outside_the_certificate_window_is_noted() {
+        // Mid-2020: inside the window.
+        assert!(
+            signature_notes(&status_signed_at(Some(1_593_561_600))).is_empty(),
+            "a signature made while the certificate was valid has nothing to report"
+        );
+
+        // 2022: after it expired.
+        let late = signature_notes(&status_signed_at(Some(1_640_995_200)));
+        assert_eq!(late.len(), 1);
+        assert!(
+            late[0].contains("after the signing certificate expired"),
+            "{late:?}"
+        );
+
+        // 2019: before it began.
+        let early = signature_notes(&status_signed_at(Some(1_546_300_800)));
+        assert_eq!(early.len(), 1);
+        assert!(
+            early[0].contains("before the signing certificate became valid"),
+            "{early:?}"
+        );
+
+        // No claimed time at all: nothing to compare, so nothing to say.
+        assert!(signature_notes(&status_signed_at(None)).is_empty());
     }
 
     #[test]

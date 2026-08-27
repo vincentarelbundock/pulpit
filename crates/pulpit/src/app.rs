@@ -3481,11 +3481,7 @@ impl App {
                     pulpit_render::verify::SignatureVerification::Checked(status) => (
                         status.field_name.clone(),
                         format!("{:?}", status.coverage),
-                        status
-                            .algorithm_findings
-                            .iter()
-                            .map(crate::view::describe_algorithm_finding)
-                            .collect::<Vec<_>>(),
+                        crate::signing::signature_notes(status),
                     ),
                     pulpit_render::verify::SignatureVerification::Broken { field_name, .. } => {
                         (field_name.clone(), "unknown".to_string(), Vec::new())
