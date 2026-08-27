@@ -1071,6 +1071,34 @@ pub fn check_signature(bytes: &[u8], report: &StructuralReport) -> SignatureVeri
         }
     }
 
+    // RFC 5652 §5.4 binds that attribute to the content actually encapsulated:
+    // the signer says what it signed twice, and a document where the two
+    // disagree is not describing one coherent signature. Checking only the
+    // attribute left the other half of the sentence unread.
+    //
+    // A PDF signature is always detached — the bytes signed are the file's,
+    // named by `/ByteRange` — so embedded content is not a variant to support
+    // but a contradiction: the digest would be checked against the wrong
+    // bytes. It fails closed today, because the recomputed digest is taken
+    // from the file either way; it is refused here so that it is refused for
+    // the reason it is wrong rather than by accident.
+    let encap = &signed_data.encap_content_info;
+    if encap.econtent_type != oid(OID_ID_DATA) {
+        return SignatureVerification::broken(
+            field,
+            format!(
+                "the encapsulated content is {}, expected id-data",
+                encap.econtent_type
+            ),
+        );
+    }
+    if encap.econtent.is_some() {
+        return SignatureVerification::broken(
+            field,
+            "the signature encapsulates its own content, but a PDF signature is detached",
+        );
+    }
+
     // Step 3: message-digest must equal the recomputed digest -> intact.
     let claimed_digest = match find_attribute(signer, OID_MESSAGE_DIGEST)
         .and_then(single_value)
