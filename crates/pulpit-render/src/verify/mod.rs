@@ -1255,6 +1255,9 @@ fn extract_sig_dict_info(
 ) -> Result<(ByteRange, ContentsExtent, Option<MdpPerm>)> {
     let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
 
+    // The DocMDP level is a property of the dictionary, not of any token in
+    // it, so it is read once here rather than from inside the loop below.
+    let docmdp = extract_docmdp_level(sig_dict_slice).unwrap_or(None);
     let mut byte_range_values: Vec<u64> = Vec::new();
     let mut contents_extent: Option<ContentsExtent> = None;
     let mut declared_docmdp: Option<MdpPerm> = None;
@@ -1312,8 +1315,13 @@ fn extract_sig_dict_info(
             } else if in_reference {
                 if token == b"]" {
                     in_reference = false;
-                } else if let Ok(mdp_level) = extract_docmdp_level(sig_dict_slice) {
-                    declared_docmdp = mdp_level;
+                } else {
+                    // Computed once, above: its argument is the whole slice,
+                    // so it cannot depend on the token being looked at. It used
+                    // to be called here, which re-tokenized the entire
+                    // dictionary for every token inside `/Reference` to arrive
+                    // at the same answer each time.
+                    declared_docmdp = docmdp;
                 }
             }
         }
