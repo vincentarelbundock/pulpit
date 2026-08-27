@@ -51,6 +51,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another producer's stamp, and a text mark's rendered picture, which is
   rewritten by editing its source rather than by moving it.
 
+- **Shared memory is reclaimed after a crash with a media overlay playing.**
+  Pulpit sweeps the shared-memory files left by a previous run whose process
+  is gone, and the sweep could not read the names the media overlays use — so
+  it reclaimed the renderer's and skipped theirs. The rings a crashed
+  presentation left behind stayed in `/dev/shm` until the machine was
+  rebooted; on a 4K overlay that is tens of megabytes each time. The sweep now
+  reads every naming scheme pulpit writes, and the names come from one place
+  so a future one cannot be missed.
+
+### Changed
+
+- **The worker machinery is written once.** Message framing, process
+  spawning, the wake-up doorbell and shared-memory naming had grown four
+  separate copies across the render, media and application crates, which is
+  how the leak above went unnoticed in one of them and how a safety check that
+  stops a worker process spawning further workers came to be skipped at one of
+  its four sites. There is now one of each, and a test that fails if a new
+  worker is added without that check. Nothing about how pulpit behaves changes
+  — this is the kind of tidying that stops the next bug rather than fixing a
+  visible one.
+
 ## [0.0.10] — 2026-08-26
 
 ### Added

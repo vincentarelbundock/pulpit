@@ -14,11 +14,14 @@ problem rather than as polish.
 The workspace is five crates under `crates/`:
 
 - `pulpit-core` — presentation state, notes mapping, timer, generations, and
-  the decision half of speech (sentences, reading cursor, language). Pure.
+  the decision half of speech (sentences, reading cursor, language). The
+  domain modules are pure; `ipc` is not, and is the one exception — see the
+  purity note under Conventions.
 - `pulpit-display` — the display identity ladder, snapshots, roles and the
   single `reconcile()` function, plus X11/Wayland/Niri adapters.
-- `pulpit-render` — PDF backends (PDFium, fixture), the worker IPC protocol,
-  supervised worker processes, and the byte-bounded frame cache.
+- `pulpit-render` — PDF backends (PDFium, fixture), the render and document
+  worker protocols, supervised worker processes, and the byte-bounded frame
+  cache. The pipe plumbing underneath the protocols is `pulpit_core::ipc`.
 - `pulpit-media` — the runtimes pulpit launches rather than links: media and
   interactive overlays, driven by an installed Chromium-family browser over
   CDP in a separate worker process, and `speech`, which drives an installed
@@ -74,6 +77,13 @@ The three rules, in short:
   types and no clock reads (time is passed in). That is what keeps the hard
   cases — reconnect at a new index, an unequal mirror, a partial write, a
   stale delayed notification — ordinary unit tests that run in CI.
+- `pulpit_core::ipc` is the one exception, and a deliberate one: it spawns
+  processes, maps files and blocks on a clock. It is there because it is the
+  only place `pulpit-render`, `pulpit-media` and `pulpit` can all reach —
+  the two worker crates are siblings — and because four copies of it had
+  already drifted into a shared-memory leak and an unenforced fork-bomb
+  marker. **No module outside `ipc` may depend on `ipc`**, so the domain
+  stays pure even though the crate no longer is.
 - Ask what the session can do, never what OS it is. Everything above
   `pulpit::platform` reads `Capabilities`; `cfg!(target_os = ...)` in a
   view or a state transition is a bug.
@@ -84,7 +94,7 @@ The three rules, in short:
 - Scripted topology files in `crates/pulpit-display/tests/topology/` are the
   regression surface for display behaviour; capture a new one with
   `pulpit-topology` rather than writing a bespoke test.
-- Measure before restructuring. Two negative results are recorded in
+- Measure before restructuring. Three negative results are recorded in
   `docs-src/internals.typ` and should not be re-litigated without numbers.
 - `docs/` is generated output. Edit `docs-src/` and run `make website`.
 - Licence texts live in `LICENSES/`, with `LICENSES/README.md` saying what

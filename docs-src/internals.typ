@@ -19,6 +19,7 @@ Application (iced daemon, one update loop)
 ├── PresentationState        authoritative domain state         pulpit-core
 ├── DisplayCoordinator       snapshots, roles, reconcile()      pulpit-display
 ├── DocumentManager          watch, debounce, atomic reload     pulpit::doc
+├── ipc                      framing, spawn, doorbell, shm      pulpit-core
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
 ├── images::PageTable        a folder or comic archive as pages pulpit-render
@@ -42,6 +43,34 @@ state machine contain no UI types, no window handles, no PDF library types and
 no clock reads (time is passed in). That is what makes the hard cases —
 reconnect at a new index, an unequal mirror, a partial write, a stale delayed
 notification — ordinary unit tests that run in CI without a graphical session.
+
+=== The one exception: `pulpit_core::ipc`
+
+`pulpit-core` holds one module that is none of those things. `ipc` spawns
+child processes, maps files and blocks on a clock, and it is in the domain
+crate for a structural reason rather than a principled one: `pulpit-render`
+and `pulpit-media` are siblings that cannot see each other, `pulpit` sits
+above both, and the only place all three can reach is `pulpit-core`.
+
+Before it existed, message framing, worker spawning, the wake-up doorbell and
+shared-memory naming were written four times between those crates. Two of the
+copies had already drifted apart in ways that mattered. A shared-memory sweep
+that reclaims files whose owning process has died was taught to one crate's
+naming scheme and silently skipped the other's, so every crash with a media
+overlay playing leaked its rings into `tmpfs` until the machine was rebooted.
+And the fork-bomb marker — the only bound that stops a worker re-executing
+this binary and spawning workers of its own — was declared once per
+supervisor, each copy carrying a comment saying the declarations had to agree,
+with nothing checking that they did; one of four spawn sites had stopped
+setting it entirely.
+
+The alternative was a sixth published crate for six hundred lines of pipe
+plumbing, which buys a Cargo boundary nobody consumes.
+
+What purity actually buys is fast, deterministic domain tests, and that is
+preserved by one rule: *no module outside `ipc` may depend on `ipc`*. The
+domain is still pure; the crate is not. The visible price is that testing
+`pulpit-core` now touches the filesystem.
 
 == Signing identity boundary
 
