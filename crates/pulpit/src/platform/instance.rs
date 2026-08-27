@@ -250,6 +250,7 @@ fn is_running(pid: u32) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(unix, allow(dead_code))] // its caller is the non-Unix fallback in `acquire`
 fn is_running(_pid: u32) -> bool {
     false
 }

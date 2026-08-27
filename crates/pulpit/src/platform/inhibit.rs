@@ -27,10 +27,13 @@ pub enum InhibitState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InhibitToken {
     /// A D-Bus object path or similar.
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // built on Linux and Windows
     Handle(String),
     /// A numeric cookie.
+    #[cfg_attr(not(unix), allow(dead_code))] // constructed only by the Unix adapters
     Cookie(u32),
     /// A child process id.
+    #[cfg_attr(not(unix), allow(dead_code))] // constructed only by the Unix adapters
     Process(u32),
     #[allow(dead_code)] // reached by its tests, not by the application
     None,

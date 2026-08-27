@@ -32,6 +32,7 @@ pub struct PrintJob {
 
 impl PrintJob {
     /// The range in the spelling CUPS reads: `1-3,7`. `None` for everything.
+    #[cfg_attr(not(unix), allow(dead_code))] // the adapter that sends it is Unix-only
     pub fn cups_range(&self) -> Option<String> {
         cups_range(&self.pages)
     }
@@ -42,6 +43,7 @@ impl PrintJob {
 /// `None` for an empty list, so a caller passes no range argument at all
 /// rather than one naming every page. Written once, here, because the print
 /// dialog needs the same string to show as the adapter needs to send.
+#[cfg_attr(not(unix), allow(dead_code))] // elsewhere, reached only by the printing tests
 pub fn cups_range(pages: &[std::ops::RangeInclusive<u32>]) -> Option<String> {
     if pages.is_empty() {
         return None;
@@ -180,6 +182,7 @@ pub trait PlatformServices: Send + Sync {
 /// same thing: no inherited stdio, and a missing program reported as
 /// [`Outcome::Unsupported`] rather than a failure, because "this desktop does
 /// not ship that helper" is not an error the reader can act on.
+#[cfg(unix)]
 pub(crate) fn spawn_detached(program: &str, arguments: &[&str]) -> Outcome {
     match std::process::Command::new(program)
         .args(arguments)

@@ -11,7 +11,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
-use crate::platform::capabilities::{Capabilities, IdentityQuality};
+use crate::platform::capabilities::{
+    Capabilities, IdentityQuality, TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE,
+};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
 use crate::platform::services::{spawn_detached as spawn, PlatformServices};
@@ -199,7 +201,7 @@ impl PlatformServices for MacosServices {
             // AppKit has a complete accessibility bridge, but nothing reaches
             // it while the toolkit exposes no tree. This says what a screen
             // reader would actually find, not what the platform could offer.
-            accessibility_bridge: false,
+            accessibility_bridge: TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE,
             media_keys: true,
             image_clipboard: true,
             // As on Linux: either way of reaching a printer counts, and a

@@ -14,7 +14,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
-use crate::platform::capabilities::{Capabilities, IdentityQuality};
+use crate::platform::capabilities::{
+    Capabilities, IdentityQuality, TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE,
+};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
 use crate::platform::services::PlatformServices;
@@ -174,7 +176,7 @@ impl PlatformServices for WindowsServices {
             // UI Automation exists, but nothing reaches it while the toolkit
             // exposes no accessibility tree. Claiming otherwise would tell a
             // screen-reader user their software works when it does not.
-            accessibility_bridge: false,
+            accessibility_bridge: TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE,
             media_keys: true,
             // Toasts need a registered AppUserModelID, which is a packaging
             // decision rather than a runtime one.
