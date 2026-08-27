@@ -9,7 +9,6 @@
 // application does not happen to call yet are exercised by the tests beside
 // them, and pruning them would throw away working, documented behaviour to
 // satisfy a lint about a boundary that no longer exists.
-#![allow(dead_code)]
 
 pub mod diagnostics;
 pub mod keys;
@@ -559,6 +558,7 @@ impl ReadingSettings {
     /// Forget every remembered position. The privacy control: a reading list
     /// is a record of what someone has read, and it must be possible to say
     /// so and be rid of it.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn forget_all(&mut self) {
         self.positions.clear();
     }

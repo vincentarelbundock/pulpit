@@ -121,53 +121,6 @@ impl AnnotationOptions {
     }
 }
 
-/// An edit to an annotation palette.
-///
-/// Nothing sends one today, for the reason given in `widgets::patch`: the
-/// designer has no properties panel yet. The vocabulary is here because the
-/// rules it encodes are the hard part.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub enum AnnotationPatch {
-    Tool(AnnotationTool),
-    InkColor(InkColor),
-    InkWidth(f32),
-    HighlightColor(InkColor),
-    HighlightWidth(f32),
-    EraserRadius(f32),
-    SpotlightRadius(f32),
-    PointerColor(InkColor),
-    PointerRadius(f32),
-    PointerSpotlight(bool),
-    SelectKind(SelectKind),
-    MarkupKind(MarkupKind),
-    TextColor(InkColor),
-    TextSize(f32),
-    AudienceVisible(bool),
-}
-
-impl AnnotationPatch {
-    pub fn apply(self, options: &mut AnnotationOptions) {
-        match self {
-            AnnotationPatch::Tool(value) => options.tool = value,
-            AnnotationPatch::InkColor(value) => options.ink_color = value,
-            AnnotationPatch::InkWidth(value) => options.ink_width = value,
-            AnnotationPatch::HighlightColor(value) => options.highlight_color = value,
-            AnnotationPatch::HighlightWidth(value) => options.highlight_width = value,
-            AnnotationPatch::EraserRadius(value) => options.eraser_radius = value,
-            AnnotationPatch::SpotlightRadius(value) => options.spotlight_radius = value,
-            AnnotationPatch::PointerColor(value) => options.pointer_color = value,
-            AnnotationPatch::PointerRadius(value) => options.pointer_radius = value,
-            AnnotationPatch::PointerSpotlight(value) => options.pointer_spotlight = value,
-            AnnotationPatch::SelectKind(value) => options.select_kind = value,
-            AnnotationPatch::MarkupKind(value) => options.markup_kind = value,
-            AnnotationPatch::TextColor(value) => options.text_color = value,
-            AnnotationPatch::TextSize(value) => options.text_size = value,
-            AnnotationPatch::AudienceVisible(value) => options.audience_visible = value,
-        }
-    }
-}
-
 fn bound(value: f32, fallback: f32, range: (f32, f32)) -> f32 {
     if value.is_finite() {
         value.clamp(range.0, range.1)
@@ -254,20 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_changes_one_thing_and_leaves_the_rest_alone() {
-        let mut options = AnnotationOptions::default();
-        AnnotationPatch::InkColor(InkColor::Cyan).apply(&mut options);
-        assert_eq!(options.ink_color, InkColor::Cyan);
-        assert_eq!(options.tool, AnnotationOptions::default().tool);
-
-        AnnotationPatch::AudienceVisible(true).apply(&mut options);
-        AnnotationPatch::Tool(AnnotationTool::Ink).apply(&mut options);
-        assert!(options.audience_visible);
-        assert_eq!(options.tool, AnnotationTool::Ink);
-        assert_eq!(options.ink_color, InkColor::Cyan);
-    }
-
-    #[test]
     fn every_measure_starts_inside_the_range_its_slider_offers() {
         // A size control drawn against the wrong range is a control that
         // fights the model: the value sits off the end of the track, and
@@ -305,9 +244,11 @@ mod tests {
 
     #[test]
     fn a_size_the_presenter_drags_to_is_kept_rather_than_snapped_back() {
-        let mut options = AnnotationOptions::default();
-        AnnotationPatch::PointerRadius(0.04).apply(&mut options);
-        AnnotationPatch::SpotlightRadius(0.2).apply(&mut options);
+        let mut options = AnnotationOptions {
+            pointer_radius: 0.04,
+            spotlight_radius: 0.2,
+            ..Default::default()
+        };
         options.sanitise();
         assert_eq!(options.pointer_radius, 0.04);
         assert_eq!(options.spotlight_radius, 0.2);
@@ -322,10 +263,10 @@ mod tests {
     fn the_pointer_control_arms_whichever_thing_it_is_set_to_be() {
         let mut options = AnnotationOptions::default();
         assert_eq!(options.pointer_tool(), AnnotationTool::Pointer);
-        AnnotationPatch::PointerSpotlight(true).apply(&mut options);
+        options.pointer_spotlight = true;
         assert_eq!(options.pointer_tool(), AnnotationTool::Spotlight);
 
-        AnnotationPatch::PointerColor(InkColor::Green).apply(&mut options);
+        options.pointer_color = InkColor::Green;
         assert_eq!(options.style().pointer_color, InkColor::Green);
     }
 

@@ -64,7 +64,6 @@ tracing-appender = { workspace = true }
 rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-resvg = "0.45"
 typst = { workspace = true }
 typst-assets = { workspace = true }
 typst-layout = { workspace = true }

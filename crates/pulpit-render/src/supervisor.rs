@@ -668,14 +668,6 @@ impl RendererSupervisor {
                 .count()
     }
 
-    /// Tell the supervisor what the frame cache is doing. The cache is owned
-    /// by the application, so its numbers can only reach the report by being
-    /// handed over; without this the report simply says so.
-    pub fn note_cache_stats(&mut self, stats: crate::cache::CacheStats, budget_bytes: u64) {
-        self.counters.cache = Some(stats);
-        self.counters.cache_budget_bytes = Some(budget_bytes);
-    }
-
     /// A snapshot of how rendering is going, with the queue read at this
     /// instant and the counters accumulated since start.
     pub fn diagnostics(&self) -> RenderDiagnostics {

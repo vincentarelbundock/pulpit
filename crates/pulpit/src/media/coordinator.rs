@@ -171,6 +171,7 @@ impl MediaCoordinator {
         &self.index
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
     }
@@ -183,6 +184,7 @@ impl MediaCoordinator {
         self.sessions.get(&overlay).copied()
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn progress(&self, overlay: OverlayId) -> Option<PlaybackProgress> {
         self.progress.get(&overlay).copied()
     }
@@ -258,6 +260,7 @@ impl MediaCoordinator {
         }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
@@ -444,6 +447,7 @@ impl MediaCoordinator {
     }
 
     /// Has this attachment already been asked of the renderer?
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn already_requested(&self, name: &str) -> bool {
         self.requested.contains(name)
     }
@@ -822,6 +826,7 @@ impl MediaCoordinator {
     }
 
     /// Forget everything. Staged assets are deleted with the staging root.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn clear(&mut self, supervisor: &mut MediaSupervisor) {
         for session in self.sessions.values() {
             supervisor.close(*session);

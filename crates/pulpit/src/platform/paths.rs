@@ -87,6 +87,7 @@ impl Directories {
     /// Encrypted signing credentials managed by pulpit. They stay separate
     /// from the human-readable settings file, which must never contain key
     /// material or passphrases.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn signing_credentials(&self) -> PathBuf {
         self.config.join("signatures")
     }
@@ -107,11 +108,13 @@ impl Directories {
         self.cache.join("audience.pid")
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.toml")
     }
 
     /// Create every directory, reporting the first that could not be made.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn create(&self) -> std::io::Result<()> {
         for directory in [&self.config, &self.cache, &self.data, &self.logs] {
             std::fs::create_dir_all(directory)?;
@@ -120,6 +123,7 @@ impl Directories {
     }
 
     /// A rooted copy, for tests.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn under(root: &Path) -> Directories {
         Directories {
             config: root.join("config"),

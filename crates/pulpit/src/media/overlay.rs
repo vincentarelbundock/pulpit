@@ -84,6 +84,7 @@ pub fn place(
 /// Values outside `0.0..=1.0` mean the pointer is not over the overlay.
 /// Letterboxed pixels never land inside one, because the same [`PageBox`]
 /// produced both answers.
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub fn pointer_within(
     panel: Size,
     aspect: f32,
@@ -103,6 +104,7 @@ pub fn pointer_within(
 }
 
 /// Is a fractional position inside the overlay?
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub fn contains(position: (f32, f32)) -> bool {
     (0.0..=1.0).contains(&position.0) && (0.0..=1.0).contains(&position.1)
 }

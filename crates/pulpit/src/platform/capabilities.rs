@@ -159,11 +159,13 @@ impl Default for Speech {
 }
 
 impl Speech {
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn can_speak(&self) -> bool {
         matches!(self, Speech::Ready { .. })
     }
 
     /// Whether the settings page should offer a download button.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn can_download(&self) -> bool {
         matches!(self, Speech::Downloadable { .. } | Speech::Ready { .. })
     }
@@ -263,6 +265,7 @@ impl Capabilities {
     }
 
     /// Everything that is *not* available, for a one-line summary.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn limitations(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if !self.arbitrary_placement {

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // configuration vocabulary, kept for when it is offered again
 //! Moving through the deck: buttons, slider, counter.
 
 use serde::{Deserialize, Serialize};
@@ -29,24 +28,6 @@ impl ButtonsOptions {
     }
 }
 
-/// An edit to the buttons.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ButtonsPatch {
-    Back(bool),
-    Forward(bool),
-    Labels(bool),
-}
-
-impl ButtonsPatch {
-    pub fn apply(self, options: &mut ButtonsOptions) {
-        match self {
-            ButtonsPatch::Back(value) => options.back = value,
-            ButtonsPatch::Forward(value) => options.forward = value,
-            ButtonsPatch::Labels(value) => options.labels = value,
-        }
-    }
-}
-
 /// What is wrong with a pair of buttons that are both switched off.
 pub fn validate_buttons(options: &ButtonsOptions) -> Vec<crate::widgets::Complaint> {
     if options.is_empty() {
@@ -61,9 +42,7 @@ pub fn validate_buttons(options: &ButtonsOptions) -> Vec<crate::widgets::Complai
 
 #[cfg(test)]
 mod buttons_tests {
-    use crate::widgets::navigation::model::ButtonsPatch;
-    use crate::widgets::patch::WidgetPatch;
-    use crate::widgets::{Widget, WidgetKind};
+    use crate::widgets::{Widget, WidgetConfig, WidgetKind};
 
     #[test]
     fn the_pair_can_be_placed_on_its_own() {
@@ -79,12 +58,10 @@ mod buttons_tests {
     #[test]
     fn a_pair_with_both_buttons_off_says_so() {
         let mut buttons = Widget::new(WidgetKind::SlideButtons);
-        buttons
-            .apply(WidgetPatch::Buttons(ButtonsPatch::Back(false)))
-            .unwrap();
-        buttons
-            .apply(WidgetPatch::Buttons(ButtonsPatch::Forward(false)))
-            .unwrap();
+        if let WidgetConfig::Buttons(options) = buttons.config_mut() {
+            options.back = false;
+            options.forward = false;
+        }
 
         assert!(!buttons.provides_forward_navigation());
         assert_eq!(buttons.validate((200.0, 60.0)).len(), 1);

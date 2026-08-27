@@ -1,4 +1,3 @@
-#![allow(dead_code)] // configuration vocabulary, kept for when it is offered again
 //! Timing: the elapsed timer, the wall clock, and the pair of them.
 
 use std::time::{Duration, Instant};
@@ -172,6 +171,7 @@ pub const STALE_AFTER_SECONDS: u32 = 90;
 /// How long a snoozed cue waits before asking again, when nobody has said.
 pub const DEFAULT_SNOOZE_MINUTES: u32 = 5;
 /// The same, in seconds, for the tests and for anything still assuming it.
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub const SNOOZE_SECONDS: u32 = DEFAULT_SNOOZE_MINUTES * 60;
 /// The widest a snooze may be set. Longer than this is not a snooze, it is a
 /// different alarm, and the popup has a field for those.
@@ -745,6 +745,20 @@ pub fn crossed(previous: u32, now: u32, alarms: &[Alarm]) -> Vec<&Alarm> {
     struck
 }
 
+/// A timer below this height is decoration rather than information.
+pub const READABLE_MINIMUM_HEIGHT: f32 = 44.0;
+
+/// What is wrong with this timer at this size, if anything.
+pub fn validate(scale: f32, inner: (f32, f32)) -> Vec<crate::widgets::Complaint> {
+    let scaled = READABLE_MINIMUM_HEIGHT * scale.clamp(0.5, 2.0);
+    if inner.1 < scaled {
+        return vec![crate::widgets::Complaint {
+            message: "Timer text may be unreadable at its current size",
+            consequence: "The timer needs to be legible from where you will be standing.",
+        }];
+    }
+    Vec::new()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1199,51 +1213,4 @@ mod tests {
         options.sanitise();
         assert_eq!(options.warning_minutes, MAX_WARNING_MINUTES);
     }
-}
-
-/// An edit to the timer.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TimerPatch {
-    WarningMinutes(u32),
-}
-
-impl TimerPatch {
-    pub fn apply(self, options: &mut TimerOptions) {
-        match self {
-            TimerPatch::WarningMinutes(value) => options.warning_minutes = value,
-        }
-    }
-}
-
-/// An edit to the clock.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ClockPatch {
-    TwentyFourHour(bool),
-    ShowSeconds(bool),
-    ShowAlarms(bool),
-}
-
-impl ClockPatch {
-    pub fn apply(self, options: &mut ClockOptions) {
-        match self {
-            ClockPatch::TwentyFourHour(value) => options.twenty_four_hour = value,
-            ClockPatch::ShowSeconds(value) => options.show_seconds = value,
-            ClockPatch::ShowAlarms(value) => options.show_alarms = value,
-        }
-    }
-}
-
-/// A timer below this height is decoration rather than information.
-pub const READABLE_MINIMUM_HEIGHT: f32 = 44.0;
-
-/// What is wrong with this timer at this size, if anything.
-pub fn validate(scale: f32, inner: (f32, f32)) -> Vec<crate::widgets::Complaint> {
-    let scaled = READABLE_MINIMUM_HEIGHT * scale.clamp(0.5, 2.0);
-    if inner.1 < scaled {
-        return vec![crate::widgets::Complaint {
-            message: "Timer text may be unreadable at its current size",
-            consequence: "The timer needs to be legible from where you will be standing.",
-        }];
-    }
-    Vec::new()
 }

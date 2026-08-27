@@ -61,10 +61,12 @@ impl InputRouter {
         self.focused
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn hovered(&self) -> Option<OverlayId> {
         self.hovered
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn focus(&mut self, overlay: Option<OverlayId>) {
         self.focused = overlay;
     }

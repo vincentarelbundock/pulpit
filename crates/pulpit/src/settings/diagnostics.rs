@@ -11,6 +11,7 @@ use pulpit_display::{DisplaySnapshot, Outcome, Role, RoleTarget, Warning};
 
 /// Sets up `tracing`, optionally with a rotating file in the state directory.
 pub struct Logging {
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub log_directory: Option<PathBuf>,
     _guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
@@ -75,6 +76,7 @@ pub fn log_directory() -> PathBuf {
 pub struct DiagnosticsBundle {
     pub platform: String,
     pub display_backend: String,
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub pdf_backend: String,
     pub capabilities: String,
     snapshot: Option<DisplaySnapshot>,
@@ -130,11 +132,13 @@ impl DiagnosticsBundle {
         }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn events(&self) -> impl Iterator<Item = &String> {
         self.events.iter()
     }
 
     /// Render the bundle as plain text for a bug report.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn to_report(&self) -> String {
         self.to_report_with_backend(&self.pdf_backend)
     }
@@ -217,6 +221,7 @@ impl DiagnosticsBundle {
 
     /// The whole bundle, summaries then appendix, for a caller with nothing
     /// of its own to add.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn to_full_report(&self) -> String {
         let mut out = self.to_report();
         out.push_str(&self.events_report());

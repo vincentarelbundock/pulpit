@@ -228,11 +228,6 @@ impl PresentationState {
         self.mapping.audience_source(self.preview, self.pdf_pages())
     }
 
-    pub fn next_preview_source(&self) -> Option<PageSource> {
-        self.mapping
-            .audience_source(self.preview + 1, self.pdf_pages())
-    }
-
     pub fn notes_source(&self) -> Option<PageSource> {
         self.mapping.notes_source(self.preview, self.pdf_pages())
     }

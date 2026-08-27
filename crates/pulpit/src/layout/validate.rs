@@ -20,6 +20,7 @@ pub enum Severity {
 }
 
 impl Severity {
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn label(self) -> &'static str {
         match self {
             Severity::Blocking => "Blocked",
@@ -202,7 +203,7 @@ mod tests {
     use crate::layout::builtin::presenter_default;
     use crate::layout::model::Layout;
     use crate::layout::tree::Direction;
-    use crate::widgets::{Widget, WidgetKind, WidgetPatch};
+    use crate::widgets::{Widget, WidgetConfig, WidgetKind};
 
     fn area() -> Frame {
         Frame::new(0.0, 0.0, 1600.0, 900.0)
@@ -248,11 +249,9 @@ mod tests {
             .unwrap();
 
         let mut navigation = Widget::new(WidgetKind::SlideButtons);
-        navigation
-            .apply(WidgetPatch::Buttons(
-                crate::widgets::navigation::model::ButtonsPatch::Forward(false),
-            ))
-            .unwrap();
+        if let WidgetConfig::Buttons(options) = navigation.config_mut() {
+            options.forward = false;
+        }
         layout.set_widget(ids[1], navigation).unwrap();
 
         let messages = messages(&validate(&layout, area()));

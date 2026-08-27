@@ -42,6 +42,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The media worker's shared-memory rings are no longer world-readable.** A
+  ring carries decoded video frames of whatever is on the audience screen, and
+  it lives in `/dev/shm`, which every local user can write to. The render
+  crate had long created its regions with an unguessable name, `create_new`
+  and mode `0600`; the media crate, doing the same job with a different data
+  structure, had none of the three — its rings were named
+  `pulpit-media-<pid>-0` upwards, adopted an existing file rather than
+  refusing it, and took whatever the umask gave, usually `0644`. Another user
+  on the same machine could read a ring, or pre-create one at the name the
+  worker was about to use. The two now create their regions on identical
+  terms. Found by comparing the two implementations rather than by a report,
+  and written up in `SPEC-simplify.md` §72.
+
 - **A typeset text mark no longer disappears when it is dragged.** Every edit
   to an annotation clears the picture the engine is holding for it, and a
   stamp is a kind nothing redraws by itself — so moving a mark whose
@@ -61,6 +74,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a future one cannot be missed.
 
 ### Changed
+
+- **Dead code is visible again, and about a thousand lines of it are gone.**
+  Five subsystems — `layout`, `settings`, `doc`, `media` and `platform` — had
+  the dead-code lint switched off for the whole module, so nothing unused in
+  them had warned for a long time and nothing new would. The lint is back on
+  everywhere; the 132 items it finds each carry their own note saying whether
+  a test still reaches them, and 50 of them turn out to be reached by nothing
+  at all, which is not what the blanket exemptions claimed. Deleted outright:
+  the widget patch layer, which nothing had sent a patch through and which the
+  designer has no panel to send one from; 28 unused items across the four
+  library crates; a vendored CSS colour table and two other modules left over
+  from a widget that was never ported; and four dependency declarations, one
+  of which was compiling a second redundant copy of a crate. Nothing about how
+  pulpit behaves changes. `SPEC-simplify.md` records what was found, what was
+  done, and — for the parts left alone — why.
 
 - **The worker machinery is written once.** Message framing, process
   spawning, the wake-up doorbell and shared-memory naming had grown four

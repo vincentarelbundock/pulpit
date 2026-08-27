@@ -153,11 +153,6 @@ impl FrameCache {
         self.budget_bytes
     }
 
-    pub fn set_budget(&mut self, budget_bytes: u64) {
-        self.budget_bytes = budget_bytes;
-        self.enforce_budget(0);
-    }
-
     pub fn stats(&self) -> CacheStats {
         self.stats
     }

@@ -40,6 +40,7 @@ impl SettingsStore {
         Self { path: path.into() }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -219,6 +220,7 @@ pub fn load_or_default() -> Settings {
     SettingsStore::default().load()
 }
 
+#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
 pub fn save(settings: &Settings) -> Result<(), SettingsError> {
     SettingsStore::default().save(settings)
 }

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // configuration vocabulary, kept for when it is offered again
 //! Slide previews: what to show, and how it fits its pane.
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +23,7 @@ impl SlideFit {
     #[allow(dead_code)] // see widgets::tokens
     pub const ALL: [SlideFit; 2] = [SlideFit::Fit, SlideFit::Fill];
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn label(self) -> &'static str {
         match self {
             SlideFit::Fit | SlideFit::Stretch => "Fit",
@@ -91,21 +91,6 @@ mod tests {
     fn a_withdrawn_fit_still_loads_and_behaves_as_fit() {
         assert_eq!(SlideFit::Stretch.label(), "Fit");
         assert!(!SlideFit::ALL.contains(&SlideFit::Stretch));
-    }
-}
-
-/// An edit to a slide pane.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub enum SlidePatch {
-    Fit(SlideFit),
-}
-
-impl SlidePatch {
-    pub fn apply(self, fit: &mut SlideFit) {
-        match self {
-            SlidePatch::Fit(value) => *fit = value,
-        }
     }
 }
 

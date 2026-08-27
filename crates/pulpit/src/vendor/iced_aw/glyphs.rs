@@ -1,10 +1,10 @@
-//! The labels the pickers put on their own buttons.
+//! The labels the picker puts on its own buttons.
 //!
 //! Upstream these come from `iced_fonts`, which loads an icon font shipped
 //! inside `iced_aw` and returns a private-use codepoint for each glyph. This
 //! crate draws its icons as SVG rather than as characters — deliberately, so
 //! a glyph cannot land at a different weight than the drawing beside it — and
-//! carrying a whole font for four symbols to do the opposite would be
+//! carrying a whole font for two symbols to do the opposite would be
 //! strange. Words instead, in the interface's own font.
 //!
 //! The signature is upstream's on purpose: a `(content, font, shaping)`
@@ -24,18 +24,9 @@ pub fn ok() -> (String, Font, Shaping) {
     label("OK")
 }
 
-/// Step a field up — the time picker's digital column.
-pub fn up_open() -> (String, Font, Shaping) {
-    label("\u{25B2}")
-}
-
-/// Step a field down.
-pub fn down_open() -> (String, Font, Shaping) {
-    label("\u{25BC}")
-}
-
 fn label(text: &str) -> (String, Font, Shaping) {
-    // Advanced shaping: the arrows are outside Latin-1, and basic shaping
-    // draws a box for anything the fallback chain has to reach for.
+    // Advanced shaping, as upstream: these labels are Latin-1 and would
+    // shape either way, but the triple is upstream's and a later fix that
+    // returns a non-Latin-1 label should not silently draw a box.
     (text.to_string(), Font::DEFAULT, Shaping::Advanced)
 }

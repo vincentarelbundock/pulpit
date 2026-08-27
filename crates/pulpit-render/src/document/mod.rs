@@ -674,11 +674,6 @@ impl<'a> PdfDocument<'a> {
         Ok(rgba)
     }
 
-    /// The identities this session has handed out, for diagnostics.
-    pub fn issued_ids(&self) -> u64 {
-        self.ids.issued()
-    }
-
     /// May this document be changed at all?
     ///
     /// One answer, consulted by every path that writes — a transaction and a

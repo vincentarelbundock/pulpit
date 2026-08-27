@@ -47,6 +47,7 @@ pub enum StoreError {
     #[error("no layout {0}")]
     NoSuchLayout(LayoutId),
     #[error("a layout named {0} already exists")]
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     NameTaken(String),
 }
 
@@ -336,6 +337,7 @@ impl LayoutStore {
         }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -424,6 +426,7 @@ impl LayoutStore {
     }
 
     /// Save under a new name, leaving the original alone.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn save_as_new(&mut self, layout: &Layout, name: &str) -> Result<LayoutId, StoreError> {
         if self.contains_name(name) {
             return Err(StoreError::NameTaken(name.to_string()));
@@ -450,6 +453,7 @@ impl LayoutStore {
         self.save(&copy)
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn rename(&mut self, id: &LayoutId, name: &str) -> Result<(), StoreError> {
         if self
             .get(id)
@@ -496,6 +500,7 @@ impl LayoutStore {
 
     /// Import from JSON text, giving the layout a free name if its own is
     /// taken.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn import(&mut self, text: &str) -> Result<(LayoutId, Vec<Issue>), StoreError> {
         let (mut layout, issues) = import_from_string(text)?;
         layout.name = self.unique_name(&layout.name);
@@ -504,6 +509,7 @@ impl LayoutStore {
         Ok((id, issues))
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn export(&self, id: &LayoutId) -> Result<String, StoreError> {
         let layout = self
             .get(id)
@@ -512,6 +518,7 @@ impl LayoutStore {
     }
 
     /// The saved version of a custom layout, for "reset to last saved".
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn saved_version(&self, id: &LayoutId) -> Option<&Layout> {
         self.custom.iter().find(|layout| &layout.id == id)
     }

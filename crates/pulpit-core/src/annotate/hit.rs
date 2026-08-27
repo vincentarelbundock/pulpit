@@ -66,26 +66,6 @@ impl AnnotationHit {
         }
         true
     }
-
-    /// Does this annotation meet the segment the pointer travelled between two
-    /// samples?
-    ///
-    /// An eraser sweep is a series of jumps, not a continuous path: at speed
-    /// the samples are tens of points apart, and testing only the sample
-    /// positions leaves marks standing in the gaps between them.
-    pub fn crossed_by(&self, from: PagePoint, to: PagePoint, tolerance: f32) -> bool {
-        // Sampling along the sweep rather than solving segment-to-segment
-        // intersection: the sweep is short, the step is bounded by the
-        // tolerance, and the arithmetic stays obvious.
-        let distance = from.distance_to(to);
-        let step = (tolerance.max(1.0)) / 2.0;
-        let steps = ((distance / step).ceil() as usize).clamp(1, 512);
-        (0..=steps).any(|i| {
-            let t = i as f32 / steps as f32;
-            let at = PagePoint::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-            self.contains(at, tolerance)
-        })
-    }
 }
 
 /// What a click landed on.

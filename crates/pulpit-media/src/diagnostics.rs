@@ -140,26 +140,6 @@ pub struct RuntimeSummary {
     pub limitations: Vec<String>,
 }
 
-impl RuntimeSummary {
-    pub fn from_probe(probe: &RuntimeProbe) -> Self {
-        Self {
-            runtime: probe.id,
-            available: probe.is_available(),
-            detail: probe.availability.detail().to_string(),
-            version: probe.version.clone(),
-            executable: probe
-                .executable
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            limitations: probe
-                .limitations
-                .iter()
-                .map(Limitation::to_string)
-                .collect(),
-        }
-    }
-}
-
 impl Preflight {
     /// Overlays the presenter should look at before starting.
     pub fn attention(&self) -> impl Iterator<Item = &OverlayReport> {

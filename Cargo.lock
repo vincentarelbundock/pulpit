@@ -4339,7 +4339,7 @@ dependencies = [
  "des",
  "hex",
  "hmac 0.13.0",
- "pkcs12 0.2.0-pre.0",
+ "pkcs12",
  "pkcs5",
  "pkcs8 0.11.0",
  "rand 0.10.2",
@@ -4686,20 +4686,6 @@ dependencies = [
 
 [[package]]
 name = "pkcs12"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "695b3df3d3cc1015f12d70235e35b6b79befc5fa7a9b95b951eab1dd07c9efc2"
-dependencies = [
- "cms 0.2.3",
- "const-oid 0.9.6",
- "der 0.7.10",
- "spki 0.7.3",
- "x509-cert 0.2.5",
- "zeroize",
-]
-
-[[package]]
-name = "pkcs12"
 version = "0.2.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8059bd79345d1d1c125656025814704bab5cdd204b1cefd5fab59b0fdd7476d2"
@@ -5001,7 +4987,6 @@ dependencies = [
  "pulpit-display",
  "pulpit-media",
  "pulpit-render",
- "resvg 0.45.1",
  "rfd",
  "serde",
  "serde_json",
@@ -5089,7 +5074,6 @@ dependencies = [
  "p384",
  "p521",
  "pdfium-render",
- "pkcs12 0.1.0",
  "pkcs8 0.10.2",
  "pulpit-core",
  "rand 0.8.7",

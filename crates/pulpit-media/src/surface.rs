@@ -7,6 +7,8 @@
 //! queue, because a browser's clock and an audio clock do not wait.
 
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,8 +50,25 @@ impl RingNamer {
     }
 
     pub fn next_name(&self) -> String {
-        let index = self.next.fetch_add(1, Ordering::Relaxed);
-        format!("{}-{index}", self.prefix)
+        use std::hash::{BuildHasher, Hasher, RandomState};
+
+        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+
+        // Unpredictable, not merely unique, and for the same reason the
+        // render crate's namer is: the directory these live in is
+        // world-writable (`/dev/shm` is 1777), so a name an onlooker can
+        // guess from the pid is a name they can squat before the ring is
+        // created. RandomState is seeded per process by the standard
+        // library.
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(ticket);
+        hasher.write_u64(nanos);
+        hasher.write_u32(std::process::id());
+        format!("{}-{:016x}", self.prefix, hasher.finish())
     }
 }
 
@@ -93,12 +112,17 @@ impl SurfaceRing {
     pub fn create(name: &str, slots: u32, slot_bytes: u64) -> Result<Self, ProtocolError> {
         let total = ring_bytes(slots, slot_bytes)?;
         let path = path_for(name)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
+        // `create_new` and mode 0600, matching the render crate: the ring
+        // carries decoded video frames and lives in a world-writable
+        // directory, so it must neither adopt a file somebody else put there
+        // nor be readable by anyone but its owner.
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
         file.set_len(total)?;
         // The supervisor only ever reads: workers are the writers. Mapping
         // read-only means a supervisor bug cannot corrupt a frame in flight.

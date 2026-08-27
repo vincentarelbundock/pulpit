@@ -10,6 +10,7 @@ use crate::platform::paths::Directories;
 use crate::platform::Outcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
 pub enum Urgency {
     #[default]
     Normal,
@@ -18,6 +19,7 @@ pub enum Urgency {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
 pub struct Notification {
     pub title: String,
     pub body: String,
@@ -108,6 +110,7 @@ pub trait PlatformServices: Send + Sync {
 
     /// Post a desktop notification. Never used for the audience window, and
     /// never the only record of a failure.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     fn notify(&self, notification: &Notification) -> Outcome;
 
     /// Put an image on the system clipboard.
@@ -194,6 +197,7 @@ pub trait PlatformServices: Send + Sync {
 
     /// A best-effort list of recently used documents the platform knows
     /// about. `None` when the platform has no such notion.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     fn recent_documents(&self) -> Option<Vec<PathBuf>> {
         None
     }

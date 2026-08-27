@@ -48,14 +48,6 @@ impl Region {
         Self::new(0.5, 0.0, 0.5, 1.0)
     }
 
-    pub fn top_half() -> Self {
-        Self::new(0.0, 0.0, 1.0, 0.5)
-    }
-
-    pub fn bottom_half() -> Self {
-        Self::new(0.0, 0.5, 1.0, 0.5)
-    }
-
     pub fn is_full(&self) -> bool {
         (self.x - 0.0).abs() < f32::EPSILON
             && (self.y - 0.0).abs() < f32::EPSILON

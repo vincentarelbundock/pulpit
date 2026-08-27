@@ -82,26 +82,6 @@ impl Default for WindowState {
     }
 }
 
-impl WindowState {
-    pub fn windowed_on(monitor: MonitorIdentity) -> Self {
-        Self {
-            monitor: Some(monitor),
-            mode: WindowMode::Windowed,
-            visible: true,
-            has_frame: true,
-        }
-    }
-
-    pub fn fullscreen_on(monitor: MonitorIdentity) -> Self {
-        Self {
-            monitor: Some(monitor),
-            mode: WindowMode::Fullscreen,
-            visible: true,
-            has_frame: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Windows {
     pub presenter: WindowState,

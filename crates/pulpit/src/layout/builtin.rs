@@ -24,12 +24,14 @@ impl Builder {
         id
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     fn cell(&mut self, kind: WidgetKind) -> Node {
         Node::Leaf(Cell::with_widget(self.id(), Widget::new(kind)))
     }
 
     /// A cell holding a widget with adjusted style.
     /// A cell holding a widget with adjusted family configuration.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     fn configured(
         &mut self,
         kind: WidgetKind,

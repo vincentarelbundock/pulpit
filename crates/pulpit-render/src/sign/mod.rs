@@ -37,15 +37,6 @@ pub enum SigningProfile {
     EtsiCadesDetached,
 }
 
-/// Information needed to build a CMS signature.
-#[derive(Clone)]
-pub struct CmsSignatureInfo {
-    pub profile: SigningProfile,
-    pub document_digest: Vec<u8>,
-    pub digest_algorithm: DigestAlgorithm,
-    pub embed_roots: bool,
-}
-
 /// Load a PKCS#12 file and return its credential.
 ///
 /// §30: the passphrase is taken by value in a [`zeroize::Zeroizing`] buffer and

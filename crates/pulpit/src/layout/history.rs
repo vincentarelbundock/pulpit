@@ -42,12 +42,14 @@ impl<T: Clone + PartialEq> History<T> {
         &self.present
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn current_mut(&mut self) -> &mut T {
         &mut self.present
     }
 
     /// Record an edit. A no-op edit is not recorded, so undo never appears to
     /// do nothing.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn commit(&mut self, next: T) {
         if next == self.present {
             return;
@@ -94,6 +96,7 @@ impl<T: Clone + PartialEq> History<T> {
 
     /// Has this ever been saved? A layout with no saved version has nothing
     /// to revert *to*, which is a different situation from having no changes.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn has_saved_version(&self) -> bool {
         self.saved.is_some()
     }
@@ -116,6 +119,7 @@ impl<T: Clone + PartialEq> History<T> {
     }
 
     /// Revert to the last saved version, as one undoable step.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn revert_to_saved(&mut self) -> bool {
         let Some(saved) = self.saved.clone() else {
             return false;
@@ -127,6 +131,7 @@ impl<T: Clone + PartialEq> History<T> {
         true
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn depth(&self) -> usize {
         self.past.len()
     }

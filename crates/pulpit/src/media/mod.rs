@@ -10,7 +10,6 @@
 // page-space routing `App` performs, and the test that pins the two together
 // is what keeps the specification's "one geometry function" rule honest —
 // deleting it to satisfy a lint would throw away that guarantee.
-#![allow(dead_code)]
 
 pub mod coordinator;
 pub mod input;

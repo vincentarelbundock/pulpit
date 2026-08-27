@@ -23,10 +23,10 @@ The workspace is five crates under `crates/`:
   worker protocols, supervised worker processes, and the byte-bounded frame
   cache. The pipe plumbing underneath the protocols is `pulpit_core::ipc`.
 - `pulpit-media` — the runtimes pulpit launches rather than links: media and
-  interactive overlays, driven by an installed Chromium-family browser over
-  CDP in a separate worker process, and `speech`, which drives an installed
-  synthesiser and audio player as child processes. The two share no types,
-  only that policy.
+  interactive overlays, driven in a separate worker process by an installed
+  Chromium-family browser over CDP or by an installed libmpv, whichever the
+  probe selects; and `speech`, which drives an installed synthesiser and
+  audio player as child processes. The two share no types, only that policy.
 - `pulpit` — the Iced application and everything only it uses: the
   presenter layout tree and widgets, the document watcher, the platform
   boundary, settings and diagnostics.

@@ -1054,10 +1054,6 @@ impl FieldFormat {
         }
     }
 
-    pub fn is_date(&self) -> bool {
-        matches!(self, FieldFormat::Date { .. })
-    }
-
     /// The time pattern this field asks for, if it asks for a time at all.
     pub fn time_pattern(&self) -> Option<&str> {
         match self {

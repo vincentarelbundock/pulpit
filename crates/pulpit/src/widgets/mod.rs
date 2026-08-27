@@ -21,7 +21,6 @@ pub mod media;
 pub mod navigation;
 pub mod notes;
 pub mod panel;
-pub mod patch;
 pub mod plan;
 pub mod registry;
 pub mod sample;
@@ -40,7 +39,6 @@ pub use event::WidgetEvent;
 pub use navigation::model::ButtonsOptions;
 pub use notes::model::NotesOptions;
 #[allow(unused_imports)] // see widgets::patch
-pub use patch::{PatchError, WidgetPatch};
 // `WidgetId`, `WidgetRegistration` and `registration` are Phase 3's public
 // surface (persistence by stable id); reachable today via `widgets::registry`
 // and via `WidgetKind::id`/`WidgetKind::from_id`, not yet re-exported at the
@@ -244,6 +242,7 @@ impl WidgetKind {
         registry::registration(self).label()
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn short_label(self) -> &'static str {
         registry::registration(self).short_label()
     }
@@ -484,6 +483,7 @@ impl Widget {
         self.kind
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn config(&self) -> &WidgetConfig {
         &self.config
     }
@@ -491,6 +491,7 @@ impl Widget {
     /// The configuration, mutably, for the model code that edits it. Kept
     /// crate-private so the kind/config agreement cannot be broken from a
     /// view.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub(crate) fn config_mut(&mut self) -> &mut WidgetConfig {
         &mut self.config
     }

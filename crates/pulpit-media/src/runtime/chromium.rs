@@ -582,10 +582,6 @@ impl CdpPipe {
         Ok(product)
     }
 
-    pub fn child_id(&self) -> u32 {
-        self.child.id()
-    }
-
     /// Close the browser and remove the private profile it was given.
     pub fn shutdown(&mut self) {
         let _ = self.send("Browser.close", serde_json::json!({}));

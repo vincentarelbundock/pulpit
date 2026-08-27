@@ -37,11 +37,13 @@ pub struct ThumbnailCell {
 
 impl ThumbnailCell {
     /// The short name to draw when there is room for one.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn label(&self) -> &'static str {
         self.widget.map(WidgetKind::short_label).unwrap_or("")
     }
 
     /// Does this pane letterbox its slide?
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn has_letterbox(&self) -> bool {
         self.slide.is_some_and(|slide| slide.bars().is_some())
     }
@@ -103,6 +105,7 @@ impl Thumbnail {
     }
 
     /// The panes that hold slide content, in reading order.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn slide_cells(&self) -> Vec<&ThumbnailCell> {
         self.cells
             .iter()

@@ -282,18 +282,6 @@ impl ShapeKind {
             ShapeKind::Arrow => "Arrow",
         }
     }
-
-    /// Is this one of the two the drag *bounds*, rather than one it draws
-    /// between two points?
-    ///
-    /// The question every piece of geometry about these asks: a box and an
-    /// ellipse are described by the rectangle the hand pulled, and a line and
-    /// an arrow by its two corners in the order they were visited — which a
-    /// rectangle cannot express, since a drag up-left and a drag down-right
-    /// bound the same box.
-    pub fn is_bounded(self) -> bool {
-        matches!(self, ShapeKind::Rectangle | ShapeKind::Ellipse)
-    }
 }
 
 /// Which mark [`AnnotationTool::Stamp`] puts down.
@@ -389,26 +377,6 @@ impl AnnotationTool {
     /// it puts that mark down in the pen's ink.
     pub fn has_options(self) -> bool {
         !matches!(self, AnnotationTool::SelectText)
-    }
-
-    /// Does this tool make a durable PDF annotation when its gesture ends?
-    pub fn makes_an_annotation(self) -> bool {
-        match self {
-            AnnotationTool::Ink
-            | AnnotationTool::Highlighter
-            | AnnotationTool::Shape
-            | AnnotationTool::Text
-            | AnnotationTool::Note
-            | AnnotationTool::Stamp => true,
-            // The eraser changes the document but makes nothing; the other
-            // four are transient effects (§3.2) — the text selection sweeps
-            // like the highlighter but is defined by committing nothing.
-            AnnotationTool::Eraser
-            | AnnotationTool::Pointer
-            | AnnotationTool::Spotlight
-            | AnnotationTool::Select
-            | AnnotationTool::SelectText => false,
-        }
     }
 
     pub fn label(self) -> &'static str {
@@ -899,10 +867,6 @@ impl Annotations {
     /// fraction of the page. Below this the points describe the tremor in a
     /// hand rather than the shape of the mark.
     pub const MIN_POINT_DISTANCE: f32 = 0.002;
-
-    /// How many edits can be taken back. Deep enough to cover a slide's worth
-    /// of drawing, bounded because a rehearsal is unbounded.
-    pub const MAX_HISTORY: usize = 128;
 
     /// The current change count. Two reads returning the same number mean
     /// nothing visible changed between them.

@@ -30,6 +30,7 @@ pub enum Instance {
     /// This process holds the claim; the lock is released when it is dropped.
     Acquired(InstanceLock),
     /// Another live process holds it.
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     AlreadyRunning { pid: Option<u32>, lock: PathBuf },
     /// The claim could not be recorded (an unwritable directory, say). The
     /// application still starts: a missing guard must never block a talk.
@@ -243,6 +244,7 @@ fn read_pid(path: &Path) -> Option<u32> {
 /// guard stands down rather than guessing, because a wrong "yes" would stop
 /// a presenter from starting at all.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
 fn is_running(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }

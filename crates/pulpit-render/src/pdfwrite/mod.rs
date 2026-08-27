@@ -78,13 +78,6 @@ pub struct DigestSpans {
     pub second_start: u64,
 }
 
-/// Result of the digest operation: the byte spans to hash and a handle for further writing.
-#[derive(Debug)]
-pub struct PreparedByteRange {
-    pub digest_spans: DigestSpans,
-    pub eof: u64,
-}
-
 /// After the document has been completely written to a stream.
 #[derive(Debug)]
 pub struct BackPatchContext {

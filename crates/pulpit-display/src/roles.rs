@@ -42,10 +42,6 @@ impl RoleTarget {
             RoleTarget::Monitor(record) => Some(record),
         }
     }
-
-    pub fn is_explicit(&self) -> bool {
-        matches!(self, RoleTarget::Monitor(_))
-    }
 }
 
 /// The user's desired display configuration. This is persisted; it contains

@@ -26,6 +26,7 @@ pub struct Shortcut {
 }
 
 impl Shortcut {
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn key(key: &str) -> Shortcut {
         Shortcut {
             modifiers: Vec::new(),
@@ -33,6 +34,7 @@ impl Shortcut {
         }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn primary(key: &str) -> Shortcut {
         Shortcut {
             modifiers: vec![Modifier::Primary],
@@ -40,6 +42,7 @@ impl Shortcut {
         }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn primary_shift(key: &str) -> Shortcut {
         Shortcut {
             modifiers: vec![Modifier::Primary, Modifier::Shift],
@@ -47,6 +50,7 @@ impl Shortcut {
         }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn shift(key: &str) -> Shortcut {
         Shortcut {
             modifiers: vec![Modifier::Shift],
@@ -62,6 +66,7 @@ impl Shortcut {
 /// Platform input conventions.
 pub trait InputPolicy: Send + Sync {
     /// `⌘` or `Ctrl`.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     fn primary_label(&self) -> &'static str;
 
     /// Format a shortcut for display.
@@ -69,9 +74,11 @@ pub trait InputPolicy: Send + Sync {
 
     /// Does this collide with something the desktop reserves? Best effort:
     /// a false negative is acceptable, a false positive is not.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     fn is_reserved(&self, shortcut: &Shortcut) -> Option<&'static str>;
 
     /// Should a press with these modifiers count as the primary modifier?
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     fn is_primary(&self, control: bool, command: bool) -> bool;
 
     /// Fold the toolkit's raw modifier flags into the two semantic ones:

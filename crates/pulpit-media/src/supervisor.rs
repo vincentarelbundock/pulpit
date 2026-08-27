@@ -20,9 +20,8 @@ use pulpit_core::{OverlayId, RenderGeneration};
 use crate::capability::RuntimeProbe;
 use crate::protocol::{
     read_message, write_message, CapabilityRequest, ImageCommand, InputEvent, MediaError,
-    MediaErrorKind, MediaEvent, MediaRequest, MediaWarning, PixelFormat, PlaybackProgress,
-    RuntimeId, SessionId, SessionSpec, SurfaceId, VideoCommand, Viewport, WebCommand,
-    WorkerCounters, MEDIA_PROTOCOL_VERSION,
+    MediaErrorKind, MediaEvent, MediaRequest, MediaWarning, PlaybackProgress, RuntimeId, SessionId,
+    SessionSpec, SurfaceId, VideoCommand, Viewport, WorkerCounters, MEDIA_PROTOCOL_VERSION,
 };
 use crate::selection::{Attempt, AttemptOutcome, RuntimePolicy, Selection};
 use crate::surface::{RingNamer, SurfaceRing, DEFAULT_SLOTS};
@@ -712,10 +711,6 @@ impl MediaSupervisor {
         self.request(session, MediaRequest::SetActive { session, active });
     }
 
-    pub fn set_focus(&mut self, session: SessionId, focused: bool) {
-        self.request(session, MediaRequest::SetFocus { session, focused });
-    }
-
     pub fn set_viewport(&mut self, session: SessionId, viewport: Viewport) {
         if viewport.validate().is_err() {
             return;
@@ -746,14 +741,6 @@ impl MediaSupervisor {
             session,
             ContentKind::Video,
             MediaRequest::Video { session, command },
-        );
-    }
-
-    pub fn web_command(&mut self, session: SessionId, command: WebCommand) {
-        self.typed_command(
-            session,
-            ContentKind::Web,
-            MediaRequest::Web { session, command },
         );
     }
 
@@ -1087,14 +1074,6 @@ impl MediaSupervisor {
         self.sessions.len()
     }
 
-    pub fn runtime_of(&self, session: SessionId) -> Option<RuntimeId> {
-        self.sessions.get(&session).map(|state| state.runtime)
-    }
-
-    pub fn overlay_of(&self, session: SessionId) -> Option<OverlayId> {
-        self.sessions.get(&session).map(|state| state.overlay)
-    }
-
     /// The viewport a session is currently rendering into.
     ///
     /// The application needs it to turn a fraction of an overlay into the
@@ -1192,15 +1171,11 @@ impl Drop for MediaSupervisor {
     }
 }
 
-/// The pixel format the application receives after the supervisor's
-/// normalisation. Workers may publish either byte order; the supervisor
-/// swaps so the UI only ever sees RGBA.
-pub const DELIVERED_FORMAT: PixelFormat = PixelFormat::Rgba8Premultiplied;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capability::{Availability, ContentCapabilities, InputCapabilities};
+    use crate::protocol::PixelFormat;
 
     fn available(id: RuntimeId, kinds: &[ContentKind]) -> RuntimeProbe {
         RuntimeProbe {

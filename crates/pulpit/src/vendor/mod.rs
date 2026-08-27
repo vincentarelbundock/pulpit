@@ -11,9 +11,10 @@
 //! it. A vendored file is a snapshot of an upstream one; the more it drifts,
 //! the harder the next upstream fix is to take.
 
-// Upstream carries pieces this crate does not call — a colour constant, a
-// helper for a widget that was not vendored. Silenced rather than deleted:
-// deleting them is a diff against upstream to maintain for ever, and the code
-// is not this crate's to tidy.
+// Upstream carries pieces this crate does not call. Silenced rather than
+// deleted: deleting them is a diff against upstream to maintain for ever, and
+// the code is not this crate's to tidy. The exception is a module that served
+// only a widget that was never ported — `SPEC-simplify.md` §68.2 — because
+// there the diff is against a port that does not exist.
 #[allow(dead_code, unused_imports)]
 pub mod iced_aw;

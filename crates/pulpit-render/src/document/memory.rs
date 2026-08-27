@@ -181,13 +181,6 @@ impl MemoryDocument {
         self
     }
 
-    pub fn with_pages(geometry: Vec<PageGeometry>) -> MemoryDocument {
-        let mut document = MemoryDocument::letter(geometry.len());
-        document.info.first_page = geometry[0];
-        document.geometry = geometry;
-        document
-    }
-
     pub fn add_field(&mut self, field: FormField) {
         self.field_order.push(field.name.clone());
         self.fields.insert(field.name.clone(), field);

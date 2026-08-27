@@ -23,7 +23,6 @@
 // application does not happen to call yet are exercised by the tests beside
 // them, and pruning them would throw away working, documented behaviour to
 // satisfy a lint about a boundary that no longer exists.
-#![allow(dead_code)]
 
 pub mod appearance;
 #[cfg(target_os = "macos")]
@@ -166,6 +165,7 @@ impl Platform {
     }
 
     /// A fully deterministic platform for tests.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn null() -> Platform {
         let services = null::NullPlatform::new("null");
         let capabilities = services.capabilities();

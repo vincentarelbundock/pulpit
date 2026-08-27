@@ -541,15 +541,6 @@ fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
     Ok(None)
 }
 
-/// Lexical extent of a /Contents string: [c_start, c_end).
-/// Must be recorded during tokenization, not reconstructed from parsed DER.
-#[derive(Debug, Clone)]
-pub struct SignatureDiscovery {
-    pub field_name: String,
-    pub contents_extent: ContentsExtent,
-    pub sig_dict_revision: u64,
-}
-
 /// Result of structural verification for a single signature.
 #[derive(Debug, Clone)]
 pub struct StructuralReport {

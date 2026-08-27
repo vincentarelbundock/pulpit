@@ -7,7 +7,6 @@
 // application does not happen to call yet are exercised by the tests beside
 // them, and pruning them would throw away working, documented behaviour to
 // satisfy a lint about a boundary that no longer exists.
-#![allow(dead_code)]
 
 pub mod images;
 pub mod manager;

@@ -236,6 +236,7 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
 ];
 
 /// The compact reference shown before a document is open.
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub const QUICK_START_ACTIONS: [Action; 7] = [
     Action::Next,
     Action::Previous,
@@ -247,6 +248,7 @@ pub const QUICK_START_ACTIONS: [Action; 7] = [
 ];
 
 /// Keys worth teaching specifically for live presentation.
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer];
 
 impl Action {
@@ -261,6 +263,7 @@ impl Action {
     /// quietly not checking them at all. Keep this in the same order as the
     /// enum declaration, so a visual diff against it is enough to catch the
     /// next omission.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub const ALL: [Action; 54] = [
         Action::Next,
         Action::Previous,
@@ -462,6 +465,7 @@ impl Mods {
         self.primary || self.alt || self.control
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     fn prefix(self) -> String {
         let mut out = String::new();
         if self.primary {
@@ -514,6 +518,7 @@ impl KeyBinding {
         }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn scancode(code: u32) -> Self {
         KeyBinding::Scancode {
             code,
@@ -521,16 +526,19 @@ impl KeyBinding {
         }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn scancode_with(code: u32, mods: Mods) -> Self {
         KeyBinding::Scancode { code, mods }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn mods(&self) -> Mods {
         match self {
             KeyBinding::Named { mods, .. } | KeyBinding::Scancode { mods, .. } => *mods,
         }
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn describe(&self) -> String {
         match self {
             KeyBinding::Named { key, mods } => format!("{}{key}", mods.prefix()),
@@ -599,6 +607,7 @@ struct KeymapWire {
 #[serde(untagged)]
 enum StoredAction {
     Known(Action),
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     Retired(String),
 }
 
@@ -801,6 +810,7 @@ impl Default for Keymap {
 impl Keymap {
     /// Resolve a logical key name, then a raw scancode. Logical wins so a
     /// remap of a named key is never shadowed by a stale scancode entry.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn resolve(&self, key: Option<&str>, scancode: Option<u32>) -> Option<Action> {
         self.resolve_with_mods(key, Mods::NONE, scancode)
     }
@@ -875,11 +885,13 @@ impl Keymap {
         None
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn bind(&mut self, binding: KeyBinding, action: Action) {
         self.bindings.retain(|(existing, _)| existing != &binding);
         self.bindings.push((binding, action));
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn unbind(&mut self, binding: &KeyBinding) {
         self.bindings.retain(|(existing, _)| existing != binding);
     }
@@ -895,6 +907,7 @@ impl Keymap {
     /// Only actions with *nothing* bound are touched, and the key is only
     /// taken if it is still free, so a deliberate remapping is never undone
     /// and a borrowed key is never stolen back.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn restore_missing_defaults(&mut self) {
         let defaults = Keymap::default();
         for action in Action::ALL {
@@ -928,6 +941,7 @@ impl Keymap {
     /// pause, and stopping is rare enough to live in the menu (see
     /// [`Action::SpeakStop`]). The variants remain internal actions, but no
     /// fixed shortcut or reference entry advertises them.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub const UNBOUND_BY_DEFAULT: [Action; 8] = [
         Action::ToggleReader,
         Action::PreviewNext,
@@ -960,6 +974,7 @@ impl Keymap {
             .map(|(binding, _)| binding)
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn keys_for(&self, action: Action) -> Vec<String> {
         self.bindings
             .iter()

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // configuration vocabulary, kept for when it is offered again
 //! Speaker notes: which slide's notes, and how they are set.
 
 use serde::{Deserialize, Serialize};
@@ -12,8 +11,10 @@ pub enum NotesSource {
 }
 
 impl NotesSource {
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub const ALL: [NotesSource; 2] = [NotesSource::CurrentSlide, NotesSource::NextSlide];
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn label(self) -> &'static str {
         match self {
             NotesSource::CurrentSlide => "Current slide",
@@ -61,6 +62,20 @@ impl NotesOptions {
     }
 }
 
+/// Below this the pane shows a line or two and you scroll during the talk.
+pub const USABLE_MINIMUM: (f32, f32) = (300.0, 140.0);
+
+/// What is wrong with this notes pane at this size, if anything.
+pub fn validate(_options: &NotesOptions, inner: (f32, f32)) -> Vec<crate::widgets::Complaint> {
+    if inner.0 < USABLE_MINIMUM.0 || inner.1 < USABLE_MINIMUM.1 {
+        return vec![crate::widgets::Complaint {
+            message: "Speaker notes are too small",
+            consequence: "Only a line or two will be visible; you will be scrolling during the \
+                          talk instead of glancing.",
+        }];
+    }
+    Vec::new()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,37 +102,4 @@ mod tests {
             "unrelated fields are untouched"
         );
     }
-}
-
-/// An edit to the notes pane.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum NotesPatch {
-    FontSize(f32),
-    LineSpacing(f32),
-    Source(NotesSource),
-}
-
-impl NotesPatch {
-    pub fn apply(self, options: &mut NotesOptions) {
-        match self {
-            NotesPatch::FontSize(value) => options.font_size = value,
-            NotesPatch::LineSpacing(value) => options.line_spacing = value,
-            NotesPatch::Source(value) => options.source = value,
-        }
-    }
-}
-
-/// Below this the pane shows a line or two and you scroll during the talk.
-pub const USABLE_MINIMUM: (f32, f32) = (300.0, 140.0);
-
-/// What is wrong with this notes pane at this size, if anything.
-pub fn validate(_options: &NotesOptions, inner: (f32, f32)) -> Vec<crate::widgets::Complaint> {
-    if inner.0 < USABLE_MINIMUM.0 || inner.1 < USABLE_MINIMUM.1 {
-        return vec![crate::widgets::Complaint {
-            message: "Speaker notes are too small",
-            consequence: "Only a line or two will be visible; you will be scrolling during the \
-                          talk instead of glancing.",
-        }];
-    }
-    Vec::new()
 }

@@ -23,15 +23,15 @@ repository = "https://github.com/vincentarelbundock/pulpit"
 [workspace.dependencies]
 pulpit-core = { path = "crates/pulpit-core", version = "0.0.10" }
 pulpit-display = { path = "crates/pulpit-display", version = "0.0.10", default-features = false }
-# Default features on purpose: the browser worker is the only media runtime,
-# so a dependant that quietly opted out would ship an application whose media
-# silently never plays — which happened once already, from the other end.
+# Default features on purpose: `chromium-runtime` is the fallback every media
+# kind can be played by — libmpv covers plain media far more cheaply but not
+# interactive overlays — so a dependant that quietly opted out would ship an
+# application whose media silently never plays, which happened once already,
+# from the other end.
 pulpit-media = { path = "crates/pulpit-media", version = "0.0.10" }
 pulpit-render = { path = "crates/pulpit-render", version = "0.0.10", default-features = false }
 
-anyhow = "1"
 bincode = { version = "1.3", default-features = false }
-crc32fast = "1"
 iced = "0.14"
 # Raster image decoding for the image-directory document tier
 # (SPEC-images.md §41.2). Default features on purpose: the supported extension
@@ -86,7 +86,6 @@ sha2 = { version = "0.10", features = ["oid"] }
 sha1 = { version = "0.10", features = ["oid"] }
 spki = "0.7"
 pkcs8 = "0.10"
-pkcs12 = "0.1"
 zeroize = "1"
 signature = "2"
 ecdsa = "0.16"

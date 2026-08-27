@@ -39,8 +39,9 @@ impl RuntimePolicy {
 /// The default automatic order, per content kind (`docs-src/internals.typ`).
 ///
 /// An installed Chromium-family browser plays all three content kinds, so it
-/// leads every order. The system-webview adapters remain as HTML fallbacks
-/// for machines without one.
+/// appears in every order — leading for web, and behind libmpv for plain
+/// media, which libmpv decodes far more cheaply. The system-webview adapters
+/// remain as HTML fallbacks for machines without a browser.
 pub fn default_order(kind: ContentKind) -> Vec<RuntimeId> {
     match kind {
         // Plain media prefers an installed ffmpeg: it decodes straight to

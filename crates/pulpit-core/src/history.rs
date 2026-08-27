@@ -109,10 +109,6 @@ impl NavHistory {
     pub fn back_depth(&self) -> usize {
         self.back.len()
     }
-
-    pub fn forward_depth(&self) -> usize {
-        self.forward.len()
-    }
 }
 
 #[cfg(test)]

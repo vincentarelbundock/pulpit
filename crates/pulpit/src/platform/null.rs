@@ -16,6 +16,7 @@ use crate::platform::services::{Notification, PlatformServices};
 use crate::platform::Outcome;
 
 #[derive(Debug)]
+#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
 pub struct NullPlatform {
     name: &'static str,
     capabilities: Capabilities,
@@ -29,6 +30,7 @@ pub struct NullPlatform {
 }
 
 impl NullPlatform {
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn new(name: &'static str) -> NullPlatform {
         NullPlatform {
             name,
@@ -45,41 +47,49 @@ impl NullPlatform {
         }
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn with_capabilities(mut self, capabilities: Capabilities) -> NullPlatform {
         self.capabilities = capabilities;
         self
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn with_appearance(mut self, appearance: SystemAppearance) -> NullPlatform {
         self.appearance = appearance;
         self.capabilities.system_appearance = appearance != SystemAppearance::Unknown;
         self
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn holding_inhibition(mut self) -> NullPlatform {
         self.inhibition_works = true;
         self.capabilities.sleep_inhibition = true;
         self
     }
 
+    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
     pub fn rooted_at(mut self, root: &Path) -> NullPlatform {
         self.directories = Some(Directories::under(root));
         self
     }
 
     /// Everything the application asked the platform to do.
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn inhibit_calls(&self) -> usize {
         self.inhibit_calls.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     pub fn release_calls(&self) -> usize {
         self.release_calls.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
     fn record(&self, call: impl Into<String>) {
         self.calls.lock().unwrap().push(call.into());
     }
