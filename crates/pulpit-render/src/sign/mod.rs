@@ -9,7 +9,7 @@
 
 pub mod apply;
 mod cms_builder;
-mod credential;
+pub(crate) mod credential;
 mod errors;
 mod generate;
 mod mechanism;

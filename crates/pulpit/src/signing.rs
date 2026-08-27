@@ -1000,16 +1000,34 @@ impl SignatureLine {
 
 /// Derive the §20.2 line from a checked [`pulpit_render::verify::SignatureStatus`].
 ///
-/// `broken` coverage, a failed `intact`/`valid` check, or `Unclear` coverage
-/// all collapse to [`SignatureLine::NotValid`] — the summary must never claim
-/// more than the weakest component establishes (§28.5).
+/// Coverage that is not whole, a failed `intact`/`valid` check, or a `broken`
+/// verification all collapse to [`SignatureLine::NotValid`] — the summary must
+/// never claim more than the weakest component establishes (§28.5).
 pub fn signature_line_for(status: &pulpit_render::verify::SignatureStatus) -> SignatureLine {
     use pulpit_render::verify::{IdentityAssurance, SignatureCoverage};
 
-    if status.coverage == SignatureCoverage::Unclear {
-        return SignatureLine::NotValid {
-            reason: "the signed byte range does not clearly cover the file".to_string(),
-        };
+    // Stated as what is *accepted* rather than what is rejected. The rule is
+    // written twice — `verify_signatures` refuses both partial coverages
+    // before it runs any cryptography — and this copy used to name only
+    // `Unclear`, so a signature that did not cover its own revision's
+    // cross-reference table would have reached the reader as "signed by X".
+    // Nothing takes that path today, because everything arrives through
+    // `verify_signatures`; but `check_signature` is public, this is the copy
+    // facing the reader, and a listing of what may pass cannot fall out of
+    // step the way a listing of what may not just did.
+    match status.coverage {
+        SignatureCoverage::EntireRevision | SignatureCoverage::EntireFile => {}
+        SignatureCoverage::Unclear => {
+            return SignatureLine::NotValid {
+                reason: "the signed byte range does not clearly cover the file".to_string(),
+            };
+        }
+        SignatureCoverage::ContiguousBlockFromStart => {
+            return SignatureLine::NotValid {
+                reason: "the signature does not cover its own revision's cross-reference table"
+                    .to_string(),
+            };
+        }
     }
     if !status.intact {
         return SignatureLine::NotValid {

@@ -260,6 +260,14 @@ const OID_SECP384R1: &str = "1.3.132.0.34";
 const OID_SECP521R1: &str = "1.3.132.0.35";
 
 /// Map a named-curve OID to a key type. Unknown curves are refused by name.
+/// Every named curve a credential may carry, and therefore every curve this
+/// crate may be asked to sign with.
+///
+/// `verify::cms_check` has to be able to check a signature on each of these.
+/// Its list and this one drifted apart once — P-521 was signable and
+/// unverifiable — and a test now holds them together.
+pub(crate) const SIGNABLE_CURVES: [&str; 3] = [OID_SECP256R1, OID_SECP384R1, OID_SECP521R1];
+
 fn classify_named_curve(curve_oid: &str) -> Result<(KeyType, PublicKeyInfo), SigningError> {
     match curve_oid {
         OID_SECP256R1 => Ok((KeyType::EcP256, PublicKeyInfo::EcP256)),
@@ -372,10 +380,7 @@ fn analyze_private_key(pkey_der: &[u8]) -> Result<(KeyType, PublicKeyInfo), Sign
     }
 
     // Some producers put the named-curve OID directly in the algorithm field.
-    if matches!(
-        oid_str.as_str(),
-        OID_SECP256R1 | OID_SECP384R1 | OID_SECP521R1
-    ) {
+    if SIGNABLE_CURVES.contains(&oid_str.as_str()) {
         return classify_named_curve(&oid_str);
     }
     if oid_str == "1.3.101.112" {

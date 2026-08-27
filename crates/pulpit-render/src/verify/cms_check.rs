@@ -62,6 +62,15 @@ const OID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
 const OID_ED25519: &str = "1.3.101.112";
 const OID_PRIME256V1: &str = "1.2.840.10045.3.1.7";
 const OID_SECP384R1: &str = "1.3.132.0.34";
+/// `secp521r1` / NIST P-521 (`1.3.132.0.35`).
+///
+/// The signer has always been able to produce these — `SPEC-signing.md` lists
+/// P-521 as implemented, and `sign::mechanism` selects it — while this file
+/// knew only the other two curves. A P-521 signature therefore fell to the
+/// catch-all below and came back `valid: false`, which the reader is shown as
+/// "the cryptographic signature does not verify": a real signature reported as
+/// a forged one.
+const OID_SECP521R1: &str = "1.3.132.0.35";
 const OID_SUBJECT_KEY_IDENTIFIER: &str = "2.5.29.14";
 
 fn oid(s: &str) -> ObjectIdentifier {
@@ -732,6 +741,22 @@ fn resolve_primitive(
     }
 }
 
+/// The named curves this file can check a signature on.
+///
+/// Stated as a list rather than left implicit in the match below, because the
+/// list has to stay in step with what `sign::mechanism` is willing to *produce*
+/// and nothing was checking that it did. P-521 was signable and unverifiable
+/// for as long as both existed: the match fell through to its catch-all, which
+/// is indistinguishable from a bad signature, so a real signature was reported
+/// to the reader as one that does not verify.
+const VERIFIABLE_CURVES: [&str; 3] = [OID_PRIME256V1, OID_SECP384R1, OID_SECP521R1];
+
+/// Is this named curve one we can check, rather than one we would silently
+/// fail?
+fn can_verify_curve(oid: &str) -> bool {
+    VERIFIABLE_CURVES.contains(&oid)
+}
+
 fn verify_signature(
     cert: &Certificate,
     tbs: &[u8],
@@ -752,6 +777,9 @@ fn verify_signature(
                 None => return false,
             };
             let point = spki.subject_public_key.raw_bytes();
+            if !can_verify_curve(&curve) {
+                return false;
+            }
             match curve.as_str() {
                 OID_PRIME256V1 => {
                     use p256::ecdsa::signature::Verifier;
@@ -775,6 +803,20 @@ fn verify_signature(
                         Err(_) => false,
                     }
                 }
+                OID_SECP521R1 => {
+                    use p521::ecdsa::signature::Verifier;
+                    let key = match p521::ecdsa::VerifyingKey::from_sec1_bytes(point) {
+                        Ok(k) => k,
+                        Err(_) => return false,
+                    };
+                    match p521::ecdsa::Signature::from_der(signature) {
+                        Ok(sig) => key.verify(tbs, &sig).is_ok(),
+                        Err(_) => false,
+                    }
+                }
+                // An unknown curve is indistinguishable here from a bad
+                // signature, which is why the list above has to stay in step
+                // with what `sign::mechanism` can produce.
                 _ => false,
             }
         }
@@ -954,11 +996,22 @@ pub fn check_signature(bytes: &[u8], report: &StructuralReport) -> SignatureVeri
     // No security-critical signed attribute may appear twice: a verifier that
     // reads the first and a signer that meant the second disagree about what
     // was signed.
+    //
+    // Every attribute this file goes on to *read* belongs on this list, and two
+    // did not. `find_attribute` takes the first match, out of a set the DER
+    // layer has already re-sorted, so a signer could bind pulpit to one ESS
+    // certificate while a verifier reading wire order bound to another — or
+    // could carry one `cms-algorithm-protection` that agrees with the
+    // SignerInfo and a second that does not. The whole set is signed, so this
+    // is not something a third party can inject; it is the same "two readers,
+    // one document, different answers" divergence, made by the signer.
     if let Some(attrs) = signer.signed_attrs.as_ref() {
         for (name, oid_str) in [
             ("content-type", OID_CONTENT_TYPE),
             ("message-digest", OID_MESSAGE_DIGEST),
             ("signing-time", OID_SIGNING_TIME),
+            ("signing-certificate-v2", OID_SIGNING_CERTIFICATE_V2),
+            ("cms-algorithm-protection", OID_CMS_ALGORITHM_PROTECTION),
         ] {
             let target = oid(oid_str);
             if attrs.iter().filter(|a| a.oid == target).count() > 1 {
@@ -1236,6 +1289,26 @@ pub fn verify_signatures(bytes: &[u8]) -> Result<Vec<SignatureVerification>> {
 
 #[cfg(test)]
 mod tests {
+    /// Every curve the signer will sign with is a curve this file can check.
+    ///
+    /// The two lists are deliberately separate — a verifier that shares its
+    /// constants with the signer cannot catch the signer being wrong, which is
+    /// why the OID tables in this file are not the ones in `sign::` — but
+    /// "separate" has to mean *checked against each other*, not *unrelated*.
+    /// They were unrelated, and P-521 fell down the gap: `sign::mechanism`
+    /// selected `EcdsaP521Sha512`, this file had no `secp521r1` arm, and the
+    /// catch-all reported a real signature as one that does not verify.
+    #[test]
+    fn every_curve_the_signer_accepts_can_be_verified() {
+        for curve in crate::sign::credential::SIGNABLE_CURVES {
+            assert!(
+                super::can_verify_curve(curve),
+                "the signer accepts {curve} but this file cannot check a signature on it, \
+                 so such a signature would be reported as failing rather than as unsupported"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
