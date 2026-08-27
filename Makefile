@@ -279,4 +279,10 @@ release:  ## Tag and push v$(VERSION); fires the release workflows
 
 clean:  ## Remove build artifacts
 	$(CARGO) clean
+	# docs-src/.calepin is pure cache and `make website` rebuilds it. docs/.calepin
+	# is not: website-manifest.json is calepin's marker that docs/ is its own output
+	# directory, and without it the compile refuses to write into a non-empty docs/.
+	# It is the one tracked file under a .calepin/, so git restores it — hence the
+	# checkout, which turns "make clean && make website" from a failure into a build.
 	rm -rf dist docs-src/.calepin docs/.calepin
+	git checkout -- docs/.calepin/website-manifest.json 2>/dev/null || true
