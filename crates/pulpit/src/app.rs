@@ -3060,6 +3060,25 @@ impl App {
         report
     }
 
+    /// Dismiss the main menu and its recent-files submenu. Several actions
+    /// taken from within those menus (opening a dialog, printing, following
+    /// a link) should close them without touching the audience-start menu,
+    /// which lives in a different corner of the UI and closes on its own
+    /// conditions.
+    fn close_menu_dropdowns(&mut self) {
+        self.menu_open = false;
+        self.recent_menu_open = false;
+    }
+
+    /// Dismiss every menu the top bar can have open at once. Used where a
+    /// message explicitly means "close the menus" rather than "close this
+    /// dialog's menu", so all three flags fall together.
+    fn close_all_menus(&mut self) {
+        self.menu_open = false;
+        self.recent_menu_open = false;
+        self.audience_start_menu_open = false;
+    }
+
     fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick(now) => self.on_tick(now),
@@ -3702,9 +3721,7 @@ impl App {
                 Task::none()
             }
             Message::MenuAction(message) => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
-                self.audience_start_menu_open = false;
+                self.close_all_menus();
                 self.dispatch(*message)
             }
             Message::ToggleMenu => {
@@ -3718,8 +3735,7 @@ impl App {
                 Task::none()
             }
             Message::ToggleShortcuts => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
+                self.close_menu_dropdowns();
                 self.shortcuts_open = !self.shortcuts_open;
                 Task::none()
             }
@@ -3728,8 +3744,7 @@ impl App {
                 Task::none()
             }
             Message::ShowAbout => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
+                self.close_menu_dropdowns();
                 self.about_open = true;
                 Task::none()
             }
@@ -3738,8 +3753,7 @@ impl App {
                 Task::none()
             }
             Message::ShowDocumentProperties => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
+                self.close_menu_dropdowns();
                 self.properties_open = true;
                 self.ask_document_properties();
                 Task::none()
@@ -3749,8 +3763,7 @@ impl App {
                 Task::none()
             }
             Message::OpenDocumentation => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
+                self.close_menu_dropdowns();
                 let outcome = self.platform.services.open(DOCUMENTATION_URL);
                 if let Some(problem) = outcome.describe() {
                     self.notify(problem);
@@ -3758,9 +3771,7 @@ impl App {
                 Task::none()
             }
             Message::CloseMenu => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
-                self.audience_start_menu_open = false;
+                self.close_all_menus();
                 Task::none()
             }
             Message::StartAudience => self.start_audience(false),
@@ -10013,8 +10024,7 @@ impl App {
 
         match message {
             PrintMsg::Open => {
-                self.menu_open = false;
-                self.recent_menu_open = false;
+                self.close_menu_dropdowns();
                 // A field holding the caret holds characters PDFium has not
                 // committed yet, and the whole point of printing "as it is on
                 // screen" is that those characters are on the paper. The
@@ -16542,6 +16552,19 @@ enum Identity {
 
 impl std::hash::Hash for DoorbellListener {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // The kind is hashed first, always. These four were four distinct
+        // types once, so iced could tell them apart by `TypeId` alone even if
+        // their hashes agreed; sharing one type gives up that separation and
+        // leaves this impl as the only thing keeping them distinct.
+        //
+        // It matters for the two that hash an address. The reader link's
+        // doorbell and the watcher's are the same type and the same size, and
+        // both are replaced when a document opens — so once the old one is
+        // released, the allocator may hand its address to the other kind's
+        // replacement. Without the kind in the hash that is a collision, and
+        // iced would keep the finished stream instead of starting the new
+        // listener: a document whose file changes are never noticed.
+        self.thread.hash(state);
         match self.identity {
             Identity::Fixed(name) => name.hash(state),
             Identity::Handle => std::sync::Arc::as_ptr(&self.doorbell).hash(state),
