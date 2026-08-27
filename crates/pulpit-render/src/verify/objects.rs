@@ -722,19 +722,16 @@ struct XrefSection {
     xref_stm: Option<u64>,
 }
 
+/// Find the offset the file's last `startxref` names.
+///
+/// The search and its window come from `pdfwrite`, so that this resolver and
+/// the revision walk cannot end up reading different documents — they used to
+/// search different distances back from the end.
 fn find_startxref_offset(bytes: &[u8]) -> Result<u64> {
     if bytes.len() < 10 {
         return Err(VerifyError::FileTooSmall);
     }
-    let window = std::cmp::min(bytes.len(), 4096);
-    let base = bytes.len() - window;
-    let tail = &bytes[base..];
-    let pos = tail
-        .windows(9)
-        .rposition(|w| w == b"startxref")
-        .ok_or(VerifyError::StartxrefNotFound)?;
-    let mut lex = Lexer::new(bytes, base + pos + 9);
-    lex.read_uint().ok_or(VerifyError::StartxrefNotFound)
+    crate::pdfwrite::find_startxref_offset(bytes).ok_or(VerifyError::StartxrefNotFound)
 }
 
 fn parse_xref_section(bytes: &[u8], offset: u64, budget: &mut DecodeBudget) -> Result<XrefSection> {
