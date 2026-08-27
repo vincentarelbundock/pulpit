@@ -16,9 +16,15 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::{MediaError, MediaErrorKind, Viewport};
 
-/// CDP methods this adapter cannot work without. They are feature-probed
-/// before any document content is loaded, so a browser that merely *looks*
-/// like Chrome fails during startup rather than on stage.
+/// CDP domains this adapter cannot work without.
+///
+/// What is actually probed before a document loads is the product string, in
+/// [`CdpPipe::feature_probe`] — enough to reject a browser that merely *looks*
+/// like Chrome. A browser that answers to the name but is missing one of these
+/// domains fails at the first command that needs it, carrying that domain's
+/// own error, rather than during startup. The list is kept, and tested, as the
+/// statement of what this adapter depends on; it is not a gate, and the
+/// comment used to say it was.
 pub const REQUIRED_DOMAINS: &[&str] = &["Page", "Input", "Runtime", "Fetch", "Emulation"];
 
 /// Flags that would defeat the security model. Kept as a list so the refusal

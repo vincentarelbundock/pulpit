@@ -93,6 +93,20 @@ struct Page {
     initial: bool,
 }
 
+/// The `Emulation.setDeviceMetricsOverride` parameters.
+///
+/// Sent when a page is prepared and again whenever its viewport changes, and
+/// the two must agree: a resize that described the page differently from the
+/// way it was set up would move the content rather than resize it.
+fn device_metrics(css_width: u32, css_height: u32, scale: f32) -> Json {
+    serde_json::json!({
+        "width": css_width,
+        "height": css_height,
+        "deviceScaleFactor": scale,
+        "mobile": false,
+    })
+}
+
 impl Browser {
     fn launch(executable: &Path, viewport: Viewport) -> Result<Self, MediaError> {
         // A fresh profile per worker lifetime, removed when the pipe drops.
@@ -512,12 +526,7 @@ impl Session {
             ),
             (
                 "Emulation.setDeviceMetricsOverride",
-                serde_json::json!({
-                    "width": css_width,
-                    "height": css_height,
-                    "deviceScaleFactor": self.spec.viewport.scale,
-                    "mobile": false,
-                }),
+                device_metrics(css_width, css_height, self.spec.viewport.scale),
             ),
         ] {
             // Bring-up: the browser may still be starting behind these.
@@ -991,12 +1000,7 @@ impl Session {
         self.send_page(
             browser,
             "Emulation.setDeviceMetricsOverride",
-            serde_json::json!({
-                "width": css_width,
-                "height": css_height,
-                "deviceScaleFactor": viewport.scale,
-                "mobile": false,
-            }),
+            device_metrics(css_width, css_height, viewport.scale),
         )?;
         // The screencast carries its frame size from when it started, so a
         // resized overlay would keep arriving at the old size and be resampled

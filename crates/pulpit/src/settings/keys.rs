@@ -251,7 +251,17 @@ pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer]
 
 impl Action {
     /// Every action, so a keymap can be checked against the whole set.
-    pub const ALL: [Action; 49] = [
+    ///
+    /// This list is hand-maintained rather than derived from the enum, so it
+    /// can drift from it silently: the five speech actions (issue #20)
+    /// shipped without ever being added here, which meant
+    /// `Keymap::restore_missing_defaults` could never hand a settings file
+    /// saved before speech existed its speech keys back, and the tests that
+    /// walk `ALL` — including the one meant to catch exactly this — were
+    /// quietly not checking them at all. Keep this in the same order as the
+    /// enum declaration, so a visual diff against it is enough to catch the
+    /// next omission.
+    pub const ALL: [Action; 54] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -264,6 +274,11 @@ impl Action {
         Action::Blank,
         Action::ToggleTimer,
         Action::ResetTimer,
+        Action::SpeakToggle,
+        Action::SpeakPageToggle,
+        Action::SpeakStop,
+        Action::SpeakNextSentence,
+        Action::SpeakPreviousSentence,
         Action::SwapDisplays,
         Action::ToggleAudienceFullscreen,
         Action::OpenDocument,
@@ -908,10 +923,12 @@ impl Keymap {
     /// library, and a second key doing the same thing to a bare letter is one
     /// vocabulary too many. Preview control belongs to the scrubber rather
     /// than Tab/Enter, and stepping through a slide's links is rare enough
-    /// that it does not earn one of the bare letters. The variants remain
-    /// internal actions, but no fixed shortcut or reference entry advertises
-    /// them.
-    pub const UNBOUND_BY_DEFAULT: [Action; 7] = [
+    /// that it does not earn one of the bare letters. Stopping speech
+    /// outright has no key of its own either: both speech toggles already
+    /// pause, and stopping is rare enough to live in the menu (see
+    /// [`Action::SpeakStop`]). The variants remain internal actions, but no
+    /// fixed shortcut or reference entry advertises them.
+    pub const UNBOUND_BY_DEFAULT: [Action; 8] = [
         Action::ToggleReader,
         Action::PreviewNext,
         Action::PreviewPrevious,
@@ -919,6 +936,7 @@ impl Keymap {
         Action::CancelPreview,
         Action::FocusNextLink,
         Action::FocusPreviousLink,
+        Action::SpeakStop,
     ];
 
     /// The binding to *show* for an action, if any.
