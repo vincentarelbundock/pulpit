@@ -107,9 +107,12 @@ pub struct PreflightOk {
 
 pub type Result<T> = std::result::Result<T, PreflightRefusal>;
 
-/// Check 1: Certifying requires an unsigned document.
-/// If any /Sig field with a non-null /V exists, refuse with CertificationNotAllowed.
-pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
+/// Build the resolver both preflight passes read through, and with it the
+/// AcroForm `/Fields` array — refusing up front if the document is encrypted
+/// (no pass may proceed on an encrypted document) or if the catalog or the
+/// fields array cannot be found. Both callers need exactly this, in exactly
+/// this order, before they diverge into their own checks.
+fn resolver_and_fields(bytes: &[u8]) -> Result<(ObjectResolver<'_>, Vec<(u32, u16)>)> {
     // One resolver for the whole pass; see `definition` above.
     let resolver = ObjectResolver::new(bytes);
     if resolver.is_encrypted() {
@@ -122,6 +125,14 @@ pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
     let fields_array = find_fields_array_with(&resolver, catalog_ref).map_err(|e| {
         PreflightRefusal::InvalidState(format!("Failed to find fields array: {}", e))
     })?;
+
+    Ok((resolver, fields_array))
+}
+
+/// Check 1: Certifying requires an unsigned document.
+/// If any /Sig field with a non-null /V exists, refuse with CertificationNotAllowed.
+pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
+    let (resolver, fields_array) = resolver_and_fields(bytes)?;
 
     let mut signed_count = 0;
     for field_ref in fields_array {
@@ -152,18 +163,7 @@ pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<Prefli
     // cannot re-read the candidate, so nothing is promoted — but only after
     // writing one, and it reports "cannot re-read" rather than naming the
     // actual reason.
-    // One resolver for the whole pass; see `definition` above.
-    let resolver = ObjectResolver::new(bytes);
-    if resolver.is_encrypted() {
-        return Err(PreflightRefusal::EncryptedDocument);
-    }
-
-    let catalog_ref = find_catalog_ref_with(&resolver, bytes)
-        .map_err(|e| PreflightRefusal::InvalidState(format!("Failed to find catalog: {}", e)))?;
-
-    let fields_array = find_fields_array_with(&resolver, catalog_ref).map_err(|e| {
-        PreflightRefusal::InvalidState(format!("Failed to find fields array: {}", e))
-    })?;
+    let (resolver, fields_array) = resolver_and_fields(bytes)?;
 
     // Collect all field infos
     let mut field_infos = Vec::new();

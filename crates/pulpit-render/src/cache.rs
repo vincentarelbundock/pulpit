@@ -416,13 +416,17 @@ impl FrameCache {
         }
     }
 
-    /// Discard everything older than `generation`. Called on every accepted
-    /// reload, DPI change and mapping change.
-    pub fn evict_older_than(&mut self, generation: RenderGeneration) -> usize {
+    /// Remove every entry `predicate` selects, and do the bookkeeping an
+    /// eviction always needs: the byte account, the eviction counter, the
+    /// resident count, and the record kept for whoever is watching what left
+    /// the cache. Shared by [`Self::evict_older_than`] and
+    /// [`Self::evict_kind`], which differ only in which entries `predicate`
+    /// selects.
+    fn evict_where(&mut self, predicate: impl Fn(&FrameKey) -> bool) -> usize {
         let doomed: Vec<FrameKey> = self
             .entries
             .keys()
-            .filter(|key| key.generation < generation)
+            .filter(|key| predicate(key))
             .copied()
             .collect();
         let count = doomed.len();
@@ -437,6 +441,12 @@ impl FrameCache {
         count
     }
 
+    /// Discard everything older than `generation`. Called on every accepted
+    /// reload, DPI change and mapping change.
+    pub fn evict_older_than(&mut self, generation: RenderGeneration) -> usize {
+        self.evict_where(|key| key.generation < generation)
+    }
+
     /// Discard every frame of one kind, whatever generation it belongs to.
     ///
     /// For a change that alters what a picture of a page *contains* without
@@ -444,22 +454,7 @@ impl FrameCache {
     /// change — where a generation bump would be a lie: the document has not
     /// been reloaded, and the slides rendered from it are still correct.
     pub fn evict_kind(&mut self, kind: FrameKind) -> usize {
-        let doomed: Vec<FrameKey> = self
-            .entries
-            .keys()
-            .filter(|key| key.kind == kind)
-            .copied()
-            .collect();
-        let count = doomed.len();
-        for key in doomed {
-            if let Some(entry) = self.entries.remove(&key) {
-                self.account(&entry, -1);
-                self.stats.evictions += 1;
-                self.forget_resident(key.generation);
-                self.evicted_keys.push(key);
-            }
-        }
-        count
+        self.evict_where(|key| key.kind == kind)
     }
 
     pub fn clear(&mut self) {

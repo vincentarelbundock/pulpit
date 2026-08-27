@@ -960,6 +960,22 @@ mod tests {
         }
     }
 
+    /// Accept the back half of a hundred-page scan first, with its one hit on
+    /// page 40. Shared by the tests below that both start this way — one
+    /// checking where the hit lands once the front half follows, the other
+    /// checking that the cursor stays on it.
+    fn accept_hit_on_page_forty(state: &mut SearchState, generation: SearchGeneration) {
+        state.accept(
+            generation,
+            HitChunk {
+                from_page: 32,
+                to_page: 64,
+                hits: vec![page_hit(40, 0)],
+                truncated: false,
+            },
+        );
+    }
+
     #[test]
     fn matching_is_case_insensitive_by_default() {
         assert_eq!(query("pdf").matches_in("A PDF and a pdf").len(), 2);
@@ -1195,15 +1211,7 @@ mod tests {
         let mut state = SearchState::new();
         state.open(100);
         let generation = state.set_query(query("pdf"));
-        state.accept(
-            generation,
-            HitChunk {
-                from_page: 32,
-                to_page: 64,
-                hits: vec![page_hit(40, 0)],
-                truncated: false,
-            },
-        );
+        accept_hit_on_page_forty(&mut state, generation);
         state.accept(
             generation,
             HitChunk {
@@ -1222,15 +1230,7 @@ mod tests {
         let mut state = SearchState::new();
         state.open(100);
         let generation = state.set_query(query("pdf"));
-        state.accept(
-            generation,
-            HitChunk {
-                from_page: 32,
-                to_page: 64,
-                hits: vec![page_hit(40, 0)],
-                truncated: false,
-            },
-        );
+        accept_hit_on_page_forty(&mut state, generation);
         assert_eq!(state.current().unwrap().page, PageIndex(40));
         state.accept(
             generation,

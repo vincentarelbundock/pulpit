@@ -173,6 +173,34 @@ impl Locale {
     }
 }
 
+/// Walk `pattern`, matching the longest of `tokens` at each position and
+/// letting `emit` write what that token expands to; anything that is not a
+/// token is copied straight through. Shared by [`Date::format`] and
+/// [`TimeOfDay::format`], which differ only in their vocabulary and in what
+/// each token means — the longest-match scan over the pattern is the same
+/// walk either way.
+fn format_tokens(
+    pattern: &str,
+    tokens: &[&str],
+    mut emit: impl FnMut(&str, &mut String),
+) -> String {
+    let mut out = String::new();
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut index = 0;
+    while index < characters.len() {
+        let rest: String = characters[index..].iter().collect();
+        let token = tokens.iter().find(|token| rest.starts_with(**token));
+        let Some(&token) = token else {
+            out.push(characters[index]);
+            index += 1;
+            continue;
+        };
+        emit(token, &mut out);
+        index += token.chars().count();
+    }
+    out
+}
+
 /// A time of day, to the minute, as a form field means one.
 ///
 /// Seconds are not held: a field asking for them is asking for a precision a
@@ -276,20 +304,10 @@ impl TimeOfDay {
     /// `MM` minutes, `ss` seconds, `tt` and `t` the am/pm marker. Anything
     /// else is copied through, so separators and literal words survive.
     pub fn format(self, pattern: &str, locale: Locale) -> String {
-        let mut out = String::new();
-        let characters: Vec<char> = pattern.chars().collect();
-        let mut index = 0;
-        while index < characters.len() {
-            let rest: String = characters[index..].iter().collect();
-            let token = ["HH", "H", "hh", "h", "MM", "ss", "tt", "t"]
-                .into_iter()
-                .find(|token| rest.starts_with(token));
-            let Some(token) = token else {
-                out.push(characters[index]);
-                index += 1;
-                continue;
-            };
-            match token {
+        let out = format_tokens(
+            pattern,
+            &["HH", "H", "hh", "h", "MM", "ss", "tt", "t"],
+            |token, out| match token {
                 "HH" => out.push_str(&format!("{:02}", self.hour)),
                 "H" => out.push_str(&self.hour.to_string()),
                 "hh" => out.push_str(&format!("{:02}", self.hour_on_the_clock())),
@@ -298,9 +316,8 @@ impl TimeOfDay {
                 "ss" => out.push_str("00"),
                 "tt" | "t" => out.push_str(&locale.meridiem(self.afternoon())),
                 _ => unreachable!("the token came from the list above"),
-            }
-            index += token.chars().count();
-        }
+            },
+        );
         // A pattern that named nothing — or an empty one, which is what an
         // `AFTime_Format` preset outside the table comes back as — still has
         // to produce a time the field's own keystroke script will accept.
@@ -431,22 +448,12 @@ impl Date {
     /// chose. A pattern that carries one keeps it verbatim, which is visibly
     /// wrong rather than quietly wrong.
     pub fn format(self, pattern: &str, locale: Locale) -> String {
-        let mut out = String::new();
-        let characters: Vec<char> = pattern.chars().collect();
-        let mut index = 0;
-        while index < characters.len() {
-            let rest: String = characters[index..].iter().collect();
-            let token = [
+        let out = format_tokens(
+            pattern,
+            &[
                 "mmmm", "mmm", "mm", "m", "dddd", "ddd", "dd", "d", "yyyy", "yy",
-            ]
-            .into_iter()
-            .find(|token| rest.starts_with(token));
-            let Some(token) = token else {
-                out.push(characters[index]);
-                index += 1;
-                continue;
-            };
-            match token {
+            ],
+            |token, out| match token {
                 "mmmm" => out.push_str(&locale.month_name(self.month)),
                 "mmm" => out.push_str(&locale.month_abbreviation(self.month)),
                 "mm" => out.push_str(&format!("{:02}", self.month)),
@@ -458,9 +465,8 @@ impl Date {
                 "yyyy" => out.push_str(&format!("{:04}", self.year)),
                 "yy" => out.push_str(&format!("{:02}", self.year.rem_euclid(100))),
                 _ => unreachable!("the token came from the list above"),
-            }
-            index += token.chars().count();
-        }
+            },
+        );
         // A pattern that named nothing — or an empty one, which is what
         // `AFDate_Format(2)`'s numbered preset comes back as — still has to
         // produce a date the field's own keystroke script will accept. ISO is

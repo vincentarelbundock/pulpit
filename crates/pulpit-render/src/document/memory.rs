@@ -49,6 +49,39 @@ pub struct MemoryDocument {
     source: Option<PathBuf>,
 }
 
+/// A form field with the defaults every field in [`MemoryDocument::with_form`]
+/// shares: an ordinary format, no multiple selection, and nothing
+/// pre-required, masked or hidden. That fixture's four fields differ only in
+/// name, kind, starting value, options and widgets — plus, for two of them, a
+/// flag this leaves at its default, which the caller overrides with a struct
+/// update.
+fn plain_field(
+    name: &str,
+    kind: FieldKind,
+    value: &str,
+    options: Vec<String>,
+    widgets: Vec<FieldWidget>,
+) -> FormField {
+    FormField {
+        name: name.into(),
+        kind,
+        value: value.into(),
+        read_only: false,
+        format: crate::document::model::FieldFormat::Plain,
+        options,
+        allows_custom_value: false,
+        multiple_selection: false,
+        selected: Vec::new(),
+        required: false,
+        password: false,
+        file_select: false,
+        rich_text: false,
+        truncated: false,
+        hidden: false,
+        widgets,
+    }
+}
+
 impl MemoryDocument {
     /// `pages` US Letter pages, no form, no warnings.
     pub fn letter(pages: usize) -> MemoryDocument {
@@ -76,66 +109,36 @@ impl MemoryDocument {
         document.info.level = CompatibilityLevel::Native;
         document.info.has_form = true;
         document.add_field(FormField {
-            name: "name".into(),
-            kind: FieldKind::Text,
-            value: String::new(),
-            read_only: false,
-            format: crate::document::model::FieldFormat::Plain,
-            options: Vec::new(),
             allows_custom_value: true,
-            multiple_selection: false,
-            selected: Vec::new(),
-            required: false,
-            password: false,
-            file_select: false,
-            rich_text: false,
-            truncated: false,
-            hidden: false,
-            widgets: vec![FieldWidget {
-                page: PageIndex(0),
-                bounds: PageRect::new(100.0, 100.0, 400.0, 124.0),
-                option: None,
-            }],
+            ..plain_field(
+                "name",
+                FieldKind::Text,
+                "",
+                Vec::new(),
+                vec![FieldWidget {
+                    page: PageIndex(0),
+                    bounds: PageRect::new(100.0, 100.0, 400.0, 124.0),
+                    option: None,
+                }],
+            )
         });
-        document.add_field(FormField {
-            name: "agreed".into(),
-            kind: FieldKind::Checkbox,
-            value: "Off".into(),
-            read_only: false,
-            format: crate::document::model::FieldFormat::Plain,
-            options: vec!["Yes".into(), "Off".into()],
-            allows_custom_value: false,
-            multiple_selection: false,
-            selected: Vec::new(),
-            required: false,
-            password: false,
-            file_select: false,
-            rich_text: false,
-            truncated: false,
-            hidden: false,
-            widgets: vec![FieldWidget {
+        document.add_field(plain_field(
+            "agreed",
+            FieldKind::Checkbox,
+            "Off",
+            vec!["Yes".into(), "Off".into()],
+            vec![FieldWidget {
                 page: PageIndex(0),
                 bounds: PageRect::new(100.0, 160.0, 116.0, 176.0),
                 option: None,
             }],
-        });
-        document.add_field(FormField {
-            name: "colour".into(),
-            kind: FieldKind::RadioGroup,
-            value: "red".into(),
-            read_only: false,
-            format: crate::document::model::FieldFormat::Plain,
-            options: vec!["red".into(), "green".into()],
-            allows_custom_value: false,
-            multiple_selection: false,
-            selected: Vec::new(),
-            required: false,
-            password: false,
-            file_select: false,
-            rich_text: false,
-            truncated: false,
-            hidden: false,
-            widgets: vec![
+        ));
+        document.add_field(plain_field(
+            "colour",
+            FieldKind::RadioGroup,
+            "red",
+            vec!["red".into(), "green".into()],
+            vec![
                 FieldWidget {
                     page: PageIndex(0),
                     bounds: PageRect::new(100.0, 200.0, 116.0, 216.0),
@@ -147,24 +150,16 @@ impl MemoryDocument {
                     option: Some("green".into()),
                 },
             ],
-        });
+        ));
         document.add_field(FormField {
-            name: "locked".into(),
-            kind: FieldKind::Text,
-            value: "computed".into(),
             read_only: true,
-            format: crate::document::model::FieldFormat::Plain,
-            options: Vec::new(),
-            allows_custom_value: false,
-            multiple_selection: false,
-            selected: Vec::new(),
-            required: false,
-            password: false,
-            file_select: false,
-            rich_text: false,
-            truncated: false,
-            hidden: false,
-            widgets: Vec::new(),
+            ..plain_field(
+                "locked",
+                FieldKind::Text,
+                "computed",
+                Vec::new(),
+                Vec::new(),
+            )
         });
         document
     }

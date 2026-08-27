@@ -423,6 +423,40 @@ impl<'a> PdfiumDocument<'a> {
         self.form.as_ref().map(|form| form.handle)
     }
 
+    /// Load `page` fresh from PDFium: check it is inside the document, then
+    /// hand back the raw page handle `FPDF_LoadPage` returns, or the error
+    /// `on_failure` describes if it comes back null.
+    ///
+    /// Shared by [`Self::open_form_page`] and [`Self::text_page_for`], which
+    /// differ only in what they do with the handle afterwards — form setup
+    /// for one, extracting the text layer for the other — and in how each
+    /// names itself when the load fails. Neither owns the handle across this
+    /// call: the caller is the one deciding what closes it and when, exactly
+    /// as before this was pulled out.
+    fn load_page(
+        &self,
+        page: PageIndex,
+        on_failure: impl FnOnce(usize) -> String,
+    ) -> Result<FPDF_PAGE> {
+        let bindings = self.backend.bindings();
+        let document = self
+            .backend
+            .document_handle(self.document)
+            .map_err(to_document_error)?;
+        let count = self.info.page_count;
+        if page.get() >= count {
+            return Err(DocumentError::NoSuchPage {
+                page: page.get(),
+                count,
+            });
+        }
+        let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
+        if handle.is_null() {
+            return Err(DocumentError::Backend(on_failure(page.get())));
+        }
+        Ok(handle)
+    }
+
     /// The loaded page a form interaction is happening on, opening it if this
     /// is the first event, and moving it if the interaction changed page.
     ///
@@ -441,25 +475,10 @@ impl<'a> PdfiumDocument<'a> {
         }
         self.release_form_page();
 
+        let handle = self.load_page(page, |page| {
+            format!("cannot load page {page} for form input")
+        })?;
         let bindings = self.backend.bindings();
-        let document = self
-            .backend
-            .document_handle(self.document)
-            .map_err(to_document_error)?;
-        let count = self.info.page_count;
-        if page.get() >= count {
-            return Err(DocumentError::NoSuchPage {
-                page: page.get(),
-                count,
-            });
-        }
-        let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
-        if handle.is_null() {
-            return Err(DocumentError::Backend(format!(
-                "cannot load page {} for form input",
-                page.get()
-            )));
-        }
         unsafe { bindings.FORM_OnAfterLoadPage(handle, form) };
         if let Some(binding) = self.form.as_mut() {
             binding.open_page = Some((page.get(), handle));
@@ -521,25 +540,9 @@ impl<'a> PdfiumDocument<'a> {
     fn text_page_for(&self, page: PageIndex, doing: &str) -> Result<Option<FPDF_TEXTPAGE>> {
         if self.text_page.borrow().as_ref().map(|cache| cache.page) != Some(page.get()) {
             self.release_text_page();
+            let handle =
+                self.load_page(page, |page| format!("cannot load page {page} to {doing}"))?;
             let bindings = self.backend.bindings();
-            let document = self
-                .backend
-                .document_handle(self.document)
-                .map_err(to_document_error)?;
-            let count = self.info.page_count;
-            if page.get() >= count {
-                return Err(DocumentError::NoSuchPage {
-                    page: page.get(),
-                    count,
-                });
-            }
-            let handle = unsafe { bindings.FPDF_LoadPage(document, page.get() as i32) };
-            if handle.is_null() {
-                return Err(DocumentError::Backend(format!(
-                    "cannot load page {} to {doing}",
-                    page.get()
-                )));
-            }
             let text = unsafe { bindings.FPDFText_LoadPage(handle) };
             if text.is_null() {
                 unsafe { bindings.FPDF_ClosePage(handle) };

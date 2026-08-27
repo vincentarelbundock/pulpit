@@ -1763,6 +1763,27 @@ mod xref_stream_tests {
         assert!(matches!(index.get(2), Some(XrefEntry::InFile { .. })));
     }
 
+    /// Append object 3 as a `/Type /XRef` stream wrapping `body`, then close
+    /// the file with `startxref`/`%%EOF`.
+    ///
+    /// The two tests below build object 3 by hand rather than through
+    /// [`xref_stream_pdf`], because a type-2 entry pointing into a compressed
+    /// stream — and a stream that recurses into another object stream — are
+    /// not shapes that generic helper produces.
+    fn close_with_xref_stream(out: &mut Vec<u8>, body: &[u8]) {
+        let at = out.len();
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+    }
+
     #[test]
     fn a_type_two_entry_resolves_through_its_object_stream() {
         // Object 1 lives at index 0 of object stream 2.
@@ -1779,17 +1800,7 @@ mod xref_stream_tests {
             .as_bytes(),
         );
         let body = rows(&[(0, 0, 0xFFFF), (2, 2, 0), (1, stm_offset, 0)]);
-        let at = out.len();
-        out.extend_from_slice(
-            format!(
-                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        out.extend_from_slice(&body);
-        out.extend_from_slice(b"\nendstream\nendobj\n");
-        out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+        close_with_xref_stream(&mut out, &body);
 
         let resolver = ObjectResolver::new(&out);
         assert!(matches!(
@@ -1819,17 +1830,7 @@ mod xref_stream_tests {
         // recursion in the resolver.
         let body = rows(&[(0, 0, 0xFFFF), (2, 2, 0), (2, 2, 1)]);
         let mut out = Vec::from(&b"%PDF-1.5\n"[..]);
-        let at = out.len();
-        out.extend_from_slice(
-            format!(
-                "3 0 obj\n<</Type /XRef /Size 4 /W [1 4 2] /Root 1 0 R /Length {}>>\nstream\n",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        out.extend_from_slice(&body);
-        out.extend_from_slice(b"\nendstream\nendobj\n");
-        out.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+        close_with_xref_stream(&mut out, &body);
 
         let resolver = ObjectResolver::new(&out);
         let err = resolver.resolve(1).expect_err("must refuse, not recurse");

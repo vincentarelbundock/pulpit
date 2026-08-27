@@ -1168,6 +1168,24 @@ mod website {
     }
 }
 
+/// The default `/` and `Ctrl+F` bindings resolve to focus-search and
+/// toggle-audience-fullscreen. Shared between the ordinary default keymap
+/// test and the migration test that repairs an old shipped keymap into the
+/// same shape, so the two are asserting the same target, not merely similar
+/// ones.
+#[cfg(test)]
+fn assert_search_and_fullscreen_defaults(keymap: &Keymap) {
+    assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
+    assert_eq!(
+        keymap.resolve_with_mods(Some("f"), Mods::primary(), None),
+        Some(Action::FocusSearch)
+    );
+    assert_eq!(
+        keymap.resolve(Some("f"), None),
+        Some(Action::ToggleAudienceFullscreen)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1615,15 +1633,7 @@ mod tests {
     #[test]
     fn search_uses_the_characters_iced_reports() {
         let keymap = Keymap::default();
-        assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
-        assert_eq!(
-            keymap.resolve_with_mods(Some("f"), Mods::primary(), None),
-            Some(Action::FocusSearch)
-        );
-        assert_eq!(
-            keymap.resolve(Some("f"), None),
-            Some(Action::ToggleAudienceFullscreen)
-        );
+        assert_search_and_fullscreen_defaults(&keymap);
     }
 
     #[test]
@@ -1728,15 +1738,7 @@ mod migration_tests {
     fn shipped_search_and_fullscreen_defaults_are_repaired() {
         let stored = r#"{"bindings":[[{"kind":"named","key":"slash"},"focus-search"],[{"kind":"named","key":"f","mods":{"ctrl":true}},"toggle-audience-fullscreen"]]}"#;
         let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_eq!(keymap.resolve(Some("/"), None), Some(Action::FocusSearch));
-        assert_eq!(
-            keymap.resolve_with_mods(Some("f"), Mods::primary(), None),
-            Some(Action::FocusSearch)
-        );
-        assert_eq!(
-            keymap.resolve(Some("f"), None),
-            Some(Action::ToggleAudienceFullscreen)
-        );
+        assert_search_and_fullscreen_defaults(&keymap);
     }
 }
 
