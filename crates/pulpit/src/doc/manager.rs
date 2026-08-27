@@ -184,12 +184,12 @@ impl DocumentManager {
         self.active.as_ref()
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn reload_count(&self) -> u64 {
         self.reloads
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn is_reloading(&self) -> bool {
         !matches!(self.state, State::Idle)
     }
@@ -378,14 +378,14 @@ impl DocumentManager {
 
     /// Adopt a document that was opened outside the reload path (the very
     /// first load, or an explicit "open file" action).
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn adopt(&mut self, info: DocumentInfo) {
         self.path = info.path.clone();
         self.active = Some(info);
         self.state = State::Idle;
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn next_document_id(&mut self) -> DocumentId {
         self.allocate()
     }

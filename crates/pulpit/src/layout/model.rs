@@ -112,7 +112,7 @@ pub enum Origin {
 }
 
 impl Origin {
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             Origin::BuiltIn => "Built-in layout · Read only",
@@ -185,7 +185,7 @@ pub enum EditError {
     #[error("{0} may only appear once in a layout")]
     AlreadyPlaced(&'static str),
     #[error("this layout is read only")]
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     ReadOnly,
 }
 
@@ -322,7 +322,7 @@ impl Layout {
     }
 
     /// The cell at a point, for hit testing in the editor.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn cell_at(&self, x: f32, y: f32, area: Frame) -> Option<NodeId> {
         let (placements, _) = self.compute(area, false);
         placements
@@ -548,7 +548,7 @@ impl Layout {
         self.check_instances(&Widget::new(kind), None).is_err()
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn set_cell_properties(
         &mut self,
         id: NodeId,
@@ -569,7 +569,7 @@ impl Layout {
     ///
     /// The whole widget, not a property bag: a kind and its configuration
     /// travel together and cannot be separated by a caller.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn update_widget(&mut self, id: NodeId, widget: Widget) -> Result<Change, EditError> {
         let cell = self.root.cell_mut(id).ok_or(EditError::NotACell(id))?;
         if cell.widget.is_none() {
@@ -581,7 +581,7 @@ impl Layout {
         Ok(Change::Updated(id))
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn rename_node(&mut self, id: NodeId, name: Option<String>) -> Result<Change, EditError> {
         let node = self.root.find_mut(id).ok_or(EditError::NoSuchNode(id))?;
         *node.name_mut() = name.filter(|name| !name.trim().is_empty());
@@ -781,7 +781,7 @@ impl Layout {
         Ok(Change::Updated(split_id))
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn reverse_children(&mut self, split_id: NodeId) -> Result<Change, EditError> {
         let split = self
             .root
@@ -792,7 +792,7 @@ impl Layout {
         Ok(Change::Updated(split_id))
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn set_split_properties(
         &mut self,
         split_id: NodeId,

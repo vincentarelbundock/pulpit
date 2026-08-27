@@ -22,6 +22,7 @@ Application (iced daemon, one update loop)
 ├── ipc                      framing, spawn, doorbell, shm      pulpit-core
 ├── RendererSupervisor       worker pool, IPC, generations      pulpit-render
 ├── FrameCache               byte-bounded CPU/GPU accounting    pulpit-render
+├── atomic                   replace a file, never overwrite    pulpit-render
 ├── images::PageTable        a folder or comic archive as pages pulpit-render
 ├── InputRouter              fixed keys + remote aliases        pulpit::settings
 ├── SessionInhibitor         acquire/release, crash-safe        pulpit
@@ -297,6 +298,17 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   position, OS font name, physical DPI, or platform shortcut spelling when a
   semantic representation exists. Migrations are deterministic and tested from
   fixtures of every supported platform.
++ *A file is replaced, never opened and overwritten.* Every writer that
+  replaces an existing file MUST go through `pulpit_render::atomic`: an
+  unpredictable hidden temporary beside the destination, created with
+  `O_CREAT|O_EXCL` so a planted name or symlink is a refusal rather than a
+  write-through, then written, `fsync`ed, renamed, and the directory
+  `fsync`ed. Opening the destination directly is forbidden — a crash
+  mid-write would leave the reader with neither their old file nor a
+  complete new one. The primitive asks for a `Visibility` rather than
+  assuming: material of the reader's own is `Private` (`0o600` from the
+  instant it exists), and a document they asked us to write to a path they
+  chose is `Inherited`, which is their umask's decision to make.
 + *Native shell, Pulpit interior.* Ordinary windows use OS decorations; Pulpit
   MUST NOT draw a custom title bar to look the same everywhere. Inside the
   frame it uses one deliberate visual language rather than imitating GTK,
@@ -565,6 +577,57 @@ it is a property of the text layer rather than of anything above it.
   build; a page turn that feels slow is far likelier to be a starved cache or
   a polled event than a mis-sorted queue, and both of those have been the
   answer before.
+
+== Superfluity
+
+A thing is superfluous when deleting it changes no behaviour and loses no
+knowledge. Behaviour is what the tests and the application exercise; knowledge
+is what would have to be re-derived. Git remembers deleted code, so "we might
+want it later" is not knowledge — a written reason is.
+
++ *A dead-code allowance names its item and its reason.* It MUST be written as
+  `#[allow(dead_code)] // <why this is kept>` on the item itself.
+  `#![allow(dead_code)]` at module scope is forbidden: it also hides every
+  *future* dead item in that module, permanently and silently. Two reasons
+  are in use and they are not interchangeable — `reached by its tests, not by
+  the application` for API kept alive by the tests beside it, and `unreached,
+  including by its own tests` for what nothing calls at all. The difference
+  between `cargo check --bins` and `cargo check --tests` is what tells them
+  apart. The standing exception is `vendor/mod.rs`, which silences the
+  vendored `iced_aw` tree: that code is upstream's, and a per-item diff
+  against it is a diff to maintain for ever.
++ *Two implementations of one OS-level object MUST agree on their safety
+  properties* — creation mode, name predictability, and whether an existing
+  file is adopted or refused — even when their data structures differ and no
+  code is shared. A divergence there is a bug in the weaker one, not a style
+  difference. This is not hypothetical: `pulpit-media`'s shared-memory ring
+  once created its regions in world-writable `/dev/shm` under a name derived
+  from the pid and a counter, adopting an existing file rather than refusing
+  it, at whatever the umask gave — while `pulpit-render`'s equivalent had an
+  unpredictable name, `create_new`, and `0o600`. It went unnoticed for
+  precisely the reason the two were filed as "similar but deliberately
+  separate."
++ *A pass that finds nothing records the instrument, not just the result.*
+  "`jscpd` found no clones" and "there is no duplication" are different
+  claims, and publishing the second on the strength of the first is how four
+  independent implementations of atomic file replacement survived a clean
+  copy-paste audit — they were not copies, so a token-level detector could
+  not see them. State what was run and what it can see.
++ *An unused declaration is not an unused compilation.* Grepping for
+  `<crate>::` finds dependency declarations nothing names, which is a
+  different thing from a dependency nothing builds — a direct declaration
+  usually resolves to a copy already in the graph. `cargo tree -i <crate>` is
+  the check that tells them apart, and it MUST be run before a removal is
+  described as a saving.
+
+Two negative results here, recorded so they are not re-litigated without
+numbers. Consolidating `pulpit-render`'s `shm.rs` with `pulpit-media`'s
+`surface.rs` is *not* advisable: one is a single resizable region, the other a
+ring of fixed slots with hold/release, both already delegate naming and
+path-safety to `pulpit_core::ipc::shm`, and the residue is a six-line
+`path_for` that cannot move into `ipc` because it wraps `ipc`'s `Option` into
+each crate's own error type. And `view.rs` and `layout_renderer.rs` are one
+layer rather than two competing ones — `view.rs` delegates at four call sites.
 
 == One representation of a mark
 
@@ -1144,7 +1207,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, notifications, sleep inhibition, directories, recent documents, putting an image on the clipboard, sending a document to a printer, or to the platform's own print dialog],
+  [`PlatformServices`], [appearance, reveal/open, sleep inhibition, directories, putting an image on the clipboard, sending a document to a printer, or to the platform's own print dialog],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -1216,8 +1279,8 @@ the strength of the parts that were — said the event loop was innocent.
 (`Stable` → `Connector` → `Geometric` → `None`), whether arbitrary placement
 and safe un-fullscreening are possible, whether appearance
 and high contrast can be read, whether sleep can be inhibited, and whether
-native dialogs, menus, an accessibility bridge, media keys, notifications, an
-image clipboard and printing exist. `report()` renders it for the diagnostics bundle and
+native dialogs, menus, an accessibility bridge, media keys, an image
+clipboard and printing exist. `report()` renders it for the diagnostics bundle and
 the settings page; `limitations()` yields the ones worth telling the presenter
 about.
 

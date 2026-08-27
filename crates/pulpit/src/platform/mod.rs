@@ -165,7 +165,7 @@ impl Platform {
     }
 
     /// A fully deterministic platform for tests.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn null() -> Platform {
         let services = null::NullPlatform::new("null");
         let capabilities = services.capabilities();

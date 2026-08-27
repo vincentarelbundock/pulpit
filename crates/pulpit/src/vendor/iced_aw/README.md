@@ -19,9 +19,9 @@ settings, where a hex field is a poor way to choose a colour.
 A time picker, for dialling a cue on the clock, was intended too and is what
 the plural in this file used to describe. It was never ported. The modules it
 would have needed — the CSS colour table, `core::renderer`, and the up/down
-arrow glyphs — were carried in anyway and reached nothing; they were deleted
-in `SPEC-simplify.md` §68.2. If the time picker is wanted later it is a fresh
-port from upstream, not a revival of what was here.
+arrow glyphs — were carried in anyway and reached nothing; they have been
+deleted. If the time picker is wanted later it is a fresh port from upstream,
+not a revival of what was here.
 
 Depending on the crate to get them would mean:
 

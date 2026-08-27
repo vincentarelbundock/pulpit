@@ -11,10 +11,10 @@ pub enum NotesSource {
 }
 
 impl NotesSource {
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub const ALL: [NotesSource; 2] = [NotesSource::CurrentSlide, NotesSource::NextSlide];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             NotesSource::CurrentSlide => "Current slide",

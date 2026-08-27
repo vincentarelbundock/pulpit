@@ -171,7 +171,7 @@ pub const STALE_AFTER_SECONDS: u32 = 90;
 /// How long a snoozed cue waits before asking again, when nobody has said.
 pub const DEFAULT_SNOOZE_MINUTES: u32 = 5;
 /// The same, in seconds, for the tests and for anything still assuming it.
-#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+#[allow(dead_code)] // reached by its tests, not by the application
 pub const SNOOZE_SECONDS: u32 = DEFAULT_SNOOZE_MINUTES * 60;
 /// The widest a snooze may be set. Longer than this is not a snooze, it is a
 /// different alarm, and the popup has a field for those.

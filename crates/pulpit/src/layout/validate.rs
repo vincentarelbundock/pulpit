@@ -20,7 +20,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             Severity::Blocking => "Blocked",

@@ -104,7 +104,7 @@ impl WidgetRegistration {
         self.definition.label
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn short_label(&self) -> &'static str {
         self.definition.short_label
     }

@@ -15,7 +15,7 @@ impl Variant {
     #[allow(dead_code)] // see widgets::tokens
     pub const ALL: [Variant; 3] = [Variant::Standard, Variant::Compact, Variant::Prominent];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             Variant::Standard => "Standard",
@@ -38,7 +38,7 @@ impl Align {
     #[allow(dead_code)] // see widgets::tokens
     pub const ALL: [Align; 3] = [Align::Start, Align::Center, Align::End];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             Align::Start => "Start",

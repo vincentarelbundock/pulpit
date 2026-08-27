@@ -127,7 +127,7 @@ impl DocumentWatcher {
         })
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -138,7 +138,7 @@ impl DocumentWatcher {
 
     /// Block for up to `timeout` for a hint. Returns true if the file was
     /// touched; repeated hints collapse into one.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn wait(&self, timeout: Duration) -> bool {
         match self.events.recv_timeout(timeout) {
             Ok(()) => {

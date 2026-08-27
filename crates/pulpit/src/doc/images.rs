@@ -117,7 +117,7 @@ impl ImageDocumentState {
     }
 
     /// The candidate's page count, as the application listed it.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn candidate_pages(&self) -> Option<usize> {
         self.candidate.as_ref().map(PageTable::len)
     }
@@ -163,7 +163,7 @@ impl ImageDocumentState {
 
     /// The promoted table, for anything that needs to name a page's file —
     /// a render failure in particular (§49.3).
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn active(&self) -> Option<&PageTable> {
         self.active.as_ref()
     }

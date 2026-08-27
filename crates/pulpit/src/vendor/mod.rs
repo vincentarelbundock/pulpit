@@ -14,7 +14,7 @@
 // Upstream carries pieces this crate does not call. Silenced rather than
 // deleted: deleting them is a diff against upstream to maintain for ever, and
 // the code is not this crate's to tidy. The exception is a module that served
-// only a widget that was never ported — `SPEC-simplify.md` §68.2 — because
-// there the diff is against a port that does not exist.
+// only a widget that was never ported — the colour table for the time picker —
+// because there the diff is against a port that does not exist.
 #[allow(dead_code, unused_imports)]
 pub mod iced_aw;

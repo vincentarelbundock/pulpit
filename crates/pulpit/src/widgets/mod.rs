@@ -242,7 +242,7 @@ impl WidgetKind {
         registry::registration(self).label()
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn short_label(self) -> &'static str {
         registry::registration(self).short_label()
     }
@@ -483,7 +483,7 @@ impl Widget {
         self.kind
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn config(&self) -> &WidgetConfig {
         &self.config
     }
@@ -491,7 +491,7 @@ impl Widget {
     /// The configuration, mutably, for the model code that edits it. Kept
     /// crate-private so the kind/config agreement cannot be broken from a
     /// view.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub(crate) fn config_mut(&mut self) -> &mut WidgetConfig {
         &mut self.config
     }

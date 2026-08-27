@@ -68,7 +68,7 @@ impl SlideWidths {
     }
 
     /// Every distinct width, so the render plan can ask for each once.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn distinct(&self) -> Vec<u32> {
         if self.current == self.neighbour {
             vec![self.current]

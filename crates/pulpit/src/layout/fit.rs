@@ -55,7 +55,7 @@ impl FittedSlide {
     }
 
     /// The share of the pane lost to letterboxing, in `0.0..=1.0`.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn padding_fraction(&self) -> f32 {
         let cell = self.cell.width * self.cell.height;
         if cell <= 0.0 {
@@ -230,7 +230,7 @@ pub fn recommend(
 /// The two ratios are independent: a 4:3 deck on a 16:9 presenter display is
 /// an ordinary situation, and the editor must be able to show it without the
 /// presenter first having to connect that projector.
-#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+#[allow(dead_code)] // reached by its tests, not by the application
 pub fn preview_frame(screen: Frame, slide_ratio: AspectRatio) -> Option<FittedSlide> {
     FittedSlide::fit(screen, slide_ratio.ratio())
 }

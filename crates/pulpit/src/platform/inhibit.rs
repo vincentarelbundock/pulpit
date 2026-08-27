@@ -32,7 +32,7 @@ pub enum InhibitToken {
     Cookie(u32),
     /// A child process id.
     Process(u32),
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     None,
 }
 
@@ -41,7 +41,7 @@ impl InhibitState {
         matches!(self, InhibitState::Held { .. })
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn is_unavailable(&self) -> bool {
         matches!(self, InhibitState::Unavailable { .. })
     }

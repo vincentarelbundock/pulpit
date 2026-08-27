@@ -558,7 +558,7 @@ impl ReadingSettings {
     /// Forget every remembered position. The privacy control: a reading list
     /// is a record of what someone has read, and it must be possible to say
     /// so and be rid of it.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn forget_all(&mut self) {
         self.positions.clear();
     }

@@ -34,7 +34,7 @@ pub enum Direction {
 
 impl Direction {
     /// The wording the interface uses, paired with a directional icon.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn action_label(self) -> &'static str {
         match self {
             Direction::Horizontal => "Split left and right",
@@ -42,7 +42,7 @@ impl Direction {
         }
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn label(self) -> &'static str {
         match self {
             Direction::Horizontal => "Left and right",
@@ -50,7 +50,7 @@ impl Direction {
         }
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn perpendicular(self) -> Direction {
         match self {
             Direction::Horizontal => Direction::Vertical,
@@ -71,10 +71,10 @@ pub enum EmptyBehavior {
 }
 
 impl EmptyBehavior {
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub const ALL: [EmptyBehavior; 2] = [EmptyBehavior::ShowBlankPanel, EmptyBehavior::Collapse];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             EmptyBehavior::ShowBlankPanel => "Show blank panel",
@@ -96,14 +96,14 @@ pub enum CellBackground {
 }
 
 impl CellBackground {
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub const ALL: [CellBackground; 3] = [
         CellBackground::None,
         CellBackground::Panel,
         CellBackground::Canvas,
     ];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             CellBackground::None => "None",
@@ -152,10 +152,10 @@ impl CellSizing {
 }
 
 impl CellBorder {
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub const ALL: [CellBorder; 3] = [CellBorder::None, CellBorder::Subtle, CellBorder::Accent];
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn label(self) -> &'static str {
         match self {
             CellBorder::None => "None",
@@ -239,7 +239,7 @@ impl Cell {
     }
 
     /// What the tree panel calls this cell.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn display_name(&self) -> String {
         self.name
             .clone()
@@ -278,7 +278,7 @@ fn default_min_child() -> f32 {
 }
 
 impl Split {
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn display_name(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             format!(
@@ -290,7 +290,7 @@ impl Split {
     }
 
     /// Number of dividers: one fewer than the children.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn divider_count(&self) -> usize {
         self.children.len().saturating_sub(1)
     }
@@ -311,7 +311,7 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn is_split(&self) -> bool {
         matches!(self, Node::Split(_))
     }
@@ -330,7 +330,7 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn display_name(&self) -> String {
         match self {
             Node::Split(split) => split.display_name(),
@@ -338,7 +338,7 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn name_mut(&mut self) -> &mut Option<String> {
         match self {
             Node::Split(split) => &mut split.name,
@@ -464,13 +464,13 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn contains(&self, id: NodeId) -> bool {
         self.find(id).is_some()
     }
 
     /// Depth-first list of every node id.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn ids(&self) -> Vec<NodeId> {
         let mut out = vec![self.id()];
         if let Node::Split(split) = self {
@@ -528,7 +528,7 @@ impl Frame {
         }
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
     }

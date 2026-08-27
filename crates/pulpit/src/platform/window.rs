@@ -40,7 +40,7 @@ impl Bounds {
 /// Lifecycle and geometry rules that differ by platform.
 pub trait WindowPolicy: Send + Sync {
     /// Reverse-DNS application identity, used for desktop integration.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     fn application_id(&self) -> &'static str;
 
     /// Smallest window in which the presenter view still works.
@@ -49,7 +49,7 @@ pub trait WindowPolicy: Send + Sync {
     /// Does closing the last window quit the application?
     ///
     /// macOS keeps the process alive; Windows and Linux do not.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     fn quit_on_last_window_closed(&self) -> bool;
 
     /// Bring restored bounds back into a usable work area.

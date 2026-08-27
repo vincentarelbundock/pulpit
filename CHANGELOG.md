@@ -42,6 +42,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Exporting a document no longer writes through a planted symlink.** Saving
+  a PDF creates a scratch file beside the destination first, so an interrupted
+  save cannot leave half a document where a whole one was. That scratch file
+  was created with a predictable name and an ordinary open, which follows a
+  symlink and truncates whatever it finds — so in a directory another local
+  user can write, the export could be redirected into a file pulpit was never
+  asked to touch. It is now created exclusively, under a name that cannot be
+  guessed from the process id, and a name somebody else has taken is a refusal
+  rather than a write. The same seven steps had been written four times across
+  the tree and had drifted apart; they are now one primitive that every writer
+  uses, which also gives the settings, layout and session files the durability
+  fsync after the rename that two of the four were missing. Permissions are
+  unchanged: a file of the reader's own stays owner-only, and a document they
+  asked us to export still takes their umask.
+
 - **The media worker's shared-memory rings are no longer world-readable.** A
   ring carries decoded video frames of whatever is on the audience screen, and
   it lives in `/dev/shm`, which every local user can write to. The render
@@ -52,8 +67,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refusing it, and took whatever the umask gave, usually `0644`. Another user
   on the same machine could read a ring, or pre-create one at the name the
   worker was about to use. The two now create their regions on identical
-  terms. Found by comparing the two implementations rather than by a report,
-  and written up in `SPEC-simplify.md` §72.
+  terms. Found by comparing the two implementations rather than by a report;
+  the rule it produced is in `docs-src/internals.typ` under *Superfluity*.
 
 - **A typeset text mark no longer disappears when it is dragged.** Every edit
   to an annotation clears the picture the engine is holding for it, and a
@@ -87,8 +102,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   library crates; a vendored CSS colour table and two other modules left over
   from a widget that was never ported; and four dependency declarations, one
   of which was compiling a second redundant copy of a crate. Nothing about how
-  pulpit behaves changes. `SPEC-simplify.md` records what was found, what was
-  done, and — for the parts left alone — why.
+  pulpit behaves changes. The rules the exercise produced — how an allowance
+  is written, and what a clean audit may and may not claim — are in
+  `docs-src/internals.typ` under *Superfluity*.
 
 - **The worker machinery is written once.** Message framing, process
   spawning, the wake-up doorbell and shared-memory naming had grown four

@@ -23,7 +23,7 @@ impl SlideFit {
     #[allow(dead_code)] // see widgets::tokens
     pub const ALL: [SlideFit; 2] = [SlideFit::Fit, SlideFit::Fill];
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn label(self) -> &'static str {
         match self {
             SlideFit::Fit | SlideFit::Stretch => "Fit",
