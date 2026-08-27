@@ -84,18 +84,36 @@ fn sweep_stale_regions() {
     sweep_stale_regions_in_directory(&base, current_pid);
 }
 
-/// Extract the pid from a region filename matching `pulpit-<pid>-*`.
-/// Returns the pid if the name matches the pattern, otherwise None.
+/// Extract the pid from a region filename, for every naming scheme pulpit
+/// uses: `pulpit-<pid>-*` for render regions, and `pulpit-<label>-<pid>-*` for
+/// a labelled consumer such as the media rings (`pulpit-media-<pid>-<n>`).
+///
+/// The pid is the first `-`-separated component that parses as a number, and
+/// never the last one, since every scheme puts a discriminator after it.
+///
+/// Reading only as far as the first dash — which is what this did — takes
+/// `"media"` from a media ring and fails to parse it, so the file is skipped.
+/// That is how media rings came to survive every sweep and sit in tmpfs until
+/// reboot: the owning process was already dead, and `SurfaceRing`'s `Drop`,
+/// the only other cleanup, does not run on a crash or a `SIGKILL`.
+///
+/// A label that was itself numeric would be mistaken for the pid, so labels
+/// have to stay non-numeric. The tests below pin that.
 fn extract_pid_from_region_name(filename: &str) -> Option<u32> {
     const PREFIX: &str = "pulpit-";
 
-    if !filename.starts_with(PREFIX) {
-        return None;
+    let remainder = filename.strip_prefix(PREFIX)?;
+    let mut components = remainder.split('-').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            // The last component is the discriminator, never the pid.
+            break;
+        }
+        if let Ok(pid) = component.parse() {
+            return Some(pid);
+        }
     }
-
-    let remainder = &filename[PREFIX.len()..];
-    let dash_pos = remainder.find('-')?;
-    remainder[..dash_pos].parse().ok()
+    None
 }
 
 /// Is a process with this id alive on Linux?
@@ -428,5 +446,62 @@ mod tests {
 
         // Clean up the current-pid test file.
         let _ = std::fs::remove_file(&current_path);
+    }
+
+    /// `pulpit-media` names its rings `pulpit-media-<pid>-<n>`, and this
+    /// sweeper is the only thing that reclaims them after a crash: the ring's
+    /// own `Drop` does not run on a `SIGKILL`. Reading the pid only as far as
+    /// the first dash took `"media"`, failed to parse it, and skipped the
+    /// file — so every crash with an overlay playing leaked its rings until
+    /// the machine was rebooted.
+    ///
+    /// The two crates cannot see each other, so nothing but this test ties the
+    /// sweeper to the name `surface.rs` actually produces. Keep them in step.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stale_media_rings_are_swept_too() {
+        let base = base_directory();
+        let current_pid = std::process::id();
+        let dead_pid = 4194305u32;
+
+        // Exactly the shape of `RingNamer`'s prefix in pulpit-media.
+        let dead_ring = base.join(format!("pulpit-media-{dead_pid}-0"));
+        std::fs::write(&dead_ring, b"stale ring").unwrap();
+        let live_ring = base.join(format!("pulpit-media-{current_pid}-0"));
+        std::fs::write(&live_ring, b"live ring").unwrap();
+
+        sweep_stale_regions_in_directory(&base, current_pid);
+
+        assert!(
+            !dead_ring.exists(),
+            "a media ring whose owner is gone must be reclaimed"
+        );
+        assert!(
+            live_ring.exists(),
+            "a media ring belonging to this process must be left alone"
+        );
+
+        let _ = std::fs::remove_file(&live_ring);
+    }
+
+    #[test]
+    fn a_pid_is_read_past_a_label_and_never_from_the_last_component() {
+        // Render regions: the pid comes first.
+        assert_eq!(
+            extract_pid_from_region_name("pulpit-1234-abcdef"),
+            Some(1234)
+        );
+        // Media rings: the pid comes after a non-numeric label.
+        assert_eq!(
+            extract_pid_from_region_name("pulpit-media-1234-0"),
+            Some(1234)
+        );
+        // Not ours.
+        assert_eq!(extract_pid_from_region_name("something-else-1234-0"), None);
+        // A bare label with nothing after it names no process.
+        assert_eq!(extract_pid_from_region_name("pulpit-media"), None);
+        // The trailing component is a discriminator, not a pid, so a name that
+        // ends in a number must not be read as owned by it.
+        assert_eq!(extract_pid_from_region_name("pulpit-media-7"), None);
     }
 }

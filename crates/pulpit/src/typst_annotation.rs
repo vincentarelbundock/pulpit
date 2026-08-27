@@ -254,9 +254,23 @@ struct Worker {
 
 impl Worker {
     fn spawn() -> std::io::Result<Self> {
+        // The same fork-bomb bound the render and media supervisors keep: a
+        // worker that spawns workers grows exponentially and takes the machine
+        // down before any deadline or restart budget can notice. This site
+        // used to set `PULPIT_WORKER_PROCESS`, which nothing ever read, and
+        // never touched the marker that is actually checked — so the one bound
+        // that holds had been forgotten here.
+        if std::env::var_os(pulpit_render::supervisor::WORKER_MARKER).is_some() {
+            return Err(std::io::Error::other(
+                "refusing to spawn a typst worker from inside a worker process",
+            ));
+        }
         let mut child = Command::new(std::env::current_exe()?)
             .arg("--typst-worker")
-            .env("PULPIT_WORKER_PROCESS", "typst")
+            .env(pulpit_render::supervisor::WORKER_MARKER, "1")
+            // stderr is dropped rather than inherited: typst writes diagnostics
+            // for markup the reader is still editing, and they are reported
+            // through the compile result instead of the terminal.
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
