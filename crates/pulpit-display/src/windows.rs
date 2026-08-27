@@ -279,18 +279,11 @@ impl WindowsBackend {
     /// Win32 has no "is a display server present" question to answer: the
     /// desktop either enumerates monitors or the session is not interactive.
     pub fn connect() -> Result<Self, BackendError> {
-        let backend = Self::new();
-        match backend.enumerate_raw() {
-            Ok(monitors) if monitors.is_empty() => Err(BackendError::Unavailable),
-            Ok(_) => Ok(backend),
-            Err(e) => Err(e),
-        }
+        crate::backend::connect_if_populated(Self::new(), Self::enumerate_raw)
     }
 
     fn next_sequence(&self) -> u64 {
-        let mut sequence = self.sequence.lock().unwrap();
-        *sequence += 1;
-        *sequence
+        crate::backend::next_sequence(&self.sequence)
     }
 
     fn enumerate_raw(&self) -> Result<Vec<RawMonitor>, BackendError> {

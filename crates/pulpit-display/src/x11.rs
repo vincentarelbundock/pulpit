@@ -137,9 +137,7 @@ impl X11Backend {
     }
 
     fn next_sequence(&self) -> u64 {
-        let mut sequence = self.sequence.lock().unwrap();
-        *sequence += 1;
-        *sequence
+        crate::backend::next_sequence(&self.sequence)
     }
 
     fn enumerate(&self) -> Result<Vec<Monitor>, BackendError> {

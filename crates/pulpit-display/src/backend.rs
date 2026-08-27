@@ -178,3 +178,36 @@ impl DisplayBackend for RecordingBackend {
         }
     }
 }
+
+/// The next snapshot sequence number for a backend.
+///
+/// Every backend stamps its snapshots with a monotonic counter so a stale one
+/// can be recognised and dropped. There is nothing platform-specific about
+/// counting, and three copies of it is three chances for one to start at the
+/// wrong number or to hand out a duplicate.
+pub(crate) fn next_sequence(sequence: &std::sync::Mutex<u64>) -> u64 {
+    // Poisoning is not meaningful here: a counter cannot be left inconsistent
+    // by a panic elsewhere, and refusing to hand out a sequence number would
+    // strand the display pipeline over nothing.
+    let mut sequence = sequence.lock().unwrap_or_else(|e| e.into_inner());
+    *sequence += 1;
+    *sequence
+}
+
+/// Accept a freshly built backend only if the session actually has monitors.
+///
+/// A platform whose enumeration succeeds but reports nothing is not a display
+/// session pulpit can use, and saying so at `connect` is what lets the caller
+/// fall through to the next backend instead of running blind on an empty
+/// topology.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn connect_if_populated<B, M>(
+    backend: B,
+    enumerate: impl Fn(&B) -> Result<Vec<M>, BackendError>,
+) -> Result<B, BackendError> {
+    match enumerate(&backend) {
+        Ok(monitors) if monitors.is_empty() => Err(BackendError::Unavailable),
+        Ok(_) => Ok(backend),
+        Err(e) => Err(e),
+    }
+}
