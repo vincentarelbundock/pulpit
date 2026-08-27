@@ -850,16 +850,7 @@ impl Anchor {
         origin: (f32, f32),
         drawn: (f32, f32),
     ) -> Self {
-        let scale_x = if shown.0 > 0.0 {
-            drawn.0 / shown.0
-        } else {
-            1.0
-        };
-        let scale_y = if shown.1 > 0.0 {
-            drawn.1 / shown.1
-        } else {
-            1.0
-        };
+        let (scale_x, scale_y) = super::page_to_screen(shown, drawn);
         let left = (bounds.left - origin.0) * scale_x;
         let top = (bounds.top - origin.1) * scale_y;
         Self {

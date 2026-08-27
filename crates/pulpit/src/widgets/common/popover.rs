@@ -10,6 +10,8 @@
 //! a panel behaves the same wherever it is opened.
 
 use iced::advanced::widget::{self, Widget};
+
+use crate::widgets::forward_to_child;
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
 
@@ -51,6 +53,8 @@ impl<'a, Message> Popover<'a, Message> {
 }
 
 impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Message> {
+    forward_to_child!(content: size, size_hint, layout, mouse_interaction, operate);
+
     fn children(&self) -> Vec<widget::Tree> {
         match &self.popup {
             Some(popup) => vec![widget::Tree::new(&self.content), widget::Tree::new(popup)],
@@ -65,25 +69,6 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
             }
             None => tree.diff_children(&[self.content.as_widget()]),
         }
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
     }
 
     fn update(
@@ -107,23 +92,6 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
             shell,
             viewport,
         );
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &widget::Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
     }
 
     fn draw(
@@ -182,24 +150,6 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
         } else {
             None
         }
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &iced::Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            self.content.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                operation,
-            );
-        });
     }
 }
 

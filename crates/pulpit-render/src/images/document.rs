@@ -17,6 +17,7 @@ use crate::document::model::{
     AnnotationBeforeImage, AnnotationSummary, CompatibilityLevel, FormField, OpenDocumentInfo,
     SaveOptions, TextSelection, TextSelectionResult,
 };
+use crate::document::unsupported_pdf_semantics;
 use crate::document::{DocumentBackend, DocumentError, Result};
 use crate::images::decode::{self, DecodedCache, DecodedKey};
 use crate::images::table::{list_source, resolve_source, PageSource, PageTable};
@@ -192,81 +193,7 @@ impl DocumentBackend for ImageDocument {
     // answer, everywhere: "this cannot be searched" and "there are no
     // matches" are different facts about a document (§48.1, §48.2).
 
-    fn annotations(&self, _page: PageIndex) -> Result<Vec<AnnotationSummary>> {
-        Err(unsupported("carry annotations"))
-    }
-
-    fn annotation(&self, _id: &AnnotationId) -> Result<AnnotationSummary> {
-        Err(unsupported("carry annotations"))
-    }
-
-    fn create(
-        &mut self,
-        _id: &AnnotationId,
-        _draft: &AnnotationDraft,
-    ) -> Result<AnnotationSummary> {
-        Err(unsupported("be annotated"))
-    }
-
-    fn replace(
-        &mut self,
-        _id: &AnnotationId,
-        _draft: &AnnotationDraft,
-    ) -> Result<AnnotationSummary> {
-        Err(unsupported("be annotated"))
-    }
-
-    fn delete(&mut self, _id: &AnnotationId) -> Result<AnnotationBeforeImage> {
-        Err(unsupported("be annotated"))
-    }
-
-    fn restore(
-        &mut self,
-        _id: &AnnotationId,
-        _before: &AnnotationBeforeImage,
-    ) -> Result<AnnotationSummary> {
-        Err(unsupported("be annotated"))
-    }
-
-    fn before_image(&self, _id: &AnnotationId) -> Result<AnnotationBeforeImage> {
-        Err(unsupported("be annotated"))
-    }
-
-    fn fields(&self) -> Result<Vec<FormField>> {
-        Err(unsupported("hold form fields"))
-    }
-
-    fn field(&self, _name: &str) -> Result<Option<FormField>> {
-        Err(unsupported("hold form fields"))
-    }
-
-    fn set_field(&mut self, _name: &str, _value: &str, _selected: &[u32]) -> Result<String> {
-        Err(unsupported("hold form fields"))
-    }
-
-    fn field_value(&self, _name: &str) -> Result<String> {
-        Err(unsupported("hold form fields"))
-    }
-
-    fn select_text(
-        &self,
-        _page: PageIndex,
-        _selection: TextSelection,
-    ) -> Result<TextSelectionResult> {
-        Err(unsupported("have its text selected"))
-    }
-
-    fn find_text(
-        &self,
-        _query: &pulpit_core::search::Query,
-        _pages: std::ops::Range<usize>,
-    ) -> Result<pulpit_core::search::HitChunk> {
-        Err(unsupported("be searched"))
-    }
-
-    fn write_to(&mut self, _destination: &Path, _options: SaveOptions) -> Result<u64> {
-        Err(unsupported("be saved"))
-    }
+    unsupported_pdf_semantics!();
 }
 
 #[cfg(test)]

@@ -148,6 +148,33 @@ pub fn create_owner_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Write `contents` to `path` so that a crash leaves either the previous file
+/// or the complete new one, never a half-written one.
+///
+/// The temporary file is flushed and fsynced *before* the rename, so the
+/// rename can never expose a file whose contents are still in the page cache,
+/// and the containing directory is fsynced afterwards so the rename itself
+/// survives a crash. `extension` names the scratch file (`"json.tmp"`,
+/// `"toml.tmp"`) so two stores writing side by side cannot collide.
+pub fn write_atomically(path: &Path, extension: &str, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let temporary = path.with_extension(extension);
+    {
+        let mut file = File::create(&temporary)?;
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, path)?;
+    if let Some(directory) = path.parent() {
+        if let Ok(handle) = File::open(directory) {
+            let _ = handle.sync_all();
+        }
+    }
+    Ok(())
+}
+
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

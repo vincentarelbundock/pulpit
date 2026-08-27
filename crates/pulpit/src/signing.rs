@@ -589,6 +589,11 @@ fn placement_for(
 /// Build the `SignAppearance` for `options`, or `None` for an invisible
 /// signature, with §25.5's default text template as its content. See
 /// [`placement_for`] for which page's geometry to pass.
+///
+/// This is the no-profile case of [`appearance_for_profile`], named for the
+/// tests that predate profiles. It delegates rather than rebuilding the
+/// appearance, so a test can never be checking a shape the signing path no
+/// longer produces.
 #[cfg(test)]
 pub fn appearance_for(
     options: &SigningOptions,
@@ -596,12 +601,7 @@ pub fn appearance_for(
     signing_time_label: &str,
     geometry: &PageGeometry,
 ) -> Option<pulpit_render::sign::SignAppearance> {
-    let plan = options.placement.as_ref()?;
-    Some(pulpit_render::sign::SignAppearance {
-        placement: placement_for(plan, geometry),
-        content: text_appearance_content(signer_cn, signing_time_label),
-        page_rotation: appearance_rotation(geometry.rotation),
-    })
+    appearance_for_profile(options, None, signer_cn, signing_time_label, geometry)
 }
 
 /// Seed the per-document options with what the target itself implies, then

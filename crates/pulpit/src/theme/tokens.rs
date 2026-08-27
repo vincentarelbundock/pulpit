@@ -299,7 +299,8 @@ impl Palette {
     }
 }
 
-fn mix(from: Color, to: Color, amount: f32) -> Color {
+/// Linear blend from `from` toward `to`; `amount` is the distance travelled.
+pub(crate) fn mix(from: Color, to: Color, amount: f32) -> Color {
     Color {
         r: from.r + (to.r - from.r) * amount,
         g: from.g + (to.g - from.g) * amount,

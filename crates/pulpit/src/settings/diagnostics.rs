@@ -23,41 +23,43 @@ impl Logging {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
         let stderr = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-        if !persistent {
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(stderr)
-                .try_init();
-            return Logging {
-                log_directory: None,
-                _guard: None,
-            };
-        }
+        // The rotating file is best-effort. Whether it was not asked for or
+        // its directory could not be made, stderr alone still has to work, so
+        // both cases land on the same one-layer registry below.
+        let file = persistent
+            .then(log_directory)
+            .filter(|directory| std::fs::create_dir_all(directory).is_ok())
+            .map(|directory| {
+                let appender = tracing_appender::rolling::daily(&directory, "pulpit.log");
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer);
+                (directory, guard, layer)
+            });
 
-        let directory = log_directory();
-        if std::fs::create_dir_all(&directory).is_err() {
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(stderr)
-                .try_init();
-            return Logging {
-                log_directory: None,
-                _guard: None,
-            };
-        }
-        let appender = tracing_appender::rolling::daily(&directory, "pulpit.log");
-        let (writer, guard) = tracing_appender::non_blocking(appender);
-        let file = tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_writer(writer);
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(stderr)
-            .with(file)
-            .try_init();
-        Logging {
-            log_directory: Some(directory),
-            _guard: Some(guard),
+        match file {
+            Some((directory, guard, layer)) => {
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(stderr)
+                    .with(layer)
+                    .try_init();
+                Logging {
+                    log_directory: Some(directory),
+                    _guard: Some(guard),
+                }
+            }
+            None => {
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(stderr)
+                    .try_init();
+                Logging {
+                    log_directory: None,
+                    _guard: None,
+                }
+            }
         }
     }
 }

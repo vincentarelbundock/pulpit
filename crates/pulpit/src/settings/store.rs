@@ -107,20 +107,7 @@ impl SettingsStore {
             let _ = std::fs::copy(&self.path, self.backup_path());
         }
 
-        let temporary = self.path.with_extension("toml.tmp");
-        {
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(text.as_bytes())?;
-            file.flush()?;
-            // Durability before visibility: the rename must never expose a
-            // file whose contents are still in the page cache.
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, &self.path)?;
-        // Also fsync the directory so the rename itself survives a crash.
-        if let Ok(handle) = std::fs::File::open(directory) {
-            let _ = handle.sync_all();
-        }
+        crate::platform::paths::write_atomically(&self.path, "toml.tmp", text.as_bytes())?;
         Ok(())
     }
 

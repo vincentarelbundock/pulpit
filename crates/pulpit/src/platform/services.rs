@@ -198,3 +198,25 @@ pub trait PlatformServices: Send + Sync {
         None
     }
 }
+
+/// Hand a URI or path to a desktop helper program, detached.
+///
+/// The backends that have one of these (`xdg-open`, `open`, …) all want the
+/// same thing: no inherited stdio, and a missing program reported as
+/// [`Outcome::Unsupported`] rather than a failure, because "this desktop does
+/// not ship that helper" is not an error the reader can act on.
+pub(crate) fn spawn_detached(program: &str, arguments: &[&str]) -> Outcome {
+    match std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => Outcome::Done,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Outcome::Unsupported {
+            what: "This desktop integration",
+        },
+        Err(e) => Outcome::failed(e.to_string()),
+    }
+}

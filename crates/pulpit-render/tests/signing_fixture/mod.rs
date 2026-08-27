@@ -765,3 +765,47 @@ pub fn build_signed_pdf(cred: &sign::Credential) -> SignedFixture {
         cms_len: cms_bytes.len(),
     }
 }
+
+/// A request with the fixed inputs the app layer would otherwise supply: the
+/// signing time and the trailer's new `/ID` randomness. `pulpit-render` reads
+/// neither a clock nor an entropy source, so tests pin both.
+///
+/// `reason` is the one thing each test binary wants to say for itself.
+pub fn request_because(field: sign::SignTarget, reason: &str) -> sign::SignRequest {
+    sign::SignRequest {
+        signing_time: SIGNING_TIME_UNIX,
+        field,
+        reason: Some(reason.to_string()),
+        location: Some("Montréal".to_string()),
+        id2: [
+            0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E,
+            0x8F, 0x90,
+        ],
+        ..sign::SignRequest::default()
+    }
+}
+
+/// Verify every signature in `bytes`, insisting each one is at least readable.
+///
+/// A broken signature is a failure of the fixture rather than a result to
+/// assert on: the tests that use this are checking *what* a verified signature
+/// says, and one that cannot be parsed means the test never got that far.
+pub fn statuses(bytes: &[u8]) -> Vec<pulpit_render::verify::SignatureStatus> {
+    pulpit_render::verify::verify_signatures(bytes)
+        .expect("verification runs")
+        .into_iter()
+        .map(|v| match v {
+            pulpit_render::verify::SignatureVerification::Checked(status) => *status,
+            pulpit_render::verify::SignatureVerification::Broken { field_name, reason } => {
+                panic!("signature '{field_name}' is broken: {reason}")
+            }
+        })
+        .collect()
+}
+
+/// Where `make sign-oracle` looks for PDFs to hand to pyHanko.
+pub fn oracle_fixture_path(name: &str) -> PathBuf {
+    let directory = std::path::Path::new("../../tools/sign-oracle/fixtures");
+    std::fs::create_dir_all(directory).expect("create the oracle fixtures directory");
+    directory.join(name)
+}

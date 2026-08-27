@@ -458,20 +458,12 @@ fn parse_pulpit_uri(rest: &str, region: Region) -> Result<OverlayDeclaration, Ur
             for (name, _) in query_pairs(query) {
                 warnings.push(OverlayWarning::UnknownParameter(name));
             }
-            Ok(OverlayDeclaration {
+            Ok(web_declaration(
                 region,
-                z_index: 0,
-                activation: ActivationPolicy::OnCommit,
-                content: OverlayContent::Web(WebSpec {
-                    bundle: OverlaySource::Embedded(AssetRef::new(attachment)),
-                    entrypoint,
-                    viewport: None,
-                    permissions: WebPermissions::default(),
-                    persistence: PersistencePolicy::default(),
-                    requirements: WebRequirements::default(),
-                }),
+                OverlaySource::Embedded(AssetRef::new(attachment)),
+                entrypoint,
                 warnings,
-            })
+            ))
         }
         "video" | "image" => {
             let source = embedded_source(remainder)?;
@@ -530,20 +522,12 @@ fn parse_run_uri(rest: &str, region: Region) -> Result<OverlayDeclaration, UriEr
         if !entrypoint.is_safe() {
             return Err(UriError::UnsafeEntrypoint(path));
         }
-        return Ok(OverlayDeclaration {
+        return Ok(web_declaration(
             region,
-            z_index: 0,
-            activation: ActivationPolicy::OnCommit,
-            content: OverlayContent::Web(WebSpec {
-                bundle: OverlaySource::External(asset),
-                entrypoint,
-                viewport: None,
-                permissions: WebPermissions::default(),
-                persistence: PersistencePolicy::default(),
-                requirements: WebRequirements::default(),
-            }),
-            warnings: Vec::new(),
-        });
+            OverlaySource::External(asset),
+            entrypoint,
+            Vec::new(),
+        ));
     }
     let (playback, warnings) = parse_playback(query, is_video);
     Ok(media_declaration(
@@ -553,6 +537,33 @@ fn parse_run_uri(rest: &str, region: Region) -> Result<OverlayDeclaration, UriEr
         playback,
         warnings,
     ))
+}
+
+/// A web overlay, however its bundle was reached.
+///
+/// Embedded and external bundles differ only in the [`OverlaySource`]; every
+/// other field of the declaration is the same, and a second copy of the
+/// defaults is a second place for them to drift.
+fn web_declaration(
+    region: Region,
+    bundle: OverlaySource,
+    entrypoint: RelativeAssetPath,
+    warnings: Vec<OverlayWarning>,
+) -> OverlayDeclaration {
+    OverlayDeclaration {
+        region,
+        z_index: 0,
+        activation: ActivationPolicy::OnCommit,
+        content: OverlayContent::Web(WebSpec {
+            bundle,
+            entrypoint,
+            viewport: None,
+            permissions: WebPermissions::default(),
+            persistence: PersistencePolicy::default(),
+            requirements: WebRequirements::default(),
+        }),
+        warnings,
+    }
 }
 
 fn media_declaration(

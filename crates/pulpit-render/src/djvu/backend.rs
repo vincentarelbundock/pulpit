@@ -668,14 +668,7 @@ impl PdfBackend for DjvuBackend {
     }
 
     fn render(&self, request: &RenderRequest, cancel: &dyn CancelSignal) -> Result<RenderedPage> {
-        request.validate()?;
-        let mut pixels = vec![0u8; request.width as usize * request.height as usize * 4];
-        self.render_into(request, &mut pixels, cancel)?;
-        Ok(RenderedPage {
-            width: request.width,
-            height: request.height,
-            pixels,
-        })
+        crate::pdf::render_via_render_into(self, request, cancel)
     }
 
     /// §56.4: djvulibre rasterises into a caller-supplied buffer, so the

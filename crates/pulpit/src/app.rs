@@ -4649,7 +4649,6 @@ impl App {
     }
 
     fn format_key_binding(&self, binding: &crate::settings::KeyBinding) -> Option<String> {
-        use crate::platform::input::Modifier;
         use crate::platform::Shortcut;
         use crate::settings::keys::KeyBinding;
 
@@ -4662,19 +4661,7 @@ impl App {
         if key == "/" && mods.shift && !mods.primary && !mods.control && !mods.alt {
             return Some("?".into());
         }
-        let mut modifiers = Vec::new();
-        if mods.primary {
-            modifiers.push(Modifier::Primary);
-        }
-        if mods.control {
-            modifiers.push(Modifier::Control);
-        }
-        if mods.alt {
-            modifiers.push(Modifier::Alt);
-        }
-        if mods.shift {
-            modifiers.push(Modifier::Shift);
-        }
+        let modifiers = crate::settings::keys::modifiers_of(mods);
         Some(self.platform.input.format(&Shortcut {
             modifiers,
             key: crate::settings::keys::display_key(key),
@@ -10395,6 +10382,22 @@ impl App {
 
     // --- Signing profiles ----------------------------------------------
 
+    /// Apply one edit to the signature profile being written, if one is open.
+    ///
+    /// Nearly every `ProfileMsg` is a field of the open editor changing and
+    /// nothing else. Without this the same "is there an editor, and if so"
+    /// wrapper is retyped around fourteen one-line mutations, and the shape of
+    /// the handler hides what each message actually does.
+    fn edit_signature_profile(
+        &mut self,
+        edit: impl FnOnce(&mut crate::signature_profiles::ProfileEditor),
+    ) -> Task<Message> {
+        if let Some(editor) = self.signature_profile_editor.as_mut() {
+            edit(editor);
+        }
+        Task::none()
+    }
+
     fn handle_signature_profile(
         &mut self,
         message: crate::signature_profiles::ProfileMsg,
@@ -10420,40 +10423,25 @@ impl App {
                 self.signature_profile_editor = None;
                 Task::none()
             }
-            ProfileMsg::NameChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.name = value;
-                    editor.error = None;
-                }
-                Task::none()
-            }
-            ProfileMsg::FullNameChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.full_name = value;
-                    editor.error = None;
-                }
-                Task::none()
-            }
-            ProfileMsg::OrganizationChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.organization = value;
-                }
-                Task::none()
-            }
-            ProfileMsg::EmailChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.email = value;
-                }
-                Task::none()
-            }
-            ProfileMsg::SourceChanged(source) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.source = source;
-                    editor.external_path = None;
-                    editor.error = None;
-                }
-                Task::none()
-            }
+            ProfileMsg::NameChanged(value) => self.edit_signature_profile(|editor| {
+                editor.name = value;
+                editor.error = None;
+            }),
+            ProfileMsg::FullNameChanged(value) => self.edit_signature_profile(|editor| {
+                editor.full_name = value;
+                editor.error = None;
+            }),
+            ProfileMsg::OrganizationChanged(value) => self.edit_signature_profile(|editor| {
+                editor.organization = value;
+            }),
+            ProfileMsg::EmailChanged(value) => self.edit_signature_profile(|editor| {
+                editor.email = value;
+            }),
+            ProfileMsg::SourceChanged(source) => self.edit_signature_profile(|editor| {
+                editor.source = source;
+                editor.external_path = None;
+                editor.error = None;
+            }),
             ProfileMsg::ChooseExternal => Task::perform(
                 async move {
                     rfd::AsyncFileDialog::new()
@@ -10464,71 +10452,44 @@ impl App {
                 },
                 |path| Message::SignatureProfile(ProfileMsg::ExternalChosen(path)),
             ),
-            ProfileMsg::ExternalChosen(path) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    if path.is_some() {
-                        editor.external_path = path;
-                    }
+            ProfileMsg::ExternalChosen(path) => self.edit_signature_profile(|editor| {
+                if path.is_some() {
+                    editor.external_path = path;
                 }
-                Task::none()
-            }
-            ProfileMsg::PassphraseChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.passphrase = value;
+            }),
+            ProfileMsg::PassphraseChanged(value) => self.edit_signature_profile(|editor| {
+                editor.passphrase = value;
+                editor.error = None;
+            }),
+            ProfileMsg::ConfirmPassphraseChanged(value) => self.edit_signature_profile(|editor| {
+                editor.confirm_passphrase = value;
+                editor.error = None;
+            }),
+            ProfileMsg::ContentChanged(content) => self.edit_signature_profile(|editor| {
+                editor.appearance.content = content;
+                editor.error = None;
+            }),
+            ProfileMsg::VisibleChanged(visible) => self.edit_signature_profile(|editor| {
+                editor.appearance.visible = visible;
+            }),
+            ProfileMsg::PositionChanged(position) => self.edit_signature_profile(|editor| {
+                editor.appearance.position = position;
+            }),
+            ProfileMsg::SizeChanged(size) => self.edit_signature_profile(|editor| {
+                editor.appearance.size = size;
+            }),
+            ProfileMsg::StrokeCommitted(stroke) => self.edit_signature_profile(|editor| {
+                if stroke.len() >= 2
+                    && editor.appearance.strokes.len()
+                        < crate::signature_profiles::MAX_PROFILE_STROKES
+                {
+                    editor.appearance.strokes.push(stroke);
                     editor.error = None;
                 }
-                Task::none()
-            }
-            ProfileMsg::ConfirmPassphraseChanged(value) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.confirm_passphrase = value;
-                    editor.error = None;
-                }
-                Task::none()
-            }
-            ProfileMsg::ContentChanged(content) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.appearance.content = content;
-                    editor.error = None;
-                }
-                Task::none()
-            }
-            ProfileMsg::VisibleChanged(visible) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.appearance.visible = visible;
-                }
-                Task::none()
-            }
-            ProfileMsg::PositionChanged(position) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.appearance.position = position;
-                }
-                Task::none()
-            }
-            ProfileMsg::SizeChanged(size) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.appearance.size = size;
-                }
-                Task::none()
-            }
-            ProfileMsg::StrokeCommitted(stroke) => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    if stroke.len() >= 2
-                        && editor.appearance.strokes.len()
-                            < crate::signature_profiles::MAX_PROFILE_STROKES
-                    {
-                        editor.appearance.strokes.push(stroke);
-                        editor.error = None;
-                    }
-                }
-                Task::none()
-            }
-            ProfileMsg::ClearInk => {
-                if let Some(editor) = self.signature_profile_editor.as_mut() {
-                    editor.appearance.strokes.clear();
-                }
-                Task::none()
-            }
+            }),
+            ProfileMsg::ClearInk => self.edit_signature_profile(|editor| {
+                editor.appearance.strokes.clear();
+            }),
             ProfileMsg::Save => {
                 let Some(editor) = self.signature_profile_editor.as_mut() else {
                     return Task::none();

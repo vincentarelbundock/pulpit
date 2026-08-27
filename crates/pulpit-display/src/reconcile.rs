@@ -512,7 +512,16 @@ fn plan_window(
         return;
     }
 
-    if !(already_there && mode_matches) && capabilities.can_place() {
+    // When the session lets us place a window, the same action corrects both
+    // the output it sits on and its mode. When it does not, the window's own
+    // mode is still ours -- the toolkit fullscreens on whatever output the
+    // window is already on -- so only a mismatched mode is worth an action.
+    let needs_placing = if capabilities.can_place() {
+        !(already_there && mode_matches)
+    } else {
+        !mode_matches
+    };
+    if needs_placing {
         actions.push(Action::Place {
             role,
             monitor_index: index,
@@ -521,19 +530,6 @@ fn plan_window(
             scale_factor: monitor.scale_factor,
             mode,
         });
-    } else if !capabilities.can_place() {
-        // Placement is off the table, but the window's own mode is still
-        // ours: the toolkit fullscreens on whatever output the window is on.
-        if !mode_matches {
-            actions.push(Action::Place {
-                role,
-                monitor_index: index,
-                identity: monitor.identity.clone(),
-                geometry: monitor.geometry,
-                scale_factor: monitor.scale_factor,
-                mode,
-            });
-        }
     }
 
     if !window.visible {

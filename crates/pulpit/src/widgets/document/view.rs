@@ -957,16 +957,7 @@ fn choice_list_layer<Message: Clone + 'static>(
     /// placement. The rows lay themselves out.
     const ROW: f32 = 24.0;
 
-    let scale_x = if shown.0 > 0.0 {
-        drawn.0 / shown.0
-    } else {
-        1.0
-    };
-    let scale_y = if shown.1 > 0.0 {
-        drawn.1 / shown.1
-    } else {
-        1.0
-    };
+    let (scale_x, scale_y) = super::page_to_screen(shown, drawn);
 
     let width = ((choice.bounds.right - choice.bounds.left) * scale_x).max(MIN_WIDTH);
     let height = (choice.options.len() as f32 * ROW + theme::space::XS * 2.0).min(MAX_HEIGHT);
@@ -1080,16 +1071,7 @@ fn date_picker_layer<Message: Clone + 'static>(
     /// One day, square, so the grid reads as a calendar rather than a table.
     const CELL: f32 = 28.0;
 
-    let scale_x = if shown.0 > 0.0 {
-        drawn.0 / shown.0
-    } else {
-        1.0
-    };
-    let scale_y = if shown.1 > 0.0 {
-        drawn.1 / shown.1
-    } else {
-        1.0
-    };
+    let (scale_x, scale_y) = super::page_to_screen(shown, drawn);
 
     // Under the field by preference, which is where a dropdown goes; above it
     // when there is no room below, so a field near the foot of the page still
@@ -1341,16 +1323,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
     /// How wide the writing box is on screen, in layout points.
     const EDITOR_WIDTH: f32 = 260.0;
 
-    let scale_x = if canonical.0 > 0.0 {
-        drawn.0 / canonical.0
-    } else {
-        1.0
-    };
-    let scale_y = if canonical.1 > 0.0 {
-        drawn.1 / canonical.1
-    } else {
-        1.0
-    };
+    let (scale_x, scale_y) = super::page_to_screen(canonical, drawn);
     // Clamped to the sheet: a mark placed near the right or bottom edge is
     // still written in a box the reader can see all of.
     let width = EDITOR_WIDTH.min(drawn.0.max(0.0));

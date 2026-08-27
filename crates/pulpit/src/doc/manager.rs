@@ -427,6 +427,26 @@ mod tests {
         Some(SourceStamp::Directory { entries, digest })
     }
 
+    /// Report a file event, let the debounce window pass, and take the id of
+    /// the candidate that opens.
+    ///
+    /// The first tick is inside the debounce window and must produce nothing;
+    /// the second is past it. Every reload test starts here, and the interval
+    /// arithmetic said five times over hid what each was actually about.
+    fn open_candidate(
+        manager: &mut DocumentManager,
+        probe: &FakeProbe,
+        start: Instant,
+    ) -> DocumentId {
+        manager.on_file_event(start);
+        manager.tick(start + Duration::from_millis(400), probe);
+        let open = manager.tick(start + Duration::from_millis(600), probe);
+        let Action::OpenCandidate { document, .. } = open[0].clone() else {
+            panic!("the debounce window has passed, so a candidate opens")
+        };
+        document
+    }
+
     fn manager() -> DocumentManager {
         DocumentManager::new("/decks/talk.pdf", ReloadPolicy::default())
     }
@@ -530,12 +550,7 @@ mod tests {
         let start = Instant::now();
         let mut manager = manager();
         let probe = FakeProbe::with(vec![stamp(500)]);
-        manager.on_file_event(start);
-        manager.tick(start + Duration::from_millis(400), &probe);
-        let open = manager.tick(start + Duration::from_millis(600), &probe);
-        let Action::OpenCandidate { document, .. } = open[0].clone() else {
-            panic!()
-        };
+        let document = open_candidate(&mut manager, &probe, start);
 
         // First failure: retried quietly.
         let actions = manager.on_candidate_failed(document, "broken".into(), start);
@@ -569,12 +584,7 @@ mod tests {
         manager.adopt(info(DocumentId(1), 20));
 
         let probe = FakeProbe::with(vec![stamp(500)]);
-        manager.on_file_event(start);
-        manager.tick(start + Duration::from_millis(400), &probe);
-        let open = manager.tick(start + Duration::from_millis(600), &probe);
-        let Action::OpenCandidate { document, .. } = open[0].clone() else {
-            panic!()
-        };
+        let document = open_candidate(&mut manager, &probe, start);
         manager.on_candidate_failed(document, "typst error".into(), start);
 
         assert_eq!(
@@ -592,12 +602,7 @@ mod tests {
         manager.adopt(info(DocumentId(1), 20));
 
         let probe = FakeProbe::with(vec![stamp(500)]);
-        manager.on_file_event(start);
-        manager.tick(start + Duration::from_millis(400), &probe);
-        let open = manager.tick(start + Duration::from_millis(600), &probe);
-        let Action::OpenCandidate { document, .. } = open[0].clone() else {
-            panic!()
-        };
+        let document = open_candidate(&mut manager, &probe, start);
 
         let candidate = info(document, 25);
         let actions = manager.on_candidate_opened(candidate.clone());
@@ -625,12 +630,7 @@ mod tests {
         let mut manager = manager();
         manager.adopt(info(DocumentId(1), 20));
         let probe = FakeProbe::with(vec![stamp(500)]);
-        manager.on_file_event(start);
-        manager.tick(start + Duration::from_millis(400), &probe);
-        let open = manager.tick(start + Duration::from_millis(600), &probe);
-        let Action::OpenCandidate { document, .. } = open[0].clone() else {
-            panic!()
-        };
+        let document = open_candidate(&mut manager, &probe, start);
 
         let actions = manager.on_candidate_opened(info(document, 0));
         assert!(actions
@@ -707,12 +707,7 @@ mod tests {
         manager.adopt(info(DocumentId(1), 20));
         let probe = FakeProbe::with(vec![stamp(500)]);
 
-        manager.on_file_event(start);
-        manager.tick(start + Duration::from_millis(400), &probe);
-        let open = manager.tick(start + Duration::from_millis(600), &probe);
-        let Action::OpenCandidate { document, .. } = open[0].clone() else {
-            panic!()
-        };
+        let document = open_candidate(&mut manager, &probe, start);
 
         // Another rebuild lands while the candidate is still opening.
         let mut opens = 0;

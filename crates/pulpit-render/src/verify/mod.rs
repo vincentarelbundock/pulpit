@@ -1406,6 +1406,22 @@ pub fn parse_pdf_string(token: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Classify one `/ByteRange` against the reservation every case here
+    /// shares -- `/Contents` at 100..200, in a file with no earlier revision.
+    ///
+    /// Each test varies the byte range and where the file ends; repeating the
+    /// fixed half five times buried what was actually under test.
+    fn coverage_of(byte_range: &ByteRange, eof: u64) -> (SignatureCoverage, bool) {
+        let extent = ContentsExtent {
+            c_start: 100,
+            c_end: 200,
+        };
+        let revisions = RevisionMap {
+            revisions: BTreeMap::new(),
+        };
+        classify_coverage(byte_range, &extent, eof, 0, &revisions).unwrap()
+    }
+
     #[test]
     fn test_coverage_z_nonzero() {
         let br = ByteRange {
@@ -1414,15 +1430,8 @@ mod tests {
             start2: 200,
             len2: 50,
         };
-        let ce = ContentsExtent {
-            c_start: 100,
-            c_end: 200,
-        };
-        let revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
 
-        let (cov, _) = classify_coverage(&br, &ce, 250, 0, &revisions).unwrap();
+        let (cov, _) = coverage_of(&br, 250);
         assert_eq!(cov, SignatureCoverage::Unclear);
     }
 
@@ -1434,15 +1443,8 @@ mod tests {
             start2: 200,
             len2: 50,
         };
-        let ce = ContentsExtent {
-            c_start: 100,
-            c_end: 200,
-        };
-        let revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
 
-        let (cov, _) = classify_coverage(&br, &ce, 250, 0, &revisions).unwrap();
+        let (cov, _) = coverage_of(&br, 250);
         assert_eq!(cov, SignatureCoverage::Unclear);
     }
 
@@ -1454,15 +1456,8 @@ mod tests {
             start2: 210, // doesn't match c_end
             len2: 50,
         };
-        let ce = ContentsExtent {
-            c_start: 100,
-            c_end: 200,
-        };
-        let revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
 
-        let (cov, _) = classify_coverage(&br, &ce, 260, 0, &revisions).unwrap();
+        let (cov, _) = coverage_of(&br, 260);
         assert_eq!(cov, SignatureCoverage::Unclear);
     }
 
@@ -1474,15 +1469,8 @@ mod tests {
             start2: 200,
             len2: 50,
         };
-        let ce = ContentsExtent {
-            c_start: 100,
-            c_end: 200,
-        };
-        let revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
 
-        let (cov, later) = classify_coverage(&br, &ce, 250, 0, &revisions).unwrap();
+        let (cov, later) = coverage_of(&br, 250);
         assert_eq!(cov, SignatureCoverage::EntireFile);
         assert!(!later);
     }
@@ -1495,15 +1483,8 @@ mod tests {
             start2: 200,
             len2: 40, // doesn't extend to eof (250)
         };
-        let ce = ContentsExtent {
-            c_start: 100,
-            c_end: 200,
-        };
-        let revisions = RevisionMap {
-            revisions: BTreeMap::new(),
-        };
 
-        let (cov, _) = classify_coverage(&br, &ce, 250, 0, &revisions).unwrap();
+        let (cov, _) = coverage_of(&br, 250);
         assert_eq!(cov, SignatureCoverage::ContiguousBlockFromStart);
     }
 

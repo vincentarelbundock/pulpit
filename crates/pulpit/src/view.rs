@@ -961,63 +961,18 @@ fn menu_button(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// A conventional split Start button: the broad side performs the default,
-/// while the arrow exposes deliberate placement variants.
+/// The same Start/Stop pair the placeable widget draws, padded into the strip
+/// rather than centred in a layout cell.
 fn audience_lifecycle_controls(app: &App) -> Element<'_, Message> {
-    const CONTROL_WIDTH: f32 = 112.0;
-    const START_LABEL_WIDTH: f32 = CONTROL_WIDTH - theme::controls::BUTTON_HEIGHT;
-    // Larger than the usual label so the words carry the button, while still
-    // leaving a margin of empty space inside it.
-    const LIFECYCLE_LABEL: f32 = 16.0;
-    // Once the audience is running the arrow does nothing, so the control
-    // becomes one undivided button and its label sits in the middle of it
-    // rather than in the middle of the narrower left half.
-    let started = app.audience_started;
-    let start = button(
-        text(if started { "Started" } else { "Start" })
-            .size(LIFECYCLE_LABEL)
-            .center(),
+    // The strip only exists on the live presenter screen, so its controls are
+    // always live; the ambient palette was set to `app.theme.palette` at the
+    // top of this view pass.
+    container(
+        crate::widgets::chrome::view::lifecycle_row(app.audience_started, true, interaction)
+            .spacing(gap::XS),
     )
-    .height(Length::Fixed(theme::controls::BUTTON_HEIGHT))
-    .width(Length::Fixed(if started {
-        CONTROL_WIDTH
-    } else {
-        START_LABEL_WIDTH
-    }))
-    .style(move |base, status| {
-        let palette = app.theme.palette;
-        if started {
-            theme::controls::filled_tonal(palette)(base, status)
-        } else {
-            theme::controls::split_left(palette)(base, status)
-        }
-    })
-    .on_press(Message::StartAudience);
-
-    let stop = button(text("Stop").size(LIFECYCLE_LABEL).center())
-        .height(Length::Fixed(theme::controls::BUTTON_HEIGHT))
-        .width(Length::Fixed(CONTROL_WIDTH))
-        .style(theme::controls::filled_tonal(app.theme.palette))
-        .on_press(Message::StopAudience);
-
-    let start_dropdown = if started {
-        row![start]
-    } else {
-        let arrow = button(theme::icon::icon(
-            theme::Icon::ChevronDown,
-            type_scale::BODY,
-        ))
-        .height(Length::Fixed(theme::controls::BUTTON_HEIGHT))
-        .width(Length::Fixed(theme::controls::BUTTON_HEIGHT))
-        .style(theme::controls::split_right(app.theme.palette))
-        .on_press(Message::ToggleAudienceStartMenu);
-        row![start, arrow]
-    }
-    .spacing(0);
-
-    container(row![start_dropdown, stop].spacing(gap::XS))
-        .padding(iced::Padding::from([gap::S, gap::S]))
-        .into()
+    .padding(iced::Padding::from([gap::S, gap::S]))
+    .into()
 }
 
 /// Display choices and alternate Start actions. Choosing a display both saves

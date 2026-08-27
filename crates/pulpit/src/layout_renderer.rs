@@ -164,91 +164,58 @@ fn node<'a, Message: Clone + 'static>(
                     .max(1.0) as u16
             };
 
-            match split.direction {
-                Direction::Horizontal => {
-                    let mut content = Vec::with_capacity(visible.len() * 2);
-                    let mut previous_closed = false;
-                    for (position, index) in visible.into_iter().enumerate() {
-                        let reveal =
-                            pane_reveal(&split.children[index], context, inside_outline_rail);
-                        let closed = reveal <= f32::EPSILON;
-                        if position > 0 {
-                            content.push(split_separator(
-                                split.direction,
-                                split.gap,
-                                !closed && !previous_closed,
-                            ));
-                        }
-                        previous_closed = closed;
-                        let width = if closed {
-                            Length::Fixed(0.0)
-                        } else {
-                            split.children[index]
-                                .hug_extent(split.direction)
-                                .map_or_else(
-                                    || Length::FillPortion(portion(index)),
-                                    |extent| Length::Fixed(extent * reveal),
-                                )
-                        };
-                        content.push(
-                            container(pane(
-                                closed,
-                                &split.children[index],
-                                context,
-                                compose,
-                                on_event,
-                                inside_outline_rail,
-                            ))
-                            .width(width)
-                            .height(Length::Fill)
-                            .clip(true)
-                            .into(),
-                        );
-                    }
-                    mounted_row(content)
+            // One loop for both axes: a split sizes its cells along its own
+            // direction and fills the other, so the direction picks which of
+            // the two lengths gets the computed extent — nothing else about
+            // laying the cells out differs between them.
+            let horizontal = split.direction == Direction::Horizontal;
+            let mut content = Vec::with_capacity(visible.len() * 2);
+            let mut previous_closed = false;
+            for (position, index) in visible.into_iter().enumerate() {
+                let reveal = pane_reveal(&split.children[index], context, inside_outline_rail);
+                let closed = reveal <= f32::EPSILON;
+                if position > 0 {
+                    content.push(split_separator(
+                        split.direction,
+                        split.gap,
+                        !closed && !previous_closed,
+                    ));
                 }
-                Direction::Vertical => {
-                    let mut content = Vec::with_capacity(visible.len() * 2);
-                    let mut previous_closed = false;
-                    for (position, index) in visible.into_iter().enumerate() {
-                        let reveal =
-                            pane_reveal(&split.children[index], context, inside_outline_rail);
-                        let closed = reveal <= f32::EPSILON;
-                        if position > 0 {
-                            content.push(split_separator(
-                                split.direction,
-                                split.gap,
-                                !closed && !previous_closed,
-                            ));
-                        }
-                        previous_closed = closed;
-                        let height = if closed {
-                            Length::Fixed(0.0)
-                        } else {
-                            split.children[index]
-                                .hug_extent(split.direction)
-                                .map_or_else(
-                                    || Length::FillPortion(portion(index)),
-                                    |extent| Length::Fixed(extent * reveal),
-                                )
-                        };
-                        content.push(
-                            container(pane(
-                                closed,
-                                &split.children[index],
-                                context,
-                                compose,
-                                on_event,
-                                inside_outline_rail,
-                            ))
-                            .width(Length::Fill)
-                            .height(height)
-                            .clip(true)
-                            .into(),
-                        );
-                    }
-                    mounted_column(content)
-                }
+                previous_closed = closed;
+                let extent = if closed {
+                    Length::Fixed(0.0)
+                } else {
+                    split.children[index]
+                        .hug_extent(split.direction)
+                        .map_or_else(
+                            || Length::FillPortion(portion(index)),
+                            |extent| Length::Fixed(extent * reveal),
+                        )
+                };
+                let (width, height) = if horizontal {
+                    (extent, Length::Fill)
+                } else {
+                    (Length::Fill, extent)
+                };
+                content.push(
+                    container(pane(
+                        closed,
+                        &split.children[index],
+                        context,
+                        compose,
+                        on_event,
+                        inside_outline_rail,
+                    ))
+                    .width(width)
+                    .height(height)
+                    .clip(true)
+                    .into(),
+                );
+            }
+            if horizontal {
+                mounted_row(content)
+            } else {
+                mounted_column(content)
             }
         }
     }

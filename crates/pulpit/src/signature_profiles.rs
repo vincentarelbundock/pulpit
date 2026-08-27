@@ -273,6 +273,21 @@ pub struct PadState {
     current: Vec<SignaturePoint>,
 }
 
+/// End the stroke in progress and publish it, if it drew anything.
+///
+/// A finger lifting and a mouse button releasing are the same gesture ending;
+/// only the event that reports it differs.
+fn commit_stroke(state: &mut PadState) -> Option<iced::widget::Action<crate::app::Message>> {
+    state.drawing = false;
+    let stroke = std::mem::take(&mut state.current);
+    (!stroke.is_empty()).then(|| {
+        iced::widget::Action::publish(crate::app::Message::SignatureProfile(
+            ProfileMsg::StrokeCommitted(stroke),
+        ))
+        .and_capture()
+    })
+}
+
 pub struct SignaturePad<'a> {
     pub strokes: &'a [Vec<SignaturePoint>],
     pub stroke_width: f32,
@@ -306,14 +321,7 @@ impl canvas::Program<crate::app::Message> for SignaturePad<'_> {
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
                 if state.drawing =>
             {
-                state.drawing = false;
-                let stroke = std::mem::take(&mut state.current);
-                (!stroke.is_empty()).then(|| {
-                    Action::publish(crate::app::Message::SignatureProfile(
-                        ProfileMsg::StrokeCommitted(stroke),
-                    ))
-                    .and_capture()
-                })
+                commit_stroke(state)
             }
             iced::Event::Touch(iced::touch::Event::FingerPressed { position, .. })
                 if bounds.contains(*position) =>
@@ -330,16 +338,7 @@ impl canvas::Program<crate::app::Message> for SignaturePad<'_> {
             }
             iced::Event::Touch(
                 iced::touch::Event::FingerLifted { .. } | iced::touch::Event::FingerLost { .. },
-            ) if state.drawing => {
-                state.drawing = false;
-                let stroke = std::mem::take(&mut state.current);
-                (!stroke.is_empty()).then(|| {
-                    Action::publish(crate::app::Message::SignatureProfile(
-                        ProfileMsg::StrokeCommitted(stroke),
-                    ))
-                    .and_capture()
-                })
-            }
+            ) if state.drawing => commit_stroke(state),
             _ => None,
         }
     }

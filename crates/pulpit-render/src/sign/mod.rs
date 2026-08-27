@@ -169,6 +169,37 @@ pub fn build_cms(
     )
 }
 
+/// A self-signed PKCS#12 credential, built in memory for the tests.
+///
+/// Several tests need a real credential to load, sign with, or size, and
+/// generating one is a dozen lines of rcgen and p12-keystore plumbing that
+/// says nothing about what any of them is checking.
+#[cfg(all(test, feature = "p12-keystore"))]
+pub(crate) fn test_pkcs12(password: &str) -> Vec<u8> {
+    let subject_alt_names = vec!["test.example.com".to_string()];
+    let cert_params = rcgen::CertificateParams::new(subject_alt_names);
+    let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+    let cert_der = cert.serialize_der().unwrap();
+    let key_der = cert.serialize_private_key_der();
+
+    let mut keystore = p12_keystore::KeyStore::new();
+    let private_key =
+        p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
+    let p12_cert =
+        p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+    let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
+    keystore.add_entry(
+        "test_alias",
+        p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
+    );
+
+    keystore
+        .writer(password)
+        .write()
+        .expect("Failed to write PKCS#12")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,31 +374,8 @@ mod tests {
     #[test]
     #[cfg(feature = "p12-keystore")]
     fn test_cms_round_trip_rsa2048() {
-        // Generate a test certificate with rcgen
-        let subject_alt_names = vec!["test.example.com".to_string()];
-        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
-        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
-
-        let cert_der = cert.serialize_der().unwrap();
-        let key_der = cert.serialize_private_key_der();
-
-        // Create PKCS#12
-        let mut keystore = p12_keystore::KeyStore::new();
-        let private_key =
-            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
-        let p12_cert =
-            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
-        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry(
-            "test_alias",
-            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
-        );
-
         let password = "test_password";
-        let p12_bytes = keystore
-            .writer(password)
-            .write()
-            .expect("Failed to write PKCS#12");
+        let p12_bytes = test_pkcs12(password);
 
         // Load credential
         let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))
@@ -408,31 +416,8 @@ mod tests {
     #[test]
     #[cfg(feature = "p12-keystore")]
     fn test_size_estimation_basic() {
-        // Generate a test certificate
-        let subject_alt_names = vec!["test.example.com".to_string()];
-        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
-        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
-
-        let cert_der = cert.serialize_der().unwrap();
-        let key_der = cert.serialize_private_key_der();
-
-        // Create PKCS#12
-        let mut keystore = p12_keystore::KeyStore::new();
-        let private_key =
-            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
-        let p12_cert =
-            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
-        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry(
-            "test_alias",
-            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
-        );
-
         let password = "test_password";
-        let p12_bytes = keystore
-            .writer(password)
-            .write()
-            .expect("Failed to write PKCS#12");
+        let p12_bytes = test_pkcs12(password);
 
         // Load credential
         let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))
@@ -466,31 +451,8 @@ mod tests {
     #[test]
     #[cfg(feature = "p12-keystore")]
     fn test_size_estimation_vs_actual_signature() {
-        // Generate a test certificate
-        let subject_alt_names = vec!["test.example.com".to_string()];
-        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
-        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
-
-        let cert_der = cert.serialize_der().unwrap();
-        let key_der = cert.serialize_private_key_der();
-
-        // Create PKCS#12
-        let mut keystore = p12_keystore::KeyStore::new();
-        let private_key =
-            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
-        let p12_cert =
-            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
-        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-        keystore.add_entry(
-            "test_alias",
-            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
-        );
-
         let password = "test_password";
-        let p12_bytes = keystore
-            .writer(password)
-            .write()
-            .expect("Failed to write PKCS#12");
+        let p12_bytes = test_pkcs12(password);
 
         // Load credential
         let credential = load_pkcs12(&p12_bytes, Zeroizing::new(password.to_string()))

@@ -364,6 +364,29 @@ pub trait PdfBackend: Send {
     }
 }
 
+/// Render a page by way of [`PdfBackend::render_into`].
+///
+/// The two buffer-filling backends answer `render` the same way: allocate the
+/// frame the caller asked for, let the rasteriser fill it, and hand it back.
+/// This is a free function rather than a default body on `render`, because a
+/// default there would call `render_into`, whose own default calls `render` --
+/// a backend that implemented neither would recurse until the stack ran out
+/// instead of failing to compile.
+pub(crate) fn render_via_render_into(
+    backend: &(impl PdfBackend + ?Sized),
+    request: &RenderRequest,
+    cancel: &dyn CancelSignal,
+) -> Result<RenderedPage> {
+    request.validate()?;
+    let mut pixels = vec![0u8; request.width as usize * request.height as usize * 4];
+    backend.render_into(request, &mut pixels, cancel)?;
+    Ok(RenderedPage {
+        width: request.width,
+        height: request.height,
+        pixels,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

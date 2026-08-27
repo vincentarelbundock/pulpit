@@ -725,3 +725,102 @@ impl Widget {
         }
     }
 }
+
+/// The [`Widget`] methods a single-child decorator forwards untouched.
+///
+/// Four widgets in this application wrap one child to add one behaviour --
+/// residency uploads its picture, `KeyScope` claims a key, `Popover` hangs a
+/// panel off it, `Thumbed` draws a scrollbar -- and each has to spell out the
+/// whole trait even though only two or three methods are its own. The
+/// forwarding bodies are mechanical, identical, and the place a wrapper
+/// quietly stops passing something through: `scroll.rs`'s
+/// `every_hand_written_wrapper_forwards_widget_operations` exists because that
+/// has to be caught.
+///
+/// The first argument names the field holding the child, since the widgets do
+/// not agree on it; the rest names the methods this widget wants forwarded, so
+/// each one still says which parts of the trait it handles itself.
+///
+/// ```ignore
+/// impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Message> {
+///     forward_to_child!(surface: children, diff, size, size_hint, layout, operate);
+///     // ... and the methods that make it a scrollbar
+/// }
+/// ```
+macro_rules! forward_to_child {
+    ($field:ident: $($method:ident),* $(,)?) => {
+        $( $crate::widgets::forward_to_child!(@one $field, $method); )*
+    };
+
+    (@one $field:ident, children) => {
+        fn children(&self) -> Vec<widget::Tree> {
+            vec![widget::Tree::new(&self.$field)]
+        }
+    };
+    (@one $field:ident, diff) => {
+        fn diff(&self, tree: &mut widget::Tree) {
+            tree.diff_children(&[self.$field.as_widget()]);
+        }
+    };
+    (@one $field:ident, size) => {
+        fn size(&self) -> Size<Length> {
+            self.$field.as_widget().size()
+        }
+    };
+    (@one $field:ident, size_hint) => {
+        fn size_hint(&self) -> Size<Length> {
+            self.$field.as_widget().size_hint()
+        }
+    };
+    (@one $field:ident, layout) => {
+        fn layout(
+            &mut self,
+            tree: &mut widget::Tree,
+            renderer: &iced::Renderer,
+            limits: &layout::Limits,
+        ) -> layout::Node {
+            self.$field
+                .as_widget_mut()
+                .layout(&mut tree.children[0], renderer, limits)
+        }
+    };
+    (@one $field:ident, mouse_interaction) => {
+        fn mouse_interaction(
+            &self,
+            tree: &widget::Tree,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+            renderer: &iced::Renderer,
+        ) -> mouse::Interaction {
+            self.$field.as_widget().mouse_interaction(
+                &tree.children[0],
+                layout,
+                cursor,
+                viewport,
+                renderer,
+            )
+        }
+    };
+    (@one $field:ident, operate) => {
+        fn operate(
+            &mut self,
+            tree: &mut widget::Tree,
+            layout: Layout<'_>,
+            renderer: &iced::Renderer,
+            operation: &mut dyn widget::Operation,
+        ) {
+            operation.container(None, layout.bounds());
+            operation.traverse(&mut |operation| {
+                self.$field.as_widget_mut().operate(
+                    &mut tree.children[0],
+                    layout,
+                    renderer,
+                    operation,
+                );
+            });
+        }
+    };
+}
+
+pub(crate) use forward_to_child;

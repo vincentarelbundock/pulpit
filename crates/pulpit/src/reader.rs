@@ -2608,19 +2608,23 @@ impl ReaderSession {
         ]))
     }
 
-    /// Rewrite a Typst mark in place from freshly compiled markup (§7.4).
+    /// The [`StampDraft`] both placing and rewriting a Typst mark start from.
     ///
-    /// The picture is new — the markup changed, so the appearance must — but
-    /// the mark keeps its identity and its top-left corner. Only its size
-    /// follows what Typst decided the new markup needs.
-    pub fn replace_typst(
+    /// Placing a new mark and rewriting an existing one differ only in the
+    /// command they end up wrapped in; the picture, the box it occupies and
+    /// the check that the box is on the page are the same work, and a second
+    /// copy of it is a second place for the two to disagree about where a mark
+    /// sits.
+    ///
+    /// `None` when the page is not one this document has, or when the mark
+    /// would not validate against that page's geometry.
+    fn typst_draft(
         &self,
-        id: &pulpit_core::annotate::AnnotationId,
         page: PageIndex,
         at: PagePoint,
         source: String,
         rendered: crate::typst_annotation::RasterisedText,
-    ) -> Option<DocumentTransaction> {
+    ) -> Option<pulpit_core::annotate::AnnotationDraft> {
         let geometry = self.pages.get(page.get()).copied()?;
         let draft =
             pulpit_core::annotate::AnnotationDraft::Stamp(pulpit_core::annotate::StampDraft {
@@ -2639,9 +2643,24 @@ impl ReaderSession {
                 style: self.interaction.ink_style(),
                 source: Some(source),
             });
-        if draft.validate(&geometry).is_err() {
-            return None;
-        }
+        draft.validate(&geometry).ok()?;
+        Some(draft)
+    }
+
+    /// Rewrite a Typst mark in place from freshly compiled markup (§7.4).
+    ///
+    /// The picture is new — the markup changed, so the appearance must — but
+    /// the mark keeps its identity and its top-left corner. Only its size
+    /// follows what Typst decided the new markup needs.
+    pub fn replace_typst(
+        &self,
+        id: &pulpit_core::annotate::AnnotationId,
+        page: PageIndex,
+        at: PagePoint,
+        source: String,
+        rendered: crate::typst_annotation::RasterisedText,
+    ) -> Option<DocumentTransaction> {
+        let draft = self.typst_draft(page, at, source, rendered)?;
         Some(DocumentTransaction::from_annotations([
             pulpit_core::annotate::AnnotationCommand::Replace {
                 id: id.clone(),
@@ -2746,27 +2765,7 @@ impl ReaderSession {
         source: String,
         rendered: crate::typst_annotation::RasterisedText,
     ) -> Option<DocumentTransaction> {
-        let geometry = self.pages.get(page.get()).copied()?;
-        let draft =
-            pulpit_core::annotate::AnnotationDraft::Stamp(pulpit_core::annotate::StampDraft {
-                page,
-                rect: pulpit_core::page::PageRect::new(
-                    at.x,
-                    at.y,
-                    at.x + rendered.width_pt,
-                    at.y + rendered.height_pt,
-                ),
-                mark: pulpit_core::annotate::StampMark::Image {
-                    pixel_width: rendered.pixel_width,
-                    pixel_height: rendered.pixel_height,
-                    rgba: rendered.rgba,
-                },
-                style: self.interaction.ink_style(),
-                source: Some(source),
-            });
-        if draft.validate(&geometry).is_err() {
-            return None;
-        }
+        let draft = self.typst_draft(page, at, source, rendered)?;
         Some(DocumentTransaction::from_annotations([
             pulpit_core::annotate::AnnotationCommand::Create(draft),
         ]))
@@ -7191,6 +7190,27 @@ mod tests {
     }
 
     /// A summary of one ink stroke on page zero, for the eraser tests.
+    /// Arm the ink tool, drag once, and commit — the opening of every gesture
+    /// test in this module.
+    ///
+    /// It panics rather than returning an `Option` because a release that does
+    /// not commit means the gesture machinery itself is broken, which is a
+    /// different failure from whatever the calling test is asserting.
+    fn commit_stroke(
+        session: &mut ReaderSession,
+        from: (f32, f32),
+        to: (f32, f32),
+    ) -> pulpit_render::document::DocumentTransaction {
+        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
+        session.pointer_moved(PageIndex(0), from.0, from.1);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), to.0, to.1);
+        let Released::Commit(transaction) = session.pointer_released() else {
+            panic!("the stroke commits")
+        };
+        transaction
+    }
+
     fn stroke_at(y: f32) -> pulpit_render::document::AnnotationSummary {
         use pulpit_core::page::{PagePoint, PageRect};
         pulpit_render::document::AnnotationSummary {
@@ -7502,13 +7522,7 @@ mod tests {
         // without it the stroke follows the hand, vanishes at release, and
         // reappears the better part of a second later.
         let mut session = open(2);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         let _ = session.retain_commit(&transaction);
 
         let shown = |session: &ReaderSession| {
@@ -7538,13 +7552,7 @@ mod tests {
     #[test]
     fn a_refused_commit_takes_its_retained_preview_down() {
         let mut session = open(1);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 150.0, 120.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (150.0, 120.0));
         let _ = session.retain_commit(&transaction);
         session.commit_refused();
         assert!(
@@ -7675,13 +7683,7 @@ mod tests {
         let stroke = stroke_at(100.0);
         let id = stroke.id.clone();
 
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         assert_eq!(
             session.retain_commit(&transaction),
             RasterUrgency::Deferred,
@@ -7738,13 +7740,7 @@ mod tests {
         let stroke = stroke_at(100.0);
         let id = stroke.id.clone();
 
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         let _ = session.retain_commit(&transaction);
         let _ = session.applied(
             &applied_naming(DocumentRevision(2), stroke),
@@ -7795,13 +7791,7 @@ mod tests {
     /// from (100, 100) to (200, 140) on a 612 × 792 page.
     fn session_with_a_retained_stroke() -> ReaderSession {
         let mut session = open(1);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         let _ = session.retain_commit(&transaction);
         let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
         session
@@ -7900,13 +7890,7 @@ mod tests {
     #[test]
     fn a_patch_on_another_page_leaves_this_ones_previews_alone() {
         let mut session = open(2);
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         let _ = session.retain_commit(&transaction);
         let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
 
@@ -7928,13 +7912,7 @@ mod tests {
             InkColor::Green,
         ));
         session.apply(&ReadCommand::SetInkWidth(5.0));
-        session.apply(&ReadCommand::Arm(Some(AnnotationTool::Ink)));
-        session.pointer_moved(PageIndex(0), 100.0, 100.0);
-        session.pointer_pressed();
-        session.pointer_moved(PageIndex(0), 200.0, 140.0);
-        let Released::Commit(transaction) = session.pointer_released() else {
-            panic!("the stroke commits")
-        };
+        let transaction = commit_stroke(&mut session, (100.0, 100.0), (200.0, 140.0));
         let pulpit_render::document::DocumentCommand::Annotation(
             pulpit_core::annotate::AnnotationCommand::Create(
                 pulpit_core::annotate::AnnotationDraft::Ink(ink),

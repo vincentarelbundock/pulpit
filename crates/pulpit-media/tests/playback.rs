@@ -163,25 +163,46 @@ fn an_html_overlay_renders_through_an_installed_browser() {
     );
 }
 
-/// Chrome playing a bare media file through a generated wrapper page.
-fn browser_plays(kind: ContentKind, asset: &str, label: &str) {
-    let _serial = browser_lock();
-    let Some(binary) = app_binary() else { return };
+/// One file from `examples/media-assets`, or `None` when it is not checked out.
+///
+/// These tests need real media to play, and a working tree without the assets
+/// should skip rather than fail -- the same reason the browser probe below
+/// hands back `None`.
+fn media_asset(name: &str) -> Option<PathBuf> {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/media-assets")
-        .join(asset);
+        .join(name);
     if !source.is_file() {
         eprintln!("skipping: {} is not present", source.display());
-        return;
+        return None;
     }
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
+    Some(source)
+}
+
+/// A supervisor with an installed Chromium-family browser behind it, or `None`
+/// on a machine that has none.
+fn chromium_supervisor() -> Option<MediaSupervisor> {
+    let supervisor = MediaSupervisor::new(MediaConfig::default());
     if !supervisor
         .probe(RuntimeId::ExternalChromium)
         .is_some_and(|probe| probe.is_available())
     {
         eprintln!("skipping: no Chromium-family browser installed");
-        return;
+        return None;
     }
+    Some(supervisor)
+}
+
+/// Chrome playing a bare media file through a generated wrapper page.
+fn browser_plays(kind: ContentKind, asset: &str, label: &str) {
+    let _serial = browser_lock();
+    let Some(binary) = app_binary() else { return };
+    let Some(source) = media_asset(asset) else {
+        return;
+    };
+    let Some(mut supervisor) = chromium_supervisor() else {
+        return;
+    };
 
     let command = WorkerCommand::Explicit {
         program: binary,
@@ -233,20 +254,12 @@ fn clicking_an_animated_image_stops_it_and_clicking_again_restarts_it() {
     // rather than by reading the generated page back.
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/media-assets/bouncing.gif");
-    if !source.is_file() {
-        eprintln!("skipping: {} is not present", source.display());
+    let Some(source) = media_asset("bouncing.gif") else {
         return;
-    }
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
-    if !supervisor
-        .probe(RuntimeId::ExternalChromium)
-        .is_some_and(|probe| probe.is_available())
-    {
-        eprintln!("skipping: no Chromium-family browser installed");
+    };
+    let Some(mut supervisor) = chromium_supervisor() else {
         return;
-    }
+    };
 
     let command = WorkerCommand::Explicit {
         program: binary,
@@ -313,14 +326,9 @@ fn two_overlays_on_one_slide_share_a_single_browser_process() {
     // media on it. One process, one page per overlay, and both still animate.
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
-    if !supervisor
-        .probe(RuntimeId::ExternalChromium)
-        .is_some_and(|probe| probe.is_available())
-    {
-        eprintln!("skipping: no Chromium-family browser installed");
+    let Some(mut supervisor) = chromium_supervisor() else {
         return;
-    }
+    };
 
     let staging = tempfile::tempdir().unwrap();
     let command = WorkerCommand::Explicit {
@@ -431,20 +439,12 @@ fn two_overlays_on_one_slide_share_a_single_browser_process() {
 fn closing_the_supervisor_leaves_no_browser_behind() {
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/media-assets/clip.mp4");
-    if !source.is_file() {
-        eprintln!("skipping: {} is not present", source.display());
+    let Some(source) = media_asset("clip.mp4") else {
         return;
-    }
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
-    if !supervisor
-        .probe(RuntimeId::ExternalChromium)
-        .is_some_and(|probe| probe.is_available())
-    {
-        eprintln!("skipping: no Chromium-family browser installed");
+    };
+    let Some(mut supervisor) = chromium_supervisor() else {
         return;
-    }
+    };
 
     let before = browser_profiles();
     let command = WorkerCommand::Explicit {
@@ -533,14 +533,9 @@ fn an_overlay_keeps_animating_after_its_viewport_changes() {
     // leave the content still moving.
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
-    if !supervisor
-        .probe(RuntimeId::ExternalChromium)
-        .is_some_and(|probe| probe.is_available())
-    {
-        eprintln!("skipping: no Chromium-family browser installed");
+    let Some(mut supervisor) = chromium_supervisor() else {
         return;
-    }
+    };
 
     let staging = tempfile::tempdir().unwrap();
     let root = staging.path().join("bundle");
@@ -630,20 +625,12 @@ fn an_overlay_keeps_animating_after_its_viewport_changes() {
 fn the_host_can_drive_a_video_and_watch_its_playhead() {
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/media-assets/clip.mp4");
-    if !source.is_file() {
-        eprintln!("skipping: {} is not present", source.display());
+    let Some(source) = media_asset("clip.mp4") else {
         return;
-    }
-    let mut supervisor = MediaSupervisor::new(MediaConfig::default());
-    if !supervisor
-        .probe(RuntimeId::ExternalChromium)
-        .is_some_and(|probe| probe.is_available())
-    {
-        eprintln!("skipping: no Chromium-family browser installed");
+    };
+    let Some(mut supervisor) = chromium_supervisor() else {
         return;
-    }
+    };
 
     let command = WorkerCommand::Explicit {
         program: binary,
@@ -851,13 +838,9 @@ fn deactivating_an_overlay_stops_its_frames_and_reactivating_resumes_them() {
 fn libmpv_plays(kind: ContentKind, asset: &str, label: &str) {
     let _serial = browser_lock();
     let Some(binary) = app_binary() else { return };
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/media-assets")
-        .join(asset);
-    if !source.is_file() {
-        eprintln!("skipping: {} is not present", source.display());
+    let Some(source) = media_asset(asset) else {
         return;
-    }
+    };
     let policy = pulpit_media::RuntimePolicy::Require(RuntimeId::LibMpv);
     let mut supervisor = MediaSupervisor::new(MediaConfig {
         video_runtime: policy,

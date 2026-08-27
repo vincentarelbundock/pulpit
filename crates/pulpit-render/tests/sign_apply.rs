@@ -13,49 +13,15 @@ use pulpit_render::sign::apply::{
     sign_document_file, sign_document_file_with_tamper, AppearanceContent, AppearancePlacement,
     AppearanceRotation, SignAppearance, SignApplyError, SignRequest, SignTarget,
 };
-use pulpit_render::verify::{self, SignatureCoverage, SignatureVerification};
+use pulpit_render::verify::{self, SignatureCoverage};
 use signing_fixture::{
     build_pdf_with_fieldmdp_lock, build_unsigned_pdf, build_unsigned_pdf_multipage,
-    build_unsigned_pdf_named, build_unsigned_pdf_pages, load_test_credential, skip_message,
-    FixtureField, FixturePage, NameSpelling, SIGNING_TIME_UNIX,
+    build_unsigned_pdf_named, build_unsigned_pdf_pages, load_test_credential, oracle_fixture_path,
+    skip_message, statuses, FixtureField, FixturePage, NameSpelling,
 };
-use std::path::{Path, PathBuf};
 
-/// A request with the fixed inputs the app layer would otherwise supply: the
-/// signing time and the trailer's new `/ID` randomness. `pulpit-render` reads
-/// neither a clock nor an entropy source, so tests pin both.
 fn request(field: SignTarget) -> SignRequest {
-    SignRequest {
-        signing_time: SIGNING_TIME_UNIX,
-        field,
-        reason: Some("Integration test".to_string()),
-        location: Some("Montréal".to_string()),
-        id2: [
-            0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E,
-            0x8F, 0x90,
-        ],
-        ..SignRequest::default()
-    }
-}
-
-fn statuses(bytes: &[u8]) -> Vec<pulpit_render::verify::SignatureStatus> {
-    verify::verify_signatures(bytes)
-        .expect("verification runs")
-        .into_iter()
-        .map(|v| match v {
-            SignatureVerification::Checked(status) => *status,
-            SignatureVerification::Broken { field_name, reason } => {
-                panic!("signature '{field_name}' is broken: {reason}")
-            }
-        })
-        .collect()
-}
-
-/// Where `make sign-oracle` looks for PDFs to hand to pyHanko.
-fn oracle_fixture_path(name: &str) -> PathBuf {
-    let directory = Path::new("../../tools/sign-oracle/fixtures");
-    std::fs::create_dir_all(directory).expect("create the oracle fixtures directory");
-    directory.join(name)
+    signing_fixture::request_because(field, "Integration test")
 }
 
 #[test]

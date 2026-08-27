@@ -777,19 +777,7 @@ impl<'a> PdfDocument<'a> {
                     },
                 })
             }
-            DocumentCommand::Annotation(AnnotationCommand::Delete { id }) => {
-                let bounds = self.backend.annotation(id)?.bounds;
-                let before = self.backend.delete(id)?;
-                Ok(Step {
-                    page: Some(before.page),
-                    region: Some(bounds),
-                    effect: AppliedEffect::Deleted(id.clone()),
-                    undo: UndoOperation::RestoreAnnotation {
-                        id: id.clone(),
-                        before: Box::new(before),
-                    },
-                })
-            }
+            DocumentCommand::Annotation(AnnotationCommand::Delete { id }) => self.delete_step(id),
             DocumentCommand::SetField {
                 name,
                 value,
@@ -821,21 +809,31 @@ impl<'a> PdfDocument<'a> {
         }
     }
 
+    /// Delete one annotation and describe the step that did it.
+    ///
+    /// Deleting is reached two ways -- a reader asking for it, and undoing a
+    /// creation -- and both have to produce the same step, or an undo of an
+    /// undo would repaint a different region than the original delete did.
+    fn delete_step(&mut self, id: &AnnotationId) -> Result<Step> {
+        // The bounds have to be read before the delete: afterwards there is no
+        // annotation left to ask, and the region is what tells the presenter
+        // which part of the page to repaint.
+        let bounds = self.backend.annotation(id)?.bounds;
+        let before = self.backend.delete(id)?;
+        Ok(Step {
+            page: Some(before.page),
+            region: Some(bounds),
+            effect: AppliedEffect::Deleted(id.clone()),
+            undo: UndoOperation::RestoreAnnotation {
+                id: id.clone(),
+                before: Box::new(before),
+            },
+        })
+    }
+
     fn apply_undo_operation(&mut self, operation: &UndoOperation) -> Result<Step> {
         match operation {
-            UndoOperation::DeleteAnnotation { id } => {
-                let bounds = self.backend.annotation(id)?.bounds;
-                let before = self.backend.delete(id)?;
-                Ok(Step {
-                    page: Some(before.page),
-                    region: Some(bounds),
-                    effect: AppliedEffect::Deleted(id.clone()),
-                    undo: UndoOperation::RestoreAnnotation {
-                        id: id.clone(),
-                        before: Box::new(before),
-                    },
-                })
-            }
+            UndoOperation::DeleteAnnotation { id } => self.delete_step(id),
             UndoOperation::RestoreAnnotation { id, before } => {
                 let summary = self.backend.restore(id, before)?;
                 Ok(Step {
@@ -1027,6 +1025,108 @@ fn floor_char_boundary(text: &str, at: usize) -> usize {
     }
     index
 }
+
+/// The PDF semantics a view-only backend cannot answer, refused in one place.
+///
+/// DjVu files and image folders are both openable, turnable and renderable,
+/// and neither can carry an annotation, hold a form field or be saved. The
+/// list of operations that fact covers is long, identical, and grows whenever
+/// [`DocumentBackend`] does — so a backend states *that* it is view-only and
+/// the refusals are written once, rather than each backend keeping its own
+/// copy for the next one to fall out of step with.
+///
+/// The message is not shared: it names the format the reader is looking at, so
+/// the macro calls the invoking module's own `unsupported(what)`. Invoke as
+/// `unsupported_pdf_semantics!()` for a backend with no text layer, or
+/// `unsupported_pdf_semantics!(except find_text)` for one that can search and
+/// supplies its own `find_text`.
+macro_rules! unsupported_pdf_semantics {
+    () => {
+        $crate::document::unsupported_pdf_semantics!(@shared);
+
+        fn find_text(
+            &self,
+            _query: &pulpit_core::search::Query,
+            _pages: std::ops::Range<usize>,
+        ) -> Result<pulpit_core::search::HitChunk> {
+            Err(unsupported("be searched"))
+        }
+    };
+    (except find_text) => {
+        $crate::document::unsupported_pdf_semantics!(@shared);
+    };
+    (@shared) => {
+        fn annotations(&self, _page: PageIndex) -> Result<Vec<AnnotationSummary>> {
+            Err(unsupported("carry annotations"))
+        }
+
+        fn annotation(&self, _id: &AnnotationId) -> Result<AnnotationSummary> {
+            Err(unsupported("carry annotations"))
+        }
+
+        fn create(
+            &mut self,
+            _id: &AnnotationId,
+            _draft: &AnnotationDraft,
+        ) -> Result<AnnotationSummary> {
+            Err(unsupported("be annotated"))
+        }
+
+        fn replace(
+            &mut self,
+            _id: &AnnotationId,
+            _draft: &AnnotationDraft,
+        ) -> Result<AnnotationSummary> {
+            Err(unsupported("be annotated"))
+        }
+
+        fn delete(&mut self, _id: &AnnotationId) -> Result<AnnotationBeforeImage> {
+            Err(unsupported("be annotated"))
+        }
+
+        fn restore(
+            &mut self,
+            _id: &AnnotationId,
+            _before: &AnnotationBeforeImage,
+        ) -> Result<AnnotationSummary> {
+            Err(unsupported("be annotated"))
+        }
+
+        fn before_image(&self, _id: &AnnotationId) -> Result<AnnotationBeforeImage> {
+            Err(unsupported("be annotated"))
+        }
+
+        fn fields(&self) -> Result<Vec<FormField>> {
+            Err(unsupported("hold form fields"))
+        }
+
+        fn field(&self, _name: &str) -> Result<Option<FormField>> {
+            Err(unsupported("hold form fields"))
+        }
+
+        fn set_field(&mut self, _name: &str, _value: &str, _selected: &[u32]) -> Result<String> {
+            Err(unsupported("hold form fields"))
+        }
+
+        fn field_value(&self, _name: &str) -> Result<String> {
+            Err(unsupported("hold form fields"))
+        }
+
+        fn select_text(
+            &self,
+            _page: PageIndex,
+            _selection: TextSelection,
+        ) -> Result<TextSelectionResult> {
+            Err(unsupported("have its text selected"))
+        }
+
+        fn write_to(&mut self, _destination: &Path, _options: SaveOptions) -> Result<u64> {
+            Err(unsupported("be saved"))
+        }
+    };
+}
+
+pub(crate) use unsupported_pdf_semantics;
 
 #[cfg(test)]
 mod tests {

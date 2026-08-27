@@ -404,33 +404,16 @@ fn highlight_links<'a, Message: Clone + 'a>(
 /// `ContentFit::Cover`). Values outside `0.0..=1.0` mean the pointer is over
 /// the letterbox bars, not the slide.
 fn to_content(point: iced::Point, panel: Size, aspect: f32, fit: ContentFit) -> (f32, f32) {
-    if panel.width <= 0.0 || panel.height <= 0.0 || aspect <= 0.0 {
+    // The letterbox this undoes is the one `PageBox::fit` lays out, so it is
+    // asked where the slide was drawn rather than working it out again: two
+    // copies of the arithmetic are two chances for a click to land somewhere
+    // other than where the reader aimed it.
+    let Some(drawn) = crate::media::PageBox::fit(panel, aspect, fit) else {
         return (-1.0, -1.0);
-    }
-    let panel_aspect = panel.width / panel.height;
-    let wide = panel_aspect > aspect;
-    // Contain letterboxes on the wide axis; Cover crops on the narrow one.
-    let (drawn_width, drawn_height) = match fit {
-        ContentFit::Cover => {
-            if wide {
-                (panel.width, panel.width / aspect)
-            } else {
-                (panel.height * aspect, panel.height)
-            }
-        }
-        _ => {
-            if wide {
-                (panel.height * aspect, panel.height)
-            } else {
-                (panel.width, panel.width / aspect)
-            }
-        }
     };
-    let offset_x = (panel.width - drawn_width) / 2.0;
-    let offset_y = (panel.height - drawn_height) / 2.0;
     (
-        (point.x - offset_x) / drawn_width,
-        (point.y - offset_y) / drawn_height,
+        (point.x - drawn.x) / drawn.width,
+        (point.y - drawn.y) / drawn.height,
     )
 }
 

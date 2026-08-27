@@ -86,13 +86,18 @@ impl World for ClosedWorld {
     }
 }
 
-/// Compile one annotation to a transparent, single-page SVG.
-pub fn render(
+/// Wrap one annotation in the page and text setup both outputs share, and
+/// compile it.
+///
+/// The SVG and the raster appearance must come from *the same* markup: a mark
+/// the reader sees on screen and the one written into the PDF cannot be laid
+/// out differently.
+fn compile(
     source: &str,
     width_pt: f32,
     size_pt: f32,
     rgb: (u8, u8, u8),
-) -> Result<String, String> {
+) -> Result<PagedDocument, String> {
     // Typst's auto-height page can otherwise end exactly on the math frame's
     // bounds. Give accents, superscripts, and descenders a font-relative
     // viewport gutter so SVG consumers never clip their antialiasing fringe.
@@ -103,13 +108,23 @@ pub fn render(
         rgb.0, rgb.1, rgb.2, source
     );
     let warned = typst::compile::<PagedDocument>(&ClosedWorld::new(wrapped));
-    let document = warned.output.map_err(|diagnostics| {
+    warned.output.map_err(|diagnostics| {
         diagnostics
             .into_iter()
             .map(|diagnostic| diagnostic.message.to_string())
             .collect::<Vec<_>>()
             .join("\n")
-    })?;
+    })
+}
+
+/// Compile one annotation to a transparent, single-page SVG.
+pub fn render(
+    source: &str,
+    width_pt: f32,
+    size_pt: f32,
+    rgb: (u8, u8, u8),
+) -> Result<String, String> {
+    let document = compile(source, width_pt, size_pt, rgb)?;
     let page = document.pages().first().ok_or("Typst produced no page")?;
     Ok(typst_svg::svg(page, &typst_svg::SvgOptions::default()))
 }
@@ -153,20 +168,7 @@ pub fn rasterise(
         2.0
     };
 
-    let vertical_gutter = size_pt * 0.2;
-    let wrapped = format!(
-        "#set page(width: {width_pt}pt, height: auto, margin: (x: 0pt, y: {vertical_gutter}pt), fill: none)\n\
-         #set text(size: {size_pt}pt, fill: rgb(\"#{:02x}{:02x}{:02x}\"))\n{}",
-        rgb.0, rgb.1, rgb.2, source
-    );
-    let warned = typst::compile::<PagedDocument>(&ClosedWorld::new(wrapped));
-    let document = warned.output.map_err(|diagnostics| {
-        diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic.message.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
+    let document = compile(source, width_pt, size_pt, rgb)?;
     let page = document.pages().first().ok_or("Typst produced no page")?;
 
     let size = page.frame.size();

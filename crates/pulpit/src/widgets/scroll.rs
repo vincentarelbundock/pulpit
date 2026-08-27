@@ -5,6 +5,8 @@
 
 use iced::advanced::renderer::Renderer as _;
 use iced::advanced::widget::{self, Widget};
+
+use crate::widgets::forward_to_child;
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::widget::{scrollable, Scrollable};
 use iced::{Element, Event, Length, Rectangle, Size};
@@ -327,6 +329,12 @@ mod tests {
         // module is inside one of the files being scanned, and an assertion
         // that spells its own needle would find itself and pass no matter
         // what the widget above it does.
+        //
+        // A wrapper may forward it either way: by writing `fn operate` out,
+        // or by naming `operate` in its `forward_to_child!` list. Both are
+        // accepted, and a wrapper that does neither still fails — dropping
+        // `operate` from the macro list is exactly as silent as never having
+        // written the method.
         let wrappers = [
             ("scroll::Thumbed", include_str!("scroll.rs")),
             ("panel::KeyScope", include_str!("panel.rs")),
@@ -334,14 +342,22 @@ mod tests {
             ("common::popover", include_str!("common/popover.rs")),
         ];
         let implements = format!("{} for", "Widget<Message, iced::Theme, iced::Renderer>");
-        let forwards = format!("fn {}(", "operate");
+        let by_hand = format!("fn {}(", "operate");
+        let by_macro = format!("forward_to_{}!(", "child");
+        let method = "operate";
         for (name, source) in wrappers {
             assert!(
                 source.contains(&implements),
                 "{name} no longer implements Widget; drop it from this list or fix the path"
             );
+            let delegates = source.match_indices(&by_macro).any(|(at, _)| {
+                let invocation = &source[at..];
+                invocation
+                    .find(')')
+                    .is_some_and(|end| invocation[..end].contains(method))
+            });
             assert!(
-                source.contains(&forwards),
+                source.contains(&by_hand) || delegates,
                 "{name} implements Widget without forwarding `operate`, so every widget \
                  operation aimed through it — `scroll_to` above all — is silently discarded"
             );
@@ -426,39 +442,31 @@ impl<Message> Thumbed<'_, Message> {
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Message> {
+    // `operate` above all. Widget operations reach the surface underneath,
+    // and every wrapper on the way has to pass them on: the default
+    // implementation is a no-op that does not descend, so a wrapper that
+    // leaves it out silently swallows every operation aimed at its subtree.
+    //
+    // That is not a cosmetic loss here. `scroll_to` is how the application
+    // moves the reader — a page chosen in the overview, a page number typed,
+    // a link followed, a zoom, an arrow key, a position restored on remount,
+    // and this widget's own thumb drag, which publishes an offset and then
+    // relies on the surface being told about it. Without it, the session's
+    // offset and the scrollable's part company: the page column builds its
+    // visible pages behind a leading spacer as tall as the session thinks it
+    // has scrolled, while the scrollable stays where it was, so what is on
+    // screen is the spacer — a surface with no pages in it at all.
+    //
+    // `every_hand_written_wrapper_forwards_widget_operations` below fails if
+    // `operate` ever leaves this list.
+    forward_to_child!(surface: children, diff, size, size_hint, layout, operate);
+
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<Grab>()
     }
 
     fn state(&self) -> widget::tree::State {
         widget::tree::State::new(Grab::default())
-    }
-
-    fn children(&self) -> Vec<widget::Tree> {
-        vec![widget::Tree::new(&self.surface)]
-    }
-
-    fn diff(&self, tree: &mut widget::Tree) {
-        tree.diff_children(&[self.surface.as_widget()]);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.surface.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.surface.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.surface
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
     }
 
     fn update(
@@ -623,38 +631,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Messa
             },
             colour,
         );
-    }
-
-    /// Widget operations reach the surface underneath, and every wrapper on
-    /// the way has to pass them on by hand: the default implementation is a
-    /// no-op that does not descend, so a wrapper that forgets this silently
-    /// swallows every operation aimed at its subtree.
-    ///
-    /// That is not a cosmetic loss here. `scroll_to` is how the application
-    /// moves the reader — a page chosen in the overview, a page number typed,
-    /// a link followed, a zoom, an arrow key, a position restored on remount,
-    /// and this widget's own thumb drag, which publishes an offset and then
-    /// relies on the surface being told about it. Without this, the session's
-    /// offset and the scrollable's part company: the page column builds its
-    /// visible pages behind a leading spacer as tall as the session thinks it
-    /// has scrolled, while the scrollable stays where it was, so what is on
-    /// screen is the spacer — a surface with no pages in it at all.
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &iced::Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            self.surface.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                operation,
-            );
-        });
     }
 
     fn overlay<'a>(

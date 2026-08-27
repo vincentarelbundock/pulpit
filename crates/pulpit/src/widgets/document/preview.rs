@@ -199,17 +199,7 @@ impl<Message> DeadFieldPainter<Message> {
     /// same conversion `draw` and `update` must agree on, or a click would
     /// land somewhere other than where the badge is drawn.
     fn scale(&self) -> (f32, f32) {
-        let scale_x = if self.canonical.0 > 0.0 {
-            self.drawn.0 / self.canonical.0
-        } else {
-            1.0
-        };
-        let scale_y = if self.canonical.1 > 0.0 {
-            self.drawn.1 / self.canonical.1
-        } else {
-            1.0
-        };
-        (scale_x, scale_y)
+        super::page_to_screen(self.canonical, self.drawn)
     }
 
     fn field_rect(&self, field: &crate::widgets::context::DeadField) -> (Point, Size) {
@@ -365,16 +355,7 @@ impl<Message> canvas::Program<Message> for MarqueePainter {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let scale_x = if self.canonical.0 > 0.0 {
-            self.drawn.0 / self.canonical.0
-        } else {
-            1.0
-        };
-        let scale_y = if self.canonical.1 > 0.0 {
-            self.drawn.1 / self.canonical.1
-        } else {
-            1.0
-        };
+        let (scale_x, scale_y) = super::page_to_screen(self.canonical, self.drawn);
         let top_left = Point::new(
             (self.rect.left - self.origin.0) * scale_x,
             (self.rect.top - self.origin.1) * scale_y,
@@ -422,16 +403,7 @@ impl<Message> canvas::Program<Message> for SelectionPainter {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        let scale_x = if self.canonical.0 > 0.0 {
-            self.drawn.0 / self.canonical.0
-        } else {
-            1.0
-        };
-        let scale_y = if self.canonical.1 > 0.0 {
-            self.drawn.1 / self.canonical.1
-        } else {
-            1.0
-        };
+        let (scale_x, scale_y) = super::page_to_screen(self.canonical, self.drawn);
         let place = |point: PagePoint| {
             Point::new(
                 (point.x - self.origin.0) * scale_x,
@@ -514,16 +486,7 @@ impl<Message> canvas::Program<Message> for Painter {
         // mark is drawn by the renderer, not here.
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        let scale_x = if self.canonical.0 > 0.0 {
-            self.drawn.0 / self.canonical.0
-        } else {
-            1.0
-        };
-        let scale_y = if self.canonical.1 > 0.0 {
-            self.drawn.1 / self.canonical.1
-        } else {
-            1.0
-        };
+        let (scale_x, scale_y) = super::page_to_screen(self.canonical, self.drawn);
         let place = |point: &PagePoint| {
             Point::new(
                 (point.x - self.origin.0) * scale_x,

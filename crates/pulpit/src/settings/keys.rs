@@ -1000,6 +1000,30 @@ impl Keymap {
     }
 }
 
+/// The modifiers of a binding, in the order a shortcut is written in.
+///
+/// The order is not cosmetic: [`crate::platform::Shortcut`] is compared and
+/// formatted as a sequence, so two spellings of the same chord would be two
+/// different shortcuts.
+pub fn modifiers_of(mods: &Mods) -> Vec<crate::platform::input::Modifier> {
+    use crate::platform::input::Modifier;
+
+    let mut modifiers = Vec::new();
+    if mods.primary {
+        modifiers.push(Modifier::Primary);
+    }
+    if mods.control {
+        modifiers.push(Modifier::Control);
+    }
+    if mods.alt {
+        modifiers.push(Modifier::Alt);
+    }
+    if mods.shift {
+        modifiers.push(Modifier::Shift);
+    }
+    modifiers
+}
+
 /// A keymap key name as an interface should print it. Letters are stored as
 /// the toolkit reports them, in lower case, and the function keys
 /// inconsistently so; a key cap is upper case either way.
@@ -1446,7 +1470,7 @@ mod tests {
         // macOS, where the reservation and the binding agree in meaning; the
         // desktop delivering the press to us anyway is the app quitting,
         // which is what the key says.)
-        use crate::platform::input::{InputPolicy, Modifier};
+        use crate::platform::input::InputPolicy;
         let input = crate::platform::input::DesktopInput;
         let keymap = Keymap::default();
         for (binding, action) in &keymap.bindings {
@@ -1456,19 +1480,7 @@ mod tests {
             let KeyBinding::Named { key, mods } = binding else {
                 continue;
             };
-            let mut modifiers = Vec::new();
-            if mods.primary {
-                modifiers.push(Modifier::Primary);
-            }
-            if mods.control {
-                modifiers.push(Modifier::Control);
-            }
-            if mods.alt {
-                modifiers.push(Modifier::Alt);
-            }
-            if mods.shift {
-                modifiers.push(Modifier::Shift);
-            }
+            let modifiers = modifiers_of(mods);
             let shortcut = crate::platform::Shortcut {
                 modifiers,
                 key: key.clone(),

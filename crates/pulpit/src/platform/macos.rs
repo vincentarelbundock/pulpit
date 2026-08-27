@@ -14,7 +14,7 @@ use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::{Capabilities, IdentityQuality};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{Notification, PlatformServices, Urgency};
+use crate::platform::services::{spawn_detached as spawn, Notification, PlatformServices, Urgency};
 use crate::platform::Outcome;
 
 // ---------------------------------------------------------------------------
@@ -393,22 +393,6 @@ impl PlatformServices for MacosServices {
         // The shared file list is a private, versioned binary plist. Reading
         // it would be guessing at another application's storage.
         None
-    }
-}
-
-fn spawn(program: &str, arguments: &[&str]) -> Outcome {
-    match Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(_) => Outcome::Done,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Outcome::Unsupported {
-            what: "This desktop integration",
-        },
-        Err(e) => Outcome::failed(e.to_string()),
     }
 }
 

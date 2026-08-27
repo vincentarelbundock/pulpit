@@ -16,7 +16,7 @@ use crate::platform::capabilities::{
 };
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{Notification, PlatformServices, Urgency};
+use crate::platform::services::{spawn_detached as spawn, Notification, PlatformServices, Urgency};
 use crate::platform::Outcome;
 
 const APP_ID: &str = "com.example.pulpit";
@@ -386,22 +386,6 @@ impl PlatformServices for LinuxServices {
         // recently-used.xbel is a GTK convention rather than a portal one, and
         // parsing it would mean guessing at another desktop's private file.
         None
-    }
-}
-
-fn spawn(program: &str, arguments: &[&str]) -> Outcome {
-    match Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(_) => Outcome::Done,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Outcome::Unsupported {
-            what: "This desktop integration",
-        },
-        Err(e) => Outcome::failed(e.to_string()),
     }
 }
 

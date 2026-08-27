@@ -48,6 +48,21 @@ pub enum WorkerCommand {
 /// recurses exactly the same way.
 pub const WORKER_MARKER: &str = "PULPIT_WORKER";
 
+/// Mark a command as a worker and give it the pipes the supervisor talks over.
+///
+/// Both supervisors in this crate end `build` the same way, and the
+/// [`WORKER_MARKER`] half of it is load-bearing: it is the bound that stops a
+/// worker from spawning workers, so it must not be something one of them can
+/// forget to apply.
+pub(crate) fn as_worker(mut command: Command) -> Command {
+    command
+        .env(WORKER_MARKER, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    command
+}
+
 impl WorkerCommand {
     fn build(&self) -> std::io::Result<Command> {
         if std::env::var_os(WORKER_MARKER).is_some() {
@@ -55,7 +70,7 @@ impl WorkerCommand {
                 "refusing to spawn a renderer worker from inside a worker process",
             ));
         }
-        let mut command = match self {
+        let command = match self {
             WorkerCommand::CurrentExe { arg } => {
                 let mut command = Command::new(std::env::current_exe()?);
                 command.arg(arg);
@@ -67,12 +82,7 @@ impl WorkerCommand {
                 command
             }
         };
-        command
-            .env(WORKER_MARKER, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        Ok(command)
+        Ok(as_worker(command))
     }
 }
 

@@ -50,6 +50,8 @@ use std::time::Duration;
 use iced::advanced::image::Id;
 use iced::advanced::image::Renderer as _;
 use iced::advanced::widget::{self, Widget};
+
+use crate::widgets::forward_to_child;
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::widget::image::{Allocation, Handle};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
@@ -208,28 +210,14 @@ fn next_missing(wanted: &[Handle], settled: &[Id]) -> Option<Handle> {
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Message> {
+    forward_to_child!(content: children, diff, size, size_hint, mouse_interaction, operate);
+
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<Held>()
     }
 
     fn state(&self) -> widget::tree::State {
         widget::tree::State::new(Held::default())
-    }
-
-    fn children(&self) -> Vec<widget::Tree> {
-        vec![widget::Tree::new(&self.content)]
-    }
-
-    fn diff(&self, tree: &mut widget::Tree) {
-        tree.diff_children(&[self.content.as_widget()]);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
     }
 
     fn layout(
@@ -274,23 +262,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
         );
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &widget::Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
-    }
-
     fn draw(
         &self,
         tree: &widget::Tree,
@@ -332,24 +303,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
             viewport,
             translation,
         )
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &iced::Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            self.content.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                operation,
-            );
-        });
     }
 }
 

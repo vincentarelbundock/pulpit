@@ -15,6 +15,7 @@
 use iced::widget::{button, container};
 use iced::{Background, Border, Color, Shadow, Theme, Vector};
 
+use super::tokens::mix;
 use super::Palette;
 
 /// Material's own measurements, kept as tokens rather than scattered numbers.
@@ -257,15 +258,6 @@ fn elevation(level: u8) -> Shadow {
 
 fn faded(color: Color, alpha: f32) -> Color {
     Color { a: alpha, ..color }
-}
-
-fn mix(from: Color, to: Color, amount: f32) -> Color {
-    Color {
-        r: from.r + (to.r - from.r) * amount,
-        g: from.g + (to.g - from.g) * amount,
-        b: from.b + (to.b - from.b) * amount,
-        a: from.a + (to.a - from.a) * amount,
-    }
 }
 
 #[cfg(test)]

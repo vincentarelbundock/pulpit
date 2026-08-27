@@ -17,7 +17,7 @@
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 
 use crate::protocol::{read_message, write_message, ProtocolError};
 use crate::supervisor::WORKER_MARKER;
@@ -56,7 +56,7 @@ impl DocumentWorkerCommand {
                 "refusing to spawn a document worker from inside a worker process",
             ));
         }
-        let mut command = match self {
+        let command = match self {
             DocumentWorkerCommand::CurrentExe { flag } => {
                 use std::ffi::OsString;
 
@@ -77,12 +77,7 @@ impl DocumentWorkerCommand {
                 command
             }
         };
-        command
-            .env(WORKER_MARKER, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        Ok(command)
+        Ok(crate::supervisor::as_worker(command))
     }
 }
 

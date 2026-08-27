@@ -382,6 +382,15 @@ pub struct PdfTokenizer<'a> {
     pos: usize,
 }
 
+/// The characters that end a PDF token: whitespace, the delimiters of the
+/// specification's lexical rules, and the string parentheses.
+fn is_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'(' | b')'
+    )
+}
+
 impl<'a> PdfTokenizer<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         PdfTokenizer { data, pos: 0 }
@@ -405,6 +414,21 @@ impl<'a> PdfTokenizer<'a> {
     }
 
     /// Get the next token.
+    /// Advance to the next delimiter, the end of the current token.
+    ///
+    /// A name and a bare token end the same way -- at whitespace or at one of
+    /// the characters PDF reserves as a delimiter -- and only their first byte
+    /// tells them apart. Writing the delimiter set twice is how the two come
+    /// to disagree about what ends a token.
+    fn scan_to_delimiter(&mut self) {
+        while self.pos < self.data.len() {
+            if is_delimiter(self.data[self.pos]) {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
     pub fn next_token(&mut self) -> Result<Option<Vec<u8>>> {
         self.skip_whitespace();
         if self.pos >= self.data.len() {
@@ -455,26 +479,7 @@ impl<'a> PdfTokenizer<'a> {
             b'/' => {
                 // PDF name - starts with / and continues until a delimiter
                 self.pos += 1;
-                while self.pos < self.data.len() {
-                    let byte = self.data[self.pos];
-                    if byte == b' '
-                        || byte == b'\t'
-                        || byte == b'\n'
-                        || byte == b'\r'
-                        || byte == b'<'
-                        || byte == b'>'
-                        || byte == b'['
-                        || byte == b']'
-                        || byte == b'{'
-                        || byte == b'}'
-                        || byte == b'/'
-                        || byte == b'('
-                        || byte == b')'
-                    {
-                        break;
-                    }
-                    self.pos += 1;
-                }
+                self.scan_to_delimiter();
                 Ok(Some(self.data[start..self.pos].to_vec()))
             }
             b'(' => {
@@ -504,26 +509,7 @@ impl<'a> PdfTokenizer<'a> {
             }
             _ => {
                 // Regular token
-                while self.pos < self.data.len() {
-                    let byte = self.data[self.pos];
-                    if byte == b' '
-                        || byte == b'\t'
-                        || byte == b'\n'
-                        || byte == b'\r'
-                        || byte == b'<'
-                        || byte == b'>'
-                        || byte == b'['
-                        || byte == b']'
-                        || byte == b'{'
-                        || byte == b'}'
-                        || byte == b'/'
-                        || byte == b'('
-                        || byte == b')'
-                    {
-                        break;
-                    }
-                    self.pos += 1;
-                }
+                self.scan_to_delimiter();
                 if self.pos > start {
                     Ok(Some(self.data[start..self.pos].to_vec()))
                 } else {

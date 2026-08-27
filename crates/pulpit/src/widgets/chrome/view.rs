@@ -4,7 +4,7 @@
 //! are there to be positioned and sized, and pressing one in the editor must
 //! not open a projector window.
 
-use iced::widget::{button, container, row, text};
+use iced::widget::{button, container, row, text, Row};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::theme;
@@ -63,13 +63,34 @@ fn lifecycle<Message: Clone + 'static>(
     mode: Mode,
     on: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
+    container(
+        lifecycle_row(started, mode.interactive(), on)
+            .spacing(theme::space::XS)
+            .align_y(Alignment::Center),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+/// Start, its placement arrow, and Stop — the buttons themselves, without the
+/// container that positions them.
+///
+/// The presenter toolbar draws the same three controls when the layout has
+/// not placed this widget, and pads them into a strip instead of centring
+/// them in a cell. Only that wrapper differs, so only that wrapper is
+/// written twice.
+pub(crate) fn lifecycle_row<Message: Clone + 'static>(
+    started: bool,
+    live: bool,
+    on: fn(WidgetEvent) -> Message,
+) -> Row<'static, Message> {
     const CONTROL_WIDTH: f32 = 112.0;
     const START_LABEL_WIDTH: f32 = CONTROL_WIDTH - theme::controls::BUTTON_HEIGHT;
     // Larger than the usual label so the words carry the button, while still
     // leaving a margin of empty space inside it.
     const LIFECYCLE_LABEL: f32 = 16.0;
     let palette = theme::ambient::palette();
-    let live = mode.interactive();
 
     // Once the audience is running the arrow does nothing, so the control
     // becomes one undivided button and its label sits in the middle of it
@@ -121,12 +142,5 @@ fn lifecycle<Message: Clone + 'static>(
     }
     .spacing(0);
 
-    container(
-        row![start_dropdown, stop]
-            .spacing(theme::space::XS)
-            .align_y(Alignment::Center),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+    row![start_dropdown, stop]
 }
