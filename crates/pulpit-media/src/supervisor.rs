@@ -37,7 +37,6 @@ use pulpit_core::ipc::Sink as WakeupSink;
 /// ordered channel; this one-slot signal only wakes the application.
 pub use pulpit_core::ipc::{Doorbell as MediaWakeup, Wakeup};
 
-/// How a worker process is launched.
 /// How a worker process is launched, and the marker that stops a worker
 /// launching more. One definition, in `pulpit-core`, shared with the renderer
 /// supervisor: a renderer worker must not spawn media workers either, and one

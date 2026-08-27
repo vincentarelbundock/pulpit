@@ -90,7 +90,7 @@ pub fn sweep_once() {
 /// never the last one, since every scheme puts a discriminator after it. That
 /// is what lets one sweep serve `pulpit-<pid>-…` and `pulpit-<label>-<pid>-…`
 /// alike.
-pub fn owner_of(filename: &str) -> Option<u32> {
+pub(crate) fn owner_of(filename: &str) -> Option<u32> {
     const PREFIX: &str = "pulpit-";
 
     let remainder = filename.strip_prefix(PREFIX)?;
@@ -111,7 +111,7 @@ pub fn owner_of(filename: &str) -> Option<u32> {
 /// Failures are ignored throughout: a sweep that cannot read the directory or
 /// cannot remove a file must never stop a region from being created. Reclaim
 /// is best-effort by nature — the space is already lost if this does nothing.
-pub fn sweep(base: &Path, current_pid: u32) {
+pub(crate) fn sweep(base: &Path, current_pid: u32) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };

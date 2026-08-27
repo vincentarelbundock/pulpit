@@ -31,9 +31,10 @@ mod testkit;
 /// A one-page PDF with two text fields, where `total` is calculated from
 /// `count` by a script and has no value of its own.
 ///
-/// Written out by hand: an AcroForm is a small enough object graph that
-/// building it directly is clearer than generating it, and the cross-reference
-/// table is the only fiddly part.
+/// The objects are written out one by one, because an AcroForm is a small
+/// enough object graph that stating it directly is clearer than generating it.
+/// The cross-reference table underneath them comes from `testkit`, which is
+/// the fiddly part and the same in every fixture.
 fn calculating_form() -> Vec<u8> {
     crate::testkit::builder::Pdf::from_objects([
         // 1: catalog, carrying the AcroForm and its calculation order.

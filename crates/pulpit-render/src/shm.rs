@@ -98,13 +98,15 @@ impl Drop for SharedRegion {
     }
 }
 
-// RESIDUAL LEAK: If the process holding a SharedRegion is killed or crashes
-// before Drop runs, the file persists in /dev/shm. The file cannot be unlinked
-// immediately after mmap in create() because AttachedRegion::open() must be
-// able to open it by name in a separate worker process. A comprehensive fix
-// would require either: (1) a startup sweep of stale pulpit-* files, or
-// (2) a separate cleanup service. For now, regions are unlinked on normal
-// process shutdown via Drop.
+// A region cannot be unlinked immediately after being mapped, the way an
+// anonymous one would be: `AttachedRegion::open` has to find it by name from
+// another process. So a process that is killed before `Drop` runs leaves its
+// file behind in `/dev/shm`.
+//
+// The startup sweep is what reclaims those: `Names::for_this_process` runs it
+// before handing out the first name, and it reads the owning pid out of every
+// naming scheme pulpit writes, so a crash costs the space only until the next
+// run. `Drop` still unlinks on the way out of a normal exit.
 
 /// A region opened by the other side of the protocol.
 #[derive(Debug)]

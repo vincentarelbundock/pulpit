@@ -986,26 +986,35 @@ fn write_hex_string<W: Write>(writer: &mut W, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// How far back from the end of a file `startxref` is looked for.
+///
+/// The writer, the revision walk and the object resolver all have to agree on
+/// this. They did not: two searched a kilobyte and the third four, so a file
+/// whose `startxref` sat between those two distances from the end was a file
+/// the resolver could read and the revision walk could not — two halves of
+/// verification reading different documents, which is the failure the
+/// `/XRefStm` scan and the `/Prev` depth guard also exist to prevent. Four
+/// kilobytes is the wider of the two that were already in use, so agreeing on
+/// it refuses nothing that used to be accepted.
+pub const STARTXREF_SEARCH_WINDOW: usize = 4096;
+
+/// The offset the file's last `startxref` names, or `None` when there is no
+/// readable one within [`STARTXREF_SEARCH_WINDOW`] of the end.
+///
+/// The callers map `None` onto their own errors, which is the only reason this
+/// does not return one itself.
+pub fn find_startxref_offset(bytes: &[u8]) -> Option<u64> {
+    let window = std::cmp::min(bytes.len(), STARTXREF_SEARCH_WINDOW);
+    let start = bytes.len().saturating_sub(window);
+    let pos = bytes[start..].windows(9).rposition(|w| w == b"startxref")?;
+    let mut tokenizer = PdfTokenizer::new(&bytes[start + pos + 9..]);
+    let token = tokenizer.next_token().ok()??;
+    std::str::from_utf8(&token).ok()?.parse().ok()
+}
+
 fn find_startxref(bytes: &[u8]) -> Result<u64> {
-    // Search backwards from the end for "startxref"
-    let search_window = std::cmp::min(bytes.len(), 1024);
-    let start_pos = bytes.len().saturating_sub(search_window);
-    let search_slice = &bytes[start_pos..];
-
-    if let Some(pos) = search_slice.windows(9).rposition(|w| w == b"startxref") {
-        let abs_pos = start_pos + pos;
-        // Parse the number after startxref
-        let mut tokenizer = PdfTokenizer::new(&bytes[abs_pos + 9..]);
-        if let Some(token) = tokenizer.next_token()? {
-            if let Ok(s) = std::str::from_utf8(&token) {
-                if let Ok(offset) = s.parse::<u64>() {
-                    return Ok(offset);
-                }
-            }
-        }
-    }
-
-    Err(PdfWriteError::ParseError("startxref not found".to_string()))
+    find_startxref_offset(bytes)
+        .ok_or_else(|| PdfWriteError::ParseError("startxref not found".to_string()))
 }
 
 /// Parse the trailer dictionary and detect xref kind.

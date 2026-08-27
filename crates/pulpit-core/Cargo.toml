@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Presentation state, notes mapping and timing for pulpit. Pure, no UI."
+description = "Presentation state, notes mapping and timing for pulpit, and the worker-process substrate its sibling crates share. No UI."
 
 [dependencies]
 bincode = { workspace = true }

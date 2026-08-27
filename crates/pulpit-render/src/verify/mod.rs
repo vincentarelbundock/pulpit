@@ -301,31 +301,15 @@ impl RevisionMap {
 }
 
 /// Find the byte offset of the final startxref directive.
-/// Searches backwards from the end of the file (up to 1024 bytes).
+///
+/// The window and the parse come from `pdfwrite`, which owns the tokenizer
+/// this file already borrows: the revision walk and the object resolver have
+/// to find the same `startxref`, or they describe different documents.
 fn find_startxref(bytes: &[u8]) -> Result<u64> {
     if bytes.len() < 10 {
         return Err(VerifyError::FileTooSmall);
     }
-
-    let search_window = std::cmp::min(bytes.len(), 1024);
-    let start_pos = bytes.len().saturating_sub(search_window);
-    let search_slice = &bytes[start_pos..];
-
-    if let Some(pos) = search_slice.windows(9).rposition(|w| w == b"startxref") {
-        let abs_pos = start_pos + pos;
-        let remaining = &bytes[abs_pos + 9..];
-        let mut tokenizer = PdfTokenizer::new(remaining);
-
-        if let Ok(Some(token)) = tokenizer.next_token() {
-            if let Ok(s) = std::str::from_utf8(&token) {
-                if let Ok(offset) = s.parse::<u64>() {
-                    return Ok(offset);
-                }
-            }
-        }
-    }
-
-    Err(VerifyError::StartxrefNotFound)
+    crate::pdfwrite::find_startxref_offset(bytes).ok_or(VerifyError::StartxrefNotFound)
 }
 
 /// Parse xref extent: find where the xref section starts and ends.
@@ -509,8 +493,22 @@ fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
         }
     }
 
-    // Parse trailer dictionary for /Prev, tracking nesting depth
-    // to handle nested dictionaries correctly
+    // Parse the trailer dictionary for /Prev.
+    //
+    // Depth is tracked for two separate reasons, and only one of them used to
+    // be honoured. Exiting on the trailer's *own* `>>` rather than the first
+    // one keeps a nested dictionary from truncating the scan. Matching `/Prev`
+    // only at depth 1 keeps a nested one from being mistaken for the
+    // trailer's: `/Info << /Prev 999 >> /Prev 100` is a trailer whose previous
+    // revision is at 100, and reading 999 out of it walks a different chain
+    // than `ObjectResolver` does, which parses the trailer into a dictionary
+    // and can only see the top-level key.
+    //
+    // That divergence is the one the `/XRefStm` scan above exists to prevent,
+    // reached by another door — and it fails in the dangerous direction. A
+    // revision missing from the map cannot be one that `classify_coverage`
+    // finds extending past a signature, so losing revisions can only *raise*
+    // how completely a signature appears to cover the file.
     let mut key: Option<String> = None;
     let mut dict_depth: i32 = 0;
     while let Ok(Some(token)) = tokenizer.next_token() {
@@ -529,7 +527,7 @@ fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
             if let Some(name) = token_str.strip_prefix('/') {
                 key = Some(name.to_string());
             } else if let Some(k) = key.take() {
-                if k == "Prev" {
+                if k == "Prev" && dict_depth == 1 {
                     if let Ok(num_str) = std::str::from_utf8(&token) {
                         if let Ok(num) = num_str.parse::<u64>() {
                             return Ok(Some(num));
@@ -2418,6 +2416,58 @@ mod tests {
 
         let revisions = result.unwrap();
         assert_eq!(revisions.all_revisions().len(), 1);
+    }
+
+    /// A `/Prev` inside a nested dictionary is not the trailer's `/Prev`.
+    ///
+    /// The test above pins that nesting does not *truncate* the scan. This
+    /// pins the other half: the scan must not pick a key up out of the nested
+    /// dictionary either. `ObjectResolver` parses the trailer into a real
+    /// dictionary and can only ever see the top-level key, so a `find_prev`
+    /// that reads the nested one walks a different revision chain than the
+    /// rest of verification does — and it fails in the dangerous direction,
+    /// because a revision missing from the map cannot be one the classifier
+    /// finds extending past a signature.
+    #[test]
+    fn a_prev_inside_a_nested_dictionary_is_not_the_trailers_prev() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<</Type /Catalog>>\nendobj\n");
+
+        // A first revision, so that a real `/Prev` has somewhere to point.
+        let first = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 2 /Root 1 0 R >>\n");
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{first}\n").as_bytes());
+        pdf.extend_from_slice(b"%%EOF\n");
+
+        // A second revision whose trailer carries a decoy `/Prev` in a nested
+        // dictionary, before the real one. 999999 is past the end of the file:
+        // if it were followed, the walk could not resolve it.
+        let second = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+        pdf.extend_from_slice(b"trailer\n");
+        pdf.extend_from_slice(b"<< /Size 2 /Root 1 0 R /Info << /Prev 999999 >> ");
+        pdf.extend_from_slice(format!("/Prev {first} >>\n").as_bytes());
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{second}\n").as_bytes());
+        pdf.extend_from_slice(b"%%EOF");
+
+        assert_eq!(
+            find_prev(&pdf, second as u64).expect("the trailer parses"),
+            Some(first as u64),
+            "the trailer's own /Prev is the one at depth 1, not the one in /Info"
+        );
+
+        // And the chain the classifier is fed has both revisions in it, rather
+        // than losing the earlier one to an offset that resolves to nothing.
+        let revisions = RevisionMap::build(&pdf).expect("the chain walks");
+        assert_eq!(
+            revisions.all_revisions().len(),
+            2,
+            "following the decoy would drop a revision from the map"
+        );
     }
 
     // ---------------------------------------------------------------
