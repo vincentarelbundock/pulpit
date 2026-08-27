@@ -10,6 +10,7 @@ pub mod autoadvance;
 pub mod document;
 pub mod generation;
 pub mod history;
+pub mod ipc;
 pub mod navigation;
 pub mod notes;
 pub mod overlay;

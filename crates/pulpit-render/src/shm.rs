@@ -5,7 +5,7 @@
 //! directly into it. Sizes are validated on both sides before mapping.
 
 use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,132 +14,12 @@ use memmap2::{Mmap, MmapMut};
 
 use crate::protocol::{ProtocolError, MAX_REGION_BYTES};
 
-/// Sweep stale region files from a directory. This is the core sweep logic,
-/// extracted to be testable. It is called from `sweep_stale_regions_once()`
-/// which wraps it in a `std::sync::Once` to run only once per process.
-fn sweep_stale_regions_in_directory(base: &Path, current_pid: u32) {
-    // Try to read the directory. If it fails, bail silently: sweep failures
-    // must never prevent region creation.
-    let entries = match std::fs::read_dir(base) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let path = entry.path();
-        let filename = match path.file_name() {
-            Some(name) => match name.to_str() {
-                Some(s) => s,
-                None => continue,
-            },
-            None => continue,
-        };
-
-        // Match the pattern `pulpit-<pid>-*` and extract the pid.
-        // The format is deterministic: prefix "pulpit-", then decimal pid, then "-".
-        let pid = match extract_pid_from_region_name(filename) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        // Never remove files owned by the current process.
-        if pid == current_pid {
-            continue;
-        }
-
-        // On non-Linux platforms, we cannot reliably check process liveness,
-        // so skip the sweep entirely to avoid false positives.
-        #[cfg(not(target_os = "linux"))]
-        {
-            continue;
-        }
-
-        // On Linux, check if the process is still running, then remove the
-        // stale file. Other platforms skip the entry above because they
-        // cannot reliably establish that the owning process is gone.
-        #[cfg(target_os = "linux")]
-        {
-            if is_process_alive(pid) {
-                continue;
-            }
-
-            // Silently ignore errors: a failed removal must never prevent a
-            // region from being created, and errors here (permission denied,
-            // file already gone, etc.) are not actionable.
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// Sweep stale region files from `/dev/shm` once per process. Called from
-/// `RegionNamer::new()` via `std::sync::Once` to run exactly once.
-fn sweep_stale_regions() {
-    let base = base_directory();
-    let current_pid = std::process::id();
-    sweep_stale_regions_in_directory(&base, current_pid);
-}
-
-/// Extract the pid from a region filename, for every naming scheme pulpit
-/// uses: `pulpit-<pid>-*` for render regions, and `pulpit-<label>-<pid>-*` for
-/// a labelled consumer such as the media rings (`pulpit-media-<pid>-<n>`).
-///
-/// The pid is the first `-`-separated component that parses as a number, and
-/// never the last one, since every scheme puts a discriminator after it.
-///
-/// Reading only as far as the first dash — which is what this did — takes
-/// `"media"` from a media ring and fails to parse it, so the file is skipped.
-/// That is how media rings came to survive every sweep and sit in tmpfs until
-/// reboot: the owning process was already dead, and `SurfaceRing`'s `Drop`,
-/// the only other cleanup, does not run on a crash or a `SIGKILL`.
-///
-/// A label that was itself numeric would be mistaken for the pid, so labels
-/// have to stay non-numeric. The tests below pin that.
-fn extract_pid_from_region_name(filename: &str) -> Option<u32> {
-    const PREFIX: &str = "pulpit-";
-
-    let remainder = filename.strip_prefix(PREFIX)?;
-    let mut components = remainder.split('-').peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            // The last component is the discriminator, never the pid.
-            break;
-        }
-        if let Ok(pid) = component.parse() {
-            return Some(pid);
-        }
-    }
-    None
-}
-
-/// Is a process with this id alive on Linux?
-#[cfg(target_os = "linux")]
-fn is_process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
-}
-
-/// Where regions live. `/dev/shm` is tmpfs on Linux; the temp dir is the
-/// portable fallback.
-fn base_directory() -> PathBuf {
-    let shm = Path::new("/dev/shm");
-    if shm.is_dir() {
-        shm.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    }
-}
-
+/// The path a region name refers to, refusing a name that could escape the
+/// directory. The directory and the safety rule come from `pulpit-core`, so
+/// this crate and the media crate cannot disagree about where regions live.
 fn path_for(name: &str) -> Result<PathBuf, ProtocolError> {
-    if name.is_empty() || name.len() > 256 || name.contains(['/', '\\', '\0']) {
-        return Err(ProtocolError::Malformed(format!(
-            "unsafe region name {name:?}"
-        )));
-    }
-    Ok(base_directory().join(name))
+    pulpit_core::ipc::shm::path_for(name)
+        .ok_or_else(|| ProtocolError::Malformed(format!("unsafe region name {name:?}")))
 }
 
 /// A writable region owned by its creator. Unlinked on drop.
@@ -285,16 +165,17 @@ pub struct RegionNamer {
 }
 
 static REGION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
 
 impl RegionNamer {
     pub fn new() -> Self {
-        // Sweep stale regions once per process, at the point where regions
-        // start being created. This reclaims tmpfs space from any prior crashes.
-        SWEEP_ONCE.call_once(sweep_stale_regions);
-
+        // `Names` sweeps as it is built, at the point where regions start
+        // being created, which reclaims tmpfs from any prior crash. It also
+        // owns the prefix, so the sweep can always read back who owns a file
+        // it finds — including files this crate did not write.
         Self {
-            prefix: format!("pulpit-{}", std::process::id()),
+            prefix: pulpit_core::ipc::shm::Names::for_this_process(None)
+                .prefix()
+                .to_string(),
         }
     }
 
@@ -327,6 +208,7 @@ impl Default for RegionNamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulpit_core::ipc::shm::base_directory;
 
     #[test]
     fn a_region_round_trips_between_owner_and_attacher() {
@@ -413,95 +295,5 @@ mod tests {
             );
         }
         assert!(!path.exists(), "region was cleaned up");
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn stale_region_files_are_swept_but_current_process_files_are_kept() {
-        let base = base_directory();
-        let current_pid = std::process::id();
-        // Use a definitely-dead pid: the kernel max plus one will never be assigned.
-        let dead_pid = 4194305u32;
-
-        // Create a file matching the dead-pid pattern.
-        let dead_file_name = format!("pulpit-{}-0", dead_pid);
-        let dead_path = base.join(&dead_file_name);
-        std::fs::write(&dead_path, b"stale").unwrap();
-        assert!(dead_path.exists(), "dead-pid file was created");
-
-        // Create a file matching the current-pid pattern.
-        let current_file_name = format!("pulpit-{}-test", current_pid);
-        let current_path = base.join(&current_file_name);
-        std::fs::write(&current_path, b"current").unwrap();
-        assert!(current_path.exists(), "current-pid file was created");
-
-        // Call the sweep logic directly. This is not protected by Once in tests,
-        // so we can call it multiple times to verify the behavior.
-        sweep_stale_regions_in_directory(&base, current_pid);
-
-        // After the sweep, the dead-pid file should be removed (because the
-        // process is not alive), but the current-pid file should remain.
-        assert!(!dead_path.exists(), "stale file for dead process was swept");
-        assert!(current_path.exists(), "file for current process was kept");
-
-        // Clean up the current-pid test file.
-        let _ = std::fs::remove_file(&current_path);
-    }
-
-    /// `pulpit-media` names its rings `pulpit-media-<pid>-<n>`, and this
-    /// sweeper is the only thing that reclaims them after a crash: the ring's
-    /// own `Drop` does not run on a `SIGKILL`. Reading the pid only as far as
-    /// the first dash took `"media"`, failed to parse it, and skipped the
-    /// file — so every crash with an overlay playing leaked its rings until
-    /// the machine was rebooted.
-    ///
-    /// The two crates cannot see each other, so nothing but this test ties the
-    /// sweeper to the name `surface.rs` actually produces. Keep them in step.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn stale_media_rings_are_swept_too() {
-        let base = base_directory();
-        let current_pid = std::process::id();
-        let dead_pid = 4194305u32;
-
-        // Exactly the shape of `RingNamer`'s prefix in pulpit-media.
-        let dead_ring = base.join(format!("pulpit-media-{dead_pid}-0"));
-        std::fs::write(&dead_ring, b"stale ring").unwrap();
-        let live_ring = base.join(format!("pulpit-media-{current_pid}-0"));
-        std::fs::write(&live_ring, b"live ring").unwrap();
-
-        sweep_stale_regions_in_directory(&base, current_pid);
-
-        assert!(
-            !dead_ring.exists(),
-            "a media ring whose owner is gone must be reclaimed"
-        );
-        assert!(
-            live_ring.exists(),
-            "a media ring belonging to this process must be left alone"
-        );
-
-        let _ = std::fs::remove_file(&live_ring);
-    }
-
-    #[test]
-    fn a_pid_is_read_past_a_label_and_never_from_the_last_component() {
-        // Render regions: the pid comes first.
-        assert_eq!(
-            extract_pid_from_region_name("pulpit-1234-abcdef"),
-            Some(1234)
-        );
-        // Media rings: the pid comes after a non-numeric label.
-        assert_eq!(
-            extract_pid_from_region_name("pulpit-media-1234-0"),
-            Some(1234)
-        );
-        // Not ours.
-        assert_eq!(extract_pid_from_region_name("something-else-1234-0"), None);
-        // A bare label with nothing after it names no process.
-        assert_eq!(extract_pid_from_region_name("pulpit-media"), None);
-        // The trailing component is a discriminator, not a pid, so a name that
-        // ends in a number must not be read as owned by it.
-        assert_eq!(extract_pid_from_region_name("pulpit-media-7"), None);
     }
 }

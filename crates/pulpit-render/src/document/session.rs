@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use crate::protocol::{read_message, write_message, ProtocolError};
-use crate::supervisor::WORKER_MARKER;
 
 use super::protocol::{DocumentFailure, DocumentRequest, DocumentResponse};
 use super::worker::Hello;
@@ -48,14 +47,13 @@ impl Default for DocumentWorkerCommand {
 
 impl DocumentWorkerCommand {
     fn build(&self, source: &Path) -> std::io::Result<Command> {
-        // The same fork-bomb bound the render supervisor keeps, for the same
-        // reason: a worker that spawns workers grows exponentially and takes
-        // the machine down before any deadline can notice.
-        if std::env::var_os(WORKER_MARKER).is_some() {
-            return Err(std::io::Error::other(
-                "refusing to spawn a document worker from inside a worker process",
-            ));
-        }
+        // The same fork-bomb bound the supervisors keep, from the same place:
+        // a worker that spawns workers grows exponentially and takes the
+        // machine down before any deadline can notice. This command builds its
+        // own `Command` rather than using `WorkerCommand`, because the
+        // document is named on the argument as raw bytes — so the guard is
+        // asked for explicitly here.
+        pulpit_core::ipc::worker::spawn_guard("document worker")?;
         let command = match self {
             DocumentWorkerCommand::CurrentExe { flag } => {
                 use std::ffi::OsString;
@@ -77,7 +75,7 @@ impl DocumentWorkerCommand {
                 command
             }
         };
-        Ok(crate::supervisor::as_worker(command))
+        Ok(pulpit_core::ipc::as_worker(command))
     }
 }
 
@@ -250,6 +248,7 @@ pub fn serve_stdio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulpit_core::ipc::WORKER_MARKER;
 
     #[test]
     fn a_worker_cannot_spawn_a_worker() {

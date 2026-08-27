@@ -7,12 +7,9 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{
-    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError,
-};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pulpit_core::RenderGeneration;
@@ -24,67 +21,11 @@ use crate::protocol::{
 };
 use crate::shm::{RegionNamer, SharedRegion};
 
-/// How a worker process is launched.
-#[derive(Debug, Clone)]
-pub enum WorkerCommand {
-    /// Re-execute the current binary with an argument that makes it a worker.
-    /// Used by the application so a single installed executable is enough.
-    CurrentExe {
-        arg: String,
-    },
-    Explicit {
-        program: PathBuf,
-        args: Vec<String>,
-    },
-}
-
-/// Set on every worker process a supervisor spawns, and refused as input.
-///
-/// A worker that spawns workers is a fork bomb: the growth is exponential and
-/// takes the machine down long before a deadline or a restart budget can
-/// notice, because the failure is unbounded breadth rather than one runaway
-/// child. The marker is the only bound that holds, and it holds for
-/// `Explicit` too — a command that happens to name the spawning binary
-/// recurses exactly the same way.
-pub const WORKER_MARKER: &str = "PULPIT_WORKER";
-
-/// Mark a command as a worker and give it the pipes the supervisor talks over.
-///
-/// Both supervisors in this crate end `build` the same way, and the
-/// [`WORKER_MARKER`] half of it is load-bearing: it is the bound that stops a
-/// worker from spawning workers, so it must not be something one of them can
-/// forget to apply.
-pub(crate) fn as_worker(mut command: Command) -> Command {
-    command
-        .env(WORKER_MARKER, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    command
-}
-
-impl WorkerCommand {
-    fn build(&self) -> std::io::Result<Command> {
-        if std::env::var_os(WORKER_MARKER).is_some() {
-            return Err(std::io::Error::other(
-                "refusing to spawn a renderer worker from inside a worker process",
-            ));
-        }
-        let command = match self {
-            WorkerCommand::CurrentExe { arg } => {
-                let mut command = Command::new(std::env::current_exe()?);
-                command.arg(arg);
-                command
-            }
-            WorkerCommand::Explicit { program, args } => {
-                let mut command = Command::new(program);
-                command.args(args);
-                command
-            }
-        };
-        Ok(as_worker(command))
-    }
-}
+/// How a worker process is launched, and the marker that stops a worker
+/// launching more. One definition, in `pulpit-core`: the two supervisors and
+/// the document session each kept their own, and each said in a comment that
+/// the copies had to agree while nothing checked that they did.
+pub use pulpit_core::ipc::{as_worker, WorkerCommand, WORKER_MARKER};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
@@ -561,6 +502,7 @@ enum WorkerPayload {
     Died(String),
 }
 
+use pulpit_core::ipc::Sink as WakeupSink;
 /// A worker has said something, so there is a reason to call
 /// [`RendererSupervisor::pump`].
 ///
@@ -570,56 +512,7 @@ enum WorkerPayload {
 /// duplicate an event. A caller that misses one loses nothing — the next
 /// `pump` drains everything waiting — which is what lets the sink drop
 /// signals rather than block a reader thread.
-pub struct RenderWakeup {
-    inbox: Mutex<Receiver<()>>,
-}
-
-/// What a [`RenderWakeup::wait`] came back with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wakeup {
-    /// A worker has spoken: drain the supervisor.
-    Ring,
-    /// Nothing was said within the timeout.
-    Idle,
-    /// The supervisor is gone. A listener must stop waiting; every later
-    /// call returns this immediately, so a loop that treats it as a ring
-    /// spins.
-    Closed,
-}
-
-impl RenderWakeup {
-    /// Wait up to `timeout` for a worker to say something.
-    ///
-    /// Blocking: this is meant for a thread of the caller's own, not for the
-    /// event loop, which must stay free to draw between renders. One waiter
-    /// at a time — the handle is taken once — and a second caller finding the
-    /// inbox held is told the same thing as a caller finding it closed.
-    pub fn wait(&self, timeout: Duration) -> Wakeup {
-        let Ok(inbox) = self.inbox.try_lock() else {
-            return Wakeup::Closed;
-        };
-        match inbox.recv_timeout(timeout) {
-            Ok(()) => Wakeup::Ring,
-            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
-            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
-        }
-    }
-}
-
-/// The reader threads' end of the doorbell.
-#[derive(Clone)]
-struct WakeupSink(SyncSender<()>);
-
-impl WakeupSink {
-    /// Ring the doorbell, unless it is already ringing.
-    ///
-    /// `try_send` on a one-deep channel is the whole coalescing rule: a burst
-    /// of finished renders wakes the event loop once, and a reader thread
-    /// never blocks on a listener that has not got round to looking yet.
-    fn ring(&self) {
-        let _ = self.0.try_send(());
-    }
-}
+pub use pulpit_core::ipc::{Doorbell as RenderWakeup, Wakeup};
 
 pub struct RendererSupervisor {
     config: SupervisorConfig,
@@ -657,19 +550,15 @@ const DEFAULT_REGION_BYTES: u64 = 1920 * 1080 * 4;
 impl RendererSupervisor {
     pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
         let (sender, events) = channel();
-        // One deep: the doorbell says "look again", and two rings before a
-        // look would mean the same thing as one.
-        let (signal, inbox) = sync_channel(1);
+        let (signal, inbox) = pulpit_core::ipc::doorbell();
         let mut supervisor = Self {
             workers: Vec::new(),
             queue: VecDeque::new(),
             events,
             deferred: VecDeque::new(),
             sender,
-            wakeup: WakeupSink(signal),
-            wakeup_inbox: Some(Arc::new(RenderWakeup {
-                inbox: Mutex::new(inbox),
-            })),
+            wakeup: signal,
+            wakeup_inbox: Some(Arc::new(inbox)),
             namer: RegionNamer::new(),
             next_request: 0,
             generation_floor: RenderGeneration::ZERO,
@@ -715,7 +604,7 @@ impl RendererSupervisor {
     }
 
     fn spawn_worker(&self, index: usize, epoch: u64) -> std::io::Result<Worker> {
-        let mut child = self.config.command.build()?.spawn()?;
+        let mut child = self.config.command.build("renderer worker")?.spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let region = SharedRegion::create(&self.namer.next(), DEFAULT_REGION_BYTES)

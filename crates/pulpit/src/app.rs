@@ -16513,182 +16513,117 @@ fn visible_centre(scroll: f32, grid: OverviewGrid, count: usize) -> Option<usize
 /// unboundedly on a channel whose senders leaked.
 const WAKEUP_POLL: Duration = Duration::from_secs(1);
 
-/// The renderer's doorbell as a subscription identity.
+/// One doorbell, as a subscription identity.
 ///
-/// The hash is a constant because there is exactly one doorbell for the life
-/// of the application. Hashing the pointer instead would be the same value in
-/// practice and a restarted subscription — a second listener thread on a
-/// one-listener handle — the day it were not.
+/// `identity` is what iced hashes to decide whether this is the same
+/// subscription as last frame, and the four doorbells do not agree on what
+/// makes them the same. The renderer and the media supervisor each have
+/// exactly one doorbell for the life of the application, so a constant is
+/// right and hashing the address would be a restarted subscription — a second
+/// listener thread on a one-listener handle — the day the address changed.
+/// The document session and the file watcher are replaced whenever a document
+/// is opened, and their identity has to change with them so the old listener
+/// is torn down; for those, the address of the handle *is* the identity.
 #[derive(Clone)]
-struct RenderListener(std::sync::Arc<pulpit_render::supervisor::RenderWakeup>);
+struct DoorbellListener {
+    doorbell: std::sync::Arc<pulpit_core::ipc::Doorbell>,
+    identity: Identity,
+    thread: &'static str,
+    message: Message,
+}
 
-impl std::hash::Hash for RenderListener {
+#[derive(Clone, Copy)]
+enum Identity {
+    /// One for the life of the application.
+    Fixed(&'static str),
+    /// Replaced when the document is; the handle's address says which.
+    Handle,
+}
+
+impl std::hash::Hash for DoorbellListener {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        "pulpit::render-wakeup".hash(state);
+        match self.identity {
+            Identity::Fixed(name) => name.hash(state),
+            Identity::Handle => std::sync::Arc::as_ptr(&self.doorbell).hash(state),
+        }
     }
 }
 
-/// Turn the renderer's doorbell into [`Message::RenderReady`].
+/// Turn a doorbell into an application message.
 ///
 /// A thread, not a future, because the doorbell is a blocking channel: the
 /// wait must not sit on the runtime that also draws. The channel it feeds is
-/// one deep and the send is a `try_send`, so a burst of finished frames
-/// collapses into a single pass of the event loop instead of a queue of
-/// messages each asking for the same drain.
-fn render_wakeups(
-    wakeup: std::sync::Arc<pulpit_render::supervisor::RenderWakeup>,
-) -> Subscription<Message> {
-    use pulpit_render::supervisor::Wakeup;
-
-    Subscription::run_with(RenderListener(wakeup), |listener| {
-        let wakeup = listener.0.clone();
-        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
-        let spawned = std::thread::Builder::new()
-            .name("render-wakeup".into())
-            .spawn(move || loop {
-                match wakeup.wait(WAKEUP_POLL) {
-                    Wakeup::Ring => {
-                        if sender
-                            .try_send(Message::RenderReady)
-                            .is_err_and(|error| error.is_disconnected())
-                        {
-                            return;
-                        }
-                    }
-                    Wakeup::Idle => {}
-                    // The supervisor is gone, which happens on the way out.
-                    Wakeup::Closed => return,
-                }
-            });
-        if let Err(error) = spawned {
-            // The tick still drains the supervisor, so this costs latency
-            // rather than frames.
-            tracing::warn!(%error, "no renderer wakeup listener; falling back to the tick");
-        }
-        receiver
-    })
-}
-
-/// Stable subscription identity for the current document session.
+/// one deep and the send is a `try_send`, so a burst collapses into a single
+/// pass of the event loop instead of a queue of messages each asking for the
+/// same drain.
 ///
-/// Every newly opened document replaces this handle, so the source path is
-/// part of the identity indirectly through the `Arc` address. The old
-/// listener observes a closed doorbell and exits.
-#[derive(Clone)]
-struct ReaderListener(std::sync::Arc<crate::reader_link::ReaderWakeup>);
+/// Failing to spawn the thread is survivable: every one of these drains on the
+/// tick as well, so the cost is latency rather than lost work.
+fn doorbell_wakeups(listener: DoorbellListener) -> Subscription<Message> {
+    use pulpit_core::ipc::Wakeup;
 
-impl std::hash::Hash for ReaderListener {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::sync::Arc::as_ptr(&self.0).hash(state);
-    }
-}
-
-fn reader_wakeups(
-    wakeup: std::sync::Arc<crate::reader_link::ReaderWakeup>,
-) -> Subscription<Message> {
-    use crate::reader_link::Wakeup;
-
-    Subscription::run_with(ReaderListener(wakeup), |listener| {
-        let wakeup = listener.0.clone();
+    Subscription::run_with(listener, |listener| {
+        let doorbell = listener.doorbell.clone();
+        let message = listener.message.clone();
+        let name = listener.thread;
         let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
         let spawned = std::thread::Builder::new()
-            .name("reader-wakeup".into())
+            .name(name.into())
             .spawn(move || loop {
-                match wakeup.wait(WAKEUP_POLL) {
+                match doorbell.wait(WAKEUP_POLL) {
                     Wakeup::Ring => {
                         if sender
-                            .try_send(Message::ReaderReady)
+                            .try_send(message.clone())
                             .is_err_and(|error| error.is_disconnected())
                         {
                             return;
                         }
                     }
                     Wakeup::Idle => {}
+                    // The other end is gone, which happens on the way out.
                     Wakeup::Closed => return,
                 }
             });
         if let Err(error) = spawned {
-            tracing::warn!(%error, "no document wakeup listener; falling back to the tick");
+            tracing::warn!(%error, listener = name, "no wakeup listener; falling back to the tick");
         }
         receiver
     })
 }
 
-#[derive(Clone)]
-struct MediaListener(std::sync::Arc<pulpit_media::supervisor::MediaWakeup>);
-
-impl std::hash::Hash for MediaListener {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        "pulpit::media-wakeup".hash(state);
-    }
-}
-
-fn media_wakeups(
-    wakeup: std::sync::Arc<pulpit_media::supervisor::MediaWakeup>,
-) -> Subscription<Message> {
-    use pulpit_media::supervisor::Wakeup;
-
-    Subscription::run_with(MediaListener(wakeup), |listener| {
-        let wakeup = listener.0.clone();
-        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
-        let spawned = std::thread::Builder::new()
-            .name("media-wakeup".into())
-            .spawn(move || loop {
-                match wakeup.wait(WAKEUP_POLL) {
-                    Wakeup::Ring => {
-                        if sender
-                            .try_send(Message::MediaReady)
-                            .is_err_and(|error| error.is_disconnected())
-                        {
-                            return;
-                        }
-                    }
-                    Wakeup::Idle => {}
-                    Wakeup::Closed => return,
-                }
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "no media wakeup listener; falling back to the tick");
-        }
-        receiver
+fn render_wakeups(wakeup: std::sync::Arc<pulpit_core::ipc::Doorbell>) -> Subscription<Message> {
+    doorbell_wakeups(DoorbellListener {
+        doorbell: wakeup,
+        identity: Identity::Fixed("pulpit::render-wakeup"),
+        thread: "render-wakeup",
+        message: Message::RenderReady,
     })
 }
 
-#[derive(Clone)]
-struct FileListener(std::sync::Arc<crate::doc::watcher::FileWakeup>);
-
-impl std::hash::Hash for FileListener {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::sync::Arc::as_ptr(&self.0).hash(state);
-    }
+fn reader_wakeups(wakeup: std::sync::Arc<pulpit_core::ipc::Doorbell>) -> Subscription<Message> {
+    doorbell_wakeups(DoorbellListener {
+        doorbell: wakeup,
+        identity: Identity::Handle,
+        thread: "reader-wakeup",
+        message: Message::ReaderReady,
+    })
 }
 
-fn file_wakeups(wakeup: std::sync::Arc<crate::doc::watcher::FileWakeup>) -> Subscription<Message> {
-    use crate::doc::watcher::Wakeup;
+fn media_wakeups(wakeup: std::sync::Arc<pulpit_core::ipc::Doorbell>) -> Subscription<Message> {
+    doorbell_wakeups(DoorbellListener {
+        doorbell: wakeup,
+        identity: Identity::Fixed("pulpit::media-wakeup"),
+        thread: "media-wakeup",
+        message: Message::MediaReady,
+    })
+}
 
-    Subscription::run_with(FileListener(wakeup), |listener| {
-        let wakeup = listener.0.clone();
-        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
-        let spawned = std::thread::Builder::new()
-            .name("file-wakeup".into())
-            .spawn(move || loop {
-                match wakeup.wait(WAKEUP_POLL) {
-                    Wakeup::Ring => {
-                        if sender
-                            .try_send(Message::FileChanged)
-                            .is_err_and(|error| error.is_disconnected())
-                        {
-                            return;
-                        }
-                    }
-                    Wakeup::Idle => {}
-                    Wakeup::Closed => return,
-                }
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "no file wakeup listener; falling back to the tick");
-        }
-        receiver
+fn file_wakeups(wakeup: std::sync::Arc<pulpit_core::ipc::Doorbell>) -> Subscription<Message> {
+    doorbell_wakeups(DoorbellListener {
+        doorbell: wakeup,
+        identity: Identity::Handle,
+        thread: "file-wakeup",
+        message: Message::FileChanged,
     })
 }
 

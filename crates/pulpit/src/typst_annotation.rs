@@ -260,14 +260,10 @@ impl Worker {
         // used to set `PULPIT_WORKER_PROCESS`, which nothing ever read, and
         // never touched the marker that is actually checked — so the one bound
         // that holds had been forgotten here.
-        if std::env::var_os(pulpit_render::supervisor::WORKER_MARKER).is_some() {
-            return Err(std::io::Error::other(
-                "refusing to spawn a typst worker from inside a worker process",
-            ));
-        }
+        pulpit_core::ipc::worker::spawn_guard("typst worker")?;
         let mut child = Command::new(std::env::current_exe()?)
             .arg("--typst-worker")
-            .env(pulpit_render::supervisor::WORKER_MARKER, "1")
+            .env(pulpit_core::ipc::WORKER_MARKER, "1")
             // stderr is dropped rather than inherited: typst writes diagnostics
             // for markup the reader is still editing, and they are reported
             // through the compile result instead of the terminal.

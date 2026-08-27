@@ -72,19 +72,12 @@ pub const INLINE_FRAME_BYTES: u64 = 8 << 20;
 /// while a warming pass of small thumbnails never comes near it.
 pub const MAX_INLINE_IN_FLIGHT_BYTES: u64 = 32 << 20;
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProtocolError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("malformed message: {0}")]
-    Malformed(String),
-    #[error("message of {0} bytes exceeds the {MAX_MESSAGE_BYTES} byte limit")]
-    TooLarge(u32),
-    #[error("peer closed the connection")]
-    Closed,
-    #[error("protocol version mismatch: worker speaks {theirs}, we speak {ours}")]
-    VersionMismatch { ours: u32, theirs: u32 },
-}
+/// Why a message could not be moved across the pipe.
+///
+/// One definition for both workers, in `pulpit-core`: the envelope is the same
+/// problem whatever is inside it, and the half where a mistake is a security
+/// bug rather than a wrong picture.
+pub use pulpit_core::ipc::ProtocolError;
 
 /// Identifies one render request for its whole lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -362,21 +355,12 @@ pub enum Response {
     },
 }
 
-/// Write one length-prefixed message.
+/// Write one length-prefixed message, at this protocol's ceiling.
 pub fn write_message<T: Serialize>(
     writer: &mut impl Write,
     message: &T,
 ) -> Result<(), ProtocolError> {
-    let encoded = bincode::serialize(message)
-        .map_err(|e| ProtocolError::Malformed(format!("encode: {e}")))?;
-    let length = u32::try_from(encoded.len()).map_err(|_| ProtocolError::TooLarge(u32::MAX))?;
-    if length > MAX_MESSAGE_BYTES {
-        return Err(ProtocolError::TooLarge(length));
-    }
-    writer.write_all(&length.to_le_bytes())?;
-    writer.write_all(&encoded)?;
-    writer.flush()?;
-    Ok(())
+    pulpit_core::ipc::write_message(writer, message, MAX_MESSAGE_BYTES)
 }
 
 /// Read one length-prefixed message, refusing implausible lengths before
@@ -384,30 +368,7 @@ pub fn write_message<T: Serialize>(
 pub fn read_message<T: serde::de::DeserializeOwned>(
     reader: &mut impl Read,
 ) -> Result<T, ProtocolError> {
-    let mut length = [0u8; 4];
-    match reader.read_exact(&mut length) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Err(ProtocolError::Closed)
-        }
-        Err(e) => return Err(ProtocolError::Io(e)),
-    }
-    let length = u32::from_le_bytes(length);
-    if length == 0 {
-        return Err(ProtocolError::Malformed("empty message".into()));
-    }
-    if length > MAX_MESSAGE_BYTES {
-        return Err(ProtocolError::TooLarge(length));
-    }
-    let mut buffer = vec![0u8; length as usize];
-    reader.read_exact(&mut buffer).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            ProtocolError::Closed
-        } else {
-            ProtocolError::Io(e)
-        }
-    })?;
-    bincode::deserialize(&buffer).map_err(|e| ProtocolError::Malformed(format!("decode: {e}")))
+    pulpit_core::ipc::read_message(reader, MAX_MESSAGE_BYTES)
 }
 
 #[cfg(test)]
@@ -460,7 +421,10 @@ mod tests {
         let mut cursor = std::io::Cursor::new(framed);
         assert!(matches!(
             read_message::<Request>(&mut cursor),
-            Err(ProtocolError::TooLarge(u32::MAX))
+            Err(ProtocolError::TooLarge {
+                bytes: u32::MAX,
+                ..
+            })
         ));
     }
 

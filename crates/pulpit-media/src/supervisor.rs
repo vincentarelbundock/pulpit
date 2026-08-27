@@ -9,11 +9,9 @@
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{
-    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError,
-};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pulpit_core::overlay::ContentKind;
@@ -34,92 +32,18 @@ use crate::surface::{RingNamer, SurfaceRing, DEFAULT_SLOTS};
 /// still short enough not to read as a hung quit.
 const WORKER_EXIT_GRACE: Duration = Duration::from_secs(5);
 
+use pulpit_core::ipc::Sink as WakeupSink;
 /// A media worker queued an event. The payload remains on the supervisor's
 /// ordered channel; this one-slot signal only wakes the application.
-pub struct MediaWakeup {
-    inbox: Mutex<Receiver<()>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wakeup {
-    Ring,
-    Idle,
-    Closed,
-}
-
-impl MediaWakeup {
-    pub fn wait(&self, timeout: Duration) -> Wakeup {
-        let Ok(inbox) = self.inbox.try_lock() else {
-            return Wakeup::Closed;
-        };
-        match inbox.recv_timeout(timeout) {
-            Ok(()) => Wakeup::Ring,
-            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
-            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct WakeupSink(SyncSender<()>);
-
-impl WakeupSink {
-    fn ring(&self) {
-        let _ = self.0.try_send(());
-    }
-}
+pub use pulpit_core::ipc::{Doorbell as MediaWakeup, Wakeup};
 
 /// How a worker process is launched.
-#[derive(Debug, Clone)]
-pub enum WorkerCommand {
-    /// Re-execute the running executable with a flag that selects a worker
-    /// role. Used for every runtime that links nothing optional, so there is
-    /// no second binary to build, install or package — and therefore none to
-    /// be missing.
-    CurrentExe {
-        arg: String,
-    },
-    Explicit {
-        program: PathBuf,
-        args: Vec<String>,
-    },
-}
-
-/// Set on every worker process a supervisor spawns, and refused as input.
-///
-/// See the renderer supervisor's marker of the same name: a worker that
-/// spawns workers grows exponentially and takes the machine down before any
-/// deadline notices. The name is shared deliberately — a renderer worker must
-/// not spawn media workers either, and one marker covers both directions.
-pub const WORKER_MARKER: &str = "PULPIT_WORKER";
-
-impl WorkerCommand {
-    fn build(&self) -> std::io::Result<Command> {
-        if std::env::var_os(WORKER_MARKER).is_some() {
-            return Err(std::io::Error::other(
-                "refusing to spawn a media worker from inside a worker process",
-            ));
-        }
-        let mut command = match self {
-            WorkerCommand::CurrentExe { arg } => {
-                let mut command = Command::new(std::env::current_exe()?);
-                command.arg(arg);
-                command
-            }
-            WorkerCommand::Explicit { program, args } => {
-                let mut command = Command::new(program);
-                command.args(args);
-                command
-            }
-        };
-        command
-            .env(WORKER_MARKER, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        Ok(command)
-    }
-}
+/// How a worker process is launched, and the marker that stops a worker
+/// launching more. One definition, in `pulpit-core`, shared with the renderer
+/// supervisor: a renderer worker must not spawn media workers either, and one
+/// marker covers both directions. Two constants that had to stay equal, with
+/// nothing checking that they did, is what this replaces.
+pub use pulpit_core::ipc::{WorkerCommand, WORKER_MARKER};
 
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
@@ -257,7 +181,7 @@ impl Worker {
         wakeup: WakeupSink,
     ) -> Result<Worker, MediaError> {
         let mut child = command
-            .build()
+            .build("media worker")
             .and_then(|mut command| command.spawn())
             .map_err(|e| {
                 MediaError::new(
@@ -444,7 +368,7 @@ impl MediaSupervisor {
 
     /// A supervisor that knows nothing until it is told. Tests only.
     pub fn unprobed(config: MediaConfig) -> Self {
-        let (signal, inbox) = sync_channel(1);
+        let (signal, inbox) = pulpit_core::ipc::doorbell();
         Self {
             config,
             namer: RingNamer::new(),
@@ -455,10 +379,8 @@ impl MediaSupervisor {
             probes: HashMap::new(),
             selections: HashMap::new(),
             pending: Vec::new(),
-            wakeup: WakeupSink(signal),
-            wakeup_inbox: Some(Arc::new(MediaWakeup {
-                inbox: Mutex::new(inbox),
-            })),
+            wakeup: signal,
+            wakeup_inbox: Some(Arc::new(inbox)),
             worker_counters: HashMap::new(),
             frames_forwarded: 0,
             frames_coalesced: 0,

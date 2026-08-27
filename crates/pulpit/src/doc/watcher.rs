@@ -5,8 +5,8 @@
 //! [`crate::doc::manager::DocumentManager`], which is pure and testable.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -28,29 +28,7 @@ pub struct DocumentWatcher {
 }
 
 /// One-slot event-loop doorbell for filesystem hints.
-pub struct FileWakeup {
-    inbox: Mutex<Receiver<()>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wakeup {
-    Ring,
-    Idle,
-    Closed,
-}
-
-impl FileWakeup {
-    pub fn wait(&self, timeout: Duration) -> Wakeup {
-        let Ok(inbox) = self.inbox.try_lock() else {
-            return Wakeup::Closed;
-        };
-        match inbox.recv_timeout(timeout) {
-            Ok(()) => Wakeup::Ring,
-            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
-            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
-        }
-    }
-}
+pub use pulpit_core::ipc::Doorbell as FileWakeup;
 
 impl std::fmt::Debug for DocumentWatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -108,7 +86,7 @@ impl DocumentWatcher {
             path.file_name().map(|name| name.to_os_string())
         };
         let (sender, events) = channel();
-        let (signal, wakeup) = sync_channel(1);
+        let (signal, wakeup) = pulpit_core::ipc::doorbell();
 
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             let Ok(event) = event else { return };
@@ -123,8 +101,10 @@ impl DocumentWatcher {
                 .iter()
                 .any(|changed| is_the_watched_file(changed, watched.as_deref()))
             {
-                let _ = sender.send(());
-                let _ = signal.try_send(());
+                // The hint reaches the channel before the doorbell rings,
+                // or the event loop could wake, find nothing, and go back to
+                // sleep just as the hint lands behind it.
+                signal.send_then_ring(&sender, ());
             }
         })
         .map_err(|e| WatchError::Watch {
@@ -143,9 +123,7 @@ impl DocumentWatcher {
             path,
             _watcher: watcher,
             events,
-            wakeup: Some(Arc::new(FileWakeup {
-                inbox: Mutex::new(wakeup),
-            })),
+            wakeup: Some(Arc::new(wakeup)),
         })
     }
 

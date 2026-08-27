@@ -17,9 +17,8 @@
 //!   mutation's revision arrives and not before (A7).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 
 use pulpit_core::page::{PageGeometry, PageIndex};
 use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse};
@@ -297,39 +296,8 @@ pub enum Told {
 /// This is deliberately a one-slot doorbell rather than another delivery
 /// channel. Answers remain ordered on `ReaderLink::told`; a burst merely asks
 /// the event loop to drain that channel once.
-pub struct ReaderWakeup {
-    inbox: Mutex<Receiver<()>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wakeup {
-    Ring,
-    Idle,
-    Closed,
-}
-
-impl ReaderWakeup {
-    /// Block on a helper thread until an answer arrives or `timeout` elapses.
-    pub fn wait(&self, timeout: Duration) -> Wakeup {
-        let Ok(inbox) = self.inbox.try_lock() else {
-            return Wakeup::Closed;
-        };
-        match inbox.recv_timeout(timeout) {
-            Ok(()) => Wakeup::Ring,
-            Err(RecvTimeoutError::Timeout) => Wakeup::Idle,
-            Err(RecvTimeoutError::Disconnected) => Wakeup::Closed,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct WakeupSink(SyncSender<()>);
-
-impl WakeupSink {
-    fn ring(&self) {
-        let _ = self.0.try_send(());
-    }
-}
+pub use pulpit_core::ipc::Doorbell as ReaderWakeup;
+use pulpit_core::ipc::Sink as WakeupSink;
 
 /// The application's end of the conversation.
 pub struct ReaderLink {
@@ -375,8 +343,7 @@ impl ReaderLink {
         let session = DocumentSession::start(&DocumentWorkerCommand::default(), source)?;
         let (ask_sender, ask_receiver) = std::sync::mpsc::channel::<Ask>();
         let (told_sender, told_receiver) = std::sync::mpsc::channel::<Told>();
-        let (wakeup_sender, wakeup_receiver) = sync_channel(1);
-        let wakeup = WakeupSink(wakeup_sender);
+        let (wakeup, wakeup_receiver) = pulpit_core::ipc::doorbell();
 
         let source_for_thread = source.to_path_buf();
         std::thread::Builder::new()
@@ -393,9 +360,7 @@ impl ReaderLink {
             source: source.to_path_buf(),
             lost: false,
             outstanding: 0,
-            wakeup_inbox: Some(Arc::new(ReaderWakeup {
-                inbox: Mutex::new(wakeup_receiver),
-            })),
+            wakeup_inbox: Some(Arc::new(wakeup_receiver)),
         })
     }
 

@@ -5028,6 +5028,7 @@ dependencies = [
 name = "pulpit-core"
 version = "0.0.10"
 dependencies = [
+ "bincode",
  "regex",
  "serde",
  "serde_json",

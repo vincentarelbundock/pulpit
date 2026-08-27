@@ -7,7 +7,7 @@
 //! queue, because a browser's clock and an audio clock do not wait.
 
 use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::{Mmap, MmapMut};
@@ -17,24 +17,12 @@ use crate::protocol::{ProtocolError, SurfaceSlot, MAX_SLOT_BYTES};
 /// Three slots: one being displayed, one just published, one being written.
 pub const DEFAULT_SLOTS: u32 = 3;
 
-/// Where regions live. `/dev/shm` is tmpfs on Linux; the temp dir is the
-/// portable fallback.
-fn base_directory() -> PathBuf {
-    let shm = Path::new("/dev/shm");
-    if shm.is_dir() {
-        shm.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    }
-}
-
+/// The path a region name refers to, refusing a name that could escape the
+/// directory. The directory and the safety rule come from `pulpit-core`, so
+/// this crate and the render crate cannot disagree about where regions live.
 fn path_for(name: &str) -> Result<PathBuf, ProtocolError> {
-    if name.is_empty() || name.len() > 256 || name.contains(['/', '\\', '\0']) {
-        return Err(ProtocolError::Malformed(format!(
-            "unsafe region name {name:?}"
-        )));
-    }
-    Ok(base_directory().join(name))
+    pulpit_core::ipc::shm::path_for(name)
+        .ok_or_else(|| ProtocolError::Malformed(format!("unsafe region name {name:?}")))
 }
 
 /// Hands out process-unique ring names so two documents, or two runs, never
@@ -48,7 +36,13 @@ pub struct RingNamer {
 impl RingNamer {
     pub fn new() -> Self {
         Self {
-            prefix: format!("pulpit-media-{}", std::process::id()),
+            // `Names` both builds the prefix and sweeps what earlier runs
+            // left behind. The ring's own `Drop` cannot do that: it does not
+            // run when the process is killed, which is exactly when the rings
+            // are left in tmpfs.
+            prefix: pulpit_core::ipc::shm::Names::for_this_process(Some("media"))
+                .prefix()
+                .to_string(),
             next: AtomicU64::new(0),
         }
     }
