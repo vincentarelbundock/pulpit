@@ -736,30 +736,20 @@ impl PdfiumBackend {
 /// directory, so an interrupted save leaves the presenter's chosen path
 /// either untouched or holding a complete PDF — never half of one, and never
 /// a truncated overwrite of a file they already had.
+///
+/// The visibility is [`Inherited`]: the presenter picked this path, and an
+/// export they cannot hand to anybody is not what they asked for. Their umask
+/// decides, as it would for any other file they created there.
+///
+/// [`Inherited`]: crate::atomic::Visibility::Inherited
 pub(crate) fn write_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let directory = destination.parent().unwrap_or_else(|| Path::new("."));
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ticket = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = directory.join(format!(".pulpit-export-{}-{ticket}", std::process::id()));
-
-    let write = |path: &Path| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    };
-    if let Err(e) = write(&temporary) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(PdfError::Render(format!(
-            "cannot write {}: {e}",
-            temporary.display()
-        )));
-    }
-    std::fs::rename(&temporary, destination).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
-        PdfError::Render(format!("cannot save {}: {e}", destination.display()))
-    })
+    crate::atomic::replace(
+        destination,
+        "export",
+        crate::atomic::Visibility::Inherited,
+        bytes,
+    )
+    .map_err(|e| PdfError::Render(format!("cannot save {e}")))
 }
 
 struct Bookmarks<'a> {

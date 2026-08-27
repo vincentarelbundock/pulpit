@@ -5,6 +5,11 @@
 //! provides crash containment for malformed or adversarial PDFs and parallel
 //! progress when one page is expensive.
 
+/// Replacing a file's contents atomically and without a symlink window.
+/// Here rather than in a domain crate because it touches the file system,
+/// and here rather than in the application because `pulpit-render` is what
+/// both the application and the signer can reach.
+pub mod atomic;
 pub mod cache;
 /// DjVu, bound to an installed djvulibre at run time
 /// (`SPEC-reader-formats.md` §55.3). The backend is behind the `djvu` feature

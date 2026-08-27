@@ -40,7 +40,7 @@ impl SettingsStore {
         Self { path: path.into() }
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -108,7 +108,7 @@ impl SettingsStore {
             let _ = std::fs::copy(&self.path, self.backup_path());
         }
 
-        crate::platform::paths::write_atomically(&self.path, "toml.tmp", text.as_bytes())?;
+        crate::platform::paths::write_atomically(&self.path, text.as_bytes())?;
         Ok(())
     }
 
@@ -220,7 +220,7 @@ pub fn load_or_default() -> Settings {
     SettingsStore::default().load()
 }
 
-#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+#[allow(dead_code)] // unreached, including by its own tests
 pub fn save(settings: &Settings) -> Result<(), SettingsError> {
     SettingsStore::default().save(settings)
 }

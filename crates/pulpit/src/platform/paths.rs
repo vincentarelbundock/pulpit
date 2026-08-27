@@ -87,7 +87,7 @@ impl Directories {
     /// Encrypted signing credentials managed by pulpit. They stay separate
     /// from the human-readable settings file, which must never contain key
     /// material or passphrases.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn signing_credentials(&self) -> PathBuf {
         self.config.join("signatures")
     }
@@ -108,13 +108,13 @@ impl Directories {
         self.cache.join("audience.pid")
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.toml")
     }
 
     /// Create every directory, reporting the first that could not be made.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn create(&self) -> std::io::Result<()> {
         for directory in [&self.config, &self.cache, &self.data, &self.logs] {
             std::fs::create_dir_all(directory)?;
@@ -123,7 +123,7 @@ impl Directories {
     }
 
     /// A rooted copy, for tests.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn under(root: &Path) -> Directories {
         Directories {
             config: root.join("config"),
@@ -155,28 +155,23 @@ pub fn create_owner_private_file(path: &Path) -> std::io::Result<File> {
 /// Write `contents` to `path` so that a crash leaves either the previous file
 /// or the complete new one, never a half-written one.
 ///
-/// The temporary file is flushed and fsynced *before* the rename, so the
-/// rename can never expose a file whose contents are still in the page cache,
-/// and the containing directory is fsynced afterwards so the rename itself
-/// survives a crash. `extension` names the scratch file (`"json.tmp"`,
-/// `"toml.tmp"`) so two stores writing side by side cannot collide.
-pub fn write_atomically(path: &Path, extension: &str, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+/// The mechanics are `pulpit_render::atomic`'s, which is where they live for
+/// every writer in pulpit: a hidden, unpredictable, `O_EXCL` temporary file
+/// beside the destination, fsynced before the rename and with the directory
+/// fsynced after it.
+///
+/// [`Visibility::Inherited`] because these are the reader's own files under
+/// their own configuration directory, and narrowing them past their umask
+/// would be this function deciding something that is not its to decide. The
+/// protection that matters here is `O_EXCL`: the previous version of this
+/// wrote to a name derived from the destination, which a planted symlink
+/// could redirect and a second writer could collide with silently.
+///
+/// [`Visibility::Inherited`]: pulpit_render::atomic::Visibility::Inherited
+pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use pulpit_render::atomic::{replace, Visibility};
 
-    let temporary = path.with_extension(extension);
-    {
-        let mut file = File::create(&temporary)?;
-        file.write_all(contents)?;
-        file.flush()?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temporary, path)?;
-    if let Some(directory) = path.parent() {
-        if let Ok(handle) = File::open(directory) {
-            let _ = handle.sync_all();
-        }
-    }
-    Ok(())
+    replace(path, "write", Visibility::Inherited, contents).map_err(std::io::Error::from)
 }
 
 fn home() -> PathBuf {

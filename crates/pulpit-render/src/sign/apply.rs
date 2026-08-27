@@ -26,15 +26,19 @@
 //! 4. Write the candidate to a temporary file beside the destination and run
 //!    the §32 gate against the bytes *as they are on disk*. Every clause of
 //!    it must pass.
-//! 5. Only then fsync and rename into place. On any failure the temporary
-//!    file is removed and neither the source nor the destination is touched.
+//! 5. Only then rename into place and fsync the directory. On any failure
+//!    the temporary file is removed and neither the source nor the
+//!    destination is touched.
+//!
+//! Steps 4 and 5 are `crate::atomic`'s, which is where the same discipline
+//! now lives for every writer in pulpit rather than only for this one.
 //!
 //! Two things this module deliberately does not do, because `pulpit-render`
 //! reads neither the clock nor an entropy source: it takes `signing_time` as
 //! unix seconds and the trailer's new `/ID` second element as 16 caller-
 //! supplied bytes. Both belong to the caller (the application layer).
 
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -407,10 +411,9 @@ fn sign_document_file_inner(
         tamper(&mut candidate);
     }
 
-    // Write the candidate beside the destination, under the same hidden
-    // temporary-file convention `pdf::pdfium::write_atomically` uses, so an
-    // interrupted signing leaves the destination either untouched or holding
-    // a complete signed PDF.
+    // Write the candidate beside the destination through `crate::atomic`,
+    // so an interrupted signing leaves the destination either untouched or
+    // holding a complete signed PDF.
     let (temporary, mut temporary_file) = create_temporary(destination)?;
     write_and_sync(&temporary, &mut temporary_file, &candidate)?;
     drop(temporary_file);
@@ -434,11 +437,12 @@ fn sign_document_file_inner(
         }
     };
 
-    if let Err(e) = std::fs::rename(&temporary, destination) {
-        let _ = std::fs::remove_file(&temporary);
+    // `promote` renames and then fsyncs the directory, so the new name
+    // survives a crash the way its contents already do.
+    if let Err(e) = crate::atomic::promote(&temporary, destination) {
         return Err(SignApplyError::Io {
-            path: destination.to_path_buf(),
-            source: e,
+            path: e.path,
+            source: e.source,
         });
     }
 
@@ -1326,82 +1330,21 @@ fn is_same_file(source: &Path, destination: &Path) -> Result<bool, SignApplyErro
     }
 }
 
-/// A per-attempt name for the temporary file. Uniqueness, not secrecy: the
-/// secrecy comes from `O_EXCL`, which is what makes a pre-planted file or
-/// symlink at the same name a failure rather than a hijack.
-fn temporary_name() -> String {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ticket = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-
-    // `RandomState` is seeded per process by the standard library; hashing
-    // the ticket and the clock through it gives a name an attacker cannot
-    // predict from the pid alone.
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(ticket);
-    hasher.write_u64(nanos);
-    hasher.write_u32(std::process::id());
-    format!(
-        ".pulpit-sign-{}-{:016x}",
-        std::process::id(),
-        hasher.finish()
-    )
-}
-
-/// Create `path`, and only create it: `O_CREAT|O_EXCL`, mode `0o600`.
+/// The temporary file, from the shared primitive: hidden, unpredictable,
+/// `O_EXCL`, and `0o600` from the instant it exists.
 ///
-/// An existing file, or a symlink pointing anywhere at all, makes this fail
-/// with `AlreadyExists` instead of opening — and nothing is truncated.
-fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-/// Create the hidden temporary file in the destination's own directory.
+/// [`Visibility::Private`] and not the reader's umask: until the §32 gate has
+/// passed, this file holds an *unverified* candidate signature over their
+/// document, and the window in which it exists is not a window anybody else
+/// needs to be able to read.
 ///
-/// `create_new` is `O_EXCL|O_CREAT`: it never follows a symlink and never
-/// truncates an existing file, so a name planted by another user is a
-/// refusal rather than a write through to whatever it points at. The mode is
-/// `0o600` from the first instant the file exists, not after the fact.
+/// [`Visibility::Private`]: crate::atomic::Visibility::Private
 fn create_temporary(destination: &Path) -> Result<(PathBuf, std::fs::File), SignApplyError> {
-    let directory = destination.parent().unwrap_or_else(|| Path::new("."));
-    let directory = if directory.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        directory
-    };
-
-    let mut last_error = None;
-    for _ in 0..32 {
-        let path = directory.join(temporary_name());
-        match open_exclusive(&path) {
-            Ok(file) => return Ok((path, file)),
-            // The name was taken: draw another one rather than touch it.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
-            Err(e) => return Err(SignApplyError::Io { path, source: e }),
-        }
-    }
-
-    Err(SignApplyError::Io {
-        path: directory.to_path_buf(),
-        source: last_error.unwrap_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "no free temporary file name",
-            )
-        }),
-    })
+    crate::atomic::create_temporary(destination, "sign", crate::atomic::Visibility::Private)
+        .map_err(|e| SignApplyError::Io {
+            path: e.path,
+            source: e.source,
+        })
 }
 
 /// Write through the handle that was created, never by reopening the path:
@@ -1411,16 +1354,9 @@ fn write_and_sync(
     file: &mut std::fs::File,
     bytes: &[u8],
 ) -> Result<(), SignApplyError> {
-    let mut write = || -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()
-    };
-    write().map_err(|e| {
-        let _ = std::fs::remove_file(path);
-        SignApplyError::Io {
-            path: path.to_path_buf(),
-            source: e,
-        }
+    crate::atomic::write_and_sync(path, file, bytes).map_err(|e| SignApplyError::Io {
+        path: e.path,
+        source: e.source,
     })
 }
 
@@ -1950,39 +1886,6 @@ mod tests {
     }
 
     // --- The temporary file and the in-place guard ------------------------
-
-    #[test]
-    fn a_planted_file_at_the_temporary_name_is_not_truncated() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let planted = directory.path().join(".pulpit-sign-planted");
-        std::fs::write(&planted, b"victim contents").expect("plant a file");
-
-        let error = open_exclusive(&planted).expect_err("O_EXCL refuses an existing name");
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(&planted).expect("read back"),
-            b"victim contents",
-            "the planted file must not have been truncated"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_planted_symlink_at_the_temporary_name_is_not_followed() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let victim = directory.path().join("victim");
-        std::fs::write(&victim, b"victim contents").expect("write the victim");
-        let planted = directory.path().join(".pulpit-sign-planted");
-        std::os::unix::fs::symlink(&victim, &planted).expect("plant a symlink");
-
-        let error = open_exclusive(&planted).expect_err("O_EXCL refuses a symlink");
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(&victim).expect("read back"),
-            b"victim contents",
-            "the symlink's target must not have been written through"
-        );
-    }
 
     #[test]
     fn the_temporary_file_is_fresh_private_and_unpredictable() {

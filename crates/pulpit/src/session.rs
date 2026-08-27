@@ -19,7 +19,6 @@
 //! state written unattended, never hand-edited, and JSON has no rule about
 //! values preceding tables to trip over as fields are added.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -506,11 +505,9 @@ impl SessionStore {
         Ok(snapshot)
     }
 
-    /// Write the snapshot atomically: temporary file in the same directory,
-    /// flushed and fsynced, then renamed over the destination. Exactly the
-    /// discipline `SettingsStore::save` uses, and for the same reason — a
-    /// crash during the write of a crash-recovery file must not be what
-    /// destroys the recovery.
+    /// Write the snapshot atomically, through the one primitive every writer
+    /// in pulpit uses — a crash during the write of a crash-recovery file
+    /// must not be what destroys the recovery.
     pub fn save(&self, snapshot: &SessionSnapshot) -> Result<(), SessionError> {
         // `capture` stamps the schema; serialising the borrow directly saves
         // cloning the mapping and roles on every periodic save.
@@ -521,19 +518,7 @@ impl SessionStore {
         let directory = self.path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(directory)?;
 
-        let temporary = self.path.with_extension("json.tmp");
-        {
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(text.as_bytes())?;
-            file.flush()?;
-            // Durability before visibility: the rename must never expose a
-            // file whose contents are still in the page cache.
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, &self.path)?;
-        if let Ok(handle) = std::fs::File::open(directory) {
-            let _ = handle.sync_all();
-        }
+        crate::platform::paths::write_atomically(&self.path, text.as_bytes())?;
         Ok(())
     }
 
