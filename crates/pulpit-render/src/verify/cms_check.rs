@@ -234,9 +234,22 @@ impl Digest {
 
 // --- ESS SigningCertificateV2 (RFC 5035), decode side ---------------------
 
+/// RFC 5035's `SigningCertificateV2`.
+///
+/// `policies` is optional in the specification and pulpit's own signer never
+/// writes it, but `der`'s `Sequence` derive refuses trailing content — so a
+/// third-party signer that does write it decoded as `None` here and the
+/// signature was reported `Broken: "signing-certificate-v2 attribute is
+/// malformed"`. A legal file, called malformed, because our own producer
+/// happens not to exercise that field.
+///
+/// It is decoded and not read: nothing in pulpit consults a signing policy,
+/// and the point is only that its presence must not condemn the signature.
 #[derive(Sequence)]
 struct SigningCertificateV2 {
     certs: Vec<EssCertIdV2>,
+    #[asn1(optional = "true")]
+    policies: Option<der::asn1::Any>,
 }
 
 #[derive(Sequence)]
@@ -1289,6 +1302,54 @@ pub fn verify_signatures(bytes: &[u8]) -> Result<Vec<SignatureVerification>> {
 
 #[cfg(test)]
 mod tests {
+    /// A `SigningCertificateV2` carrying the optional `policies` field still
+    /// decodes.
+    ///
+    /// `der`'s `Sequence` derive refuses trailing content, so while this
+    /// struct stopped at `certs` a legal RFC 5035 attribute decoded as `None`
+    /// and the signature was reported malformed. pulpit's own signer never
+    /// writes `policies`, which is exactly why nothing in the suite noticed:
+    /// the shape that broke is one only a third-party producer makes.
+    ///
+    /// The attribute is assembled as bytes rather than through our own struct,
+    /// because a test that builds the value with a field cannot be run against
+    /// a version that lacks it — and this is checking that we can read what
+    /// someone else wrote, not that we can read ourselves.
+    #[test]
+    fn a_signing_certificate_v2_with_policies_is_not_malformed() {
+        use der::Decode;
+
+        /// A DER `SEQUENCE` wrapping `body`. Every length here is far below
+        /// 128, so the short form is all that is needed.
+        fn sequence(body: &[u8]) -> Vec<u8> {
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend_from_slice(body);
+            out
+        }
+
+        // EssCertIdV2 ::= SEQUENCE { certHash OCTET STRING }
+        let mut cert_hash = vec![0x04, 32];
+        cert_hash.extend_from_slice(&[0x11u8; 32]);
+        let ess = sequence(&cert_hash);
+        let certs = sequence(&ess);
+
+        let without = sequence(&certs);
+        assert!(
+            SigningCertificateV2::from_der(&without).is_ok(),
+            "the shape our own signer writes must decode"
+        );
+
+        // The same attribute with `policies` appended: SEQUENCE OF, empty.
+        let policies = sequence(&[]);
+        let mut body = certs.clone();
+        body.extend_from_slice(&policies);
+        let with = sequence(&body);
+        assert!(
+            SigningCertificateV2::from_der(&with).is_ok(),
+            "a legal attribute carrying policies must not read as malformed"
+        );
+    }
+
     /// Every curve the signer will sign with is a curve this file can check.
     ///
     /// The two lists are deliberately separate — a verifier that shares its
