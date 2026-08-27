@@ -4,7 +4,7 @@
 //! capability exists so the application's fallback paths can be exercised
 //! from a unit test.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -12,11 +12,11 @@ use crate::platform::appearance::SystemAppearance;
 use crate::platform::capabilities::Capabilities;
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{Notification, PlatformServices};
+use crate::platform::services::PlatformServices;
 use crate::platform::Outcome;
 
 #[derive(Debug)]
-#[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+#[allow(dead_code)] // reached by its tests, not by the application
 pub struct NullPlatform {
     name: &'static str,
     capabilities: Capabilities,
@@ -30,7 +30,7 @@ pub struct NullPlatform {
 }
 
 impl NullPlatform {
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn new(name: &'static str) -> NullPlatform {
         NullPlatform {
             name,
@@ -47,49 +47,49 @@ impl NullPlatform {
         }
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn with_capabilities(mut self, capabilities: Capabilities) -> NullPlatform {
         self.capabilities = capabilities;
         self
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn with_appearance(mut self, appearance: SystemAppearance) -> NullPlatform {
         self.appearance = appearance;
         self.capabilities.system_appearance = appearance != SystemAppearance::Unknown;
         self
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn holding_inhibition(mut self) -> NullPlatform {
         self.inhibition_works = true;
         self.capabilities.sleep_inhibition = true;
         self
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
+    #[allow(dead_code)] // unreached, including by its own tests
     pub fn rooted_at(mut self, root: &Path) -> NullPlatform {
         self.directories = Some(Directories::under(root));
         self
     }
 
     /// Everything the application asked the platform to do.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn inhibit_calls(&self) -> usize {
         self.inhibit_calls.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn release_calls(&self) -> usize {
         self.release_calls.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     fn record(&self, call: impl Into<String>) {
         self.calls.lock().unwrap().push(call.into());
     }
@@ -126,13 +126,6 @@ impl PlatformServices for NullPlatform {
         }
     }
 
-    fn notify(&self, notification: &Notification) -> Outcome {
-        self.record(format!("notify {}", notification.title));
-        Outcome::Unsupported {
-            what: "Desktop notifications",
-        }
-    }
-
     /// Recorded, and never sent anywhere. The null adapter exists so a test
     /// can watch what the application asked for; a printer is the last thing
     /// it should be able to reach.
@@ -162,15 +155,12 @@ impl PlatformServices for NullPlatform {
         self.record("release");
         Outcome::Done
     }
-
-    fn recent_documents(&self) -> Option<Vec<PathBuf>> {
-        None
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn unsupported_operations_are_refused_not_silently_dropped() {

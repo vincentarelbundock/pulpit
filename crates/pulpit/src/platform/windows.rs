@@ -3,21 +3,21 @@
 //! Appearance comes from the Personalize registry values and the accessibility
 //! system parameters; inhibition from the power-request API; opening and
 //! revealing from the shell. Anything Windows cannot do without a packaged
-//! app identity — toast notifications, a global menu — is reported as
-//! unsupported rather than faked.
+//! app identity — a global menu — is reported as unsupported rather than
+//! faked.
 //!
 //! As in the Linux adapter, the FFI is declared here so the handful of structs
 //! whose layout matters sit next to the code that fills them in.
 
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::{Capabilities, IdentityQuality};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{Notification, PlatformServices};
+use crate::platform::services::PlatformServices;
 use crate::platform::Outcome;
 
 type Bool = i32;
@@ -178,7 +178,6 @@ impl PlatformServices for WindowsServices {
             media_keys: true,
             // Toasts need a registered AppUserModelID, which is a packaging
             // decision rather than a runtime one.
-            notifications: false,
             image_clipboard: true,
             // Windows has no "show the print dialog for this file" call:
             // the shell verb takes no options and shows nothing, and the
@@ -285,14 +284,6 @@ impl PlatformServices for WindowsServices {
             2 | 3 => Outcome::failed("that file or folder no longer exists"),
             5 => Outcome::refused("Windows denied access to that file"),
             code => Outcome::failed(format!("the shell refused to open it (code {code})")),
-        }
-    }
-
-    fn notify(&self, _notification: &Notification) -> Outcome {
-        // A toast requires a registered AppUserModelID and a WinRT activation
-        // path. Until the package provides one, this must say so.
-        Outcome::Unsupported {
-            what: "Desktop notifications",
         }
     }
 
@@ -424,12 +415,6 @@ impl PlatformServices for WindowsServices {
             }
         }
         Outcome::Done
-    }
-
-    fn recent_documents(&self) -> Option<Vec<PathBuf>> {
-        // The shell's recent list is written to, not read from: parsing the
-        // `.lnk` files in `Recent` would mean guessing at a private format.
-        None
     }
 }
 

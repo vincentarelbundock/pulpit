@@ -7,14 +7,14 @@
 //! pulpit dies mid-talk — the same ordering as the Linux adapter.
 
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::{Capabilities, IdentityQuality};
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{spawn_detached as spawn, Notification, PlatformServices, Urgency};
+use crate::platform::services::{spawn_detached as spawn, PlatformServices};
 use crate::platform::Outcome;
 
 // ---------------------------------------------------------------------------
@@ -201,7 +201,6 @@ impl PlatformServices for MacosServices {
             // reader would actually find, not what the platform could offer.
             accessibility_bridge: false,
             media_keys: true,
-            notifications: true,
             image_clipboard: true,
             // As on Linux: either way of reaching a printer counts, and a
             // build with Quartz but no `lp` still prints through the panel.
@@ -266,23 +265,6 @@ impl PlatformServices for MacosServices {
 
     fn open(&self, target: &str) -> Outcome {
         spawn("open", &[target])
-    }
-
-    fn notify(&self, notification: &Notification) -> Outcome {
-        // AppleScript is the only notification path open to an unsigned,
-        // unpackaged binary. It posts a real notification, but the system
-        // attributes it to the script runner rather than to pulpit; a signed
-        // bundle with `UNUserNotificationCenter` is the packaging-time fix.
-        let escape = |value: &str| value.replace('\\', r"\\").replace('"', "\\\"");
-        let mut script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            escape(&notification.body),
-            escape(&notification.title)
-        );
-        if notification.urgency == Urgency::Critical {
-            script.push_str(" sound name \"Basso\"");
-        }
-        spawn("osascript", &["-e", &script])
     }
 
     /// One clipboard library serves all three desktops; what differs is
@@ -387,12 +369,6 @@ impl PlatformServices for MacosServices {
             }
             InhibitToken::Handle(_) | InhibitToken::None => Outcome::Done,
         }
-    }
-
-    fn recent_documents(&self) -> Option<Vec<PathBuf>> {
-        // The shared file list is a private, versioned binary plist. Reading
-        // it would be guessing at another application's storage.
-        None
     }
 }
 

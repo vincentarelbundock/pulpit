@@ -4,7 +4,7 @@
 //! fallback chain, and every step reports what actually happened. This module
 //! is the only place in the workspace that knows what a D-Bus name is.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use zbus::blocking::Connection;
@@ -16,7 +16,7 @@ use crate::platform::capabilities::{
 };
 use crate::platform::inhibit::{InhibitState, InhibitToken};
 use crate::platform::paths::Directories;
-use crate::platform::services::{spawn_detached as spawn, Notification, PlatformServices, Urgency};
+use crate::platform::services::{spawn_detached as spawn, PlatformServices};
 use crate::platform::Outcome;
 
 const APP_ID: &str = "com.example.pulpit";
@@ -92,7 +92,6 @@ impl PlatformServices for LinuxServices {
                     || std::env::var_os("GTK_MODULES")
                         .is_some_and(|modules| modules.to_string_lossy().contains("atk-bridge"))),
             media_keys: true,
-            notifications: portal_present,
             // A clipboard belongs to a display server: X11 has a selection
             // owner and Wayland has the data-control protocol, and a
             // headless session has neither. Answered from the session type
@@ -197,22 +196,6 @@ impl PlatformServices for LinuxServices {
 
     fn open(&self, target: &str) -> Outcome {
         spawn("xdg-open", &[target])
-    }
-
-    fn notify(&self, notification: &Notification) -> Outcome {
-        let urgency = match notification.urgency {
-            Urgency::Normal => "normal",
-            Urgency::Critical => "critical",
-        };
-        spawn(
-            "notify-send",
-            &[
-                "--app-name=pulpit",
-                &format!("--urgency={urgency}"),
-                &notification.title,
-                &notification.body,
-            ],
-        )
     }
 
     /// On Wayland the region goes out as pixels and as a written PNG file,
@@ -380,12 +363,6 @@ impl PlatformServices for LinuxServices {
             }
             InhibitToken::None => Outcome::Done,
         }
-    }
-
-    fn recent_documents(&self) -> Option<Vec<PathBuf>> {
-        // recently-used.xbel is a GTK convention rather than a portal one, and
-        // parsing it would mean guessing at another desktop's private file.
-        None
     }
 }
 

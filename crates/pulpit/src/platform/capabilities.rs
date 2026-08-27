@@ -78,8 +78,6 @@ pub struct Capabilities {
     pub accessibility_bridge: bool,
     /// Media and presenter-remote keys reach the application.
     pub media_keys: bool,
-    /// Desktop notifications are available.
-    pub notifications: bool,
     /// A document can be sent to a printer.
     ///
     /// Not "this machine has a printer": a session with a spooler and no
@@ -159,13 +157,13 @@ impl Default for Speech {
 }
 
 impl Speech {
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn can_speak(&self) -> bool {
         matches!(self, Speech::Ready { .. })
     }
 
     /// Whether the settings page should offer a download button.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn can_download(&self) -> bool {
         matches!(self, Speech::Downloadable { .. } | Speech::Ready { .. })
     }
@@ -187,7 +185,6 @@ impl Default for Capabilities {
             native_menus: false,
             accessibility_bridge: false,
             media_keys: true,
-            notifications: false,
             // The null adapter must never send anything to a real printer,
             // and a desktop that has not been taught to print says so.
             printing: false,
@@ -265,7 +262,7 @@ impl Capabilities {
     }
 
     /// Everything that is *not* available, for a one-line summary.
-    #[allow(dead_code)] // reached by its tests, not by the application — SPEC-simplify.md §69
+    #[allow(dead_code)] // reached by its tests, not by the application
     pub fn limitations(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if !self.arbitrary_placement {

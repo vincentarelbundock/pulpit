@@ -1,4 +1,4 @@
-//! Desktop services: dialogs, opening things, notifications, appearance,
+//! Desktop services: dialogs, opening things, printing, appearance,
 //! inhibition and where files live.
 
 use std::path::{Path, PathBuf};
@@ -8,23 +8,6 @@ use crate::platform::capabilities::Capabilities;
 use crate::platform::inhibit::InhibitState;
 use crate::platform::paths::Directories;
 use crate::platform::Outcome;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
-pub enum Urgency {
-    #[default]
-    Normal,
-    /// Something the presenter must know even if the window is not focused.
-    Critical,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
-pub struct Notification {
-    pub title: String,
-    pub body: String,
-    pub urgency: Urgency,
-}
 
 /// One document, on its way to a printer.
 ///
@@ -108,11 +91,6 @@ pub trait PlatformServices: Send + Sync {
     /// Open a URL or file with the desktop's default handler.
     fn open(&self, target: &str) -> Outcome;
 
-    /// Post a desktop notification. Never used for the audience window, and
-    /// never the only record of a failure.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
-    fn notify(&self, notification: &Notification) -> Outcome;
-
     /// Put an image on the system clipboard.
     ///
     /// Here rather than on the toolkit's clipboard because Iced's carries
@@ -194,13 +172,6 @@ pub trait PlatformServices: Send + Sync {
 
     /// Release whatever [`PlatformServices::inhibit`] took.
     fn release_inhibit(&self, state: &InhibitState) -> Outcome;
-
-    /// A best-effort list of recently used documents the platform knows
-    /// about. `None` when the platform has no such notion.
-    #[allow(dead_code)] // unreached, including by its own tests — SPEC-simplify.md §69
-    fn recent_documents(&self) -> Option<Vec<PathBuf>> {
-        None
-    }
 }
 
 /// Hand a URI or path to a desktop helper program, detached.

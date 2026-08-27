@@ -319,7 +319,6 @@ impl ChoiceList {
 
 /// What the reader is looking at.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct ReaderSession {
     /// `None` when no document is open in document mode — which is different
     /// from a document with no pages.
