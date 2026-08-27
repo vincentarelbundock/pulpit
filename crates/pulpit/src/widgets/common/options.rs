@@ -13,10 +13,11 @@
 //! order they appear, and colour comes first because it is what a hand
 //! reaches for most often.
 
-use iced::widget::{button, column, container, row, space, text, Column};
-use iced::{Alignment, Element, Length};
+use iced::widget::{column, container, text, Column};
+use iced::Element;
 
 use crate::theme;
+use crate::widgets::common::view::panel_header;
 
 /// The width a control in an options panel is given.
 ///
@@ -72,18 +73,7 @@ impl<Message: Clone + 'static> Options<Message> {
 
 impl<Message: Clone + 'static> From<Options<Message>> for Element<'static, Message> {
     fn from(options: Options<Message>) -> Self {
-        let header = row![
-            text(options.title).size(theme::type_scale::LABEL),
-            space::horizontal().width(Length::Fill),
-            button(theme::icon::icon(
-                theme::Icon::Close,
-                theme::type_scale::BODY
-            ))
-            .padding(2)
-            .style(theme::ambient::tool_button)
-            .on_press_maybe(options.on_close),
-        ]
-        .align_y(Alignment::Center);
+        let header = panel_header(options.title, options.on_close);
 
         let mut panel: Column<'static, Message> = column![header].spacing(theme::space::S);
         for (label, control) in options.rows {

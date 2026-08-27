@@ -1044,43 +1044,32 @@ fn a_date_field_is_recognised_and_says_what_it_expects() {
 
 /// Three text fields: a date, a number, and one with no format script.
 fn dated_form() -> Vec<u8> {
-    let objects: [&str; 7] = [
+    use crate::testkit::builder::Pdf;
+
+    let mut pdf = Pdf::new();
+    pdf.add(
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R] \
          /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R] >>",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    pdf.add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    pdf.add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R] >>");
+    pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    pdf.add(
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (when) /V () /Ff 0 \
          /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
          /AA << /F << /S /JavaScript /JS (AFDate_FormatEx(\"dd mmmm yyyy\");) >> \
          /K << /S /JavaScript /JS (AFDate_KeystrokeEx(\"dd mmmm yyyy\");) >> >> >>",
+    );
+    pdf.add(
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () /Ff 0 \
          /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
          /AA << /F << /S /JavaScript /JS (AFNumber_Format(1, 3, 0, 0, \"\", true);) >> >> >>",
+    );
+    pdf.add(
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (who) /V () /Ff 0 \
          /Rect [100 600 300 630] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
-    ];
-    let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.7\n");
-    let mut offsets = Vec::new();
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
-    }
-    let start = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
     );
-    pdf
+    pdf.build()
 }
 
 /// One named corpus case, written where the engine can open it.

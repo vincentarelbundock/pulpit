@@ -8,8 +8,8 @@
 //! function and cannot disagree about where a stroke is.
 
 use iced::widget::{
-    button, canvas, column, container, mouse_area, responsive, row, scrollable, slider, space,
-    text, tooltip, Row,
+    button, canvas, column, container, mouse_area, responsive, row, scrollable, slider, text,
+    tooltip, Row,
 };
 use iced::{Alignment, ContentFit, Element, Length, Padding, Rectangle, Size};
 
@@ -399,17 +399,13 @@ fn overflow_menu<Message: Clone + 'static>(
     // A way out in the corner, matching the one on the tool option panels.
     // The menu is opened mid-talk by someone who could not find a control;
     // it must not then be a thing they have to work out how to get rid of.
-    let mut menu = column![row![
-        text("More").size(theme::type_scale::LABEL),
-        space::horizontal().width(Length::Fill),
-        button(theme::icon::icon(theme::Icon::Close, glyph))
-            .padding(2)
-            .style(theme::ambient::tool_button)
-            .on_press_maybe(mode.interactive().then(|| on(WidgetEvent::Annotate(
-                AnnotationCommand::OpenOverflow(false)
+    let mut menu = column![crate::widgets::common::view::panel_header(
+        "More",
+        mode.interactive()
+            .then(|| on(WidgetEvent::Annotate(AnnotationCommand::OpenOverflow(
+                false
             )))),
-    ]
-    .align_y(Alignment::Center)]
+    )]
     .spacing(theme::space::XS);
     for slot in hidden {
         match *slot {
@@ -419,24 +415,7 @@ fn overflow_menu<Message: Clone + 'static>(
                 selected,
                 command,
             } => {
-                let icon = match armable {
-                    AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph),
-                    AnnotationTool::Highlighter => tool_glyph(
-                        crate::widgets::common::view::markup_kind_glyph(options.markup_kind),
-                        glyph,
-                    ),
-                    AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph),
-                    AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
-                    AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
-                    AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
-                    AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
-                    AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
-                    // Never drawn by this palette: shapes are document mode's, and
-                    // arriving here at all would be a stale message.
-                    AnnotationTool::Shape => theme::icon::icon(theme::Icon::Rectangle, glyph),
-                    AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
-                    AnnotationTool::SelectText => theme::icon::icon(theme::Icon::TextCursor, glyph),
-                };
+                let icon = armable_tool_glyph(armable, options, glyph);
                 let mut arm = button(
                     row![icon, text(armable.label()).size(theme::type_scale::CAPTION)]
                         .spacing(theme::space::S)
@@ -527,24 +506,7 @@ fn tool_control<Message: Clone + 'static>(
     // stay the palette's own. That tint is the only thing that says what
     // colour is armed without opening the options panel.
     let glyph = size * 0.74;
-    let icon = match armable {
-        AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph),
-        AnnotationTool::Highlighter => tool_glyph(
-            crate::widgets::common::view::markup_kind_glyph(options.markup_kind),
-            glyph,
-        ),
-        AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph),
-        AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
-        AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
-        AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
-        AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
-        AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
-        // Never drawn by this palette: shapes are document mode's, and
-        // arriving here at all would be a stale message.
-        AnnotationTool::Shape => theme::icon::icon(theme::Icon::Rectangle, glyph),
-        AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
-        AnnotationTool::SelectText => theme::icon::icon(theme::Icon::TextCursor, glyph),
-    };
+    let icon = armable_tool_glyph(armable, options, glyph);
     let mut main = button(icon)
         .padding(Padding::from([size * 0.12, size * 0.2]))
         .height(Length::Fixed(size))
@@ -1001,6 +963,39 @@ fn control<Message: Clone + 'static>(
 /// options say, and they say it against a background chosen to show it.
 fn tool_glyph<'a, Message: 'a>(glyph: theme::Icon, size: f32) -> Element<'a, Message> {
     theme::icon::icon(glyph, size)
+}
+
+/// The glyph an armable tool draws on its own button, wherever that button
+/// is: on the row, or reached through the overflow menu when it did not fit.
+///
+/// Ink, the highlighter and the pointer are drawn in [`tool_glyph`]'s neutral
+/// ink because they are the tools that lay down colour — the swatch in their
+/// options panel is what says which colour, not the icon — while every other
+/// tool keeps [`theme::icon::icon`]'s own rendering because it takes no
+/// colour to begin with.
+fn armable_tool_glyph<'a, Message: 'a>(
+    armable: AnnotationTool,
+    options: crate::widgets::AnnotationOptions,
+    glyph: f32,
+) -> Element<'a, Message> {
+    match armable {
+        AnnotationTool::Ink => tool_glyph(theme::Icon::Pen, glyph),
+        AnnotationTool::Highlighter => tool_glyph(
+            crate::widgets::common::view::markup_kind_glyph(options.markup_kind),
+            glyph,
+        ),
+        AnnotationTool::Pointer => tool_glyph(theme::Icon::Pointer, glyph),
+        AnnotationTool::Spotlight => theme::icon::icon(theme::Icon::Spotlight, glyph),
+        AnnotationTool::Eraser => theme::icon::icon(theme::Icon::Eraser, glyph),
+        AnnotationTool::Text => tool_glyph(theme::Icon::Type, glyph),
+        AnnotationTool::Note => tool_glyph(theme::Icon::StickyNote, glyph),
+        AnnotationTool::Stamp => theme::icon::icon(theme::Icon::Stamp, glyph),
+        // Never drawn by this palette: shapes are document mode's, and
+        // arriving here at all would be a stale message.
+        AnnotationTool::Shape => theme::icon::icon(theme::Icon::Rectangle, glyph),
+        AnnotationTool::Select => theme::icon::icon(theme::Icon::Select, glyph),
+        AnnotationTool::SelectText => theme::icon::icon(theme::Icon::TextCursor, glyph),
+    }
 }
 
 /// One geometry cache per place a [`Marks`] layer is drawn.

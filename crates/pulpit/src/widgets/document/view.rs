@@ -1035,14 +1035,7 @@ fn choice_list_layer<Message: Clone + 'static>(
     .width(Length::Fixed(width))
     .style(theme::ambient::surface);
 
-    let placed = column![
-        space::vertical().height(Length::Fixed(top)),
-        row![space::horizontal().width(Length::Fixed(left)), panel],
-    ];
-    container(placed)
-        .width(Length::Fixed(drawn.0))
-        .height(Length::Fixed(drawn.1))
-        .into()
+    placed_over_the_sheet(panel, (left, top), drawn)
 }
 
 /// The calendar pulpit draws over a date field (§8.6).
@@ -1166,14 +1159,7 @@ fn date_picker_layer<Message: Clone + 'static>(
     .width(Length::Fixed(WIDTH))
     .style(theme::ambient::surface);
 
-    let placed = column![
-        space::vertical().height(Length::Fixed(top)),
-        row![space::horizontal().width(Length::Fixed(left)), panel],
-    ];
-    container(placed)
-        .width(Length::Fixed(drawn.0))
-        .height(Length::Fixed(drawn.1))
-        .into()
+    placed_over_the_sheet(panel, (left, top), drawn)
 }
 
 /// The hour and minute steppers pulpit draws over a time field (§8.6).
@@ -1413,14 +1399,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
             .on_press(on_event(WidgetEvent::Read(ReadCommand::CancelMark))),
     );
 
-    let placed = column![
-        space::vertical().height(Length::Fixed(top)),
-        row![space::horizontal().width(Length::Fixed(left)), controls],
-    ];
-    container(placed)
-        .width(Length::Fixed(drawn.0))
-        .height(Length::Fixed(drawn.1))
-        .into()
+    placed_over_the_sheet(controls, (left, top), drawn)
 }
 
 /// How tall the writing box is with one line in it. It grows from here as
@@ -1678,25 +1657,40 @@ fn navigation_is_compact(width: f32) -> bool {
     width < NAVIGATION_RUN_WIDTH
 }
 
-fn navigation_overflow<Message: Clone + 'static>(
-    state: &NavigationState,
-    on_event: fn(WidgetEvent) -> Message,
+/// The "…" that opens an overflow menu: an ellipsis, held selected while its
+/// menu is open, pressable only while `press` carries a message. Both bands
+/// that collapse behind a menu — navigation and the document's own tools —
+/// draw this same button, so the two overflow triggers cannot drift apart.
+fn overflow_trigger<Message: Clone + 'static>(
+    open: bool,
+    press: Option<Message>,
 ) -> Element<'static, Message> {
-    let mut trigger = button(theme::icon::icon(
+    button(theme::icon::icon(
         theme::Icon::Ellipsis,
         theme::type_scale::HEADING,
     ))
     .padding(Padding::from([4.0, 8.0]))
-    .style(if state.overflow_open {
+    .style(if open {
         theme::ambient::selected_button
     } else {
         theme::ambient::tool_button
-    });
-    if state.live {
-        trigger = trigger.on_press(on_event(WidgetEvent::Read(
-            ReadCommand::NavigationOverflow(!state.overflow_open),
-        )));
-    }
+    })
+    .on_press_maybe(press)
+    .into()
+}
+
+fn navigation_overflow<Message: Clone + 'static>(
+    state: &NavigationState,
+    on_event: fn(WidgetEvent) -> Message,
+) -> Element<'static, Message> {
+    let trigger = overflow_trigger(
+        state.overflow_open,
+        state.live.then(|| {
+            on_event(WidgetEvent::Read(ReadCommand::NavigationOverflow(
+                !state.overflow_open,
+            )))
+        }),
+    );
     let panel = state
         .overflow_open
         .then(|| navigation_overflow_menu(state, on_event));
@@ -1730,22 +1724,12 @@ fn navigation_overflow_menu<Message: Clone + 'static>(
         }
     };
     let spread = state.spread.other();
-    let mut menu = column![row![
-        text(format!("Zoom — {}", state.zoom_label)).size(theme::type_scale::LABEL),
-        space::horizontal().width(Length::Fill),
-        button(theme::icon::icon(
-            theme::Icon::Close,
-            theme::type_scale::BODY
-        ))
-        .padding(2)
-        .style(theme::ambient::tool_button)
-        .on_press_maybe(
-            state
-                .live
-                .then(|| on_event(WidgetEvent::Read(ReadCommand::NavigationOverflow(false),)))
-        ),
-    ]
-    .align_y(Alignment::Center)]
+    let mut menu = column![crate::widgets::common::view::panel_header(
+        format!("Zoom — {}", state.zoom_label),
+        state
+            .live
+            .then(|| on_event(WidgetEvent::Read(ReadCommand::NavigationOverflow(false)))),
+    )]
     .spacing(theme::space::XS);
     for control in [
         item(theme::Icon::ZoomOut, "Zoom out", ReadCommand::ZoomOut),
@@ -1791,6 +1775,23 @@ fn navigation_overflow_menu<Message: Clone + 'static>(
         .padding(theme::space::S)
         .style(theme::ambient::surface)
         .into()
+}
+
+/// The accent rule down the left edge of an outline row carrying the
+/// keyboard focus, or a blank of the same width when it is not.
+///
+/// A spacer rather than an absent marker: three kinds of outline row (a
+/// field, a page, a bookmark) all share this rail, and an absent element
+/// would let the label creep sideways the moment focus reached the row
+/// instead of only lighting up in place.
+fn outline_focus_marker<Message: 'static>(focused: bool) -> Element<'static, Message> {
+    if focused {
+        container(space::vertical().width(3.0).height(Length::Fill))
+            .style(theme::ambient::accent_rule)
+            .into()
+    } else {
+        space::horizontal().width(3.0).into()
+    }
 }
 
 /// The document's authored outline. Page numbers live in the navigation band,
@@ -1945,13 +1946,7 @@ fn outline<Message: Clone + 'static>(
                         theme::ambient::muted()
                     });
                     let focused = focus.as_ref() == Some(&id);
-                    let marker: Element<'static, Message> = if focused {
-                        container(space::vertical().width(3.0).height(Length::Fill))
-                            .style(theme::ambient::accent_rule)
-                            .into()
-                    } else {
-                        space::horizontal().width(3.0).into()
-                    };
+                    let marker = outline_focus_marker(focused);
                     let control = button(
                         row![marker, label, kind, status]
                             .spacing(theme::space::XS)
@@ -2005,13 +2000,7 @@ fn outline<Message: Clone + 'static>(
                             theme::ambient::muted()
                         });
                     let focused = focus.as_ref() == Some(&id);
-                    let marker: Element<'static, Message> = if focused {
-                        container(space::vertical().width(3.0).height(Length::Fill))
-                            .style(theme::ambient::accent_rule)
-                            .into()
-                    } else {
-                        space::horizontal().width(3.0).into()
-                    };
+                    let marker = outline_focus_marker(focused);
                     let control = button(row![marker, label].spacing(theme::space::XS))
                         .width(Length::Fill)
                         .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
@@ -2371,13 +2360,7 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
                 source_ordinal: entry.source_ordinal,
             };
             let focused = focus.as_ref() == Some(&id);
-            let marker: Element<'static, Message> = if focused {
-                container(space::vertical().width(3.0).height(Length::Fill))
-                    .style(theme::ambient::accent_rule)
-                    .into()
-            } else {
-                space::horizontal().width(3.0).into()
-            };
+            let marker = outline_focus_marker(focused);
             let label = text(entry.title.clone())
                 .size(theme::type_scale::LABEL)
                 .line_height(iced::widget::text::LineHeight::Absolute(iced::Pixels(
@@ -2796,21 +2779,14 @@ fn document_tools_overflow<Message: Clone + 'static>(
     state: DocumentToolsState,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let mut trigger = button(theme::icon::icon(
-        theme::Icon::Ellipsis,
-        theme::type_scale::HEADING,
-    ))
-    .padding(Padding::from([4.0, 8.0]))
-    .style(if state.overflow_open {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    });
-    if state.live {
-        trigger = trigger.on_press(on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(
-            !state.overflow_open,
-        ))));
-    }
+    let trigger = overflow_trigger(
+        state.overflow_open,
+        state.live.then(|| {
+            on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(
+                !state.overflow_open,
+            )))
+        }),
+    );
     let panel = state
         .overflow_open
         .then(|| document_tools_overflow_menu(state, on_event));
@@ -2825,22 +2801,12 @@ fn document_tools_overflow_menu<Message: Clone + 'static>(
     state: DocumentToolsState,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    let mut menu = column![row![
-        text("More annotation controls").size(theme::type_scale::LABEL),
-        space::horizontal().width(Length::Fill),
-        button(theme::icon::icon(
-            theme::Icon::Close,
-            theme::type_scale::BODY
-        ))
-        .padding(2)
-        .style(theme::ambient::tool_button)
-        .on_press_maybe(
-            state
-                .live
-                .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(false),)))
-        ),
-    ]
-    .align_y(Alignment::Center)]
+    let mut menu = column![crate::widgets::common::view::panel_header(
+        "More annotation controls",
+        state
+            .live
+            .then(|| on_event(WidgetEvent::Read(ReadCommand::ToolOverflow(false)))),
+    )]
     .spacing(theme::space::XS);
 
     for tool in AnnotationTool::DOCUMENT {

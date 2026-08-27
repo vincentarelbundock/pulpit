@@ -29,6 +29,8 @@ use pulpit_render::document::{
 
 #[cfg(feature = "pdfium")]
 mod common;
+#[cfg(feature = "pdfium")]
+mod testkit;
 
 fn stroke(x: f32) -> DocumentTransaction {
     DocumentTransaction::from_annotations([AnnotationCommand::Create(AnnotationDraft::Ink(
@@ -299,44 +301,17 @@ mod corrupt {
     /// A one-page document whose single annotation is `annotation`.
     fn with_annotation(path: &Path, annotation: &str) -> std::io::Result<()> {
         let content = b"BT /F1 24 Tf 72 700 Td (page) Tj ET\n";
-        let objects: Vec<Vec<u8>> = vec![
-            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-               /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>"
-                .to_vec(),
-            {
-                let mut object = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-                object.extend_from_slice(content);
-                object.extend_from_slice(b"endstream");
-                object
-            },
-            annotation.as_bytes().to_vec(),
-        ];
-
-        let mut bytes = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
-        let mut offsets = Vec::new();
-        for (index, object) in objects.iter().enumerate() {
-            offsets.push(bytes.len());
-            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-            bytes.extend_from_slice(object);
-            bytes.extend_from_slice(b"\nendobj\n");
-        }
-        let start = bytes.len();
-        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-        bytes.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in &offsets {
-            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-        }
-        bytes.extend_from_slice(
-            format!(
-                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
-                objects.len() + 1
-            )
-            .as_bytes(),
+        let mut pdf = crate::testkit::builder::Pdf::new();
+        pdf.add("<< /Type /Catalog /Pages 2 0 R >>");
+        pdf.add("<< /Type /Pages /Kids [4 0 R] /Count 1 >>");
+        pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        pdf.add(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>",
         );
-        std::fs::write(path, bytes)
+        pdf.add_stream("", content);
+        pdf.add(annotation);
+        std::fs::write(path, pdf.build())
     }
 
     /// Each way one annotation dictionary can be wrong, one case at a time.

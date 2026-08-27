@@ -10,6 +10,21 @@ impl Pdf {
         Self::default()
     }
 
+    /// Build from a flat list of object bodies, one per object number in the
+    /// order given — the common case, for a document with no forward
+    /// references that would need [`reserve`](Self::reserve) and [`set`](Self::set).
+    pub fn from_objects<I, T>(bodies: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]>,
+    {
+        let mut pdf = Self::new();
+        for body in bodies {
+            pdf.add(body);
+        }
+        pdf
+    }
+
     /// Add an object body, returning the object number it was given.
     pub fn add(&mut self, body: impl AsRef<[u8]>) -> u32 {
         self.objects.push(body.as_ref().to_vec());

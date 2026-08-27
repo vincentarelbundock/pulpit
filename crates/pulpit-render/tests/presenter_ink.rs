@@ -22,6 +22,7 @@ use pulpit_core::page::PageIndex;
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, PdfDocument, SaveOptions};
 
 mod common;
+mod testkit;
 
 /// The stroke a presenter draws: a wave, so a mark that lands mirrored or
 /// transposed is visible in the comparison rather than symmetric under it.
@@ -323,55 +324,30 @@ mod harness {
     use super::*;
     /// A plain letter-sized deck of `pages` pages with a word on each.
     pub fn write_deck(path: &Path, pages: usize) -> std::io::Result<()> {
-        let mut objects: Vec<Vec<u8>> = vec![
-            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            Vec::new(), // the page tree, once the kids are numbered
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        ];
+        use crate::testkit::builder::Pdf;
+
+        let mut pdf = Pdf::new();
+        pdf.add("<< /Type /Catalog /Pages 2 0 R >>");
+        let tree = pdf.reserve(); // the page tree, once the kids are numbered
+        pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
         let mut kids = Vec::new();
         for page in 0..pages {
             let content = format!("BT /F1 36 Tf 72 700 Td (Slide {}) Tj ET\n", page + 1);
-            let content_number = objects.len() + 2;
-            kids.push(format!("{} 0 R", objects.len() + 1));
-            objects.push(
-                format!(
-                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-                     /Resources << /Font << /F1 3 0 R >> >> /Contents {content_number} 0 R >>"
-                )
-                .into_bytes(),
-            );
-            let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-            stream.extend_from_slice(content.as_bytes());
-            stream.extend_from_slice(b"endstream");
-            objects.push(stream);
+            let content_number = pdf.len() + 2;
+            let page_number = pdf.add(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                 /Resources << /Font << /F1 3 0 R >> >> /Contents {content_number} 0 R >>"
+            ));
+            kids.push(format!("{page_number} 0 R"));
+            pdf.add_stream("", content.as_bytes());
         }
-        objects[1] = format!(
-            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
-            kids.join(" ")
-        )
-        .into_bytes();
-
-        let mut bytes = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
-        let mut offsets = Vec::new();
-        for (index, object) in objects.iter().enumerate() {
-            offsets.push(bytes.len());
-            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-            bytes.extend_from_slice(object);
-            bytes.extend_from_slice(b"\nendobj\n");
-        }
-        let start = bytes.len();
-        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-        bytes.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in &offsets {
-            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-        }
-        bytes.extend_from_slice(
+        pdf.set(
+            tree,
             format!(
-                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
-                objects.len() + 1
-            )
-            .as_bytes(),
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                kids.join(" ")
+            ),
         );
-        std::fs::write(path, bytes)
+        std::fs::write(path, pdf.build())
     }
 }

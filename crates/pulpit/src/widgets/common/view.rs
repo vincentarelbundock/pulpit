@@ -1,6 +1,6 @@
 //! Small visual primitives every family draws with.
 
-use iced::widget::{column, container, responsive, row, space, text};
+use iced::widget::{button, column, container, responsive, row, space, text};
 use iced::{Alignment, Element, Length};
 
 use crate::theme;
@@ -44,6 +44,34 @@ pub fn select_kind_glyph(kind: pulpit_core::annotation::SelectKind) -> theme::Ic
         pulpit_core::annotation::SelectKind::Image => theme::Icon::Picture,
         pulpit_core::annotation::SelectKind::Text => theme::Icon::TextRegion,
     }
+}
+
+/// The title-and-close row atop a floating panel.
+///
+/// An options panel and an overflow menu are different questions — "what
+/// does this tool draw" against "what did not fit on the row" — but both are
+/// a popover the presenter opens mid-talk and must be able to leave without
+/// hunting for the way out. Closing over `on_close` rather than always
+/// wiring a press keeps that exit inert instead of absent when the surface
+/// it would dismiss is not actually live, so the row does not change shape
+/// with the mode.
+pub fn panel_header<Message: Clone + 'static>(
+    title: impl Into<String>,
+    on_close: Option<Message>,
+) -> Element<'static, Message> {
+    row![
+        text(title.into()).size(theme::type_scale::LABEL),
+        space::horizontal().width(Length::Fill),
+        button(theme::icon::icon(
+            theme::Icon::Close,
+            theme::type_scale::BODY
+        ))
+        .padding(2)
+        .style(theme::ambient::tool_button)
+        .on_press_maybe(on_close),
+    ]
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// A caption above a value, the shape most information widgets take.

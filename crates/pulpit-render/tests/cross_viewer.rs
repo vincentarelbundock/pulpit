@@ -493,45 +493,16 @@ fn saving_and_reopening_does_not_shift_geometry_on_a_rotated_page() {
 fn write_rotated_pdf(path: &Path, degrees: i32) -> std::io::Result<()> {
     let content = b"BT /F1 96 Tf 120 500 Td (Rotated) Tj ET\n\
                     1 0 0 RG 6 w 40 40 520 700 re S\n";
-    let objects: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {degrees} \
-             /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>"
-        )
-        .into_bytes(),
-        {
-            let mut object = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-            object.extend_from_slice(content);
-            object.extend_from_slice(b"endstream");
-            object
-        },
-    ];
-
-    let mut bytes = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(bytes.len());
-        bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        bytes.extend_from_slice(object);
-        bytes.extend_from_slice(b"\nendobj\n");
-    }
-    let start = bytes.len();
-    bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-    bytes.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    bytes.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    std::fs::write(path, bytes)
+    let mut pdf = crate::testkit::builder::Pdf::new();
+    pdf.add("<< /Type /Catalog /Pages 2 0 R >>");
+    pdf.add("<< /Type /Pages /Kids [4 0 R] /Count 1 >>");
+    pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    pdf.add(format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {degrees} \
+         /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>"
+    ));
+    pdf.add_stream("", content);
+    std::fs::write(path, pdf.build())
 }
 
 /// §25.5, checked where it matters: a signature drawn into a field's own box
