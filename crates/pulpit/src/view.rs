@@ -353,7 +353,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
     // the toolbar means neither their opening nor their closing can move the
     // menu button or any of the controls in that band.
     let body = if compact_sidebar {
-        let sidebar = if app.search_workspace {
+        let sidebar = if app.search_pane.is_open() {
             search_workspace(app)
         } else {
             let outline = app
@@ -886,7 +886,7 @@ fn document_surface_fingerprint(app: &App) -> u64 {
     app.reader_fullscreen.hash(&mut hasher);
     has_outline_panel.hash(&mut hasher);
     app.compact_document_sidebar().hash(&mut hasher);
-    app.search_workspace.hash(&mut hasher);
+    app.search_pane.is_open().hash(&mut hasher);
     toolbar_present.hash(&mut hasher);
     // The document widget's own gate (`widgets::document::view::page_surface`):
     // closed or open, and a page count of zero draws the same "nothing to

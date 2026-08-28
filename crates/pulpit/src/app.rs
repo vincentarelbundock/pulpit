@@ -1088,10 +1088,11 @@ pub struct App {
     /// Whether pulpit keeps its own motion down, resolved from the
     /// desktop preference and the application setting.
     pub motion: crate::platform::Motion,
-    /// The outline's disclosure transition. Its target mirrors the reader's
-    /// semantic collapsed flag; keeping the clocked interpolation here keeps
-    /// time out of the pure reader session.
-    outline_animation: iced::Animation<bool>,
+    /// The outline rail: whether it is out, and how far through the
+    /// transition that is. Here rather than on the reader session because it
+    /// is chrome around the document, outlives any one document, and is
+    /// clocked — none of which the session is.
+    pub outline_rail: crate::disclosure::Disclosure,
     pub editing_colors: crate::settings::ColorScheme,
     /// Incomplete HEX input belongs to the editor, never to persisted
     /// settings. A valid value moves from here into the sparse overrides.
@@ -1544,8 +1545,10 @@ pub struct App {
     /// question.
     pub search: pulpit_core::search::SearchState,
     /// Search is a transient rail beside Reader or Presenter, never a layout
-    /// cell that permanently takes document space.
-    pub search_workspace: bool,
+    /// cell that permanently takes document space. The same
+    /// [`Disclosure`](crate::disclosure::Disclosure) as the outline rail, so
+    /// the two open, close, remember and animate alike.
+    pub search_pane: crate::disclosure::Disclosure,
     /// Which visible reading region owns arrows and activation. This is
     /// explicit because widget focus alone cannot describe a selected row in
     /// a virtualised sidebar.
@@ -1588,10 +1591,6 @@ pub struct App {
     /// hidden: it is a copy of the reader's document, and it should be no
     /// more exposed than the document already is.
     signing_temp: Option<PathBuf>,
-    /// The search rail's disclosure transition. Kept beside the outline's
-    /// animation so opening either rail has the same timing and reduced-motion
-    /// behaviour.
-    search_animation: iced::Animation<bool>,
     /// Where search began. Keyboard stepping is only a preview; closing the
     /// rail restores this exact view unless a result was explicitly chosen.
     search_origin: Option<SearchOrigin>,
@@ -2051,8 +2050,11 @@ impl App {
             // Settled properly by `apply_appearance` once the platform can be
             // asked; full motion until then, so nothing is reduced on a guess.
             motion: crate::platform::Motion::Full,
-            outline_animation: iced::Animation::new(false).quick(),
-            search_animation: iced::Animation::new(false).quick(),
+            // Both panes start away, including on the paths that never go
+            // through `open_document`: a restored session, or a deck handed
+            // to a window that is already up.
+            outline_rail: crate::disclosure::Disclosure::closed(),
+            search_pane: crate::disclosure::Disclosure::closed(),
             editing_colors: match theme.resolved {
                 crate::platform::appearance::Resolved::Light => crate::settings::ColorScheme::Light,
                 crate::platform::appearance::Resolved::Dark
@@ -2189,7 +2191,6 @@ impl App {
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
-            search_workspace: false,
             keyboard_region: KeyboardRegion::Document,
             search_focus_pending: false,
             sign_resume_pending: false,
@@ -2550,8 +2551,8 @@ impl App {
             // helper for the same reason. Left off this list it faded in
             // about five steps and read as a stutter rather than a fade.
             || self.timer_controls.overtime_since.is_some()
-            || self.outline_animation.is_animating(self.now)
-            || self.search_animation.is_animating(self.now)
+            || self.outline_rail.is_animating(self.now)
+            || self.search_pane.is_animating(self.now)
             || self.search_focus_pending
             || self.sign_resume_pending
             || self.print_spool_pending.is_some()
@@ -4483,9 +4484,7 @@ impl App {
                 // The half-written mark belongs to the application, and the
                 // page surface is where it is drawn (§8.5).
                 if live {
-                    reader.outline_reveal = self
-                        .outline_animation
-                        .interpolate(1.0_f32, 0.0_f32, self.now);
+                    reader.outline_reveal = self.outline_rail.reveal(self.now);
                     if self.keyboard_region != KeyboardRegion::Outline {
                         reader.outline_focus = None;
                     }
@@ -4515,7 +4514,7 @@ impl App {
                 scroll: if live { self.search_scroll } else { 0.0 },
                 viewport: self.search_viewport.clone(),
             },
-            search_open: live && self.search_workspace,
+            search_open: live && self.search_pane.is_open(),
             search_reveal: if live { self.search_reveal() } else { 0.0 },
             audience: crate::widgets::context::AudienceData {
                 blank: self.state.blank(),
@@ -4787,7 +4786,7 @@ impl App {
             Rung::AlarmPopup => self.alarm_controls.open,
             Rung::TimerPopup => self.timer_controls.open,
             Rung::CropMarquee => self.reader.controls().crop.takes_the_pointer(),
-            Rung::SearchWorkspace => self.search_workspace,
+            Rung::SearchWorkspace => self.search_pane.is_open(),
             Rung::AnnotationPanel => {
                 self.annotation_controls.overflow || self.annotation_controls.open.is_some()
             }
@@ -5086,27 +5085,21 @@ impl App {
             // The rail collapses in place, wherever the layout put it, and a
             // layout without an outline pane simply has nothing to collapse.
             Action::ToggleOutline => {
-                if self.search_workspace && self.uses_document_viewer() {
+                use crate::widgets::event::PanelCommand;
+                if self.search_pane.is_open() && self.uses_document_viewer() {
                     let mut tasks = vec![self.close_search(false)];
-                    tasks.push(self.on_read_command(
-                        crate::widgets::event::ReadCommand::SetOutlineCollapsed(false),
-                    ));
-                    tasks.push(
-                        self.on_panel_command(crate::widgets::event::PanelCommand::FocusSidebar),
-                    );
+                    tasks.push(self.on_panel_command(PanelCommand::SetOutlineOpen(true)));
+                    tasks.push(self.on_panel_command(PanelCommand::FocusSidebar));
                     return Task::batch(tasks);
                 }
-                let collapsed = self.reader.controls().outline_collapsed;
-                self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineCollapsed(
-                    !collapsed,
-                ))
+                self.on_panel_command(PanelCommand::SetOutlineOpen(!self.outline_rail.is_open()))
             }
             Action::FocusSearch => {
-                if self.search_workspace {
+                if self.search_pane.is_open() {
                     let mut tasks = vec![self.close_search(true)];
                     if self.uses_document_viewer() {
-                        tasks.push(self.on_read_command(
-                            crate::widgets::event::ReadCommand::SetOutlineCollapsed(true),
+                        tasks.push(self.on_panel_command(
+                            crate::widgets::event::PanelCommand::SetOutlineOpen(false),
                         ));
                     }
                     Task::batch(tasks)
@@ -6487,9 +6480,11 @@ impl App {
         // The previous document's rail is not this document's. A remembered
         // position for the new file, if any, is consulted later and can
         // reopen either pane; until then both start closed, which is also
-        // the declared answer for a file with no record at all.
-        self.set_outline_collapsed(true, false);
-        self.search_workspace = false;
+        // the declared answer for a file with no record at all. Neither
+        // slides shut: nobody asked for a pane to move, a document was
+        // opened.
+        self.outline_rail.jump(false);
+        self.search_pane.jump(false);
         // A *different* file, not a rebuild of this one: the query belonged to
         // the document being put down. Hiding the rail while keeping its hits
         // left the previous document's marks to be drawn over this one's pages
@@ -6719,6 +6714,9 @@ impl App {
     /// different halves of it, and the half `EditFailed` left standing was the
     /// half that stops the form following the pointer.
     fn reader_link_died(&mut self) {
+        // The session goes; the panes around it stay as the reader left
+        // them. They are not the session's to reset — that they were is what
+        // made a document open reopen the outline rail.
         self.reader.closed();
         // A dead worker can never answer the page-text request speech is
         // waiting on; ending the reading now beats leaving it in
@@ -8620,7 +8618,7 @@ impl App {
     /// quarter smaller than they should be, and in a two-page spread the top
     /// of the next row shows below them.
     ///
-    /// Interpolated rather than switched on the collapsed flag, so the fit
+    /// Taken from the reveal rather than the open/closed fact, so the fit
     /// tracks the disclosure animation instead of jumping at the end of it.
     /// Claimed only when the rail sits in the same horizontal band as the
     /// page — in the built-in Reader they are siblings, and a custom layout
@@ -8632,8 +8630,8 @@ impl App {
         page: crate::layout::Frame,
     ) -> f32 {
         let revealed = self
-            .outline_animation
-            .interpolate(1.0_f32, 0.0_f32, self.now)
+            .outline_rail
+            .reveal(self.now)
             .max(self.search_reveal())
             .clamp(0.0, 1.0);
         // A narrow window mounts the rail as a drawer over the page instead,
@@ -9334,15 +9332,6 @@ impl App {
                         return self.scroll_surface_to_reader();
                     }
                 }
-                // Session and animation move together through
-                // `set_outline_collapsed`, the same pairing the mount gate
-                // above uses to restore a remembered sidebar — the point of
-                // sharing it is that the two cannot desync again the way
-                // `open_document` once let them.
-                if let ReadCommand::SetOutlineCollapsed(collapsed) = &command {
-                    self.set_outline_collapsed(*collapsed, true);
-                    return Task::none();
-                }
                 // The reader's jumps: a page chosen in the overview, typed
                 // into the page box, or arrived at by following a link. A
                 // scroll — by wheel, by hand or by `ScrollByWindows` from the
@@ -9706,11 +9695,8 @@ impl App {
             page: page.get(),
             zoom: stored_zoom(zoom),
             fraction,
-            // Inverted: the record speaks of the rail in terms a reader
-            // would use ("open"), the session in terms the widget tree
-            // needs ("collapsed").
-            outline_open: !self.reader.controls().outline_collapsed,
-            search_open: self.search_workspace,
+            outline_open: self.outline_rail.is_open(),
+            search_open: self.search_pane.is_open(),
         };
         // Nothing to write when nothing moved, which is most ticks: the
         // settings are only dirtied by a position that is actually new.
@@ -9740,31 +9726,17 @@ impl App {
             .position_for(self.document_hash.as_deref(), self.documents.path());
     }
 
-    /// Set the outline rail's collapsed state on the reader session and on
-    /// the screen from one place, so the two cannot disagree the way
-    /// `outline_animation` and the session's own `outline_collapsed` used
-    /// to after a document open reset one but not the other.
-    ///
-    /// `animate` is false for a restore: the record is putting the reader
-    /// back where it was, not answering a click, so the rail should simply
-    /// be there on arrival rather than sliding open in front of it — the
-    /// same immediate form the reduced-motion setting already uses.
-    fn set_outline_collapsed(&mut self, collapsed: bool, animate: bool) {
-        self.reader
-            .apply(&crate::widgets::event::ReadCommand::SetOutlineCollapsed(
-                collapsed,
-            ));
-        self.outline_animation = if animate && !self.motion.is_reduced() {
-            self.outline_animation.clone().go(collapsed, self.now)
-        } else {
-            iced::Animation::new(collapsed).quick()
-        };
-    }
-
     /// Apply the held position, now that the surface has reported a window.
     ///
     /// Returns whether anything moved, so the caller knows whether the
     /// scrollable has to be told where the session now is.
+    ///
+    /// The panes jump rather than slide: the record is putting the reader
+    /// back where they were, not answering a click, so a rail that was open
+    /// should be there on arrival instead of opening in front of them. This
+    /// can land before or after the worker has described the document —
+    /// which order is a race — and it no longer matters, because nothing in
+    /// that description touches the panes.
     fn apply_pending_position(&mut self) -> bool {
         let Some(position) = self.pending_position.take() else {
             return false;
@@ -9772,8 +9744,8 @@ impl App {
         let (page, zoom, fraction, outline_open, search_open) = restored_fields(position);
         self.reader
             .restore_position(pulpit_core::page::PageIndex(page), zoom, fraction);
-        self.set_outline_collapsed(!outline_open, false);
-        self.search_workspace = search_open;
+        self.outline_rail.jump(outline_open);
+        self.search_pane.jump(search_open);
         true
     }
 
@@ -11640,7 +11612,7 @@ impl App {
                 Task::none()
             }
             FindCommand::Next => {
-                if self.search_workspace {
+                if self.search_pane.is_open() {
                     self.keyboard_region = KeyboardRegion::SearchResults;
                 }
                 let hit = self.search.advance().cloned();
@@ -11655,7 +11627,7 @@ impl App {
                 ])
             }
             FindCommand::Previous => {
-                if self.search_workspace {
+                if self.search_pane.is_open() {
                     self.keyboard_region = KeyboardRegion::SearchResults;
                 }
                 let hit = self.search.retreat().cloned();
@@ -11798,11 +11770,14 @@ impl App {
                 Task::batch([close_search, show, open])
             }
             PanelCommand::CloseSidebar => {
-                let close_search = self.close_search(false);
-                let collapse_outline = self.on_read_command(
-                    crate::widgets::event::ReadCommand::SetOutlineCollapsed(true),
-                );
-                Task::batch([close_search, collapse_outline])
+                // Both panes share the sidebar's space, so the one control
+                // that closes it closes whichever is in there.
+                self.outline_rail.set(false, self.motion, self.now);
+                self.close_search(false)
+            }
+            PanelCommand::SetOutlineOpen(open) => {
+                self.outline_rail.set(open, self.motion, self.now);
+                Task::none()
             }
             PanelCommand::FocusDocument => {
                 self.keyboard_region = KeyboardRegion::Document;
@@ -11810,7 +11785,7 @@ impl App {
                     iced::advanced::widget::operation::focusable::unfocus(),
                 )
             }
-            PanelCommand::FocusSidebar if self.search_workspace => {
+            PanelCommand::FocusSidebar if self.search_pane.is_open() => {
                 self.keyboard_region = KeyboardRegion::SearchInput;
                 iced::widget::operation::focus(crate::widgets::search::view::input_id())
             }
@@ -11857,27 +11832,17 @@ impl App {
         // and a scan that starts at page one makes them wait for 299 pages of
         // answers they did not ask for.
         self.search.begin_at(self.showing_page());
-        self.search_workspace = true;
+        self.search_pane.set(true, self.motion, self.now);
         self.keyboard_region = KeyboardRegion::SearchInput;
         self.search_focus_pending = true;
-        self.search_animation = if self.motion.is_reduced() {
-            iced::Animation::new(true).quick()
-        } else {
-            self.search_animation.clone().go(true, self.now)
-        };
         self.overview = false;
         Task::none()
     }
 
     fn close_search(&mut self, restore_origin: bool) -> Task<Message> {
-        self.search_workspace = false;
+        self.search_pane.set(false, self.motion, self.now);
         self.keyboard_region = KeyboardRegion::Document;
         self.search_focus_pending = false;
-        self.search_animation = if self.motion.is_reduced() {
-            iced::Animation::new(false).quick()
-        } else {
-            self.search_animation.clone().go(false, self.now)
-        };
         let origin = self.search_origin.take();
         if !restore_origin {
             return Task::none();
@@ -11909,9 +11874,10 @@ impl App {
         }
     }
 
+    /// The search pane's reveal at this frame's clock, for the views that
+    /// have the application but not its `now`.
     pub fn search_reveal(&self) -> f32 {
-        self.search_animation
-            .interpolate(0.0_f32, 1.0_f32, self.now)
+        self.search_pane.reveal(self.now)
     }
 
     /// Whether a document sidebar should float over the page instead of

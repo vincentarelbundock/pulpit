@@ -14,6 +14,7 @@ mod coalesce;
 mod datefield;
 mod designer;
 mod designer_view;
+mod disclosure;
 mod display;
 mod doc;
 mod form_flow;

@@ -600,11 +600,12 @@ pub struct ReaderControls {
     pub rotation: PageRotation,
     /// The marquee crop: armed, mid-choice, or in force.
     pub crop: CropState,
-    /// Whether the outline rail is collapsed to its header. The rail keeps the
-    /// space the layout gave it — that is the layout's to decide — but hides
-    /// everything below the header, so a reader who wants the page and not the
-    /// bookmarks can put them away without editing the layout.
-    pub outline_collapsed: bool,
+    //
+    // Whether the outline rail is out is deliberately *not* here. It is
+    // chrome around the document rather than a control of it, it outlives any
+    // one document, and this struct is reset wholesale whenever a document is
+    // opened — which is how the rail used to reopen itself. The application
+    // owns it, as a `crate::disclosure::Disclosure`.
 }
 
 impl Default for ReaderControls {
@@ -632,7 +633,6 @@ impl Default for ReaderControls {
             spread: PageSpread::default(),
             rotation: PageRotation::default(),
             crop: CropState::default(),
-            outline_collapsed: false,
         }
     }
 }
@@ -1089,7 +1089,6 @@ mod tests {
         assert_eq!(OutlineView::Bookmarks.label(), "Outline");
         assert_eq!(OutlineView::Thumbnails.label(), "Pages");
         // Each tab names itself, so a view that is in front is still labelled.
-        assert!(!ReaderControls::default().outline_collapsed);
         assert!(!ReaderControls::default().navigation_overflow);
         assert!(!ReaderControls::default().tool_overflow);
     }

@@ -60,6 +60,12 @@ pub enum WidgetEvent {
     Chrome(ChromeCommand),
 }
 
+/// What can be asked of the panes around the document.
+///
+/// Which pane is shown, whether it is out at all, and which of it and the
+/// document owns the keyboard — all of it here rather than half here and half
+/// in [`ReadCommand`]. Opening the rail is not a thing done to the document,
+/// and the reader session no longer hears about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelCommand {
     FocusDocument,
@@ -76,6 +82,9 @@ pub enum PanelCommand {
     /// are worth a tab, and a reader who has not opened the sidebar is not
     /// looking for them (§8.4).
     ShowAnnotations,
+    /// Put the outline rail away — collapsed to its header, keeping the space
+    /// the layout gave it — or bring it back out.
+    SetOutlineOpen(bool),
 }
 
 /// What the search pane can ask for.
@@ -247,8 +256,6 @@ pub enum ReadCommand {
         offset: u32,
         viewport: u32,
     },
-    /// Collapse the outline rail to its header, or open it again.
-    SetOutlineCollapsed(bool),
     /// Arm a document tool, or hand the pointer back to the document's own
     /// links and form fields.
     Arm(Option<pulpit_core::annotation::AnnotationTool>),

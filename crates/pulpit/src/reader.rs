@@ -623,6 +623,13 @@ impl ReaderSession {
     }
 
     /// A document was opened. Everything about the previous one goes.
+    ///
+    /// Everything here is about the document, which is why this can be a
+    /// wholesale reset with no list of exceptions to keep. Whether the
+    /// outline rail is out is *not* about the document — it is chrome around
+    /// it, and the application owns it as a
+    /// [`Disclosure`](crate::disclosure::Disclosure). It used to live in the
+    /// controls, where this reset reopened it behind the reader's back.
     pub fn opened(
         &mut self,
         pages: Vec<PageGeometry>,
@@ -3859,10 +3866,6 @@ impl ReaderSession {
                 self.report_outline_scroll(*offset as f32, *viewport as f32);
                 false
             }
-            ReadCommand::SetOutlineCollapsed(collapsed) => {
-                self.controls.outline_collapsed = *collapsed;
-                false
-            }
             ReadCommand::StepDatePicker(forward) => {
                 self.step_date_picker(*forward);
                 false
@@ -4477,13 +4480,11 @@ impl ReaderSession {
             viewport_width: self.cell.0,
             visible,
             controls: &self.controls,
-            // Live views replace this with the application's clocked Iced
-            // animation. Facets used in tests and previews are fully open.
-            outline_reveal: if self.controls.outline_collapsed {
-                0.0
-            } else {
-                1.0
-            },
+            // The rail is the application's, not the session's: a live view
+            // replaces this with its `Disclosure`'s clocked reveal. Facets
+            // used in tests and previews are fully open, so a preview shows
+            // the rail it is a preview of.
+            outline_reveal: 1.0,
             scale: self.scale,
             outline: self.outline.clone(),
             outline_focus: self.outline_focus.as_ref(),
