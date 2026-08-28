@@ -42,6 +42,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A page can no longer stay blurry for the rest of the session.** The
+  application asks for a page's sharp frame once and waits for the answer
+  before ever asking again — and three supervisor paths could drop a render
+  job with no answer at all: a shared region that could not be sized (a full
+  `/dev/shm` at open, most plausibly, and only the big refined frames travel
+  through the region — the coarse stand-ins always arrived), a submit below
+  the generation floor, and a queue deduplication that discarded an
+  identical-looking job from a *different* requester. A job swallowed that
+  way left its frame permanently "in flight": every later plan skipped it,
+  and the page — typically the first pages on screen when a document opened —
+  kept its coarse stand-in for as long as it was looked at. Every job that
+  enters the supervisor is now answered — rendered, failed or cancelled — so
+  the next plan simply asks again, and the deduplication is gone: the rare
+  genuine collision renders twice, which is cheap next to a page that never
+  sharpens.
+
 - **Exporting a document no longer writes through a planted symlink.** Saving
   a PDF creates a scratch file beside the destination first, so an interrupted
   save cannot leave half a document where a whole one was. That scratch file

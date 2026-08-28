@@ -522,6 +522,15 @@ pub struct RendererSupervisor {
     /// One message pulled only to determine whether a bounded drain has more
     /// work. It remains ordered ahead of the channel on the next pass.
     deferred: VecDeque<WorkerMessage>,
+    /// Answers the supervisor itself owes, for jobs that left the queue
+    /// without ever reaching a worker — a submit below the generation floor,
+    /// a region that cannot be sized. The application frees an
+    /// outstanding-work slot only when a job is answered, so a job dropped
+    /// here without an event would leave its frame key blocked for ever:
+    /// the plan re-offers the same key every tick, sees it still pending,
+    /// and never submits it again — a page that stays coarse for as long as
+    /// it is looked at.
+    owed: Vec<RenderEvent>,
     sender: Sender<WorkerMessage>,
     /// Handed to every reader thread, including those of workers spawned or
     /// restarted later, so the doorbell survives a crash.
@@ -556,6 +565,7 @@ impl RendererSupervisor {
             queue: VecDeque::new(),
             events,
             deferred: VecDeque::new(),
+            owed: Vec::new(),
             sender,
             wakeup: signal,
             wakeup_inbox: Some(Arc::new(inbox)),
@@ -804,23 +814,24 @@ impl RendererSupervisor {
     /// dropped immediately: obsolete work is never dispatched.
     pub fn submit(&mut self, job: RenderJob) {
         if job.generation < self.generation_floor {
+            // Answered, not swallowed: the requester's bookkeeping frees a
+            // slot for this key only when an event names the job, and a
+            // request that dies silently blocks its key from ever being
+            // asked for again.
+            self.owed.push(RenderEvent::Cancelled { id: job.id });
             return;
         }
-        // A newer request for the same page, quality and size supersedes an
-        // older queued one rather than queueing behind it. Generation and
-        // region are part of "the same": a `/FitR` re-crop or a reload asks
-        // for a genuinely different picture at the same dimensions, and
-        // silently dropping the older job forced a redundant re-request
-        // later.
-        self.queue.retain(|queued| {
-            !(queued.page == job.page
-                && queued.quality == job.quality
-                && queued.width == job.width
-                && queued.height == job.height
-                && queued.document == job.document
-                && queued.generation == job.generation
-                && queued.region == job.region)
-        });
+        // No deduplication against the queue. Two jobs that agree on page,
+        // size, generation and region can still come from two requesters —
+        // the slide plan and the reader plan both draw from the presentation
+        // document, and they differ in `with_annotations`, which is not even
+        // part of that identity. Dropping the queued one answered only the
+        // newer id and left the older requester waiting for ever. Every
+        // caller already prevents its *own* duplicates (the pending set, or
+        // an explicit cancel of the superseded request), so the collision the
+        // retain guarded against cannot arise from a single requester, and a
+        // genuine cross-requester collision rendering twice is honest and
+        // cheap next to a page that never sharpens.
         self.queue.push_back(job);
         self.counters.submitted += 1;
         self.dispatch();
@@ -901,6 +912,10 @@ impl RendererSupervisor {
         self.enforce_deadlines(&mut events);
         self.reap(&mut events);
         self.dispatch();
+        // After the dispatch, so an answer it owes — a region that cannot be
+        // sized — reaches the application in this same batch rather than a
+        // tick later.
+        events.append(&mut self.owed);
         PumpBatch {
             events,
             more: !self.deferred.is_empty(),
@@ -1333,8 +1348,20 @@ impl RendererSupervisor {
             if job.is_inline() {
                 job.region_name = String::new();
             } else {
-                if worker.region.ensure_capacity(job.byte_len()).is_err() {
-                    tracing::warn!(?job, "cannot size the shared region for this job");
+                if let Err(error) = worker.region.ensure_capacity(job.byte_len()) {
+                    // The job has already left the queue, so it must be
+                    // *answered* here — failed, like a job whose worker died —
+                    // or its requester waits for ever: the frame key stays
+                    // pending, every later plan skips it as already asked
+                    // for, and the page it was refining keeps its coarse
+                    // stand-in for as long as it is looked at. A shared
+                    // memory that cannot grow right now (a full /dev/shm,
+                    // most plausibly) often can a moment later, and a Failed
+                    // answer is what lets the next plan try again.
+                    let reason = format!("cannot size the shared region: {error}");
+                    tracing::warn!(?job, reason, "render job failed before dispatch");
+                    self.counters.record_failure(&reason);
+                    self.owed.push(RenderEvent::Failed { job, reason });
                     continue;
                 }
                 job.region_name = worker.region.name().to_string();

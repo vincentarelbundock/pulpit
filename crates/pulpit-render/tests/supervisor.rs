@@ -238,27 +238,26 @@ fn obsolete_generations_never_produce_frames() {
 }
 
 #[test]
-fn a_superseded_request_for_the_same_page_replaces_the_queued_one() {
+fn a_duplicate_request_for_the_same_page_still_answers_both_ids() {
+    // The queue used to deduplicate identical jobs, answering only the newer
+    // id — which left the older requester's frame key pending for ever. Two
+    // identical inline requests now both come back. (The region-job variant,
+    // where the duplicates genuinely sit in the queue together, is
+    // `two_identical_jobs_from_different_requesters_are_both_answered`.)
     let mut supervisor = start(1);
     supervisor.open(1, "fixture:pages=30");
 
-    // Fill the single worker, then queue two requests for the same page.
     supervisor.submit(job(1, 1, 0, Priority::Audience));
     supervisor.submit(job(2, 1, 4, Priority::Adjacent));
     supervisor.submit(job(3, 1, 4, Priority::Audience));
-    assert!(
-        supervisor.queued() <= 1,
-        "the older duplicate was dropped, not queued"
-    );
 
     let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
-        frames(events).len() >= 2
+        frames(events).len() >= 3
     });
     let ids: Vec<u64> = frames(&events).iter().map(|job| job.id.0).collect();
-    assert!(
-        !ids.contains(&2),
-        "the superseded request never rendered: {ids:?}"
-    );
+    for id in [1, 2, 3] {
+        assert!(ids.contains(&id), "job {id} was answered: {ids:?}");
+    }
 }
 
 #[test]
@@ -777,6 +776,113 @@ fn a_rar_comic_fails_its_open_by_name() {
         !reason.to_lowercase().contains("corrupt") && !reason.to_lowercase().contains("damaged"),
         "{reason}"
     );
+
+    supervisor.shutdown();
+}
+
+/// A render job of `width` × `height`, for the tests where the size is the
+/// point: whether it travels inline or through the shared region, and
+/// whether the region can be made to hold it at all.
+fn sized_job(id: u64, page: usize, width: u32, height: u32) -> RenderJob {
+    RenderJob {
+        width,
+        height,
+        ..job(id, 1, page, Priority::Presenter)
+    }
+}
+
+/// The invariant every one of these three tests holds the supervisor to:
+/// a submitted job is *answered* — Frame, Failed or Cancelled — never
+/// swallowed. The application frees an outstanding-work slot only when an
+/// event names the job, so a job that dies silently leaves its frame key
+/// pending for ever: every later plan sees the key as already asked for and
+/// never submits it again, and the page it was refining keeps its coarse
+/// stand-in for as long as it is looked at.
+#[test]
+fn a_job_the_shared_region_cannot_hold_is_failed_not_swallowed() {
+    let mut supervisor = start(1);
+    supervisor.open(1, "fixture:pages=30");
+
+    // 20000 × 20000 × 4 bytes is past MAX_REGION_BYTES, so sizing the region
+    // fails deterministically, before any filesystem is involved.
+    supervisor.submit(sized_job(1, 0, 20_000, 20_000));
+
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        completed_job_ids(events).contains(&1)
+    });
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Failed { job, .. } if job.id == RequestId(1))),
+        "the job the region cannot hold is answered with Failed: {events:?}"
+    );
+
+    // The failure poisoned nothing: an ordinary job still renders.
+    supervisor.submit(job(2, 1, 1, Priority::Audience));
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        !frames(events).is_empty()
+    });
+    assert!(
+        frames(&events).iter().any(|job| job.id == RequestId(2)),
+        "rendering goes on: {events:?}"
+    );
+
+    supervisor.shutdown();
+}
+
+#[test]
+fn a_submit_below_the_generation_floor_is_cancelled_not_swallowed() {
+    let mut supervisor = start(1);
+    supervisor.open(1, "fixture:pages=30");
+
+    supervisor.cancel_older_than(RenderGeneration(5));
+    supervisor.submit(job(1, 1, 0, Priority::Audience));
+
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        completed_job_ids(events).contains(&1)
+    });
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Cancelled { id } if *id == RequestId(1))),
+        "the below-floor submit is answered with Cancelled: {events:?}"
+    );
+
+    supervisor.shutdown();
+}
+
+/// The slide plan and the reader plan can ask for the same page at the same
+/// size, at the same generation, from the same document — two requesters,
+/// two ids, one picture. Deduplicating the queue answered only the newer id
+/// and left the older requester waiting for ever; both must come back.
+#[test]
+fn two_identical_jobs_from_different_requesters_are_both_answered() {
+    let mut supervisor = start(1);
+    supervisor.open(1, "fixture:pages=30");
+
+    // 2048 × 1152 × 4 bytes is over the inline threshold, so these travel
+    // through the shared region — and a region job occupies the region until
+    // its frame is copied out, which keeps the two duplicates queued together
+    // behind the first job rather than racing it to the worker.
+    supervisor.submit(sized_job(1, 0, 2_048, 1_152));
+    supervisor.submit(sized_job(2, 1, 2_048, 1_152));
+    supervisor.submit(sized_job(3, 1, 2_048, 1_152));
+
+    let events = collect_until(&mut supervisor, Duration::from_secs(20), |events| {
+        frames(events).len() == 3
+    });
+    let rendered: Vec<u64> = frames(&events).iter().map(|job| job.id.0).collect();
+    assert_eq!(
+        rendered.len(),
+        3,
+        "both requesters of the identical picture are answered: {events:?}"
+    );
+    for id in [1, 2, 3] {
+        assert!(
+            rendered.contains(&id),
+            "job {id} was answered: {rendered:?}"
+        );
+    }
 
     supervisor.shutdown();
 }
