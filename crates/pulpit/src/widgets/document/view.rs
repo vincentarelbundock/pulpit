@@ -1808,60 +1808,24 @@ fn outline<Message: Clone + 'static>(
 
     let view = reader.controls.outline;
 
-    // The large heading names the current view. This row therefore offers
-    // only the alternatives; repeating the current name as a small centred
-    // tab and underlining it added hierarchy without adding information.
-    let tab = |target: OutlineView| -> Element<'static, Message> {
-        let label = text(match target {
-            OutlineView::Bookmarks => "Bookmarks",
-            _ => target.label(),
-        })
-        .size(theme::type_scale::LABEL)
-        .color(theme::ambient::muted());
-        let control = button(label)
-            .padding(Padding::from([2.0, 6.0]))
-            .style(theme::ambient::tool_button);
-        if live {
-            control.on_press(send(ReadCommand::SetOutlineView(target)))
-        } else {
-            control
-        }
-        .into()
-    };
-
-    let mut tabs = row![].spacing(theme::space::XS).align_y(Alignment::Center);
-    if view != OutlineView::Bookmarks {
-        tabs = tabs.push(tab(OutlineView::Bookmarks));
-    }
-    if view != OutlineView::Thumbnails {
-        tabs = tabs.push(tab(OutlineView::Thumbnails));
-    }
-    // A third tab only where there is a form. The rail is the toggle: a
-    // document with fields grows one more way to look at itself, and a deck of
-    // slides is left exactly as it was.
-    if reader.has_form && view != OutlineView::Fields {
-        tabs = tabs.push(tab(OutlineView::Fields));
-    }
-    // The marks are deliberately absent from this row: they are not a way of
-    // looking at the document's authored structure, and they have their own
-    // icon in the row above.
-
     // Search and outline occupy the same rail, so they begin with the same
-    // title scale and inset. The tabs are controls within the outline rather
-    // than a substitute for its title.
+    // title scale and inset. Every view is a first-class tab in the icon row
+    // above the title; the second row of text tabs that used to sit under it
+    // was a split inside the split, and it is gone.
     let header = column![
         sidebar_tabs(
-            if view == OutlineView::Annotations {
-                SidebarTab::Annotations
-            } else {
-                SidebarTab::Outline
+            match view {
+                OutlineView::Bookmarks => SidebarTab::Outline,
+                OutlineView::Thumbnails => SidebarTab::Pages,
+                OutlineView::Fields => SidebarTab::Fields,
+                OutlineView::Annotations => SidebarTab::Annotations,
             },
             reader.annotatable(),
+            reader.has_form,
             live,
             on_event
         ),
         text(view.label()).size(theme::type_scale::TITLE),
-        tabs.width(Length::Fill)
     ]
     .spacing(theme::space::XS);
 
@@ -2230,6 +2194,7 @@ fn annotations<Message: Clone + 'static>(
 pub fn sidebar_tabs<Message: Clone + 'static>(
     selected: SidebarTab,
     annotatable: bool,
+    has_form: bool,
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
@@ -2251,22 +2216,42 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
         hint(control, label)
     };
 
+    // One row, one level: every way of looking at the document is a tab
+    // here, never a tab within a tab. The outline's views used to be a
+    // second row of text tabs under this one, which read as a split inside
+    // the split.
     let mut tabs = row![
         tab(
             theme::Icon::Outline,
             "Outline",
             selected == SidebarTab::Outline,
-            PanelCommand::ShowOutline
+            PanelCommand::ShowView(OutlineView::Bookmarks)
         ),
         tab(
-            theme::Icon::Search,
-            "Search",
-            selected == SidebarTab::Search,
-            PanelCommand::ShowSearch
+            theme::Icon::SinglePage,
+            "Pages",
+            selected == SidebarTab::Pages,
+            PanelCommand::ShowView(OutlineView::Thumbnails)
         ),
     ]
     .spacing(theme::space::XS);
-    // Third and last, and reached by pressing it and by nothing else: the
+    // Only where there is a form. A document with fields grows one more way
+    // to look at itself; a deck of slides is left exactly as it was.
+    if has_form {
+        tabs = tabs.push(tab(
+            theme::Icon::TextCursor,
+            "Fields",
+            selected == SidebarTab::Fields,
+            PanelCommand::ShowView(OutlineView::Fields),
+        ));
+    }
+    tabs = tabs.push(tab(
+        theme::Icon::Search,
+        "Search",
+        selected == SidebarTab::Search,
+        PanelCommand::ShowSearch,
+    ));
+    // Last, and reached by pressing it and by nothing else: the
     // marks are worth a tab in the rail a reader has already opened, and not
     // worth a key of their own (§8.4).
     if annotatable {

@@ -73,6 +73,19 @@ pub trait PlatformServices: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// The capability snapshot startup builds the first frame from.
+    ///
+    /// Defaulted to [`capabilities`](PlatformServices::capabilities). An
+    /// adapter whose full answer waits on anything slower than the process
+    /// itself — Linux asks the session bus — overrides this with the answer
+    /// it can give without asking anybody, and the application adopts the
+    /// full snapshot from a helper thread once the window is up. The
+    /// conservative answer must only ever *under*-claim: a control that
+    /// appears late is a refresh, a control that vanishes is a bug.
+    fn startup_capabilities(&self) -> Capabilities {
+        self.capabilities()
+    }
+
     fn directories(&self) -> Directories;
 
     /// The system light/dark/high-contrast preference, if readable.

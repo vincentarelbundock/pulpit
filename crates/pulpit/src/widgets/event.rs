@@ -74,8 +74,11 @@ pub enum PanelCommand {
     CloseSidebar,
     /// Show search in the shared document sidebar.
     ShowSearch,
-    /// Show the outline in the shared document sidebar.
-    ShowOutline,
+    /// Show one named view of the document's structure — the pages, the
+    /// fields — in the shared document sidebar. The rail's own icon row is
+    /// the only caller: every way of looking at the document is one tab in
+    /// one row, rather than tabs within tabs.
+    ShowView(crate::widgets::document::model::OutlineView),
     /// Show the document's marks in the shared document sidebar.
     ///
     /// Reached by pressing the rail's own icon and by nothing else: the marks

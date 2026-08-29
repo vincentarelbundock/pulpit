@@ -698,6 +698,8 @@ impl OutlineView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
     Outline,
+    Pages,
+    Fields,
     Search,
     Annotations,
 }

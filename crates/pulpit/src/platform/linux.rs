@@ -97,24 +97,10 @@ impl LinuxServices {
     }
 }
 
-impl PlatformServices for LinuxServices {
-    fn name(&self) -> &'static str {
-        "linux-xdg"
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        // One bus trip for everything the snapshot wants to know: whether the
-        // bus answers at all, and whether a print portal lives behind it.
-        // This used to be three separate connections (the print question was
-        // even asked twice), each a thread and a handshake, all serial, all
-        // before there is a window to close.
-        let (portal_present, print_portal) = on_the_bus("capability probe", |connection| {
-            (
-                true,
-                crate::platform::portal_print::available_on(connection),
-            )
-        })
-        .unwrap_or((false, false));
+impl LinuxServices {
+    /// Everything about the capability snapshot that is not a bus question,
+    /// shared by the trait's two answers.
+    fn capabilities_with(&self, (portal_present, print_portal): (bool, bool)) -> Capabilities {
         Capabilities {
             backend: if self.wayland {
                 "wayland".into()
@@ -177,6 +163,37 @@ impl PlatformServices for LinuxServices {
             // a window backend can answer.
             speech: crate::platform::capabilities::Speech::default(),
         }
+    }
+}
+
+impl PlatformServices for LinuxServices {
+    fn name(&self) -> &'static str {
+        "linux-xdg"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        // One bus trip for everything the snapshot wants to know: whether the
+        // bus answers at all, and whether a print portal lives behind it.
+        // This used to be three separate connections (the print question was
+        // even asked twice), each a thread and a handshake, all serial, all
+        // before there is a window to close.
+        let portal = on_the_bus("capability probe", |connection| {
+            (
+                true,
+                crate::platform::portal_print::available_on(connection),
+            )
+        })
+        .unwrap_or((false, false));
+        self.capabilities_with(portal)
+    }
+
+    /// The bus-free snapshot the first frame is built from. It claims no
+    /// portal and no portal printing — never more than the full answer, which
+    /// is adopted from a helper thread once the window is up. Even a bounded
+    /// bus probe is two seconds of tail latency exactly when the bus is
+    /// unhealthy, which is a poor moment to also be slow to a first window.
+    fn startup_capabilities(&self) -> Capabilities {
+        self.capabilities_with((false, false))
     }
 
     fn directories(&self) -> Directories {

@@ -190,6 +190,13 @@ pub enum Message {
     CopySignatureReport(usize),
     /// The media runtime probes, run on a helper thread at startup.
     MediaProbed(Vec<pulpit_media::RuntimeProbe>),
+    /// The presenter window has been up for a moment: probe everything
+    /// optional. Delayed so browser subprocesses, `PATH` walks and D-Bus
+    /// traffic stop contending with compositor initialisation.
+    StartupProbes,
+    /// The full capability snapshot, adopted over the conservative one the
+    /// first frame was built from.
+    CapabilitiesProbed(Box<crate::platform::Capabilities>),
     /// The speech probe finished on its helper thread.
     SpeechProbed(Box<pulpit_media::speech::Probe>),
     /// The desktop answered what appearance and motion it prefers.
@@ -1541,6 +1548,8 @@ pub struct App {
     /// synchronous resume refresh so the startup probe, if still out on its
     /// thread, is recognised as stale when it lands.
     appearance_generation: crate::probegen::ProbeGeneration,
+    /// The deferred probe pass runs once, however many windows open.
+    startup_probes_launched: bool,
     /// The desktop's reduced-motion preference, cached the same way.
     motion_probe: crate::platform::appearance::MotionPreference,
     /// Whether the settings have changed since they were last written.
@@ -2213,6 +2222,7 @@ impl App {
             diagnostics_report_cache: std::cell::RefCell::new(None),
             appearance_probe: system_appearance,
             appearance_generation: crate::probegen::ProbeGeneration::default(),
+            startup_probes_launched: false,
             motion_probe,
             settings_dirty: false,
             settings_throttle: crate::session::SaveThrottle::default(),
@@ -2339,62 +2349,14 @@ impl App {
                 tasks.push(Task::done(Message::Opened(Some(path))));
             }
         }
-        // Read the UTC offset now, on purpose: it is cached in a OnceLock
-        // but primed by spawning `date +%z`, and the first clock widget to
-        // draw should not be the thing paying for a subprocess.
-        let _ = crate::view::seconds_of_day();
-
-        // Probe the media runtimes off the startup path: each candidate
-        // browser is asked `--version` in a subprocess, and paying that
-        // before the first window appears was pure startup latency.
-        let browser = app
-            .media_supervisor
-            .as_ref()
-            .and_then(|media| media.config().browser_path.clone());
-        tasks.push(Task::future(async move {
-            let (sender, receiver) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = sender.send(pulpit_media::runtime::probe_all(browser.as_deref()));
-            });
-            Message::MediaProbed(receiver.await.unwrap_or_default())
-        }));
-
-        // The speech probe, by the same arrangement: `PATH` walks and a
-        // store scan, none of it worth a millisecond of first-frame latency.
-        tasks.push(Task::future(async move {
-            let (sender, receiver) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                let catalog = pulpit_media::speech::Catalog::builtin();
-                let store = pulpit_media::speech::Store::new(&speech_data);
-                let _ = sender.send(pulpit_media::speech::Probe::run(&catalog, &store));
-            });
-            let probe = receiver
-                .await
-                .unwrap_or_else(|_| pulpit_media::speech::Probe {
-                    availability: pulpit_media::speech::Availability::Unavailable {
-                        why: "the speech probe did not finish".into(),
-                    },
-                    program: None,
-                    sink: None,
-                });
-            Message::SpeechProbed(Box::new(probe))
-        }));
-
-        // And the desktop's appearance and motion preferences: two portal
-        // round trips that used to run before the event loop existed.
-        let services = app.platform.services.clone();
-        let generation = app.appearance_generation.current();
-        tasks.push(Task::future(async move {
-            let (sender, receiver) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = sender.send((services.system_appearance(), services.reduced_motion()));
-            });
-            let (appearance, motion) = receiver.await.unwrap_or((
-                crate::platform::appearance::SystemAppearance::Unknown,
-                crate::platform::appearance::MotionPreference::Unknown,
-            ));
-            Message::AppearanceProbed(generation, appearance, motion)
-        }));
+        // Everything else this session wants to know — media runtimes, the
+        // speech catalog, the desktop's appearance, the full capability
+        // snapshot — is probed after the first window is up, from
+        // `Message::StartupProbes`. Probing here was asynchronous already,
+        // but it began while the compositor was initialising, and browser
+        // subprocesses, `PATH` walks and D-Bus traffic were contending with
+        // GPU startup for the very resources the first frame needed.
+        crate::startup_mark("App::new returning");
         (app, Task::batch(tasks))
     }
 
@@ -3349,7 +3311,10 @@ impl App {
             Message::Opened(None) => Task::none(),
             Message::WindowOpened { role, id } => {
                 match role {
-                    Role::Presenter => self.presenter_window = Some(id),
+                    Role::Presenter => {
+                        crate::startup_mark("presenter window opened");
+                        self.presenter_window = Some(id);
+                    }
                     Role::Audience => self.audience_window = Some(id),
                 }
                 let window = self.coordinator.window_state_mut(role);
@@ -3370,6 +3335,18 @@ impl App {
                     Role::Presenter => Task::batch([
                         window::scale_factor(id).map(Message::PresenterScale),
                         native,
+                        // A beat after the window exists, everything optional
+                        // gets probed — late enough that the compositor has
+                        // the machine to itself for the first frame.
+                        Task::future(async {
+                            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_millis(250));
+                                let _ = sender.send(());
+                            });
+                            let _ = receiver.await;
+                            Message::StartupProbes
+                        }),
                     ]),
                     Role::Audience => native,
                 }
@@ -3874,6 +3851,25 @@ impl App {
                     self.audience_start_menu_open = !self.audience_start_menu_open;
                     self.menu_open = false;
                 }
+                Task::none()
+            }
+            Message::StartupProbes => {
+                // Once. A reopened presenter window (or a stray second
+                // message) must not probe everything again.
+                if self.startup_probes_launched {
+                    return Task::none();
+                }
+                self.startup_probes_launched = true;
+                crate::startup_mark("deferred probes launched");
+                self.launch_startup_probes()
+            }
+            Message::CapabilitiesProbed(capabilities) => {
+                // The speech capability is owned by the speech probe, which
+                // lands on its own schedule; the platform snapshot must not
+                // reset it to the placeholder.
+                let speech = self.platform.capabilities.speech.clone();
+                self.platform.capabilities = *capabilities;
+                self.platform.capabilities.speech = speech;
                 Task::none()
             }
             Message::MediaProbed(probes) => {
@@ -4807,6 +4803,85 @@ impl App {
     /// portal round-trips, so this runs when the desktop may actually have
     /// changed — startup and resume — never on the setting handlers, which
     /// only change pulpit's own preference.
+    /// Everything optional this session wants to know, probed on helper
+    /// threads: the media runtimes, the speech catalog, the desktop's
+    /// appearance and motion preferences, the full capability snapshot, and
+    /// the wall clock's UTC offset. Launched once, a beat after the
+    /// presenter window opens, so none of it contends with the first frame.
+    fn launch_startup_probes(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        // The media runtimes: each candidate browser is asked `--version`
+        // in a subprocess.
+        let browser = self
+            .media_supervisor
+            .as_ref()
+            .and_then(|media| media.config().browser_path.clone());
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(pulpit_media::runtime::probe_all(browser.as_deref()));
+            });
+            Message::MediaProbed(receiver.await.unwrap_or_default())
+        }));
+
+        // The speech probe: `PATH` walks and a store scan.
+        let speech_data = crate::platform::Directories::detect().data;
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let catalog = pulpit_media::speech::Catalog::builtin();
+                let store = pulpit_media::speech::Store::new(&speech_data);
+                let _ = sender.send(pulpit_media::speech::Probe::run(&catalog, &store));
+            });
+            let probe = receiver
+                .await
+                .unwrap_or_else(|_| pulpit_media::speech::Probe {
+                    availability: pulpit_media::speech::Availability::Unavailable {
+                        why: "the speech probe did not finish".into(),
+                    },
+                    program: None,
+                    sink: None,
+                });
+            Message::SpeechProbed(Box::new(probe))
+        }));
+
+        // The desktop's appearance and motion preferences: two portal round
+        // trips.
+        let services = self.platform.services.clone();
+        let generation = self.appearance_generation.current();
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send((services.system_appearance(), services.reduced_motion()));
+            });
+            let (appearance, motion) = receiver.await.unwrap_or((
+                crate::platform::appearance::SystemAppearance::Unknown,
+                crate::platform::appearance::MotionPreference::Unknown,
+            ));
+            Message::AppearanceProbed(generation, appearance, motion)
+        }));
+
+        // The full capability snapshot, over the conservative one the first
+        // frame was built from — this is the bus-answering version. The UTC
+        // offset rides on the same thread: it is primed by spawning `date`,
+        // which was being paid before the window existed.
+        let services = self.platform.services.clone();
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                crate::view::prime_local_offset();
+                let _ = sender.send(services.capabilities());
+            });
+            match receiver.await {
+                Ok(capabilities) => Message::CapabilitiesProbed(Box::new(capabilities)),
+                Err(_) => Message::StartupProbes, // guarded to a no-op
+            }
+        }));
+
+        Task::batch(tasks)
+    }
+
     fn refresh_appearance_probe(&mut self) {
         // Supersedes any probe still out on a thread: its answer predates
         // this one and must not overwrite it when it lands.
@@ -11867,19 +11942,15 @@ impl App {
         use crate::widgets::event::PanelCommand;
         match command {
             PanelCommand::ShowSearch => self.open_search(),
-            PanelCommand::ShowOutline => {
-                // Closing search is not enough now that the rail has a fourth
-                // view: with the marks showing, "Outline" has to put the
-                // document's own structure back, or it is a lit control that
-                // does nothing when pressed.
-                let structural = self.reader.structural_outline_view();
+            PanelCommand::ShowView(view) => {
+                // A named view from the rail's own icon row. Search shares
+                // the sidebar, so it goes away; the body opens because a tab
+                // press is a reader asking to *see* the view, not merely to
+                // select it behind a collapsed header.
                 let close_search = self.close_search(false);
-                if self.reader.controls().outline == structural {
-                    return close_search;
-                }
-                let show = self.on_read_command(
-                    crate::widgets::event::ReadCommand::SetOutlineView(structural),
-                );
+                let show =
+                    self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineView(view));
+                self.outline_rail.set(true, self.motion, self.now);
                 Task::batch([close_search, show])
             }
             PanelCommand::ShowAnnotations => {

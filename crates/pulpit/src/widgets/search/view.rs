@@ -36,6 +36,7 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
         ctx.context.mode.interactive(),
         widget.kind() == crate::widgets::WidgetKind::DocumentOutline,
         ctx.context.reader.annotatable(),
+        ctx.context.reader.has_form,
         ctx.on_event,
     )
 }
@@ -48,6 +49,7 @@ pub fn pane<Message: Clone + 'static>(
     live: bool,
     shares_outline_sidebar: bool,
     annotatable: bool,
+    has_form: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let state = search.state;
@@ -140,6 +142,7 @@ pub fn pane<Message: Clone + 'static>(
         pane = pane.push(crate::widgets::document::view::sidebar_tabs(
             crate::widgets::document::model::SidebarTab::Search,
             annotatable,
+            has_form,
             live,
             on_event,
         ));

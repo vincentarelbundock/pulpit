@@ -155,7 +155,10 @@ impl Platform {
         let services: std::sync::Arc<dyn PlatformServices> =
             std::sync::Arc::new(null::NullPlatform::new("portable"));
 
-        let capabilities = services.capabilities();
+        // The conservative snapshot, so nothing here waits on a session bus.
+        // The full answer is adopted from a helper thread after the window
+        // is up — see `Message::CapabilitiesProbed`.
+        let capabilities = services.startup_capabilities();
         Platform {
             services,
             window: Box::new(window::DesktopWindowPolicy),

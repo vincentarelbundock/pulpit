@@ -419,7 +419,7 @@ fn search_workspace(app: &App) -> Element<'_, Message> {
     };
     // A transient rail beside a presenter layout draws no tab row, so whether
     // the document can carry marks does not reach it.
-    crate::widgets::search::view::pane(search, true, false, false, interaction)
+    crate::widgets::search::view::pane(search, true, false, false, false, interaction)
 }
 
 /// A blank, transparent, click-through filler for one slot in a fixed
@@ -4377,12 +4377,20 @@ pub fn seconds_of_day() -> u32 {
     ((now as i64 + local_offset_seconds()).rem_euclid(86_400)) as u32
 }
 
-/// Offset from UTC in seconds, read once from `date +%z`. Falls back to UTC,
-/// which is honest rather than wrong by an unknown amount.
+/// Offset from UTC in seconds, primed once from `date +%z`. Falls back to
+/// UTC until then, which is honest rather than wrong by an unknown amount.
 fn local_offset_seconds() -> i64 {
-    use std::sync::OnceLock;
-    static OFFSET: OnceLock<i64> = OnceLock::new();
-    *OFFSET.get_or_init(|| {
+    OFFSET.get().copied().unwrap_or(0)
+}
+
+static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+/// Spawn `date +%z` and cache what it says. Called from a startup helper
+/// thread, deliberately not from the first clock widget to draw: priming is
+/// a `PATH` walk and a subprocess, which is nothing the first frame — or the
+/// event loop at all — should be paying for.
+pub fn prime_local_offset() {
+    let _ = OFFSET.get_or_init(|| {
         std::process::Command::new("date")
             .arg("+%z")
             .output()
@@ -4396,7 +4404,7 @@ fn local_offset_seconds() -> i64 {
                 Some(sign * (hours * 3600 + minutes * 60))
             })
             .unwrap_or(0)
-    })
+    });
 }
 
 #[cfg(test)]

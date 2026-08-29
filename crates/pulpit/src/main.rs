@@ -60,6 +60,9 @@ pub enum StartPage {
 fn main() -> iced::Result {
     use std::ffi::OsStr;
 
+    // The zero the startup marks measure from.
+    let _ = STARTED.get_or_init(std::time::Instant::now);
+
     let mut arguments = std::env::args_os().skip(1);
     let mut document: Option<PathBuf> = None;
     let mut worker = false;
@@ -142,6 +145,7 @@ fn main() -> iced::Result {
         settings.diagnostics.persistent_log,
     );
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "pulpit starting");
+    startup_mark("settings loaded");
 
     // Iced panics rather than returning an error when the event loop cannot
     // be created, which is precisely the missing-library case. Catch it in a
@@ -518,4 +522,23 @@ fn seed_from_process() -> u64 {
         .map(|elapsed| elapsed.as_nanos() as u64)
         .unwrap_or(0);
     pid.rotate_left(32) ^ since_epoch
+}
+
+/// When the process entered `main`, for the startup timing marks.
+///
+/// A static rather than a value threaded through `App::new`, because the
+/// interesting spans cross the iced boundary: process entry to `App::new`
+/// returning, to the presenter window opening, to the deferred probes
+/// starting. `tracing` timestamps say the same thing less legibly; one
+/// number relative to entry is what a launch regression is diagnosed with.
+static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Log a startup stage with its offset from process entry.
+pub(crate) fn startup_mark(stage: &str) {
+    let started = *STARTED.get_or_init(std::time::Instant::now);
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        stage,
+        "startup"
+    );
 }

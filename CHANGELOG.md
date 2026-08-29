@@ -106,6 +106,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Launch gets out of its own way.** Everything optional the session wants
+  to know — which browsers and media runtimes are installed, whether a
+  speech synthesiser and voices are on disk, the desktop's appearance and
+  motion preferences, the full capability snapshot, even the wall clock's
+  UTC offset — is now probed a beat *after* the presenter window opens,
+  instead of contending with the compositor for CPU, disk and the dynamic
+  loader while the first frame was being built. The window is built from a
+  conservative capability snapshot that only ever under-claims, and adopts
+  the full answer moments later; a probe still in flight when a
+  suspend/resume refreshes the same preference is recognised as stale and
+  dropped. What used to be five serial D-Bus connections before there was a
+  window to close is now zero, with the one bounded bus trip on a helper
+  thread. The log carries startup marks (`stage`, `elapsed_ms`) so a launch
+  regression can be measured rather than felt.
+
 - **Dead code is visible again, and about a thousand lines of it are gone.**
   Five subsystems — `layout`, `settings`, `doc`, `media` and `platform` — had
   the dead-code lint switched off for the whole module, so nothing unused in
