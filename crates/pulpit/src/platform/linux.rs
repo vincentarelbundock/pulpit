@@ -24,6 +24,57 @@ const REASON: &str = "Presentation in progress";
 /// Portal flags: 4 = suspend, 8 = idle.
 const INHIBIT_SUSPEND_AND_IDLE: u32 = 4 | 8;
 
+/// How long a session-bus round trip is given before pulpit stops waiting.
+///
+/// Every call in this module is made from the thread that owns the event
+/// loop, and a blocking D-Bus call has no client-side timeout of its own: a
+/// portal or screensaver service that accepts the connection and then says
+/// nothing freezes both windows. On the way out it is worse than a freeze —
+/// `release` runs inside the quit path, so a wedged service means a window
+/// that cannot be closed.
+///
+/// Two seconds because these are local IPC calls that normally answer in
+/// single-digit milliseconds. Nothing here is worth a visible pause, and
+/// every caller already has an honest answer for not knowing.
+const BUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Make a session-bus call somewhere the event loop is not, and give up on it
+/// after [`BUS_DEADLINE`].
+///
+/// The connection is opened inside the thread rather than passed in: zbus
+/// keeps one per process, so this costs nothing, and it means an abandoned
+/// call holds nothing this side cares about. A thread left behind is a thread
+/// blocked on a socket read that ends when the service answers or the process
+/// does — it owns no lock and no handle.
+pub(crate) fn on_the_bus<T: Send + 'static>(
+    what: &'static str,
+    call: impl FnOnce(&Connection) -> T + Send + 'static,
+) -> Option<T> {
+    let (send, receive) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pulpit-dbus".into())
+        .spawn(move || {
+            let Ok(connection) = Connection::session() else {
+                return;
+            };
+            let _ = send.send(call(&connection));
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, call = what, "no thread for the session bus");
+        return None;
+    }
+    match receive.recv_timeout(BUS_DEADLINE) {
+        Ok(answer) => Some(answer),
+        Err(_) => {
+            tracing::warn!(
+                call = what,
+                "the session bus did not answer; carrying on without it"
+            );
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LinuxServices {
     wayland: bool,
@@ -44,10 +95,6 @@ impl LinuxServices {
             x11: session != "wayland" && std::env::var_os("DISPLAY").is_some(),
         }
     }
-
-    fn session_bus(&self) -> Option<Connection> {
-        Connection::session().ok()
-    }
 }
 
 impl PlatformServices for LinuxServices {
@@ -56,7 +103,10 @@ impl PlatformServices for LinuxServices {
     }
 
     fn capabilities(&self) -> Capabilities {
-        let portal_present = self.session_bus().is_some();
+        // Bounded like every other bus question here: opening the session bus
+        // is itself a socket handshake, and this one is asked before there is
+        // a window to close.
+        let portal_present = on_the_bus("session bus", |_| true).unwrap_or(false);
         Capabilities {
             backend: if self.wayland {
                 "wayland".into()
@@ -129,31 +179,33 @@ impl PlatformServices for LinuxServices {
     fn system_appearance(&self) -> SystemAppearance {
         // org.freedesktop.appearance/color-scheme: 0 = no preference,
         // 1 = prefer dark, 2 = prefer light.
-        let Some(connection) = self.session_bus() else {
-            return SystemAppearance::Unknown;
-        };
-        let Ok(proxy) = zbus::blocking::Proxy::new(
-            &connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Settings",
-        ) else {
-            return SystemAppearance::Unknown;
-        };
-        let contrast: Result<zbus::zvariant::OwnedValue, _> =
-            proxy.call("ReadOne", &("org.freedesktop.appearance", "contrast"));
-        if let Ok(value) = contrast {
-            if u32::try_from(&value).ok() == Some(1) {
-                return SystemAppearance::HighContrast;
+        on_the_bus("portal appearance", |connection| {
+            let Ok(proxy) = zbus::blocking::Proxy::new(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+            ) else {
+                return SystemAppearance::Unknown;
+            };
+            let contrast: Result<zbus::zvariant::OwnedValue, _> =
+                proxy.call("ReadOne", &("org.freedesktop.appearance", "contrast"));
+            if let Ok(value) = contrast {
+                if u32::try_from(&value).ok() == Some(1) {
+                    return SystemAppearance::HighContrast;
+                }
             }
-        }
-        let scheme: Result<zbus::zvariant::OwnedValue, _> =
-            proxy.call("ReadOne", &("org.freedesktop.appearance", "color-scheme"));
-        match scheme.ok().and_then(|value| u32::try_from(&value).ok()) {
-            Some(1) => SystemAppearance::Dark,
-            Some(2) => SystemAppearance::Light,
-            _ => SystemAppearance::Unknown,
-        }
+            let scheme: Result<zbus::zvariant::OwnedValue, _> =
+                proxy.call("ReadOne", &("org.freedesktop.appearance", "color-scheme"));
+            match scheme.ok().and_then(|value| u32::try_from(&value).ok()) {
+                Some(1) => SystemAppearance::Dark,
+                Some(2) => SystemAppearance::Light,
+                _ => SystemAppearance::Unknown,
+            }
+        })
+        // A desktop that did not answer in time is a desktop pulpit knows
+        // nothing about, which is exactly what `Unknown` says.
+        .unwrap_or(SystemAppearance::Unknown)
     }
 
     fn reduced_motion(&self) -> crate::platform::appearance::MotionPreference {
@@ -162,26 +214,26 @@ impl PlatformServices for LinuxServices {
         // interface schema, which KDE and others also honour through
         // xdg-desktop-portal-gtk. A desktop that has neither says nothing,
         // which is the honest answer.
-        let Some(connection) = self.session_bus() else {
-            return MotionPreference::Unknown;
-        };
-        let Ok(proxy) = zbus::blocking::Proxy::new(
-            &connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Settings",
-        ) else {
-            return MotionPreference::Unknown;
-        };
-        let value: Result<zbus::zvariant::OwnedValue, _> = proxy.call(
-            "ReadOne",
-            &("org.gnome.desktop.interface", "enable-animations"),
-        );
-        match value.ok().and_then(|value| bool::try_from(&value).ok()) {
-            Some(true) => MotionPreference::Full,
-            Some(false) => MotionPreference::Reduced,
-            None => MotionPreference::Unknown,
-        }
+        on_the_bus("portal motion preference", |connection| {
+            let Ok(proxy) = zbus::blocking::Proxy::new(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+            ) else {
+                return MotionPreference::Unknown;
+            };
+            let value: Result<zbus::zvariant::OwnedValue, _> = proxy.call(
+                "ReadOne",
+                &("org.gnome.desktop.interface", "enable-animations"),
+            );
+            match value.ok().and_then(|value| bool::try_from(&value).ok()) {
+                Some(true) => MotionPreference::Full,
+                Some(false) => MotionPreference::Reduced,
+                None => MotionPreference::Unknown,
+            }
+        })
+        .unwrap_or(MotionPreference::Unknown)
     }
 
     fn reveal(&self, path: &Path) -> Outcome {
@@ -235,56 +287,68 @@ impl PlatformServices for LinuxServices {
     fn inhibit(&self) -> InhibitState {
         let mut attempts = Vec::new();
 
-        // 1. The portal: works under Flatpak, Wayland and X11.
-        match self.session_bus() {
-            Some(connection) => {
-                let proxy = zbus::blocking::Proxy::new(
-                    &connection,
-                    "org.freedesktop.portal.Desktop",
-                    "/org/freedesktop/portal/desktop",
-                    "org.freedesktop.portal.Inhibit",
-                );
-                match proxy {
-                    Ok(proxy) => {
-                        let mut options: std::collections::HashMap<&str, Value> =
-                            std::collections::HashMap::new();
-                        options.insert("reason", Value::from(REASON));
-                        let request: Result<OwnedObjectPath, _> =
-                            proxy.call("Inhibit", &("", INHIBIT_SUSPEND_AND_IDLE, options));
-                        match request {
-                            Ok(path) => {
-                                return InhibitState::Held {
+        // 1. The portal: works under Flatpak, Wayland and X11. Then 2, the
+        // long-standing screensaver interface. Both in one trip off the event
+        // loop, so a bus that has stopped answering costs one deadline rather
+        // than two.
+        let asked = on_the_bus("inhibit", |connection| {
+            let proxy = zbus::blocking::Proxy::new(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Inhibit",
+            );
+            let mut attempts = Vec::new();
+            match proxy {
+                Ok(proxy) => {
+                    let mut options: std::collections::HashMap<&str, Value> =
+                        std::collections::HashMap::new();
+                    options.insert("reason", Value::from(REASON));
+                    let request: Result<OwnedObjectPath, _> =
+                        proxy.call("Inhibit", &("", INHIBIT_SUSPEND_AND_IDLE, options));
+                    match request {
+                        Ok(path) => {
+                            return (
+                                Some(InhibitState::Held {
                                     mechanism: "xdg-desktop-portal",
                                     token: InhibitToken::Handle(path.as_str().to_string()),
-                                }
-                            }
-                            Err(e) => attempts.push(format!("portal: {e}")),
+                                }),
+                                attempts,
+                            )
                         }
+                        Err(e) => attempts.push(format!("portal: {e}")),
                     }
-                    Err(e) => attempts.push(format!("portal proxy: {e}")),
                 }
+                Err(e) => attempts.push(format!("portal proxy: {e}")),
+            }
 
-                // 2. The long-standing screensaver interface.
-                let screensaver = zbus::blocking::Proxy::new(
-                    &connection,
-                    "org.freedesktop.ScreenSaver",
-                    "/org/freedesktop/ScreenSaver",
-                    "org.freedesktop.ScreenSaver",
-                );
-                match screensaver {
-                    Ok(proxy) => match proxy.call::<_, _, u32>("Inhibit", &(APP_ID, REASON)) {
-                        Ok(cookie) => {
-                            return InhibitState::Held {
+            let screensaver = zbus::blocking::Proxy::new(
+                connection,
+                "org.freedesktop.ScreenSaver",
+                "/org/freedesktop/ScreenSaver",
+                "org.freedesktop.ScreenSaver",
+            );
+            match screensaver {
+                Ok(proxy) => match proxy.call::<_, _, u32>("Inhibit", &(APP_ID, REASON)) {
+                    Ok(cookie) => {
+                        return (
+                            Some(InhibitState::Held {
                                 mechanism: "org.freedesktop.ScreenSaver",
                                 token: InhibitToken::Cookie(cookie),
-                            }
-                        }
-                        Err(e) => attempts.push(format!("screensaver: {e}")),
-                    },
-                    Err(e) => attempts.push(format!("screensaver proxy: {e}")),
-                }
+                            }),
+                            attempts,
+                        )
+                    }
+                    Err(e) => attempts.push(format!("screensaver: {e}")),
+                },
+                Err(e) => attempts.push(format!("screensaver proxy: {e}")),
             }
-            None => attempts.push("session bus: unavailable".into()),
+            (None, attempts)
+        });
+        match asked {
+            Some((Some(held), _)) => return held,
+            Some((None, tried)) => attempts.extend(tried),
+            None => attempts.push("session bus: no answer".into()),
         }
 
         // 3. A child process, which the kernel reaps if we die mid-talk.
@@ -321,37 +385,44 @@ impl PlatformServices for LinuxServices {
             return Outcome::Done;
         };
         match token {
+            // Both of these run inside the quit path, which is why they are
+            // bounded: an unanswered release there is a window that will not
+            // close. The lock outlives a process that has gone, and the
+            // session tidies it up.
             InhibitToken::Handle(path) => {
-                let Some(connection) = self.session_bus() else {
-                    return Outcome::failed("the session bus went away");
-                };
-                match zbus::blocking::Proxy::new(
-                    &connection,
-                    "org.freedesktop.portal.Desktop",
-                    path.as_str(),
-                    "org.freedesktop.portal.Request",
+                let path = path.clone();
+                on_the_bus(
+                    "portal uninhibit",
+                    move |connection| match zbus::blocking::Proxy::new(
+                        connection,
+                        "org.freedesktop.portal.Desktop",
+                        path,
+                        "org.freedesktop.portal.Request",
+                    )
+                    .and_then(|proxy| proxy.call::<_, _, ()>("Close", &()))
+                    {
+                        Ok(()) => Outcome::Done,
+                        Err(e) => Outcome::failed(e.to_string()),
+                    },
                 )
-                .and_then(|proxy| proxy.call::<_, _, ()>("Close", &()))
-                {
-                    Ok(()) => Outcome::Done,
-                    Err(e) => Outcome::failed(e.to_string()),
-                }
+                .unwrap_or_else(|| Outcome::failed("the portal did not answer"))
             }
             InhibitToken::Cookie(cookie) => {
-                let Some(connection) = self.session_bus() else {
-                    return Outcome::failed("the session bus went away");
-                };
-                match zbus::blocking::Proxy::new(
-                    &connection,
-                    "org.freedesktop.ScreenSaver",
-                    "/org/freedesktop/ScreenSaver",
-                    "org.freedesktop.ScreenSaver",
-                )
-                .and_then(|proxy| proxy.call::<_, _, ()>("UnInhibit", &(*cookie,)))
-                {
-                    Ok(()) => Outcome::Done,
-                    Err(e) => Outcome::failed(e.to_string()),
-                }
+                let cookie = *cookie;
+                on_the_bus("screensaver uninhibit", move |connection| {
+                    match zbus::blocking::Proxy::new(
+                        connection,
+                        "org.freedesktop.ScreenSaver",
+                        "/org/freedesktop/ScreenSaver",
+                        "org.freedesktop.ScreenSaver",
+                    )
+                    .and_then(|proxy| proxy.call::<_, _, ()>("UnInhibit", &(cookie,)))
+                    {
+                        Ok(()) => Outcome::Done,
+                        Err(e) => Outcome::failed(e.to_string()),
+                    }
+                })
+                .unwrap_or_else(|| Outcome::failed("the screensaver did not answer"))
             }
             InhibitToken::Process(pid) => {
                 // The child is ours; SIGTERM releases the lock.
@@ -398,6 +469,27 @@ mod tests {
             spawn("pulpit-definitely-not-a-real-program", &[]),
             Outcome::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn a_bus_call_that_never_answers_is_given_up_on() {
+        // The property under test is that the *caller* comes back, not that
+        // the call does: a service that has stopped answering must not be
+        // able to hold the event loop, and least of all the quit path.
+        let started = std::time::Instant::now();
+        let answer = on_the_bus("a call that never returns", |_| {
+            std::thread::sleep(BUS_DEADLINE * 10);
+            "answered"
+        });
+        assert!(
+            answer.is_none(),
+            "a call past the deadline is not an answer"
+        );
+        assert!(
+            started.elapsed() < BUS_DEADLINE * 5,
+            "waited {:?}, which is not a deadline",
+            started.elapsed()
+        );
     }
 
     #[test]

@@ -872,6 +872,13 @@ pub enum PrintMsg {
     TypeCopies(String),
     /// A queue by name, or `None` for the platform's default.
     ChooseDestination(Option<String>),
+    /// The queues the spooler named, arriving after the dialog opened.
+    ///
+    /// Asked for off the event loop for the same reason spooling is:
+    /// `lpstat` enumerates network-discovered destinations, and one
+    /// unreachable print server is a freeze of both windows — with the
+    /// close button in one of them.
+    Destinations(Vec<String>),
     /// The reader has read what the document asked for and said print it
     /// anyway.
     AcceptPermission,
@@ -10049,6 +10056,17 @@ impl App {
                 }
                 Task::none()
             }
+            PrintMsg::Destinations(names) => {
+                // Only into the dialog that asked. A list that arrives after
+                // the reader has closed the dialog, or printed, is nothing to
+                // put anywhere.
+                if let Some(dialog) = self.print_dialog.as_mut() {
+                    if dialog.asks_particulars {
+                        dialog.destinations = names;
+                    }
+                }
+                Task::none()
+            }
             PrintMsg::AcceptPermission => {
                 if let Some(dialog) = self.print_dialog.as_mut() {
                     dialog.permission_answered = true;
@@ -10146,15 +10164,45 @@ impl App {
         // system dialog can ask.
         let asks_particulars = self.platform.capabilities.print_options
             && !self.platform.capabilities.system_print_dialog;
-        let destinations = if asks_particulars {
-            self.platform.services.printers()
+        // The dialog opens now and the queue list catches up. Asking the
+        // spooler is a subprocess that talks to the network — `lpstat`
+        // enumerates destinations it has only heard about — so on the event
+        // loop it is a freeze of both windows for as long as one unreachable
+        // print server takes to time out. The picker appears when the answer
+        // does; until then the dialog means what an empty list has always
+        // meant here, which is the default queue.
+        let ask_destinations = if asks_particulars {
+            let services = self.platform.services.clone();
+            Task::perform(
+                async move {
+                    // Its own thread rather than the executor's blocking
+                    // pool, for the reason spooling uses one: how long the
+                    // spooler takes is not this process's to know, and an
+                    // executor thread parked on it is one the rest of the
+                    // application does not get back.
+                    let (send, receive) = std::sync::mpsc::channel();
+                    let spawned = std::thread::Builder::new()
+                        .name("pulpit-printers".into())
+                        .spawn(move || {
+                            let _ = send.send(services.printers());
+                        });
+                    match spawned {
+                        Ok(_) => receive.recv().unwrap_or_default(),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not ask for the print queues");
+                            Vec::new()
+                        }
+                    }
+                },
+                |names| Message::Print(PrintMsg::Destinations(names)),
+            )
         } else {
             // A picker that cannot pick — or that the system dialog is about
             // to offer properly — is worse than no picker.
-            Vec::new()
+            Task::none()
         };
         let mut dialog = crate::printing::PrintDialog::open(
-            destinations,
+            Vec::new(),
             self.reader.can_undo(),
             asks_particulars,
         );
@@ -10170,7 +10218,7 @@ impl App {
             self.ask_document_properties();
         }
         self.print_dialog = Some(dialog);
-        Task::none()
+        ask_destinations
     }
 
     /// Ask the worker for the copy a marked-up print is spooled from.

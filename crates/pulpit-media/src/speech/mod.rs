@@ -48,7 +48,7 @@ pub mod subprocess;
 pub use capability::{human_bytes, Availability, Probe, ENGINE};
 pub use catalog::{ArchiveKind, Catalog, EngineBuild, Quality, Store, Voice, VoiceFile};
 pub use download::{install_engine, install_voice, Cancel, Progress};
-pub use engine::{Pcm, SpeechEngine, SpeechError};
+pub use engine::{EngineStop, Pcm, SpeechEngine, SpeechError};
 pub use sink::{Player, Sink};
 pub use speaker::{Command, Event, Speaker};
 pub use subprocess::{EngineManifest, SubprocessEngine};

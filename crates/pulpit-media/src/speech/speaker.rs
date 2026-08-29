@@ -32,7 +32,7 @@ use std::thread::JoinHandle;
 use pulpit_core::speech::SpeechRate;
 
 use super::catalog::Voice;
-use super::engine::{Pcm, SpeechEngine, SpeechError};
+use super::engine::{EngineStop, Pcm, SpeechEngine, SpeechError};
 use super::sink::Player;
 
 /// Identifies a synthesis request, so a prefetched result can be recognised.
@@ -118,6 +118,9 @@ pub struct Speaker {
     /// skip lands must not advance whatever reading comes next, and `drain`
     /// discards anything stamped with an older generation.
     generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Reaches the synthesiser the way `player` reaches the audio player.
+    /// Used on shutdown and nowhere else — see [`EngineStop`].
+    engine: EngineStop,
     control: Option<JoinHandle<()>>,
     synth: Option<JoinHandle<()>>,
 }
@@ -131,6 +134,9 @@ impl Speaker {
         let (ready_tx, ready_rx) = channel::<Key>();
         let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
         let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Taken before the engine moves onto its thread: after that, the only
+        // way to reach it is this handle.
+        let engine_stop = engine.stopper();
 
         let synth = {
             let cache = Arc::clone(&cache);
@@ -159,6 +165,7 @@ impl Speaker {
             events: event_rx,
             player,
             generation,
+            engine: engine_stop,
             control: Some(control),
             synth: Some(synth),
         }
@@ -227,6 +234,13 @@ impl Speaker {
 impl Drop for Speaker {
     fn drop(&mut self) {
         self.player.stop();
+        // Both children die before anything is joined, and that order is the
+        // whole point. `Command::Shutdown` is only read between utterances,
+        // and the control thread may be parked inside `ready.recv()` waiting
+        // on a synthesiser that has stopped answering — in which case the
+        // join below never returns, and the window it is being run from can
+        // never close. Killing the synthesiser is what ends that wait.
+        self.engine.stop();
         let _ = self.commands.send(Command::Shutdown);
         // Joining matters: a synthesiser child left running would keep
         // talking after the window closed.
@@ -442,6 +456,79 @@ mod tests {
                 sample_rate: voice.sample_rate,
             })
         }
+    }
+
+    /// An engine that never answers until its stop handle is pulled, which
+    /// is what a synthesiser wedged on a cold model load looks like.
+    struct Wedged {
+        stop: EngineStop,
+        entered: Arc<Mutex<bool>>,
+    }
+
+    impl SpeechEngine for Wedged {
+        fn id(&self) -> &str {
+            "wedged"
+        }
+        fn stopper(&self) -> EngineStop {
+            self.stop.clone()
+        }
+        fn synthesize(
+            &mut self,
+            _text: &str,
+            _voice: &Voice,
+            _rate: SpeechRate,
+        ) -> crate::speech::engine::Result<Pcm> {
+            *self.entered.lock().unwrap() = true;
+            while !self.stop.is_stopping() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(SpeechError::refused("stopped"))
+        }
+    }
+
+    #[test]
+    fn dropping_the_speaker_ends_a_synthesis_that_is_still_running() {
+        // The hang this exists to prevent: `Shutdown` is only read between
+        // utterances, so a control thread parked inside synthesis would hold
+        // the join in `Drop` for as long as the synthesiser felt like — with
+        // the window up, unresponsive and impossible to close.
+        let entered = Arc::new(Mutex::new(false));
+        let engine = Wedged {
+            stop: EngineStop::default(),
+            entered: Arc::clone(&entered),
+        };
+        let speaker = Speaker::start(Box::new(engine), Player::new(Sink::null_for_tests()));
+        speaker.send(Command::Speak {
+            text: "one".into(),
+            next: None,
+            voice: Box::new(voice()),
+            rate: SpeechRate::NORMAL,
+            generation: 0,
+        });
+        // Wait until synthesis is genuinely under way, so the drop below is
+        // the case under test rather than a race that passes by arriving
+        // first.
+        for _ in 0..400 {
+            if *entered.lock().unwrap() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(*entered.lock().unwrap(), "synthesis never started");
+
+        // Dropped on a scratch thread so the test reports a hang as a
+        // failure rather than hanging with it.
+        let (done, finished) = channel::<()>();
+        std::thread::spawn(move || {
+            drop(speaker);
+            let _ = done.send(());
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "dropping the speaker did not return: the join is still unbounded"
+        );
     }
 
     fn key_of(text: &str) -> Key {

@@ -60,23 +60,27 @@ static NEXT_TOKEN: AtomicU32 = AtomicU32::new(1);
 /// implements no `Print` at all, and a capability that says yes there is a
 /// print command that opens nothing.
 pub fn available() -> bool {
-    let Some(connection) = Connection::session().ok() else {
-        return false;
-    };
-    let Ok(proxy) = zbus::blocking::Proxy::new(
-        &connection,
-        PORTAL,
-        PORTAL_PATH,
-        "org.freedesktop.DBus.Properties",
-    ) else {
-        return false;
-    };
-    // Every portal interface carries a `version` property. Asking for this
-    // one's is the cheapest question whose answer is "there is a Print
-    // implementation behind this bus name".
-    proxy
-        .call::<_, _, OwnedValue>("Get", &(PRINT, "version"))
-        .is_ok()
+    // Bounded, because this is asked while the capabilities are being read —
+    // which is before there is a window. A portal that accepts the call and
+    // never answers would otherwise be a pulpit that never starts, with
+    // nothing on screen to close.
+    crate::platform::linux::on_the_bus("portal print probe", |connection| {
+        let Ok(proxy) = zbus::blocking::Proxy::new(
+            connection,
+            PORTAL,
+            PORTAL_PATH,
+            "org.freedesktop.DBus.Properties",
+        ) else {
+            return false;
+        };
+        // Every portal interface carries a `version` property. Asking for
+        // this one's is the cheapest question whose answer is "there is a
+        // Print implementation behind this bus name".
+        proxy
+            .call::<_, _, OwnedValue>("Get", &(PRINT, "version"))
+            .is_ok()
+    })
+    .unwrap_or(false)
 }
 
 /// Put the desktop's print dialog up and spool what it says.

@@ -15,7 +15,7 @@ use pulpit_core::speech::SpeechRate;
 use serde::{Deserialize, Serialize};
 
 use super::catalog::Voice;
-use super::engine::{Pcm, Result, SpeechEngine, SpeechError};
+use super::engine::{EngineStop, Pcm, Result, SpeechEngine, SpeechError};
 
 /// One placeholder-substituted argument.
 ///
@@ -73,6 +73,9 @@ pub struct SubprocessEngine {
     /// Resolves a voice to its model file. Injected so the engine does not
     /// need to know about the store's search-path rules.
     resolve: ResolveVoice,
+    /// Shared with whoever shuts the speaker down, so a synthesiser that has
+    /// stopped answering can be killed rather than waited for.
+    stop: EngineStop,
 }
 
 /// Maps a voice to the model file on disk that an engine is pointed at.
@@ -91,6 +94,7 @@ impl SubprocessEngine {
             manifest,
             program,
             resolve: Box::new(resolve),
+            stop: EngineStop::default(),
         }
     }
 
@@ -116,7 +120,16 @@ impl SpeechEngine for SubprocessEngine {
         &self.manifest.id
     }
 
+    fn stopper(&self) -> EngineStop {
+        self.stop.clone()
+    }
+
     fn synthesize(&mut self, text: &str, voice: &Voice, rate: SpeechRate) -> Result<Pcm> {
+        // A stop has already landed: whatever is still queued behind it is a
+        // synthesiser this process would have to wait for on its way out.
+        if self.stop.is_stopping() {
+            return Err(SpeechError::refused("the engine has been stopped"));
+        }
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(Pcm {
@@ -156,30 +169,57 @@ impl SpeechEngine for SubprocessEngine {
                 ))
             })?;
 
+        // Both pipes come out before the child is handed over, because from
+        // here on the child belongs to the stop handle and this thread only
+        // borrows it back at the end.
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+
+        // Registered so `EngineStop::stop` can reach it. Everything after
+        // this point blocks on a program that may never answer, and this is
+        // what makes that bounded.
+        if !self.stop.adopt(child) {
+            return Err(SpeechError::refused("the engine has been stopped"));
+        }
+        // From here, `?` would leak the registration, so every exit goes
+        // through this: reclaim what is left of the child and kill it.
+        let abandon = |stop: &EngineStop| {
+            if let Some(mut child) = stop.reclaim() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        };
+
         // The text goes in and the pipe closes: one line, one utterance, EOF
         // on stdout marks the end. Writing happens on this thread and reading
         // after it, which is safe only because a sentence is far smaller than
         // a pipe buffer's worth of *input*; the output is what needs draining.
         {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| SpeechError::failed("engine stdin closed"))?;
+            let Some(mut stdin) = stdin else {
+                abandon(&self.stop);
+                return Err(SpeechError::failed("engine stdin closed"));
+            };
             let line = format!("{}\n", trimmed.replace(['\r', '\n'], " "));
             if let Err(e) = stdin.write_all(line.as_bytes()) {
-                let _ = child.kill();
+                abandon(&self.stop);
                 return Err(SpeechError::failed(format!("writing to the engine: {e}")));
             }
         }
 
         let mut samples = Vec::new();
-        if let Some(mut stdout) = child.stdout.take() {
+        if let Some(mut stdout) = stdout {
             if let Err(e) = stdout.read_to_end(&mut samples) {
-                let _ = child.kill();
+                abandon(&self.stop);
                 return Err(SpeechError::failed(format!("reading from the engine: {e}")));
             }
         }
 
+        // Gone from the slot means a stop took it, killed it and is waiting
+        // for this thread to notice. Saying so is what turns a kill into an
+        // orderly end rather than a mysterious empty utterance.
+        let Some(mut child) = self.stop.reclaim() else {
+            return Err(SpeechError::refused("the engine was stopped mid-utterance"));
+        };
         let status = child
             .wait()
             .map_err(|e| SpeechError::failed(format!("waiting for the engine: {e}")))?;
@@ -283,6 +323,59 @@ mod tests {
             .expect("silence is fine");
         assert!(pcm.is_empty());
         assert_eq!(pcm.sample_rate, voice().sample_rate);
+    }
+
+    /// A synthesiser that never produces a byte and never exits, which is
+    /// what a wedged model load looks like from here.
+    #[cfg(unix)]
+    fn never_answers() -> SubprocessEngine {
+        SubprocessEngine::new(
+            EngineManifest {
+                id: "sleeper".into(),
+                args: vec![ArgTemplate::new("-c"), ArgTemplate::new("sleep 300")],
+            },
+            PathBuf::from("/bin/sh"),
+            |_| Some(PathBuf::from("/voices/x.onnx")),
+        )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stopping_ends_a_synthesiser_that_would_never_answer() {
+        // Without this the shutdown join is unbounded: nothing else in the
+        // process can reach the child, and `read_to_end` waits as long as it
+        // takes.
+        let mut engine = never_answers();
+        let stop = engine.stopper();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            stop.stop();
+        });
+        let started = std::time::Instant::now();
+        let error = engine
+            .synthesize("hello", &voice(), SpeechRate::NORMAL)
+            .unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the stop did not reach the child"
+        );
+        // Refused, not failed: nothing is broken, the reader is leaving.
+        assert!(matches!(error, SpeechError::Refused(_)), "got {error:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stopped_engine_does_not_start_another_synthesiser() {
+        // The queue behind a stop is the second way to hold the join: every
+        // request still in it would spawn a fresh child to wait for.
+        let mut engine = never_answers();
+        engine.stopper().stop();
+        let started = std::time::Instant::now();
+        let error = engine
+            .synthesize("hello", &voice(), SpeechRate::NORMAL)
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert!(matches!(error, SpeechError::Refused(_)), "got {error:?}");
     }
 
     #[test]
