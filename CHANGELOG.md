@@ -117,6 +117,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Pages arrive sharp, or they do not arrive.** Pulpit used to draw every
+  page twice — a small blurry frame first, then the real one over it — on the
+  belief that a full page took the better part of a second to rasterise.
+  Measured on two real books it takes about nine milliseconds, roughly twice
+  what the blurry one cost, because most of a page's expense is reading and
+  laying it out rather than filling pixels. So the first pass is gone. A page
+  now arrives once, at the size it is drawn, and a whole family of faults goes
+  with it: pages that stayed soft because the sharp frame was cancelled and
+  never asked for again, and pages that stayed soft after leaving fullscreen
+  for as long as you looked at them.
+
+- **The frame cache follows the display it is feeding.** The configured budget
+  is really a number of pages, and a page on a 2× display costs four times
+  what it costs at 1× — so the same setting held a quarter of the document and
+  a long book re-rendered pages it had already drawn, all session. The budget
+  is now read as a figure for a 1× display and scaled by the pixels the screen
+  actually has, up to four times.
+
 - **One row of sidebar tabs, and no Pages view.** The sidebar's icon row is
   now the only level — Outline, Fields (where the document has a form),
   Search, Annotations — replacing the second row of text tabs that used to

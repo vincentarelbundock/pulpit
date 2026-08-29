@@ -32,6 +32,11 @@ pub(crate) const DOCUMENTATION_URL: &str = "https://vincentarelbundock.github.io
 
 /// Cadence for animations and short UI deadlines. Worker delivery is
 /// event-driven and does not wait for this clock.
+/// The most the frame-cache budget may be multiplied by for a dense
+/// display. Four is a 2x panel exactly; beyond that this is resident memory
+/// and the budget stops following.
+const MAX_CACHE_SCALE: f64 = 4.0;
+
 const TICK: Duration = Duration::from_millis(50);
 /// The watchdog tick while nothing is live: fast enough for the clock,
 /// deadlines and resume detection, slow enough that an idle talk barely
@@ -1061,6 +1066,10 @@ pub struct App {
     /// reader page is a `FrameKind::Page` at the column's width, and the
     /// panel's is a `FrameKind::Slide` at the panel's.
     last_reader: Option<FrameKey>,
+    /// Scratch for naming the message being handled. Reused so that naming
+    /// every message costs no allocation once it has grown.
+    worst_message_name: String,
+
     /// How deep the current `on_read_command` is. Only the outermost call
     /// times a turn: several commands answer by calling this handler again,
     /// and an inner call that moved the page would otherwise start a turn
@@ -2079,6 +2088,7 @@ impl App {
             last_audience: None,
             last_presenter: None,
             last_reader: None,
+            worst_message_name: String::new(),
             read_command_depth: 0,
             documents: DocumentManager::new(
                 initial.clone().unwrap_or_default(),
@@ -2741,6 +2751,13 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Named before it is handled, because handling consumes it. The
+        // buffer is reused, so the steady state allocates nothing; the name
+        // is only copied out when a new worst arrives. Outside the timer:
+        // this is the instrumentation's own cost, not the application's.
+        let mut name = std::mem::take(&mut self.worst_message_name);
+        write_variant_name(&mut name, &message);
+
         let started = Instant::now();
         let task = self.dispatch(message);
         // After every message, not per handler: annotations mutate from a
@@ -2760,7 +2777,8 @@ impl App {
             None => task,
         };
         self.latency
-            .record_stage(|stages| &mut stages.update, started.elapsed());
+            .record_update(started.elapsed(), || name.clone());
+        self.worst_message_name = name;
         task
     }
 
@@ -2999,6 +3017,13 @@ impl App {
                 millis(stage.mean()),
                 millis(stage.worst),
             ));
+        }
+        // Which message the worst one was. A worst-case figure that names
+        // nothing is one step short of useful: this one climbed across four
+        // reports of this application while saying only that a hitch had
+        // happened somewhere.
+        if let Some(worst) = self.latency.worst_update() {
+            report.push_str(&format!("    the slowest was {worst}\n"));
         }
         // Uploads are on the event loop too, but outside `update`: they
         // happen while a window lays itself out, which is why they are
@@ -3459,6 +3484,7 @@ impl App {
                 if (self.presenter_scale - scale).abs() > f32::EPSILON {
                     tracing::debug!(scale, "presenter pixel ratio");
                     self.presenter_scale = scale;
+                    self.follow_display_with_the_cache_budget();
                     // Every panel frame is now the wrong size by definition:
                     // ask for the right ones rather than upscale for ever.
                     self.request_renders();
@@ -15144,6 +15170,29 @@ impl App {
         previous
     }
 
+    /// Size the frame cache for the display it is actually feeding.
+    ///
+    /// The configured budget is a count of frames in disguise, and a frame's
+    /// size is a property of the display: at 2× a page costs four times what
+    /// the same page costs at 1×, so the same budget holds a quarter of the
+    /// document. Measured on a 3600×2250 panel, a 256 MiB budget held 33
+    /// pages of a 509-page book and evicted 264 times in one sitting — the
+    /// reader was re-rendering pages it had already drawn, for the whole
+    /// session.
+    ///
+    /// So the configured figure is read as a budget *for a 1× display* and
+    /// multiplied by the pixels this one actually has. Capped, because this
+    /// is resident memory and a 3× display should not quietly ask for a
+    /// gigabyte.
+    fn follow_display_with_the_cache_budget(&mut self) {
+        let configured = self.settings.rendering.cache_budget_mib * 1024 * 1024;
+        let scale = self.presenter_scale_factor();
+        let factor = (f64::from(scale) * f64::from(scale)).clamp(1.0, MAX_CACHE_SCALE);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let scaled = (configured as f64 * factor) as u64;
+        self.cache.set_budget(scaled);
+    }
+
     /// The projector's output width in pixels.
     fn audience_width(&self) -> u32 {
         self.audience_size.width.max(320.0) as u32
@@ -17138,6 +17187,39 @@ async fn pick_pdf_named(suggested: PathBuf) -> Option<PathBuf> {
         .map(|handle| handle.path().to_path_buf())
 }
 
+/// Write a message's variant name into `out`, without formatting its payload.
+///
+/// `Debug` writes `Variant { .. }` or `Variant(..)`, so a sink that refuses
+/// everything from the first delimiter onwards stops the formatter before it
+/// reaches a payload — which can be a whole outline or a page of pixels.
+/// Naming every message any other way would cost more than the hitch it is
+/// meant to find.
+fn write_variant_name(out: &mut String, message: &Message) {
+    use std::fmt::Write;
+
+    struct UpToTheDelimiter<'a>(&'a mut String);
+
+    impl std::fmt::Write for UpToTheDelimiter<'_> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            for character in text.chars() {
+                if matches!(character, '(' | '{' | ' ') || self.0.len() >= 48 {
+                    // Not an error anyone handles: it is how the formatter is
+                    // told to stop.
+                    return Err(std::fmt::Error);
+                }
+                self.0.push(character);
+            }
+            Ok(())
+        }
+    }
+
+    out.clear();
+    let _ = write!(UpToTheDelimiter(out), "{message:?}");
+    if out.is_empty() {
+        out.push_str("a message");
+    }
+}
+
 /// How one reader page is kept resident: by its frame key, or as a picture.
 #[derive(Debug)]
 enum PageResidency {
@@ -17357,7 +17439,33 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
 }
 
 #[cfg(test)]
+mod variant_name_tests {
+    use super::{write_variant_name, Message};
+
+    /// The name, and nothing of the payload — which for some messages is a
+    /// whole outline. A worst-case figure is only useful if finding it is
+    /// cheaper than the thing it measures.
+    #[test]
+    fn a_message_is_named_without_formatting_what_it_carries() {
+        let mut name = String::new();
+
+        write_variant_name(&mut name, &Message::OpenDialog);
+        assert_eq!(name, "OpenDialog");
+
+        // A tuple variant stops at the bracket.
+        write_variant_name(&mut name, &Message::PresenterScale(2.0));
+        assert_eq!(name, "PresenterScale");
+
+        // The buffer is reused, so a shorter name must not wear the tail of
+        // a longer one.
+        write_variant_name(&mut name, &Message::OpenDialog);
+        assert_eq!(name, "OpenDialog");
+    }
+}
+
+#[cfg(test)]
 mod canonical_frame_tests {
+
     use super::ready_transition;
     use pulpit_core::RenderGeneration;
     use pulpit_render::cache::{FrameKey, FrameKind};

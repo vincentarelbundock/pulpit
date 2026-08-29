@@ -178,7 +178,17 @@ pub struct Latency {
     /// Turns abandoned because the next one began first.
     abandoned: u64,
     stages: Stages,
+    /// Which message the worst `update` was handling.
+    ///
+    /// The worst-case figure alone says a hitch happened and nothing about
+    /// what caused it, which is one step short of useful: it climbed across
+    /// four reports of this application and named nothing each time. Only
+    /// the name is kept, and only when a new worst arrives, so the cost is
+    /// one short string every time the record is beaten and nothing at all
+    /// in between.
+    worst_update: Option<String>,
     copies: Copies,
+
     /// Render latency for a frame a window is waiting for: submitted to
     /// frame in hand, so it includes the wait in the queue.
     ///
@@ -312,6 +322,20 @@ impl Latency {
             self.turns.pop_front();
         }
         self.turns.push_back(turn);
+    }
+
+    /// Record one message's handling, and remember what it was if it is the
+    /// slowest so far. `name` is only called when the record is beaten.
+    pub fn record_update(&mut self, elapsed: Duration, name: impl FnOnce() -> String) {
+        if elapsed > self.stages.update.worst {
+            self.worst_update = Some(name());
+        }
+        self.stages.update.record(elapsed);
+    }
+
+    /// What the slowest message so far was.
+    pub fn worst_update(&self) -> Option<&str> {
+        self.worst_update.as_deref()
     }
 
     /// Record how long a named piece of synchronous work took.

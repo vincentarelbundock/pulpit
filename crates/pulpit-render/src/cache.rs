@@ -132,6 +132,21 @@ impl FrameCache {
         self.budget_bytes
     }
 
+    /// Change the budget, evicting down to it if it shrank.
+    ///
+    /// The configured figure is a number of frames in disguise, and a frame's
+    /// size is a property of the display: on a 2× panel a page costs four
+    /// times what the same page costs at 1×, so one budget holds a quarter of
+    /// the deck. Raising it with the pixel ratio is what keeps the working
+    /// set the same *document*, which is what a reader experiences.
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        if budget_bytes == self.budget_bytes {
+            return;
+        }
+        self.budget_bytes = budget_bytes;
+        self.enforce_budget(0);
+    }
+
     pub fn stats(&self) -> CacheStats {
         self.stats
     }
@@ -804,6 +819,32 @@ mod tests {
                 .best(RenderGeneration(4), 7, FrameKind::Slide)
                 .is_none(),
             "frames never leak across generations"
+        );
+    }
+
+    /// A denser display makes every frame bigger, so the budget follows it.
+    /// Shrinking must not leave the cache over its new budget.
+    #[test]
+    fn a_new_budget_is_enforced_in_both_directions() {
+        let mut cache = FrameCache::new(5_000_000);
+        for slide in 0..4 {
+            cache.insert(key(1, slide), frame(1_000_000));
+        }
+        assert_eq!(cache.stats().frames, 4);
+
+        cache.set_budget(20_000_000);
+        assert_eq!(cache.budget_bytes(), 20_000_000);
+        assert_eq!(cache.stats().frames, 4, "growing evicts nothing");
+        for slide in 4..12 {
+            cache.insert(key(1, slide), frame(1_000_000));
+        }
+        assert_eq!(cache.stats().frames, 12, "and the room is usable");
+
+        cache.set_budget(3_000_000);
+        assert!(
+            cache.stats().total_bytes() <= 3_000_000,
+            "shrinking evicts down to the new budget: {:?}",
+            cache.stats()
         );
     }
 
