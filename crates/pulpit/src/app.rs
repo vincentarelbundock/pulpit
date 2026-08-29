@@ -2080,7 +2080,10 @@ impl App {
             reader_fullscreen: false,
             designer: None,
             layout_dialog: None,
-            cache: FrameCache::new(settings.rendering.cache_budget_mib * 1024 * 1024),
+            cache: FrameCache::new(
+                Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB")
+                    .unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
+            ),
             handles: std::collections::HashMap::new(),
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             form_flow: crate::form_flow::FormFlow::default(),
@@ -2230,7 +2233,10 @@ impl App {
             reader_surface_seen: 0,
             reader_surface_sized: 0,
             overview_reveal: None,
-            thumbnails: crate::thumbnails::ThumbnailCache::new(THUMBNAIL_BUDGET_BYTES),
+            thumbnails: crate::thumbnails::ThumbnailCache::new(
+                Self::budget_from_env("PULPIT_THUMBNAIL_BUDGET_MIB")
+                    .unwrap_or(THUMBNAIL_BUDGET_BYTES),
+            ),
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnail_requests: std::collections::HashSet::new(),
             area_copy: None,
@@ -3097,10 +3103,15 @@ impl App {
         // Source bytes only: the cache cannot see the image handles or GPU
         // textures built from its pixels, so it does not pretend to.
         report.push_str(&format!(
-            "- {} frames, {:.1} MiB source bytes, budget {:.0} MiB, {} evictions\n",
+            "- {} frames, {:.1} MiB source bytes, budget {:.0} MiB{}, {} evictions\n",
             stats.frames,
             stats.cpu_bytes as f64 / 1_048_576.0,
             self.cache.budget_bytes() as f64 / 1_048_576.0,
+            if std::env::var_os("PULPIT_CACHE_BUDGET_MIB").is_some() {
+                " (set by hand)"
+            } else {
+                ""
+            },
             stats.evictions,
         ));
         // Hits and misses are deliberately absent. They are counted only by
@@ -15170,6 +15181,24 @@ impl App {
         previous
     }
 
+    /// A budget set from the environment, in mebibytes, or `None`.
+    ///
+    /// Absolute: it is not scaled by the display, because the whole point of
+    /// setting it is to find out what a machine smaller than this one feels
+    /// like. `PULPIT_CACHE_BUDGET_MIB` sizes the frame cache and
+    /// `PULPIT_THUMBNAIL_BUDGET_MIB` the deck's small pictures; a zero or an
+    /// unparseable value is ignored rather than obeyed, since a zero-byte
+    /// cache would refuse every frame.
+    fn budget_from_env(name: &str) -> Option<u64> {
+        std::env::var(name)
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|mib| *mib > 0)
+            .map(|mib| mib * 1024 * 1024)
+    }
+
     /// Size the frame cache for the display it is actually feeding.
     ///
     /// The configured budget is a count of frames in disguise, and a frame's
@@ -15185,6 +15214,12 @@ impl App {
     /// is resident memory and a 3× display should not quietly ask for a
     /// gigabyte.
     fn follow_display_with_the_cache_budget(&mut self) {
+        // An explicit budget is obeyed exactly. Scaling it would defeat the
+        // one reason to set it.
+        if let Some(fixed) = Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB") {
+            self.cache.set_budget(fixed);
+            return;
+        }
         let configured = self.settings.rendering.cache_budget_mib * 1024 * 1024;
         let scale = self.presenter_scale_factor();
         let factor = (f64::from(scale) * f64::from(scale)).clamp(1.0, MAX_CACHE_SCALE);
