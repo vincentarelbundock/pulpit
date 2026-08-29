@@ -10,6 +10,7 @@
 
 pub mod images;
 pub mod manager;
+pub mod shape;
 pub mod watcher;
 
 pub use images::{ImageDocumentState, Positions};

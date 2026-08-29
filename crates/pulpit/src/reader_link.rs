@@ -340,15 +340,34 @@ impl ReaderLink {
     /// Returns as soon as the worker has answered its handshake, so a document
     /// that cannot be opened is reported here rather than as silence.
     pub fn open(source: &Path) -> Result<ReaderLink, SessionError> {
-        let session = DocumentSession::start(&DocumentWorkerCommand::default(), source)?;
         let (ask_sender, ask_receiver) = std::sync::mpsc::channel::<Ask>();
         let (told_sender, told_receiver) = std::sync::mpsc::channel::<Told>();
         let (wakeup, wakeup_receiver) = pulpit_core::ipc::doorbell();
 
+        // The worker is started on the link's own thread, not here. Starting
+        // it means spawning the process and waiting out its handshake — a
+        // third of a second of dynamic linking and PDFium coming up — and
+        // every caller of `open` is on a path that has better things to do
+        // with that time. A start that fails becomes a fatal `Told`, which
+        // is the same shape any later loss of the worker takes.
         let source_for_thread = source.to_path_buf();
         std::thread::Builder::new()
             .name("document-session".into())
             .spawn(move || {
+                let session = match DocumentSession::start(
+                    &DocumentWorkerCommand::default(),
+                    &source_for_thread,
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        let _ = told_sender.send(Told::Failed {
+                            message: format!("the document worker did not start: {error}"),
+                            fatal: true,
+                        });
+                        wakeup.ring();
+                        return;
+                    }
+                };
                 serve(session, ask_receiver, told_sender, wakeup);
                 tracing::debug!(source = %source_for_thread.display(), "document session ended");
             })
@@ -778,6 +797,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
 
 /// Ask for the document's shape, in as few round trips as it takes.
 fn describe(session: &mut DocumentSession, pages: usize) -> Vec<Told> {
+    tracing::debug!("describe begins");
     let info = match session.request(DocumentRequest::Info) {
         Ok(DocumentResponse::Opened(info)) => info,
         other => return vec![unexpected(other, "document info")],
@@ -820,6 +840,7 @@ fn describe(session: &mut DocumentSession, pages: usize) -> Vec<Told> {
         // build that cannot read them; the rail says it has none.
         _ => Default::default(),
     };
+    tracing::debug!(pages = geometry.len(), "describe measured");
     vec![Told::Described {
         info,
         geometry,

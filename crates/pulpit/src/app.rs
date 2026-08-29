@@ -1743,6 +1743,12 @@ pub struct App {
     /// restore waits for the first scroll report — which Iced sends as soon as
     /// the surface has bounds, without anybody scrolling.
     pending_position: Option<crate::settings::RestoredPosition>,
+    /// The shape the reader was pre-opened from, held until the worker's own
+    /// measurement confirms or contradicts it. `Some` means the open-time
+    /// work — layout, restore, outline — already happened from the record,
+    /// and a `Described` that matches must not do it again.
+    reader_preopened: Option<crate::doc::shape::DocumentShape>,
+
     /// The offer itself, drawn as a dialogue with no way out but an answer.
     /// Inert: nothing is applied until one is given (§11.4).
     pub reader_recovery: Option<crate::reader_journal::RecoveredJournal>,
@@ -2304,6 +2310,7 @@ impl App {
             document_hash: None,
             pending_document_layout: None,
             pending_position: None,
+            reader_preopened: None,
             reader_recovery: None,
             presenter_interaction: pulpit_core::annotate::AnnotationInteraction::new(),
             composing_mark: None,
@@ -6771,6 +6778,7 @@ impl App {
         self.file_wakeup = None;
         self.document_serial += 1;
         self.document_hash = None;
+        self.reader_preopened = None;
         self.pending_document_layout = None;
         // A fresh document starts with no signing question answered yet;
         // discovery below decides whether one needs asking (§31.3, A9).
@@ -6839,6 +6847,22 @@ impl App {
         let spawn = std::thread::Builder::new()
             .name("document-open".into())
             .spawn(move || {
+                // The reader's worker first, and asked to measure at once.
+                // Describing a long document loads every page for its real
+                // geometry — a third of a second on a six-hundred-page book —
+                // and it used to start only after promotion, with the worker
+                // sitting bound and idle while this thread hashed the file
+                // and verified its signatures. Asked here, the measuring runs
+                // under the rest of the preparation instead of after it, and
+                // the answers wait in the link until the application polls.
+                let reader = reader_enabled.then(|| {
+                    crate::reader_link::ReaderLink::open(&path)
+                        .map(|mut link| {
+                            link.ask(crate::reader_link::Ask::Describe { pages: 0 });
+                            link
+                        })
+                        .map_err(|e| e.to_string())
+                });
                 let fingerprint = crate::session::fingerprint(&path);
                 // A journal belonging to a copy that is gone, and to this file:
                 // anything else on disk is another document's or another
@@ -6854,9 +6878,6 @@ impl App {
                     .ok()
                     .and_then(|bytes| pulpit_render::verify::verify_signatures(&bytes).ok())
                     .unwrap_or_default();
-                let reader = reader_enabled.then(|| {
-                    crate::reader_link::ReaderLink::open(&path).map_err(|e| e.to_string())
-                });
                 let prepared = PreparedDocument {
                     serial,
                     content_hash: crate::session::content_hash(&path),
@@ -6959,9 +6980,49 @@ impl App {
                 return Task::none();
             }
         };
-        link.ask(crate::reader_link::Ask::Describe { pages: 0 });
+        // Describe was asked the moment the link was opened, on the
+        // preparation thread; its answer may already be waiting.
         self.reader_wakeup = link.take_wakeup();
         self.reader_link = Some(link);
+
+        // A document opened before lays out from its remembered shape now,
+        // rather than after the worker has come up and measured every page —
+        // half a second on a long book, and the reading position, the page
+        // it names and the outline all wait behind it. The worker's own
+        // answer reconciles this when it lands: see `Told::Described`.
+        self.reader_preopened = None;
+        if let Some(shape) = self
+            .document_hash
+            .as_deref()
+            .and_then(crate::doc::shape::recall)
+        {
+            tracing::info!(
+                pages = shape.geometry.len(),
+                "reader preopened from remembered shape"
+            );
+            self.reader_recovery = self.pending_reader_recovery.take();
+            self.forget_per_document_edit_state();
+            self.wash_cache.borrow_mut().clear();
+            self.reader.opened(
+                shape.geometry.clone(),
+                shape.info.level,
+                shape.info.warnings.clone(),
+                shape.info.has_form,
+            );
+            self.rescan_search_after_document_change();
+            if shape.info.has_form {
+                self.ask_field_list();
+            }
+            self.set_reader_outline(shape.outline.clone());
+            self.find_reading_position();
+            for warning in &shape.info.warnings {
+                self.notify(warning.message().to_string());
+            }
+            if self.properties_open {
+                self.ask_document_properties();
+            }
+            self.reader_preopened = Some(shape);
+        }
 
         let journal_path = Self::journal_path();
         match prepared.fingerprint {
@@ -7137,6 +7198,35 @@ impl App {
                     geometry,
                     outline,
                 } => {
+                    // The measurement the pre-open promised. Identical, and
+                    // everything below already happened from the record;
+                    // running it again would reset the session and throw
+                    // away the restored position. Different — the file
+                    // changed between the hash and the measure — and the
+                    // fresh answer replaces the record, wholesale, through
+                    // the ordinary path.
+                    if let Some(shape) = self.reader_preopened.take() {
+                        if shape.geometry == geometry
+                            && shape.info == *info
+                            && shape.outline == outline
+                        {
+                            tracing::debug!("described confirms the remembered shape");
+                            continue;
+                        }
+                        tracing::warn!("the document no longer matches its remembered shape");
+                    } else if let Some(hash) = self.document_hash.clone() {
+                        // Freshly measured and worth remembering. Written on
+                        // its own thread: serialising a long book is real
+                        // work, and the event loop has a page to show.
+                        let remembered = crate::doc::shape::DocumentShape {
+                            info: (*info).clone(),
+                            geometry: geometry.clone(),
+                            outline: outline.clone(),
+                        };
+                        std::thread::spawn(move || {
+                            crate::doc::shape::remember(&hash, remembered);
+                        });
+                    }
                     // The document is up, so what the last run left unsaved
                     // can be *offered*. It is not applied: recovery needs an
                     // explicit answer, and the offer itself is inert (§11.4).
@@ -7147,6 +7237,7 @@ impl App {
                     // is gone are owed by nobody.
                     self.forget_per_document_edit_state();
                     self.wash_cache.borrow_mut().clear();
+                    tracing::debug!(pages = geometry.len(), "reader described");
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
                     // Page numbers meaning something else now applies to the
@@ -9788,6 +9879,7 @@ impl App {
                         let estimate = self
                             .page_surface_size()
                             .unwrap_or((self.reader.cell_width(), *viewport));
+                        tracing::debug!("reader surface mounted");
                         self.reader.remount_cell(estimate, *viewport);
                         self.apply_pending_position();
                         self.request_reader_renders();

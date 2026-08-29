@@ -136,6 +136,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A book you have opened before opens to your page in half the time.**
+  Describing a document loads every page for its true geometry, after a
+  comparable wait for the document worker to start at all — together most
+  of the delay between picking a file and seeing your page. The measured
+  shape is now remembered against the file's content hash, so a known
+  document lays out, restores its place and shows its outline from the
+  record while the worker measures afresh in the background; the two are
+  compared when the fresh answer arrives, and a file whose bytes changed
+  gets the fresh answer wholesale. Opening also no longer renders the
+  pages the restore is about to leave, and the worker's startup no longer
+  blocks the rest of the preparation.
+
 - **Pulpit now weighs what a document viewer should.** Three changes, one
   principle: memory follows what you are doing, not what might be done. The
   renderer pool is elastic — a burst of work takes the whole pool and a
