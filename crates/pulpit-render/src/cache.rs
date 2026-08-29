@@ -177,9 +177,9 @@ impl FrameCache {
         }
     }
 
-    /// Best available frame for a slide: the refined one if present,
-    /// otherwise the coarse one. This is what keeps a valid image on screen
-    /// while a better one renders.
+    /// The widest frame there is for a slide, whatever it was drawn for.
+    /// This is what keeps a valid image on screen while the one a surface
+    /// actually wants renders.
     pub fn best(
         &self,
         generation: RenderGeneration,
@@ -776,28 +776,28 @@ mod tests {
     }
 
     #[test]
-    fn the_best_available_frame_prefers_refined_over_coarse() {
+    fn the_best_available_frame_is_the_widest_there_is() {
         let mut cache = FrameCache::new(100_000_000);
-        let coarse = FrameKey {
+        let small = FrameKey {
             width: 480,
             height: 270,
             ..key(3, 7)
         };
-        cache.insert(coarse, Frame::new(480, 270, vec![0; 480 * 270 * 4]));
+        cache.insert(small, Frame::new(480, 270, vec![0; 480 * 270 * 4]));
         let (found, _) = cache
             .best(RenderGeneration(3), 7, FrameKind::Slide)
             .unwrap();
         assert_eq!(
-            found, coarse,
-            "the coarse frame is shown until something better exists"
+            found, small,
+            "a narrow frame is shown until something better exists"
         );
 
-        let refined = key(3, 7);
-        cache.insert(refined, frame(1920 * 1080 * 4));
+        let wide = key(3, 7);
+        cache.insert(wide, frame(1920 * 1080 * 4));
         let (found, _) = cache
             .best(RenderGeneration(3), 7, FrameKind::Slide)
             .unwrap();
-        assert_eq!(found, refined);
+        assert_eq!(found, wide);
 
         assert!(
             cache
@@ -809,21 +809,22 @@ mod tests {
 
     #[test]
     fn a_long_presentation_stays_within_budget() {
-        // 300 slides at 4K, coarse and refined, on a 256 MiB budget.
+        // 300 slides at 4K, plus the panel-sized frame of each, on a 256 MiB
+        // budget.
         let mut cache = FrameCache::new(DEFAULT_BUDGET_BYTES);
         for slide in 0..300 {
-            let coarse = FrameKey {
+            let panel = FrameKey {
                 width: 640,
                 height: 360,
                 ..key(1, slide)
             };
-            cache.insert(coarse, Frame::new(640, 360, vec![0; 640 * 360 * 4]));
-            let refined = FrameKey {
+            cache.insert(panel, Frame::new(640, 360, vec![0; 640 * 360 * 4]));
+            let audience = FrameKey {
                 width: 3840,
                 height: 2160,
                 ..key(1, slide)
             };
-            cache.insert(refined, Frame::new(3840, 2160, vec![0; 3840 * 2160 * 4]));
+            cache.insert(audience, Frame::new(3840, 2160, vec![0; 3840 * 2160 * 4]));
             assert!(cache.stats().total_bytes() <= DEFAULT_BUDGET_BYTES);
         }
         assert!(

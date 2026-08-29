@@ -119,23 +119,25 @@ an error path.
   no window climbs a ladder of textures for one page turn. A panel with
   nothing yet shows the deck thumbnail, and gives it up once, to the first
   real frame.
-- The one deliberate exception is the coarse stand-in, and it is asked for
-  only on the jumps where it would be shown: a window holding some *other*
-  page, with nothing at its own size for the page it wants. A correct page
-  coarsely beats a sharp picture of somewhere else. One rule serves both
-  windows and one render answers both, because a window that took a stand-in
-  the plan had not asked for would wait for a frame nobody was rendering.
-  Ordinary turns land on a prefetched frame, so they neither render it nor
-  show it; a stand-in never appears over the page it is already showing, which
-  would be the ladder rather than the cure; and the very first frame of a
-  session is always the real one — no window is revealed with a soft picture
-  that sharpens in front of the room.
-- The presenter's current-slide panel changes in the same beat the room sees,
-  stand-in included: it is the surface the operator is watching, and holding
-  the previous page there until a full canonical render landed made it the
-  last thing in the application to answer the key they pressed. Blanking is
-  still not mirrored: the room's screen goes dark, the presenter's place in
-  the deck does not. Every display change is logged at debug level.
+- There are no exceptions, and there used to be one. A coarse stand-in was
+  rendered ahead of the real frame on the jumps where a window would
+  otherwise hold the wrong page, on the premise that a full page costs an
+  order of magnitude more than a small one. Measured on two real books, a
+  full page rasterises in about 9 ms against a preview's 5 ms: most of a
+  page's cost is parsing and laying it out, which is paid at any size. The
+  tier bought a few milliseconds and cost a whole second rung — three times
+  the jobs queued in front of the frame somebody was waiting for, and a
+  standing family of defects in which a page climbs partway up the ladder
+  and stops. A window now waits on one frame, which either exists or does
+  not.
+- The presenter's current-slide panel changes in the same beat the room sees:
+  it is the surface the operator is watching, and holding the previous page
+  there until a full render landed made it the last thing in the application
+  to answer the key they pressed. A panel with nothing at all still shows the
+  deck thumbnail, which is a different mechanism — one picture, given up once,
+  never a rung. Blanking is still not mirrored: the room's screen goes dark,
+  the presenter's place in the deck does not. Every display change is logged
+  at debug level.
 - The render queue serves the committed audience page first, then the
   presenter panels' preview-size frames, and only then the audience-size
   prefetch of the neighbouring pages: prefetch is a background luxury, and one
@@ -537,8 +539,8 @@ it is a property of the text layer rather than of anything above it.
   first (`cargo test --release -p pulpit-render --test document_budgets`, and
   the numbers are in that file's `commit_path` module): the incremental
   snapshot write is about 5.3 ms and the reopen about 0.26 ms — a fixed cost
-  the change could not remove — while a cold page costs 1.3 ms coarse and
-  2.4 ms refined at a 1080p reader cell, 9.8 ms refined at a HiDPI one. The
+  the change could not remove — while a cold page costs about 2.4 ms at a
+  1080p reader cell and 9.8 ms at a HiDPI one. The
   reader has one or two pages on screen, redrawn across two to six pool
   workers, behind a 250 ms debounce, with the previous frames still standing
   under A7 so nothing blanks. What the change would buy is a few milliseconds
@@ -836,7 +838,7 @@ the projector's slides — as `FrameKind::Page` entries whose jobs set
 point. The bespoke path this replaced — one serial document worker answering
 render requests over a pipe, pixels inline, no cache, no cancellation — is
 why paging used to lag behind stale renders and why a settling page could be
-repainted by a late coarse frame.
+repainted by a late frame.
 
 What made the bespoke path look necessary is A7: a frame must contain the
 annotation that was just committed, and only the process holding the mutated
@@ -851,10 +853,9 @@ and are never fed to `cancel_older_than` — reader jobs are cancelled by id,
 by their own sweep, so neither plan can cancel the other's work.
 
 Generation order is revision order, and that equivalence is what carries A7
-into the cache: the lookup walks generations from the newest down and a
-coarse frame can never outrank a refined one at the same generation, so a
-page keeps its pre-edit picture until a complete frame containing the edit
-exists, and a late or lesser frame can never repaint a better one. Before
+into the cache: the lookup walks generations from the newest down, so a page
+keeps its pre-edit picture until a complete frame containing the edit exists,
+and a frame from an older generation can never repaint a newer one. Before
 the first edit no snapshot exists and none is taken: pages render from the
 presentation's own document, already open in every pool worker.
 
