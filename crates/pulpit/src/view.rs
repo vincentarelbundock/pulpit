@@ -616,7 +616,14 @@ fn overview(app: &App) -> Element<'_, Message> {
     let aspect = app.slide_aspect();
 
     let grid = responsive(move |size| {
-        let plan = grid_plan(count, size, aspect);
+        // The scroll thumb draws in a lane over the surface's right edge,
+        // and a grid planned to the full width put its last column of
+        // pictures directly under it — a thumb over a page photograph is a
+        // thumb nobody can see. Plan to a width one lane short, so the lane
+        // is empty ground.
+        let lane = crate::widgets::tokens::SCROLL_LANE_WIDTH;
+        let planned = iced::Size::new((size.width - lane).max(1.0), size.height);
+        let plan = grid_plan(count, planned, aspect);
         let row_height = plan.cell_height + gap::S;
 
         // The keyboard moves about this grid, and only here is its shape
