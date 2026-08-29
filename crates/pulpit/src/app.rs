@@ -3349,10 +3349,7 @@ impl App {
                         "navigated"
                     );
                 }
-                let start = Instant::now();
                 self.request_renders();
-                self.latency
-                    .record_stage(|stages| &mut stages.plan_renders, start.elapsed());
                 Task::none()
             }
             Message::OpenDialog => Task::perform(
@@ -7686,6 +7683,13 @@ impl App {
     /// Only `FrameKind::Page` keys are touched here, and only they are spared
     /// there, so the two sweeps cannot cancel each other's work.
     fn request_reader_renders(&mut self) {
+        let started = Instant::now();
+        self.plan_reader_renders();
+        self.latency
+            .record_stage(|stages| &mut stages.plan_renders, started.elapsed());
+    }
+
+    fn plan_reader_renders(&mut self) {
         if !self.reader.is_open() || self.page_surface_size().is_none() {
             return;
         }
@@ -15747,7 +15751,22 @@ impl App {
 
     /// Ask for everything the two windows need, in priority order, coarse
     /// before refined. Requests already in flight are not repeated.
+    /// Ask for every frame the windows want, and count what that cost.
+    ///
+    /// The timing is here rather than at a call site because there are nine
+    /// of them. It used to be recorded at exactly one, and never at all for
+    /// the reader's own planner — so a session that planned hundreds of
+    /// renders reported two, and the one stage that could show planning
+    /// growing expensive was blind to almost all of it. Wrapping the
+    /// function instead of its callers is what stops that drifting again.
     fn request_renders(&mut self) {
+        let started = Instant::now();
+        self.plan_renders();
+        self.latency
+            .record_stage(|stages| &mut stages.plan_renders, started.elapsed());
+    }
+
+    fn plan_renders(&mut self) {
         let Some(document) = self.state.document().map(|d| d.id.0) else {
             return;
         };
