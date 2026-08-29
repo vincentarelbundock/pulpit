@@ -15913,15 +15913,10 @@ impl App {
         // crop's height is the same number in the plan and in every lookup.
         let audience_width = self.audience_width();
         let widths = self.slide_widths();
-        let coarse_width = self.coarse_width();
         let preview_width = (self.preview_size.width.max(240.0)) as u32;
 
         // One exact audience frame plus one immutable presenter representation
-        // for every page in the bounded navigation neighbourhood — and, ahead
-        // of both, the coarse stand-in, but only on the jumps where it would
-        // actually be shown. Asked for on every turn it would be a render and
-        // a texture bought on the overwhelming majority of turns, where the
-        // page is already prefetched and the stand-in is never displayed.
+        // for every page in the bounded navigation neighbourhood.
         let demand = crate::layout::panels::demand(&self.active_layout);
         let mut wanted = live_slide_plan(
             committed,
@@ -15929,7 +15924,6 @@ impl App {
             audience_width,
             widths,
             demand,
-            (coarse_width < audience_width && self.wants_coarse_stand_in()).then_some(coarse_width),
         );
         // The pages on either side of the committed one, at audience size, so
         // stepping swaps one finished frame for another instead of waiting
@@ -17153,30 +17147,20 @@ type RenderWant = (usize, FrameKind, Priority, Quality, u32);
 /// logical page: no page is ever asked for at two live sizes, so no panel and
 /// no projector can be handed a quality ladder to climb.
 ///
-/// `coarse` is the one exception, and `Some` only on the jumps where the
-/// stand-in would be shown — the committed page, ahead of its own refined
-/// frame, so a worker that is busy with panels still answers the projector
-/// first.
+/// There used to be one exception: a coarse stand-in for the committed page,
+/// asked for ahead of its own refined frame on the jumps where it would be
+/// shown. It is gone with the reader's preview tier and for the same measured
+/// reason — a full page costs about twice a small one rather than the order
+/// of magnitude the ladder assumed, so the extra job bought little and queued
+/// in front of the frame somebody was waiting for.
 fn live_slide_plan(
     committed: usize,
     count: usize,
     audience: u32,
     widths: crate::layout::panels::SlideWidths,
     demand: crate::layout::panels::PanelDemand,
-    coarse: Option<u32>,
 ) -> Vec<RenderWant> {
-    let mut wanted: Vec<RenderWant> = coarse
-        .map(|width| {
-            (
-                committed,
-                FrameKind::Slide,
-                Priority::Audience,
-                Quality::Coarse,
-                width,
-            )
-        })
-        .into_iter()
-        .collect();
+    let mut wanted: Vec<RenderWant> = Vec::new();
     wanted.push((
         committed,
         FrameKind::Slide,
@@ -17583,7 +17567,7 @@ mod canonical_frame_tests {
 
     #[test]
     fn the_live_plan_has_no_progressive_presenter_ladder() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND);
         assert!(plan.iter().all(|request| request.3 == Quality::Refined));
         assert_eq!(
             plan.iter()
@@ -17604,7 +17588,7 @@ mod canonical_frame_tests {
     /// asking after it is what makes a turn wait for a render.
     #[test]
     fn a_neighbour_is_asked_for_at_both_widths_before_the_turn() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND);
         let for_next: Vec<u32> = plan
             .iter()
             .filter(|request| request.0 == 5)
@@ -17622,7 +17606,7 @@ mod canonical_frame_tests {
             current: 1536,
             neighbour: 1536,
         };
-        let plan = super::live_slide_plan(4, 100, 3840, equal, FULL_DEMAND, None);
+        let plan = super::live_slide_plan(4, 100, 3840, equal, FULL_DEMAND);
         let for_next = plan.iter().filter(|request| request.0 == 5).count();
         assert_eq!(for_next, 1);
     }
@@ -17637,7 +17621,7 @@ mod canonical_frame_tests {
             current: true,
             neighbour: false,
         };
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, current_only, None);
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, current_only);
         assert!(
             plan.iter().all(|request| request.0 == 4),
             "every request is for the committed page: {plan:?}"
@@ -17663,7 +17647,6 @@ mod canonical_frame_tests {
             3_840,
             reader_widths,
             crate::layout::panels::demand(&reader),
-            None,
         );
         assert!(reader_plan
             .iter()
@@ -17677,7 +17660,6 @@ mod canonical_frame_tests {
             3_840,
             presenter_widths,
             crate::layout::panels::demand(&presenter),
-            None,
         );
         assert!(presenter_plan.iter().any(|request| {
             request.0 == 0
@@ -17687,22 +17669,20 @@ mod canonical_frame_tests {
         }));
     }
 
+    /// The projector's own frame leads the plan, and nothing coarse precedes
+    /// it. A stand-in used to be asked for first; it was retired with the
+    /// reader's preview tier, on the same measurement.
     #[test]
-    fn one_coarse_stand_in_is_asked_for_first_and_serves_both_windows() {
-        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND, Some(640));
-        let coarse = plan.first().expect("a plan");
-        assert_eq!(coarse.3, Quality::Coarse);
-        assert_eq!(coarse.4, 640);
-        assert_eq!(coarse.0, 4, "the committed page, never a neighbour");
-        // Exactly one, however many windows will draw it: the projector and
-        // the Current Slide panel show the same picture while the page they
-        // have been sent to renders, and asking twice would buy a second
-        // texture and a second render for one image.
-        assert_eq!(
-            plan.iter()
-                .filter(|request| request.3 == Quality::Coarse)
-                .count(),
-            1
+    fn the_audience_frame_leads_the_plan_and_nothing_coarse_precedes_it() {
+        let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND);
+        let first = plan.first().expect("a plan");
+        assert_eq!(first.0, 4, "the committed page, never a neighbour");
+        assert_eq!(first.2, pulpit_render::protocol::Priority::Audience);
+        assert_eq!(first.3, Quality::Refined);
+        assert_eq!(first.4, 3840);
+        assert!(
+            plan.iter().all(|request| request.3 == Quality::Refined),
+            "no page is asked for at two qualities: {plan:?}"
         );
     }
 
