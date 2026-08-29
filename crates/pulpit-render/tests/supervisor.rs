@@ -885,3 +885,41 @@ fn two_identical_jobs_from_different_requesters_are_both_answered() {
 
     supervisor.shutdown();
 }
+
+/// Growing the pool costs a worker's share of the document — measured, sixty
+/// mebibytes or so on a deck of heavy pages, before it draws anything. Work
+/// nobody waits for must not buy that: warming a deck submits a job per page
+/// at `Ancillary`, which used to saturate the pool and grow it to its ceiling
+/// to finish a background pass a few seconds sooner.
+#[test]
+fn warming_never_grows_the_pool() {
+    let mut supervisor = start(4);
+    supervisor.open(1, "fixture:pages=200");
+    let before = supervisor.diagnostics().workers_alive;
+
+    for page in 0..64usize {
+        supervisor.submit(job(page as u64 + 1, 1, page, Priority::Ancillary));
+    }
+    assert_eq!(
+        supervisor.diagnostics().workers_alive,
+        before,
+        "a deck warming itself is nobody's page turn"
+    );
+}
+
+/// And a page somebody is waiting for still does, which is what the rest of
+/// the configured pool is for.
+#[test]
+fn a_page_a_window_waits_for_still_grows_the_pool() {
+    let mut supervisor = start(4);
+    supervisor.open(1, "fixture:pages=200");
+    let before = supervisor.diagnostics().workers_alive;
+
+    for page in 0..64usize {
+        supervisor.submit(job(page as u64 + 1, 1, page, Priority::Audience));
+    }
+    assert!(
+        supervisor.diagnostics().workers_alive > before,
+        "contention on the projector's own frame is what the pool exists for"
+    );
+}

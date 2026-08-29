@@ -53,6 +53,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Pulpit asks the machine for a great deal less.** Reading a PDF with no
+  projector attached no longer reserves the memory a projector needs: a
+  four-thousand-pixel audience frame is thirty-three megabytes and the room
+  is why that budget is what it is, but a reader on a laptop draws pages a
+  fifth of that. And warming a deck's thumbnails no longer starts renderer
+  processes: warming is work nobody is waiting for, each renderer holds its
+  own share of the open document, and a background pass finishing three
+  seconds sooner was not worth what it cost to buy. Between them, a few
+  hundred megabytes on an ordinary document and more on a heavy one.
+
 - **A long deck no longer renders its thumbnails over and over.** The warmer
   keeps a window of pages around where you are, sized to what the budget
   holds — but it estimated that by pretending a page is square, and a square

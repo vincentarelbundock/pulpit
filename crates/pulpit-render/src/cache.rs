@@ -132,6 +132,15 @@ impl FrameCache {
         self.budget_bytes
     }
 
+    /// Change the budget, evicting down to it if it shrank.
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        if budget_bytes == self.budget_bytes {
+            return;
+        }
+        self.budget_bytes = budget_bytes;
+        self.enforce_budget(0);
+    }
+
     pub fn stats(&self) -> CacheStats {
         self.stats
     }

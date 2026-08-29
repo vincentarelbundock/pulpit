@@ -16,7 +16,7 @@ use pulpit_core::RenderGeneration;
 
 use crate::cache::Frame;
 use crate::protocol::{
-    read_message, write_message, OpenedDocument, RenderJob, Request, RequestId, Response,
+    read_message, write_message, OpenedDocument, Priority, RenderJob, Request, RequestId, Response,
     PROTOCOL_VERSION,
 };
 use crate::shm::{RegionNamer, SharedRegion};
@@ -1293,7 +1293,21 @@ impl RendererSupervisor {
             let Some((position, index)) = choice else {
                 // Work is waiting and nobody can take it: this is the
                 // contention the rest of the configured pool exists for.
-                if !self.queue.is_empty() && self.spawn_additional_worker() {
+                //
+                // Only for work somebody is waiting on, though. A worker
+                // replays every open document, and a worker's memory follows
+                // the pages it draws — measured, a deck of heavy pages costs
+                // about sixty-five mebibytes per worker before it renders
+                // anything. Warming a deck submits a job per page at
+                // `Ancillary`, which saturated the pool instantly and grew it
+                // to its ceiling: the work nobody waits for was buying the
+                // most expensive resource here, to finish a background pass
+                // three seconds sooner.
+                let waited_on = self
+                    .queue
+                    .iter()
+                    .any(|job| matches!(job.priority, Priority::Audience | Priority::Presenter));
+                if waited_on && self.spawn_additional_worker() {
                     continue;
                 }
                 return;

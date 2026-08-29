@@ -590,6 +590,16 @@ pub const THUMBNAIL_MIN_WIDTH: u32 = 120;
 /// Separate from the frame cache so the two can never evict each other.
 const THUMBNAIL_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 
+/// What the frame cache is allowed while no projector is attached.
+///
+/// The configured budget has to cover a presentation: a 4K audience frame is
+/// about thirty-three megabytes, and the projector holds one while its
+/// neighbours are prefetched, so the room's needs set that figure. A reader
+/// on a laptop draws six-megabyte pages and, measured, is indistinguishable
+/// at a tenth of it — so charging every reader for a projector that is not
+/// plugged in is a hundred and sixty mebibytes bought for nothing.
+const READER_CACHE_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
+
 /// How many thumbnails may be outstanding (queued or rendering) at once.
 ///
 /// This is the warming throughput throttle. Renderer events are drained once
@@ -2770,6 +2780,7 @@ impl App {
         // went away never finishes, and never being told is how that happens.
         let audience = self.audience_window.is_some();
         self.latency.expect_audience(audience);
+        self.size_the_cache_for_what_is_mounted(audience);
         // Likewise for the presenter window's own mode: `f`, Escape and a
         // layout that mounts fullscreen all move the same flag, and each of
         // them wants the window itself to follow.
@@ -3130,6 +3141,21 @@ impl App {
         // legible a thumbnail is, and it went unreported entirely — so the
         // deck's small pictures were invisible here while the warming that
         // renders all of them was one of the largest figures in the report.
+        // What the process is actually holding. Every figure above is one
+        // pool's own accounting, and the pools do not add up to a machine's
+        // memory: the workers are separate processes, and what a worker holds
+        // follows the pages it has drawn. Reported for this process because
+        // it is the one that can be asked cheaply and without a dependency.
+        if let Some(rss) = resident_bytes() {
+            report.push_str(&format!(
+                "- this process holds {:.0} MiB; {} worker process(es) hold their own\n",
+                rss as f64 / 1_048_576.0,
+                self.supervisor
+                    .as_ref()
+                    .map_or(0, |s| s.diagnostics().workers_alive),
+            ));
+        }
+
         report.push_str("\n## Thumbnails\n");
         match self.thumbnails.width() {
             Some(width) => report.push_str(&format!(
@@ -15193,6 +15219,26 @@ impl App {
             .map(|mib| mib * 1024 * 1024)
     }
 
+    /// Hold what the windows that exist will actually ask for.
+    ///
+    /// Asked of the session rather than of the machine, which is the rule
+    /// everywhere else here: a projector needs room for frames five times a
+    /// reader's, and a reader with no projector should not be charged for it.
+    /// A budget set by hand is obeyed either way — the only reason to set one
+    /// is to find out what a smaller machine feels like.
+    fn size_the_cache_for_what_is_mounted(&mut self, audience: bool) {
+        if Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB").is_some() {
+            return;
+        }
+        let configured = self.settings.rendering.cache_budget_mib * 1024 * 1024;
+        let wanted = if audience {
+            configured
+        } else {
+            READER_CACHE_BUDGET_BYTES.min(configured)
+        };
+        self.cache.set_budget(wanted);
+    }
+
     /// The projector's output width in pixels.
     fn audience_width(&self) -> u32 {
         self.audience_size.width.max(320.0) as u32
@@ -17226,6 +17272,19 @@ fn write_variant_name(out: &mut String, message: &Message) {
     if out.is_empty() {
         out.push_str("a message");
     }
+}
+
+/// This process's resident set, in bytes, where the platform will say.
+///
+/// `/proc` on Linux, and nothing anywhere else: the alternatives are a
+/// dependency or a syscall per platform, and a figure that is absent on two
+/// platforms is better than a wrong one on three. The application asks what
+/// the session can do everywhere else, and this is the same rule.
+fn resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kibibytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kibibytes * 1024)
 }
 
 /// How one reader page is kept resident: by its frame key, or as a picture.
