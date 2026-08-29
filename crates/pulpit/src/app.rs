@@ -3436,7 +3436,14 @@ impl App {
                 },
                 Message::Opened,
             ),
-            Message::Opened(Some(path)) => self.open_document(path),
+            Message::Opened(Some(path)) => {
+                // The region between the click and `opening candidate` was
+                // unlogged, and a slow native picker — a cold portal takes
+                // seconds on some desktops — was indistinguishable from a
+                // slow open. This line is the boundary between them.
+                tracing::info!(path = %path.display(), "file dialog returned");
+                self.open_document(path)
+            }
             Message::Opened(None) => Task::none(),
             Message::WindowOpened { role, id } => {
                 match role {
@@ -7774,6 +7781,14 @@ impl App {
         if !self.reader.is_open() || self.page_surface_size().is_none() {
             return;
         }
+        // A remembered reading position is about to move the reader — it is
+        // applied on the surface's first report, a tick or two away. Planning
+        // now renders the pages *being left*, and at open that spends the
+        // only worker on pictures nobody will see while the page the reader
+        // is returning to waits behind them.
+        if self.pending_position.is_some() {
+            return;
+        }
         let Some((document, generation)) = self.reader_render_source() else {
             return;
         };
@@ -10189,6 +10204,7 @@ impl App {
             return false;
         };
         let (page, zoom, fraction, outline_open, search_open) = restored_fields(position);
+        tracing::info!(page = page + 1, "reading position restored");
         self.reader
             .restore_position(pulpit_core::page::PageIndex(page), zoom, fraction);
         self.outline_rail.jump(outline_open);
