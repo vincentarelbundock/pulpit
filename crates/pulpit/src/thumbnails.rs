@@ -99,9 +99,23 @@ impl ThumbnailCache {
         self.entries.len()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn used_bytes(&self) -> u64 {
         self.used_bytes
+    }
+
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget_bytes
+    }
+
+    /// The width this document's pictures were warmed at.
+    ///
+    /// One pass at one width per document, so any entry answers for all of
+    /// them. It is the whole story of how legible a thumbnail is — and so of
+    /// whether one could stand in for a page being scrolled past — and until
+    /// it was reported the only way to learn it was to read the code that
+    /// chose it.
+    pub fn width(&self) -> Option<u32> {
+        self.entries.values().next().map(|entry| entry.width)
     }
 
     /// Roughly how many pages of `width` this budget holds, never more than

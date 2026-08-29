@@ -3035,6 +3035,24 @@ impl App {
                 millis(views.worst),
             ));
         }
+        // What each tier of picture costs the rasteriser. Reported next to
+        // each other because the only question they answer is comparative:
+        // whether a preview is cheap enough to be worth its complication, and
+        // whether a full page is slow enough to need one.
+        for (name, stage) in [
+            ("a preview", self.latency.coarse_rendered()),
+            ("a full page", self.latency.refined_rendered()),
+        ] {
+            if stage.calls == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "- rasterising {name}: {} drawn, {} typical, {} worst\n",
+                stage.calls,
+                millis(stage.mean()),
+                millis(stage.worst),
+            ));
+        }
         let copies = self.latency.copies();
         if copies.frames > 0 {
             report.push_str(&format!(
@@ -3095,6 +3113,21 @@ impl App {
                 "- {:.1} MiB over budget because every remaining frame is pinned on screen\n",
                 stats.pinned_overcommit_bytes as f64 / 1_048_576.0,
             ));
+        }
+        // The other cache, which has its own budget precisely so the two
+        // cannot evict each other. Its width is the whole story of how
+        // legible a thumbnail is, and it went unreported entirely — so the
+        // deck's small pictures were invisible here while the warming that
+        // renders all of them was one of the largest figures in the report.
+        report.push_str("\n## Thumbnails\n");
+        match self.thumbnails.width() {
+            Some(width) => report.push_str(&format!(
+                "- {} pages at {width}px, {:.1} MiB of {:.0} MiB\n",
+                self.thumbnails.len(),
+                self.thumbnails.used_bytes() as f64 / 1_048_576.0,
+                self.thumbnails.budget_bytes() as f64 / 1_048_576.0,
+            )),
+            None => report.push_str("- none warmed yet\n"),
         }
         report.push_str(&self.latency_report());
         if let Some(media) = self.media_supervisor.as_ref() {
@@ -6302,6 +6335,7 @@ impl App {
                         rendered,
                         was_thumbnail,
                         on_screen,
+                        job.quality == Quality::Refined,
                     );
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {

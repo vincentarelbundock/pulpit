@@ -233,6 +233,18 @@ pub struct Latency {
     /// an ordering mistake could lengthen.
     on_screen_inbox: Stage,
     prefetch_inbox: Stage,
+    /// The rasteriser's own time for each of the two tiers a page is drawn
+    /// at, so the cost of the coarse-then-refined arrangement can be weighed
+    /// against what it buys.
+    ///
+    /// Reported together — which is how it was — the two are one number that
+    /// answers neither question anyone asks of them: whether a preview is
+    /// cheap enough to be worth rendering, and whether a full page is slow
+    /// enough to need one. A fifth of the pixels is a fifth of the work only
+    /// if the rasteriser is pixel-bound, and a page of text is not obviously
+    /// that.
+    coarse_rendered: Stage,
+    refined_rendered: Stage,
     /// The part of `render` a worker was holding the job. What is left is the
     /// wait in this process's queue.
     render_worked: Stage,
@@ -371,7 +383,16 @@ impl Latency {
         rendered: Duration,
         warming: bool,
         on_screen: bool,
+        refined: bool,
     ) {
+        // Both tiers, warming included: a thumbnail pass is coarse work too,
+        // and leaving it out would describe the preview tier from the handful
+        // of previews a reader happens to scroll past.
+        if refined {
+            self.refined_rendered.record(rendered);
+        } else {
+            self.coarse_rendered.record(rendered);
+        }
         if warming {
             self.warming.record(elapsed);
             self.warming_worked.record(worked);
@@ -441,6 +462,14 @@ impl Latency {
 
     pub fn prefetch_inbox(&self) -> &Stage {
         &self.prefetch_inbox
+    }
+
+    pub fn coarse_rendered(&self) -> &Stage {
+        &self.coarse_rendered
+    }
+
+    pub fn refined_rendered(&self) -> &Stage {
+        &self.refined_rendered
     }
 
     pub fn warming_worked(&self) -> &Stage {
@@ -594,12 +623,14 @@ mod tests {
             Duration::from_millis(38),
             false,
             true,
+            true,
         );
         // Speculative: quick to draw, sat in an inbox.
         latency.note_render(
             Duration::from_millis(20),
             Duration::from_millis(18),
             Duration::from_millis(3),
+            false,
             false,
             false,
         );
@@ -611,6 +642,31 @@ mod tests {
             Duration::from_millis(15),
             "the wait, not the drawing"
         );
+        // And the two tiers are told apart by what they cost to draw, which
+        // is the question "is the preview tier worth its complication?" in
+        // its measurable form.
+        assert_eq!(latency.refined_rendered().mean(), Duration::from_millis(38));
+        assert_eq!(latency.coarse_rendered().mean(), Duration::from_millis(3));
+    }
+
+    /// A thumbnail pass is coarse work, and the preview tier must be judged
+    /// on every preview drawn rather than on the few a reader scrolls past.
+    #[test]
+    fn warming_counts_towards_the_tier_it_drew() {
+        let mut latency = Latency::default();
+        latency.note_render(
+            Duration::from_millis(50),
+            Duration::from_millis(30),
+            Duration::from_millis(4),
+            true,
+            false,
+            false,
+        );
+        assert_eq!(latency.coarse_rendered().calls, 1, "warming is coarse work");
+        assert_eq!(latency.warming().calls, 1);
+        // Warming is nobody's page turn, so it stays out of both.
+        assert_eq!(latency.on_screen().calls, 0);
+        assert_eq!(latency.prefetch().calls, 0);
     }
 
     #[test]
