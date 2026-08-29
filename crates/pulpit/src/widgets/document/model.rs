@@ -645,9 +645,6 @@ pub enum OutlineView {
     /// says more than a picture of a page of text.
     #[default]
     Bookmarks,
-    /// Page thumbnails, which is the only answer for a document with no
-    /// bookmarks and the better one for a document of figures.
-    Thumbnails,
     /// The document's form fields, in the order the file lists them (§6.4).
     ///
     /// Offered only for a document that has a form: a rail tab that is always
@@ -669,7 +666,6 @@ pub enum OutlineItemId {
     Bookmark {
         source_ordinal: usize,
     },
-    Page(PageIndex),
     Field {
         name: String,
         source_ordinal: usize,
@@ -684,7 +680,6 @@ impl OutlineView {
     pub fn label(self) -> &'static str {
         match self {
             OutlineView::Bookmarks => "Outline",
-            OutlineView::Thumbnails => "Pages",
             OutlineView::Fields => "Fields",
             OutlineView::Annotations => "Annotations",
         }
@@ -698,7 +693,6 @@ impl OutlineView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
     Outline,
-    Pages,
     Fields,
     Search,
     Annotations,
@@ -1086,10 +1080,9 @@ mod tests {
     }
 
     #[test]
-    fn the_outline_rail_has_two_views_and_opens_on_the_bookmarks() {
+    fn the_outline_rail_opens_on_the_bookmarks() {
         assert_eq!(OutlineView::default(), OutlineView::Bookmarks);
         assert_eq!(OutlineView::Bookmarks.label(), "Outline");
-        assert_eq!(OutlineView::Thumbnails.label(), "Pages");
         // Each tab names itself, so a view that is in front is still labelled.
         assert!(!ReaderControls::default().navigation_overflow);
         assert!(!ReaderControls::default().tool_overflow);

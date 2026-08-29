@@ -341,9 +341,9 @@ pub struct ReaderSession {
     /// One scroll offset, viewport and width per rail view, so switching tabs
     /// and switching back puts a reader where they were rather than at the
     /// top. Indexed by [`ReaderSession::outline_slot`].
-    outline_scroll: [f32; 4],
-    outline_viewport: [std::rc::Rc<std::cell::Cell<f32>>; 4],
-    outline_width: [std::rc::Rc<std::cell::Cell<f32>>; 4],
+    outline_scroll: [f32; 3],
+    outline_viewport: [std::rc::Rc<std::cell::Cell<f32>>; 3],
+    outline_width: [std::rc::Rc<std::cell::Cell<f32>>; 3],
     level: CompatibilityLevel,
     warnings: Vec<DocumentWarning>,
     /// Whether this document has fields that can be filled at all (§8.6).
@@ -475,9 +475,6 @@ pub struct ReaderSession {
     /// already gone comes back as a refusal — an error message about an edit
     /// that in fact succeeded.
     annotation_deletes: HashSet<pulpit_core::annotate::AnnotationId>,
-    /// Which view the rail was showing before the marks were opened, so the
-    /// sidebar's Outline tab has something to go back to.
-    outline_before_marks: OutlineView,
     /// Where a transform started, so movement can be measured from it.
     transform_origin: Option<PagePoint>,
     /// The marquee in flight: the page it started on, where it started, and
@@ -1404,7 +1401,6 @@ impl ReaderSession {
     pub fn outline_len(&self) -> usize {
         match self.controls.outline {
             OutlineView::Bookmarks => self.outline.len(),
-            OutlineView::Thumbnails => self.pages.len(),
             OutlineView::Fields => self.fields.len(),
             OutlineView::Annotations => self.annotation_rows.len(),
         }
@@ -1418,9 +1414,6 @@ impl ReaderSession {
                     .map(|entry| OutlineItemId::Bookmark {
                         source_ordinal: entry.source_ordinal,
                     })
-            }
-            OutlineView::Thumbnails => {
-                (index < self.pages.len()).then_some(OutlineItemId::Page(PageIndex(index)))
             }
             OutlineView::Fields => self.fields.get(index).map(|field| OutlineItemId::Field {
                 name: field.name.clone(),
@@ -1439,7 +1432,6 @@ impl ReaderSession {
                 .outline
                 .iter()
                 .position(|entry| entry.source_ordinal == *source_ordinal),
-            OutlineItemId::Page(page) => (page.get() < self.pages.len()).then_some(page.get()),
             OutlineItemId::Field {
                 name,
                 source_ordinal,
@@ -1469,7 +1461,6 @@ impl ReaderSession {
                 .find(|(_, entry)| entry.page <= page)
                 .map(|(index, _)| index)
                 .or_else(|| (!self.outline.is_empty()).then_some(0)),
-            OutlineView::Thumbnails => (!self.pages.is_empty()).then_some(page.get()),
             OutlineView::Fields => self
                 .fields
                 .iter()
@@ -1536,7 +1527,6 @@ impl ReaderSession {
                 .iter()
                 .find(|entry| entry.source_ordinal == *source_ordinal)
                 .map(|entry| ReadCommand::GoToPage(entry.page)),
-            OutlineItemId::Page(page) => Some(ReadCommand::GoToPage(*page)),
             OutlineItemId::Field {
                 name,
                 source_ordinal,
@@ -1565,9 +1555,8 @@ impl ReaderSession {
     fn outline_slot(&self) -> usize {
         match self.controls.outline {
             OutlineView::Bookmarks => 0,
-            OutlineView::Thumbnails => 1,
-            OutlineView::Fields => 2,
-            OutlineView::Annotations => 3,
+            OutlineView::Fields => 1,
+            OutlineView::Annotations => 2,
         }
     }
 
@@ -1578,18 +1567,6 @@ impl ReaderSession {
 
     pub fn outline_width(&self) -> f32 {
         self.outline_width[self.outline_slot()].get()
-    }
-
-    /// What the sidebar's Outline tab should show.
-    ///
-    /// The view the rail is already on, unless it is on the marks — which
-    /// have their own tab, so the Outline tab means "back to the document's
-    /// own structure" and has to name a view that is one.
-    pub fn structural_outline_view(&self) -> OutlineView {
-        match self.controls.outline {
-            OutlineView::Annotations => self.outline_before_marks,
-            other => other,
-        }
     }
 
     /// How tall one row of the current rail view is.
@@ -3833,15 +3810,6 @@ impl ReaderSession {
                 true
             }
             ReadCommand::SetOutlineView(view) => {
-                // Where the sidebar's Outline tab goes back to. Remembered
-                // rather than fixed at bookmarks: a reader who was reading
-                // thumbnails, looked at the marks and pressed Outline asked
-                // for the rail they had, not for a different one.
-                if *view == OutlineView::Annotations
-                    && self.controls.outline != OutlineView::Annotations
-                {
-                    self.outline_before_marks = self.controls.outline;
-                }
                 self.controls.outline = *view;
                 // Coming to the marks builds their list from what is already
                 // known, so the panel opens with the pages the reader has
@@ -5762,27 +5730,34 @@ mod tests {
         assert!(session.tool().is_none());
 
         use crate::widgets::document::model::OutlineView;
-        assert!(!session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails)));
-        assert_eq!(session.controls().outline, OutlineView::Thumbnails);
+        assert!(!session.apply(&ReadCommand::SetOutlineView(OutlineView::Annotations)));
+        assert_eq!(session.controls().outline, OutlineView::Annotations);
     }
 
     #[test]
     fn outline_arrows_move_a_stable_focus_without_moving_the_document() {
-        use crate::widgets::document::model::{OutlineItemId, OutlineView};
+        use crate::widgets::context::OutlineRow;
+        use crate::widgets::document::model::OutlineItemId;
 
+        let row = |source_ordinal, title: &str, page| OutlineRow {
+            source_ordinal,
+            title: title.to_string(),
+            page: PageIndex(page),
+            depth: 0,
+        };
         let mut session = open(20);
+        session.set_outline(vec![row(1, "Introduction", 0), row(4, "Methods", 7)]);
         session.apply(&ReadCommand::GoToPage(PageIndex(7)));
-        session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails));
         assert!(session.focus_nearest_outline_item());
         assert_eq!(
             session.outline_focus(),
-            Some(&OutlineItemId::Page(PageIndex(7)))
+            Some(&OutlineItemId::Bookmark { source_ordinal: 4 })
         );
 
-        assert_eq!(session.move_outline_focus(1), Some(8));
+        assert_eq!(session.move_outline_focus(-1), Some(0));
         assert_eq!(
             session.outline_focus(),
-            Some(&OutlineItemId::Page(PageIndex(8)))
+            Some(&OutlineItemId::Bookmark { source_ordinal: 1 })
         );
         assert_eq!(session.controls().page, PageIndex(7));
     }
@@ -9251,26 +9226,6 @@ mod tests {
         session.commit_refused();
         assert_eq!(session.annotation_rows().len(), 1);
         assert!(session.delete_annotation(&id).is_some());
-    }
-
-    /// The sidebar's Outline tab has to lead somewhere from the marks, and to
-    /// the rail the reader was actually on.
-    #[test]
-    fn the_outline_tab_goes_back_to_the_view_the_marks_were_opened_from() {
-        let mut session = open(3);
-        assert_eq!(session.structural_outline_view(), OutlineView::Bookmarks);
-        session.apply(&ReadCommand::SetOutlineView(OutlineView::Thumbnails));
-        session.apply(&ReadCommand::SetOutlineView(OutlineView::Annotations));
-        assert_eq!(
-            session.structural_outline_view(),
-            OutlineView::Thumbnails,
-            "not a different rail from the one they had"
-        );
-        session.apply(&ReadCommand::SetOutlineView(
-            session.structural_outline_view(),
-        ));
-        assert_eq!(session.controls().outline, OutlineView::Thumbnails);
-        assert_eq!(session.structural_outline_view(), OutlineView::Thumbnails);
     }
 
     /// The command the rail's keyboard sends for the focused row is the same

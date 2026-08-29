@@ -106,6 +106,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **One row of sidebar tabs, and no Pages view.** The sidebar's icon row is
+  now the only level — Outline, Fields (where the document has a form),
+  Search, Annotations — replacing the second row of text tabs that used to
+  sit inside the outline pane, a split within the split. The page-thumbnail
+  view is gone with it: the overview page already shows every page as a
+  thumbnail, and a second, smaller copy of it in a rail earned its column
+  width twice.
+
 - **Launch gets out of its own way.** Everything optional the session wants
   to know — which browsers and media runtimes are installed, whether a
   speech synthesiser and voices are on disk, the desktop's appearance and

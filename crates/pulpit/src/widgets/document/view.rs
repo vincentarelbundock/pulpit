@@ -13,7 +13,6 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Padding};
 
 use pulpit_core::annotation::{AnnotationTool, InkColor};
-use pulpit_core::page::PageIndex;
 
 use crate::theme;
 use crate::theme::Icon;
@@ -1816,7 +1815,6 @@ fn outline<Message: Clone + 'static>(
         sidebar_tabs(
             match view {
                 OutlineView::Bookmarks => SidebarTab::Outline,
-                OutlineView::Thumbnails => SidebarTab::Pages,
                 OutlineView::Fields => SidebarTab::Fields,
                 OutlineView::Annotations => SidebarTab::Annotations,
             },
@@ -1933,53 +1931,6 @@ fn outline<Message: Clone + 'static>(
                             control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
                         }
                         _ => control,
-                    };
-                    container(control)
-                        .id(outline_item_id(&id))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT))
-                        .into()
-                },
-            )
-        }
-        OutlineView::Thumbnails => {
-            let page_count = reader.page_count;
-            let selected_page = reader.controls.page;
-            let focus = reader.outline_focus.cloned();
-            virtual_outline(
-                page_count,
-                OUTLINE_ROW_HEIGHT,
-                reader.outline_scroll,
-                reader.outline_viewport.clone(),
-                on_event,
-                move |index| {
-                    let page = PageIndex(index);
-                    let id = OutlineItemId::Page(page);
-                    let selected = page == selected_page;
-                    let label = text(format!("{page}"))
-                        .size(theme::type_scale::LABEL)
-                        .color(if selected {
-                            theme::ambient::accent()
-                        } else {
-                            theme::ambient::muted()
-                        });
-                    let focused = focus.as_ref() == Some(&id);
-                    let marker = outline_focus_marker(focused);
-                    let control = button(row![marker, label].spacing(theme::space::XS))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(OUTLINE_ROW_HEIGHT - 2.0))
-                        .padding(Padding::from([3.0, 6.0]))
-                        .style(if focused {
-                            theme::ambient::focus_button
-                        } else if selected {
-                            theme::ambient::selected_button
-                        } else {
-                            theme::ambient::tool_button
-                        });
-                    let control = if live {
-                        control.on_press(send(ReadCommand::ActivateOutlineItem(id.clone())))
-                    } else {
-                        control
                     };
                     container(control)
                         .id(outline_item_id(&id))
@@ -2220,20 +2171,12 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
     // here, never a tab within a tab. The outline's views used to be a
     // second row of text tabs under this one, which read as a split inside
     // the split.
-    let mut tabs = row![
-        tab(
-            theme::Icon::Outline,
-            "Outline",
-            selected == SidebarTab::Outline,
-            PanelCommand::ShowView(OutlineView::Bookmarks)
-        ),
-        tab(
-            theme::Icon::SinglePage,
-            "Pages",
-            selected == SidebarTab::Pages,
-            PanelCommand::ShowView(OutlineView::Thumbnails)
-        ),
-    ]
+    let mut tabs = row![tab(
+        theme::Icon::Outline,
+        "Outline",
+        selected == SidebarTab::Outline,
+        PanelCommand::ShowView(OutlineView::Bookmarks)
+    ),]
     .spacing(theme::space::XS);
     // Only where there is a form. A document with fields grows one more way
     // to look at itself; a deck of slides is left exactly as it was.
@@ -2455,7 +2398,6 @@ pub fn outline_item_id(
 
     let key = match item {
         OutlineItemId::Bookmark { source_ordinal } => format!("bookmark-{source_ordinal}"),
-        OutlineItemId::Page(page) => format!("page-{}", page.get()),
         OutlineItemId::Field {
             name,
             source_ordinal,
