@@ -1367,6 +1367,11 @@ pub struct App {
     /// Page labels and the outline of the open document, as reported by the
     /// renderer. Section display and the outline navigator read this.
     pub navigation: std::collections::HashMap<u64, pulpit_core::DocumentNavigation>,
+    /// The open reader document's bookmark tree, as the document worker last
+    /// reported it — on open, and again after every bookmark edit. This is
+    /// what turns a rail row's flattened ordinal back into the tree path a
+    /// [`pulpit_core::navigation::BookmarkCommand`] carries.
+    reader_outline: pulpit_core::navigation::Outline,
     /// What the open document declares that pulpit will flatten or ignore.
     pub capabilities: std::collections::HashMap<u64, pulpit_render::DocumentCapabilities>,
     /// Overlay declarations, staging and the frames they produce.
@@ -2178,6 +2183,7 @@ impl App {
             links_requested: std::collections::HashSet::new(),
             document_survey_requested: std::collections::HashSet::new(),
             navigation: std::collections::HashMap::new(),
+            reader_outline: pulpit_core::navigation::Outline::default(),
             capabilities: std::collections::HashMap::new(),
             media: crate::media::MediaCoordinator::new(),
             // Unprobed: probing runs the candidate browsers' `--version`,
@@ -6933,8 +6939,35 @@ impl App {
     /// three: a reload left the move guard latched shut, and a `reader_pending`
     /// entry that outlived its document was popped by the next document's
     /// first answer and read as that edit's record.
+    /// Adopt `outline` as the open reader document's bookmark tree: the tree
+    /// itself, for turning a rail row back into the tree path an edit names,
+    /// and the flattened rows the rail draws. Called when a document is
+    /// described and again whenever an edit hands back the tree it produced.
+    fn set_reader_outline(&mut self, outline: pulpit_core::navigation::Outline) {
+        self.reader.set_outline(
+            outline
+                .flattened()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(source_ordinal, entry)| {
+                    Some(crate::widgets::context::OutlineRow {
+                        source_ordinal,
+                        title: entry.title.clone(),
+                        // A bookmark that points at a URI orders nothing in
+                        // this document, so it is not a row the rail can take
+                        // you to.
+                        page: pulpit_core::page::PageIndex(entry.page()?),
+                        depth: entry.depth,
+                    })
+                })
+                .collect(),
+        );
+        self.reader_outline = outline;
+    }
+
     fn forget_per_document_edit_state(&mut self) {
         self.form_flow.forget_document();
+        self.reader_outline = pulpit_core::navigation::Outline::default();
         self.reader_patch_images.clear();
         self.reader_pending.clear();
         self.form_move.abandon();
@@ -7014,24 +7047,7 @@ impl App {
                     if info.has_form {
                         self.ask_field_list();
                     }
-                    self.reader.set_outline(
-                        outline
-                            .flattened()
-                            .into_iter()
-                            .enumerate()
-                            .filter_map(|(source_ordinal, entry)| {
-                                Some(crate::widgets::context::OutlineRow {
-                                    source_ordinal,
-                                    title: entry.title.clone(),
-                                    // A bookmark that points at a URI orders
-                                    // nothing in this document, so it is not a
-                                    // row the rail can take you to.
-                                    page: pulpit_core::page::PageIndex(entry.page()?),
-                                    depth: entry.depth,
-                                })
-                            })
-                            .collect(),
-                    );
+                    self.set_reader_outline(outline);
                     // …and where it was last read. Only looked up here; the
                     // window it is restored into does not exist yet.
                     self.find_reading_position();
@@ -7125,6 +7141,21 @@ impl App {
                                 }
                             }
                         }
+                    }
+
+                    // A bookmark edit repaints nothing and dirties no page;
+                    // the tree it hands back is the only signal the rail
+                    // gets, so it is adopted here. The last effect wins when
+                    // a transaction carried several.
+                    if let Some(outline) = applied.effects.iter().rev().find_map(|effect| {
+                        match effect {
+                            pulpit_render::document::AppliedEffect::Outline(outline) => {
+                                Some((**outline).clone())
+                            }
+                            _ => None,
+                        }
+                    }) {
+                        self.set_reader_outline(outline);
                     }
 
                     // An edit drops the annotation list of every page it
@@ -9219,6 +9250,86 @@ impl App {
                 // comes back with one press of undo.
                 if let Some(transaction) = self.reader.delete_annotation(id) {
                     self.commit_to_document(transaction);
+                }
+                Task::none()
+            }
+            ReadCommand::AddBookmark => {
+                use pulpit_core::navigation::BookmarkCommand;
+                let Some(page) = self.reader.current_page() else {
+                    return Task::none();
+                };
+                // The producer's label where there is one — "Page iv" says
+                // more than "Page 4" in a front matter — and the plain
+                // number everywhere else. `PageIndex` displays one-based.
+                let title = self
+                    .documents
+                    .active()
+                    .and_then(|document| self.navigation.get(&document.id.0))
+                    .and_then(|navigation| navigation.label_for_page(page.get()))
+                    .map(|label| format!("Page {label}"))
+                    .unwrap_or_else(|| format!("Page {page}"));
+                // Top level, in page order: a bookmark made mid-read lands
+                // where a reader scanning the rail would look for it.
+                let index = self.reader_outline.top_level_insertion_index(page.get());
+                self.commit_to_document(pulpit_render::document::DocumentTransaction::one(
+                    pulpit_render::document::DocumentCommand::Bookmark(BookmarkCommand::Create {
+                        path: vec![index],
+                        title,
+                        page: page.get(),
+                    }),
+                ));
+                Task::none()
+            }
+            ReadCommand::RenameBookmark(ordinal) => {
+                if self.reader.begin_bookmark_rename(*ordinal) {
+                    return iced::widget::operation::focus(
+                        crate::widgets::document::view::bookmark_rename_input_id(),
+                    );
+                }
+                Task::none()
+            }
+            ReadCommand::CommitBookmarkTitle => {
+                use pulpit_core::navigation::BookmarkCommand;
+                if let Some((ordinal, title)) = self.reader.take_bookmark_edit() {
+                    let title = title.trim().to_string();
+                    let path = self.reader_outline.path_of_flattened(ordinal);
+                    if let Some(path) = path {
+                        let unchanged = self
+                            .reader_outline
+                            .entry_at(&path)
+                            .is_some_and(|entry| entry.title == title);
+                        // An empty title is not a rename, and neither is the
+                        // title the bookmark already has; both simply close
+                        // the field.
+                        if !title.is_empty() && !unchanged {
+                            self.commit_to_document(
+                                pulpit_render::document::DocumentTransaction::one(
+                                    pulpit_render::document::DocumentCommand::Bookmark(
+                                        BookmarkCommand::Rename { path, title },
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                }
+                Task::none()
+            }
+            ReadCommand::DeleteBookmark(ordinal) => {
+                use pulpit_core::navigation::BookmarkCommand;
+                // A rename open on the row that is going away closes with it.
+                if self
+                    .reader
+                    .bookmark_edit()
+                    .is_some_and(|(open, _)| open == *ordinal)
+                {
+                    let _ = self.reader.take_bookmark_edit();
+                }
+                if let Some(path) = self.reader_outline.path_of_flattened(*ordinal) {
+                    self.commit_to_document(pulpit_render::document::DocumentTransaction::one(
+                        pulpit_render::document::DocumentCommand::Bookmark(
+                            BookmarkCommand::Delete { path },
+                        ),
+                    ));
                 }
                 Task::none()
             }
@@ -11433,6 +11544,9 @@ impl App {
                 | ReadCommand::ComposeMark(_)
                 | ReadCommand::DeleteSelected
                 | ReadCommand::DeleteAnnotation(_)
+                | ReadCommand::AddBookmark
+                | ReadCommand::CommitBookmarkTitle
+                | ReadCommand::DeleteBookmark(_)
                 | ReadCommand::EditSelected
                 | ReadCommand::PickDate(_)
                 | ReadCommand::PickTime
@@ -15312,19 +15426,6 @@ impl App {
             crate::latency::Surface::Audience => self.audience_width(),
             crate::latency::Surface::Presenter => self.slide_widths().current,
         };
-        self.note_answer_at(surface, key, exact_width);
-    }
-
-    /// The same, for a surface whose exact width is not one of the two the
-    /// slide model knows. The reader's column is sized by the layout tree and
-    /// rendered at the display's scale, so only the caller can say what
-    /// "exact" means for it.
-    fn note_answer_at(
-        &mut self,
-        surface: crate::latency::Surface,
-        key: FrameKey,
-        exact_width: u32,
-    ) {
         let answer = if key.width >= exact_width {
             crate::latency::Answer::Exact
         } else {
@@ -15486,8 +15587,27 @@ impl App {
         let next = ready_transition(self.last_reader, page.get(), candidate);
         if next != self.last_reader {
             if let Some(key) = next {
-                let exact = crate::reader::rendered_width(width, self.presenter_scale_factor());
-                self.note_answer_at(crate::latency::Surface::Presenter, key, exact);
+                // Quality, not width. The panel's exactness test asks whether
+                // a frame is as wide as the surface, which is the right
+                // question there and the wrong one here: the reader's plan
+                // sizes a page from the *placed sheet*, so a perfectly sharp
+                // frame is narrower than the column it sits in and every
+                // answer scored as a stand-in — no reader turn could close.
+                // The plan already names the two frames it asks for, and they
+                // mean exactly what a stand-in and an exact answer mean: the
+                // coarse one is what a landing page paints from, the refined
+                // one is the page.
+                let answer = if key.quality == Quality::Refined {
+                    crate::latency::Answer::Exact
+                } else {
+                    crate::latency::Answer::StandIn
+                };
+                self.latency.answered(
+                    crate::latency::Surface::Presenter,
+                    answer,
+                    key.slide,
+                    Instant::now(),
+                );
             }
             self.last_reader = next;
         }
