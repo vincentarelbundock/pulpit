@@ -59,28 +59,32 @@ static NEXT_TOKEN: AtomicU32 = AtomicU32::new(1);
 /// service: `xdg-desktop-portal` is present on desktops whose backend
 /// implements no `Print` at all, and a capability that says yes there is a
 /// print command that opens nothing.
+#[allow(dead_code)] // the capability snapshot now probes on a shared connection
 pub fn available() -> bool {
     // Bounded, because this is asked while the capabilities are being read —
     // which is before there is a window. A portal that accepts the call and
     // never answers would otherwise be a pulpit that never starts, with
     // nothing on screen to close.
-    crate::platform::linux::on_the_bus("portal print probe", |connection| {
-        let Ok(proxy) = zbus::blocking::Proxy::new(
-            connection,
-            PORTAL,
-            PORTAL_PATH,
-            "org.freedesktop.DBus.Properties",
-        ) else {
-            return false;
-        };
-        // Every portal interface carries a `version` property. Asking for
-        // this one's is the cheapest question whose answer is "there is a
-        // Print implementation behind this bus name".
-        proxy
-            .call::<_, _, OwnedValue>("Get", &(PRINT, "version"))
-            .is_ok()
-    })
-    .unwrap_or(false)
+    crate::platform::linux::on_the_bus("portal print probe", available_on).unwrap_or(false)
+}
+
+/// The same question, on a connection somebody else already opened — so the
+/// capability snapshot can ask everything it wants of the bus in one trip.
+pub fn available_on(connection: &Connection) -> bool {
+    let Ok(proxy) = zbus::blocking::Proxy::new(
+        connection,
+        PORTAL,
+        PORTAL_PATH,
+        "org.freedesktop.DBus.Properties",
+    ) else {
+        return false;
+    };
+    // Every portal interface carries a `version` property. Asking for
+    // this one's is the cheapest question whose answer is "there is a
+    // Print implementation behind this bus name".
+    proxy
+        .call::<_, _, OwnedValue>("Get", &(PRINT, "version"))
+        .is_ok()
 }
 
 /// Put the desktop's print dialog up and spool what it says.

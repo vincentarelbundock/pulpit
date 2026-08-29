@@ -129,10 +129,48 @@ impl Speech {
     ///
     /// Never fails: a session that cannot speak is a valid answer, and it is
     /// the one [`Speech::capability`] reports.
+    #[cfg(test)] // production startup probes on a helper thread instead
     pub fn new(data_directory: &std::path::Path, settings: &SpeechSettings) -> Speech {
         let catalog = Catalog::builtin();
         let store = Store::new(data_directory);
         let probe = Probe::run(&catalog, &store);
+        Self::with_probe(catalog, store, probe, settings)
+    }
+
+    /// Build the coordinator without probing the session.
+    ///
+    /// The probe scans the store, walks `PATH` for a synthesiser and again
+    /// for an audio player — disk work that startup should not wait on. This
+    /// starts as "unavailable, still checking"; [`Speech::adopt_probe`]
+    /// installs the real answer when it arrives from a helper thread.
+    pub fn unprobed(data_directory: &std::path::Path, settings: &SpeechSettings) -> Speech {
+        let placeholder = Probe {
+            availability: Availability::Unavailable {
+                why: "speech is still being probed".into(),
+            },
+            program: None,
+            sink: None,
+        };
+        Self::with_probe(
+            Catalog::builtin(),
+            Store::new(data_directory),
+            placeholder,
+            settings,
+        )
+    }
+
+    /// Install a probe run elsewhere. Startup's other half.
+    pub fn adopt_probe(&mut self, probe: Probe, settings: &SpeechSettings) {
+        self.probe = probe;
+        self.choose_voice(settings);
+    }
+
+    fn with_probe(
+        catalog: Catalog,
+        store: Store,
+        probe: Probe,
+        settings: &SpeechSettings,
+    ) -> Speech {
         let mut speech = Speech {
             catalog,
             store,

@@ -103,10 +103,18 @@ impl PlatformServices for LinuxServices {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Bounded like every other bus question here: opening the session bus
-        // is itself a socket handshake, and this one is asked before there is
-        // a window to close.
-        let portal_present = on_the_bus("session bus", |_| true).unwrap_or(false);
+        // One bus trip for everything the snapshot wants to know: whether the
+        // bus answers at all, and whether a print portal lives behind it.
+        // This used to be three separate connections (the print question was
+        // even asked twice), each a thread and a handshake, all serial, all
+        // before there is a window to close.
+        let (portal_present, print_portal) = on_the_bus("capability probe", |connection| {
+            (
+                true,
+                crate::platform::portal_print::available_on(connection),
+            )
+        })
+        .unwrap_or((false, false));
         Capabilities {
             backend: if self.wayland {
                 "wayland".into()
@@ -154,8 +162,7 @@ impl PlatformServices for LinuxServices {
             // prints perfectly well; asking only about `lp` there would grey
             // out a command that works. What this must not do is say yes
             // when neither answered.
-            printing: crate::platform::cups::available()
-                || crate::platform::portal_print::available(),
+            printing: crate::platform::cups::available() || print_portal,
             // CUPS takes a page range, a copy count and a named queue. It
             // matters only where there is no portal to ask for them, since
             // where there is one it does the asking.
@@ -164,7 +171,7 @@ impl PlatformServices for LinuxServices {
             // answers it asks every question pulpit would otherwise ask
             // badly. `lp` stays underneath it for a session that has CUPS
             // and no portal.
-            system_print_dialog: crate::platform::portal_print::available(),
+            system_print_dialog: print_portal,
             // Filled in by the application once the speech catalog has been
             // probed. Whether a voice is installed on disk is not a question
             // a window backend can answer.

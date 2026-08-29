@@ -190,6 +190,13 @@ pub enum Message {
     CopySignatureReport(usize),
     /// The media runtime probes, run on a helper thread at startup.
     MediaProbed(Vec<pulpit_media::RuntimeProbe>),
+    /// The speech probe finished on its helper thread.
+    SpeechProbed(Box<pulpit_media::speech::Probe>),
+    /// The desktop answered what appearance and motion it prefers.
+    AppearanceProbed(
+        crate::platform::appearance::SystemAppearance,
+        crate::platform::appearance::MotionPreference,
+    ),
     WindowOpened {
         role: Role,
         id: window::Id,
@@ -1874,13 +1881,18 @@ impl App {
         // whether a voice is on disk is not something a window backend knows.
         // The answer is folded into the same snapshot so views keep asking
         // exactly one thing about what this session can do.
-        let speech = crate::speech::Speech::new(
-            &crate::platform::Directories::detect().data,
-            &settings.speech,
-        );
+        // Unprobed: the probe walks the store and `PATH`, and its answer is
+        // adopted from a helper thread via `Message::SpeechProbed` — the same
+        // arrangement the media runtimes already use.
+        let speech_data = crate::platform::Directories::detect().data;
+        let speech = crate::speech::Speech::unprobed(&speech_data, &settings.speech);
         platform.capabilities.speech = speech.capability();
-        let system_appearance = platform.services.system_appearance();
-        let motion_probe = platform.services.reduced_motion();
+        // The desktop's appearance and motion preferences are two portal
+        // round trips, so they arrive via `Message::AppearanceProbed` rather
+        // than holding the first frame. Until then the reader's own setting
+        // decides, exactly as it does on a desktop that never answers.
+        let system_appearance = crate::platform::appearance::SystemAppearance::Unknown;
+        let motion_probe = crate::platform::appearance::MotionPreference::Unknown;
         let preference = settings.appearance.appearance;
         let theme = ThemeState::new(
             system_appearance.resolve(preference),
@@ -2335,6 +2347,42 @@ impl App {
                 let _ = sender.send(pulpit_media::runtime::probe_all(browser.as_deref()));
             });
             Message::MediaProbed(receiver.await.unwrap_or_default())
+        }));
+
+        // The speech probe, by the same arrangement: `PATH` walks and a
+        // store scan, none of it worth a millisecond of first-frame latency.
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let catalog = pulpit_media::speech::Catalog::builtin();
+                let store = pulpit_media::speech::Store::new(&speech_data);
+                let _ = sender.send(pulpit_media::speech::Probe::run(&catalog, &store));
+            });
+            let probe = receiver
+                .await
+                .unwrap_or_else(|_| pulpit_media::speech::Probe {
+                    availability: pulpit_media::speech::Availability::Unavailable {
+                        why: "the speech probe did not finish".into(),
+                    },
+                    program: None,
+                    sink: None,
+                });
+            Message::SpeechProbed(Box::new(probe))
+        }));
+
+        // And the desktop's appearance and motion preferences: two portal
+        // round trips that used to run before the event loop existed.
+        let services = app.platform.services.clone();
+        tasks.push(Task::future(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send((services.system_appearance(), services.reduced_motion()));
+            });
+            let (appearance, motion) = receiver.await.unwrap_or((
+                crate::platform::appearance::SystemAppearance::Unknown,
+                crate::platform::appearance::MotionPreference::Unknown,
+            ));
+            Message::AppearanceProbed(appearance, motion)
         }));
         (app, Task::batch(tasks))
     }
@@ -3826,6 +3874,17 @@ impl App {
                 // A deck opened before the probes landed has overlays
                 // waiting: service them now that a runtime can be selected.
                 self.service_media();
+                Task::none()
+            }
+            Message::SpeechProbed(probe) => {
+                self.speech.adopt_probe(*probe, &self.settings.speech);
+                self.platform.capabilities.speech = self.speech.capability();
+                Task::none()
+            }
+            Message::AppearanceProbed(appearance, motion) => {
+                self.appearance_probe = appearance;
+                self.motion_probe = motion;
+                self.apply_appearance();
                 Task::none()
             }
             Message::ShowSettings => {
