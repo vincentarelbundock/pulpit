@@ -11764,10 +11764,8 @@ impl App {
                     self.on_read_command(crate::widgets::event::ReadCommand::SetOutlineView(
                         crate::widgets::document::model::OutlineView::Annotations,
                     ));
-                let open = self.on_read_command(
-                    crate::widgets::event::ReadCommand::SetOutlineCollapsed(false),
-                );
-                Task::batch([close_search, show, open])
+                self.outline_rail.set(true, self.motion, self.now);
+                Task::batch([close_search, show])
             }
             PanelCommand::CloseSidebar => {
                 // Both panes share the sidebar's space, so the one control
@@ -11809,8 +11807,8 @@ impl App {
         use crate::widgets::document::model::OutlineView;
 
         self.uses_document_viewer()
-            && !self.search_workspace
-            && !self.reader.controls().outline_collapsed
+            && !self.search_pane.is_open()
+            && self.outline_rail.is_open()
             && self.reader.controls().outline == OutlineView::Annotations
     }
 

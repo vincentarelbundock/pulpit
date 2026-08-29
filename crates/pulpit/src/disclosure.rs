@@ -65,6 +65,7 @@ impl Disclosure {
         };
     }
 
+    #[cfg(test)]
     pub fn toggle(&mut self, motion: Motion, now: Instant) {
         self.set(!self.open, motion, now);
     }
