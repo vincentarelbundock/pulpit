@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the wire format changes. A worker that does not answer
 /// with the same version is shut down rather than trusted.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Hard ceiling on one encoded message.
 ///
@@ -53,9 +53,9 @@ pub const MAX_REGION_BYTES: u64 = 16_384 * 16_384 * 4;
 /// worker per tick (40 pages/s, 14× below the plateau), however narrowly it
 /// crosses. The threshold therefore decides only which consumers stand at
 /// that cliff. Eight mebibytes puts every consumer that exists in any
-/// window configuration — thumbnails (≤0.5 MB), the coarse audience pass
-/// (0.9 MB), the preview ring up to a 4K presenter window (6.7 MB), even an
-/// HD refined audience frame (8.29 MB) — on the fast side, and leaves only
+/// window configuration — thumbnails (≤0.5 MB), a reader page up to a 4K
+/// presenter window (6.7 MB), even an HD audience frame (8.29 MB) — on the
+/// fast side, and leaves only
 /// frames from the 33 MB class of a 4K projector in the region, where a
 /// second copy of that many bytes is the one cost that would actually
 /// register.
@@ -68,8 +68,8 @@ pub const INLINE_FRAME_BYTES: u64 = 8 << 20;
 /// much frame data can sit buffered in the event channel between pumps. Two
 /// constants multiply into the worst case otherwise — sixteen jobs at eight
 /// mebibytes each is a number nobody chose. Four full-sized inline frames is
-/// enough for the audience coarse/refined pair and a prefetch either side,
-/// while a warming pass of small thumbnails never comes near it.
+/// enough for the audience frame and a prefetch either side, while a warming
+/// pass of small thumbnails never comes near it.
 pub const MAX_INLINE_IN_FLIGHT_BYTES: u64 = 32 << 20;
 
 /// Why a message could not be moved across the pipe.
@@ -98,16 +98,6 @@ pub enum Priority {
     Ancillary,
 }
 
-/// Quality tier. A new page is published coarse-first, then refined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Quality {
-    /// A low-resolution frame, rendered first so something correct appears
-    /// immediately.
-    Coarse,
-    /// The target-resolution frame that replaces it.
-    Refined,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderJob {
     pub id: RequestId,
@@ -118,7 +108,6 @@ pub struct RenderJob {
     pub width: u32,
     pub height: u32,
     pub priority: Priority,
-    pub quality: Quality,
     /// Draw the document's own annotations into the frame.
     ///
     /// Off for every presentation frame — the presenter's marks are a vector
@@ -288,7 +277,6 @@ pub enum Response {
         generation: RenderGeneration,
         width: u32,
         height: u32,
-        quality: Quality,
         /// Bytes of the frame: written into the shared-memory region, or the
         /// length of `pixels` when the frame travels inline.
         bytes: u64,
@@ -399,7 +387,6 @@ mod tests {
             width: 3840,
             height: 2160,
             priority: Priority::Audience,
-            quality: Quality::Refined,
             with_annotations: false,
             region_name: "pulpit-shm-1".into(),
         }

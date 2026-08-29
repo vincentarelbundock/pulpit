@@ -14,8 +14,8 @@ use crate::pdf::{BackendDocumentId, PdfBackend, RenderRequest};
 use pulpit_core::RenderGeneration;
 
 use crate::protocol::{
-    read_message, write_message, Priority, ProtocolError, Quality, RenderJob, Request, RequestId,
-    Response, MAX_ATTACHMENT_BYTES, PROTOCOL_VERSION,
+    read_message, write_message, Priority, ProtocolError, RenderJob, Request, RequestId, Response,
+    MAX_ATTACHMENT_BYTES, PROTOCOL_VERSION,
 };
 use crate::shm::AttachedRegion;
 
@@ -435,19 +435,8 @@ fn pick_job(inbox: &Inbox) -> Option<usize> {
         .jobs
         .iter()
         .enumerate()
-        .min_by_key(|(index, job)| (job.priority, job.quality_rank(), *index))
+        .min_by_key(|(index, job)| (job.priority, *index))
         .map(|(index, _)| index)
-}
-
-impl RenderJob {
-    /// Coarse work goes first within a priority class: something correct on
-    /// screen beats something perfect later.
-    fn quality_rank(&self) -> u8 {
-        match self.quality {
-            Quality::Coarse => 0,
-            Quality::Refined => 1,
-        }
-    }
 }
 
 fn render_one(
@@ -505,7 +494,6 @@ fn render_one(
                 generation: job.generation,
                 width: job.width,
                 height: job.height,
-                quality: job.quality,
                 bytes,
                 pixels: Some(pixels),
                 render_micros,
@@ -571,7 +559,6 @@ fn render_one(
             generation: job.generation,
             width: job.width,
             height: job.height,
-            quality: job.quality,
             bytes,
             pixels: None,
             render_micros,
@@ -718,7 +705,6 @@ mod tests {
             width: 64,
             height: 36,
             priority,
-            quality: Quality::Refined,
             with_annotations: false,
             region_name: region_name.to_string(),
         }
@@ -1015,18 +1001,17 @@ mod tests {
     }
 
     #[test]
-    fn queued_work_is_ordered_by_priority_then_quality() {
+    fn queued_work_is_ordered_by_priority() {
         let namer = RegionNamer::new();
         let name = namer.next();
         let _region = SharedRegion::create(&name, 64 * 36 * 4).unwrap();
 
         let mut ancillary = job(1, 1, Priority::Ancillary, &name);
         ancillary.page = 1;
-        let mut audience_refined = job(2, 1, Priority::Audience, &name);
-        audience_refined.page = 2;
-        let mut audience_coarse = job(3, 1, Priority::Audience, &name);
-        audience_coarse.page = 3;
-        audience_coarse.quality = Quality::Coarse;
+        let mut audience = job(2, 1, Priority::Audience, &name);
+        audience.page = 2;
+        let mut second_audience = job(3, 1, Priority::Audience, &name);
+        second_audience.page = 3;
 
         let responses = run_worker(vec![
             Request::Open {
@@ -1034,8 +1019,8 @@ mod tests {
                 path: "fixture:pages=10".into(),
             },
             Request::Render(ancillary),
-            Request::Render(audience_refined),
-            Request::Render(audience_coarse),
+            Request::Render(audience),
+            Request::Render(second_audience),
             Request::Shutdown,
         ]);
         let order: Vec<u64> = responses
@@ -1069,21 +1054,20 @@ mod tests {
     /// three jobs are in the queue before the renderer picks the first one
     /// depends on thread scheduling. This one asks the picker directly.
     #[test]
-    fn the_queue_prefers_the_audience_page_and_coarse_work_first() {
+    fn the_queue_prefers_the_audience_page_then_takes_them_in_order() {
         let mut inbox = Inbox::default();
         let mut ancillary = job(1, 1, Priority::Ancillary, "region");
         ancillary.page = 1;
-        let mut audience_refined = job(2, 1, Priority::Audience, "region");
-        audience_refined.page = 2;
-        let mut audience_coarse = job(3, 1, Priority::Audience, "region");
-        audience_coarse.page = 3;
-        audience_coarse.quality = Quality::Coarse;
+        let mut first_audience = job(2, 1, Priority::Audience, "region");
+        first_audience.page = 2;
+        let mut second_audience = job(3, 1, Priority::Audience, "region");
+        second_audience.page = 3;
         let mut presenter = job(4, 1, Priority::Presenter, "region");
         presenter.page = 4;
 
         inbox.jobs.push_back(ancillary);
-        inbox.jobs.push_back(audience_refined);
-        inbox.jobs.push_back(audience_coarse);
+        inbox.jobs.push_back(first_audience);
+        inbox.jobs.push_back(second_audience);
         inbox.jobs.push_back(presenter);
 
         let mut order = Vec::new();
@@ -1092,8 +1076,8 @@ mod tests {
         }
         assert_eq!(
             order,
-            vec![3, 2, 4, 1],
-            "coarse audience, refined audience, presenter, then the rest"
+            vec![2, 3, 4, 1],
+            "both audience pages in the order asked, presenter, then the rest"
         );
     }
 }

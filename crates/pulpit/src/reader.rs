@@ -544,7 +544,6 @@ pub struct PlannedRender {
     pub page: PageIndex,
     pub width: u32,
     pub height: u32,
-    pub quality: pulpit_render::protocol::Quality,
     /// On screen right now, as opposed to warming in the margin.
     pub visible: bool,
     /// Which part of the page to draw: the whole of it, or the crop window
@@ -3428,8 +3427,8 @@ impl ReaderSession {
         }
     }
 
-    /// The pages worth drawing right now, nearest first, at the size and
-    /// quality to draw them.
+    /// The pages worth drawing right now, nearest first, at the size they
+    /// are drawn at.
     ///
     /// A *plan*, not a queue: the application checks each entry against the
     /// frame cache and its in-flight set before submitting anything, so the
@@ -3477,7 +3476,6 @@ impl ReaderSession {
         });
         self.last_render_offset = self.controls.offset;
 
-        use pulpit_render::protocol::Quality;
         // One window for every page: a crop is a statement about margins, and
         // margins are the same fraction of a letter page and of the A4
         // appendix behind it.
@@ -3513,7 +3511,6 @@ impl ReaderSession {
                 page: placed.page,
                 width: full.0,
                 height: full.1,
-                quality: Quality::Refined,
                 visible,
                 region: window,
             });
@@ -4970,14 +4967,10 @@ mod tests {
 
     #[test]
     fn a_turned_page_is_still_requested_as_an_upright_frame() {
-        use pulpit_render::protocol::Quality;
         let mut session = open(3);
         session.apply(&ReadCommand::RotateView);
         let plan = session.render_plan(1.0);
-        let refined = plan
-            .iter()
-            .find(|planned| planned.quality == Quality::Refined)
-            .expect("a settled reader gets a refined frame");
+        let refined = plan.first().expect("a settled reader gets a frame");
         // The sheet on screen is landscape, but the raster asked for is the
         // upright page: one picture serves every rotation.
         assert!(
@@ -5099,14 +5092,9 @@ mod tests {
         let mut halves = 0;
         for scale in [1.0_f32, 1.25, 1.5, 2.5, 3.5] {
             // Two calls at the same offset: the first settles the reader, the
-            // second is the plan that carries the refined entries.
-            let _ = session.render_plan(scale);
             let plan = session.render_plan(scale);
-            let refined: Vec<&PlannedRender> = plan
-                .iter()
-                .filter(|entry| entry.quality == pulpit_render::protocol::Quality::Refined)
-                .collect();
-            assert!(!refined.is_empty(), "a settled reader plans a sharp page");
+            let refined: Vec<&PlannedRender> = plan.iter().collect();
+            assert!(!refined.is_empty(), "a settled reader plans a page");
             for entry in refined {
                 let placed = session
                     .column
@@ -5615,8 +5603,6 @@ mod tests {
 
     #[test]
     fn fit_page_requests_a_sharp_frame_without_waiting_for_a_scroll_reply() {
-        use pulpit_render::protocol::Quality;
-
         let mut session = open(10);
         session.apply(&ReadCommand::GoToPage(PageIndex(4)));
         // Settle the previous navigation so the regression specifically
@@ -5627,9 +5613,9 @@ mod tests {
         session.apply(&ReadCommand::SetZoom(Zoom::FitPage));
         let plan = session.render_plan(2.0);
 
-        assert!(plan.iter().any(|entry| {
-            entry.page == PageIndex(4) && entry.visible && entry.quality == Quality::Refined
-        }));
+        assert!(plan
+            .iter()
+            .any(|entry| { entry.page == PageIndex(4) && entry.visible }));
     }
 
     #[test]
@@ -5661,13 +5647,9 @@ mod tests {
     /// page somebody was actually waiting for.
     #[test]
     fn every_planned_page_is_asked_for_once_at_the_size_it_is_drawn() {
-        use pulpit_render::protocol::Quality;
         let mut session = open(20);
         let settled = session.render_plan(2.0);
         assert!(!settled.is_empty());
-        assert!(settled
-            .iter()
-            .all(|entry| entry.quality == Quality::Refined));
 
         // A page appears once in the plan, not once per tier.
         let mut pages: Vec<_> = settled.iter().map(|entry| entry.page).collect();
@@ -5686,7 +5668,6 @@ mod tests {
         });
         let moving = session.render_plan(2.0);
         assert!(!moving.is_empty());
-        assert!(moving.iter().all(|entry| entry.quality == Quality::Refined));
     }
 
     #[test]
@@ -5864,7 +5845,6 @@ mod tests {
 
     #[test]
     fn only_the_window_and_its_margin_are_planned() {
-        use pulpit_render::protocol::Quality;
         let mut session = open(20);
         let plan = session.render_plan(1.0);
         assert!(!plan.is_empty());
@@ -5877,27 +5857,19 @@ mod tests {
         );
         assert_eq!(plan[0].page, PageIndex(0));
         // The refined width is the width the column placed the page at.
-        let refined = plan
-            .iter()
-            .find(|entry| entry.quality == Quality::Refined)
-            .unwrap();
+        let refined = plan.first().unwrap();
         assert_eq!(refined.width, 612);
     }
 
     #[test]
     fn the_plan_follows_the_cell_it_is_drawn_in() {
-        use pulpit_render::protocol::Quality;
         let mut session = open(3);
         let narrow = session.render_plan(1.0);
         // A wider cell is a different picture, not the same one stretched.
         session.set_cell(1_224.0, 400.0);
         let wide = session.render_plan(1.0);
-        let width_of = |plan: &[PlannedRender]| {
-            plan.iter()
-                .find(|entry| entry.quality == Quality::Refined)
-                .map(|entry| entry.width)
-                .unwrap()
-        };
+        let width_of =
+            |plan: &[PlannedRender]| plan.iter().next().map(|entry| entry.width).unwrap();
         assert!(width_of(&wide) > width_of(&narrow));
     }
 

@@ -43,7 +43,7 @@ pub use djvu::{DjvuBackend, DjvuDocument};
 pub use formats::{format_of, unsupported_format, UnsupportedFormat, UNSUPPORTED_FORMATS};
 pub use images::{ImageBackend, ImageDocument, IMAGE_EXTENSIONS};
 pub use pdf::capabilities::{CapabilityFinding, DocumentCapabilities, FindingKind};
-pub use protocol::{Priority, Quality, RenderJob, Request, RequestId, Response, PROTOCOL_VERSION};
+pub use protocol::{Priority, RenderJob, Request, RequestId, Response, PROTOCOL_VERSION};
 pub use sign::{
     build_cms, estimate_cms_size, load_pkcs12, CredentialSummary, DigestAlgorithm, SigningError,
     SigningProfile,

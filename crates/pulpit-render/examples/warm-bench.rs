@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use pulpit_core::notes::Region;
 use pulpit_core::RenderGeneration;
-use pulpit_render::protocol::{Priority, Quality, RenderJob};
+use pulpit_render::protocol::{Priority, RenderJob};
 use pulpit_render::supervisor::{RenderEvent, RendererSupervisor, SupervisorConfig, WorkerCommand};
 
 /// The application's live tick: renderer events are drained once per tick.
@@ -151,7 +151,6 @@ fn warm(
                 width,
                 height,
                 priority: Priority::Ancillary,
-                quality: Quality::Refined,
                 with_annotations: false,
                 region_name: String::new(),
             });

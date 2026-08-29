@@ -43,55 +43,33 @@ pub enum Surface {
     Presenter,
 }
 
-/// What a surface showed, and how good it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Answer {
-    /// The coarse frame, correct page but soft.
-    StandIn,
-    /// The frame that surface actually wants.
-    Exact,
-}
-
 /// One page turn in progress.
 #[derive(Debug, Clone)]
 struct Open {
     slide: usize,
     started: Instant,
-    audience_stand_in: Option<Duration>,
-    audience_exact: Option<Duration>,
-    presenter_stand_in: Option<Duration>,
-    presenter_exact: Option<Duration>,
+    audience: Option<Duration>,
+    presenter: Option<Duration>,
 }
 
 /// A turn both surfaces have answered exactly.
 #[derive(Debug, Clone, Copy)]
 pub struct Turn {
     pub slide: usize,
-    pub audience_stand_in: Option<Duration>,
-    pub audience_exact: Duration,
-    pub presenter_stand_in: Option<Duration>,
-    pub presenter_exact: Duration,
+    pub audience: Duration,
+    pub presenter: Duration,
 }
 
 impl Turn {
     /// The turn as the presenter experienced it: the last surface to answer.
     pub fn settled(&self) -> Duration {
-        self.audience_exact.max(self.presenter_exact)
+        self.audience.max(self.presenter)
     }
 
-    /// The first correct picture on either surface, exact or not. This is
-    /// what "it felt instant" means, as against "it finished".
+    /// The first picture on either surface. This is what "it felt instant"
+    /// means, as against "it finished".
     pub fn first_picture(&self) -> Duration {
-        [
-            self.audience_stand_in,
-            self.presenter_stand_in,
-            Some(self.audience_exact),
-            Some(self.presenter_exact),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or_default()
+        self.audience.min(self.presenter)
     }
 }
 
@@ -233,18 +211,6 @@ pub struct Latency {
     /// an ordering mistake could lengthen.
     on_screen_inbox: Stage,
     prefetch_inbox: Stage,
-    /// The rasteriser's own time for each of the two tiers a page is drawn
-    /// at, so the cost of the coarse-then-refined arrangement can be weighed
-    /// against what it buys.
-    ///
-    /// Reported together — which is how it was — the two are one number that
-    /// answers neither question anyone asks of them: whether a preview is
-    /// cheap enough to be worth rendering, and whether a full page is slow
-    /// enough to need one. A fifth of the pixels is a fifth of the work only
-    /// if the rasteriser is pixel-bound, and a page of text is not obviously
-    /// that.
-    coarse_rendered: Stage,
-    refined_rendered: Stage,
     /// The part of `render` a worker was holding the job. What is left is the
     /// wait in this process's queue.
     render_worked: Stage,
@@ -277,10 +243,8 @@ impl Latency {
         self.open = Some(Open {
             slide,
             started: now,
-            audience_stand_in: None,
-            audience_exact: None,
-            presenter_stand_in: None,
-            presenter_exact: None,
+            audience: None,
+            presenter: None,
         });
     }
 
@@ -289,7 +253,7 @@ impl Latency {
     /// Ignored unless it is the page the open turn is about, so a neighbour's
     /// prefetch landing cannot be mistaken for an answer. Only the first of
     /// each kind counts: a surface answers a turn once.
-    pub fn answered(&mut self, surface: Surface, answer: Answer, slide: usize, now: Instant) {
+    pub fn answered(&mut self, surface: Surface, slide: usize, now: Instant) {
         let Some(open) = self.open.as_mut() else {
             return;
         };
@@ -297,11 +261,9 @@ impl Latency {
             return;
         }
         let elapsed = now.saturating_duration_since(open.started);
-        let slot = match (surface, answer) {
-            (Surface::Audience, Answer::StandIn) => &mut open.audience_stand_in,
-            (Surface::Audience, Answer::Exact) => &mut open.audience_exact,
-            (Surface::Presenter, Answer::StandIn) => &mut open.presenter_stand_in,
-            (Surface::Presenter, Answer::Exact) => &mut open.presenter_exact,
+        let slot = match surface {
+            Surface::Audience => &mut open.audience,
+            Surface::Presenter => &mut open.presenter,
         };
         if slot.is_none() {
             *slot = Some(elapsed);
@@ -329,23 +291,21 @@ impl Latency {
         let Some(open) = self.open.as_ref() else {
             return;
         };
-        let Some(presenter_exact) = open.presenter_exact else {
+        let Some(presenter) = open.presenter else {
             return;
         };
-        // With no projector the audience columns are reported as zero rather
+        // With no projector the audience column is reported as zero rather
         // than omitted: a report whose shape changed with the hardware would
         // be one nobody could compare across sessions.
-        let audience_exact = match (!self.audience_absent, open.audience_exact) {
-            (true, Some(exact)) => exact,
+        let audience = match (!self.audience_absent, open.audience) {
+            (true, Some(answered)) => answered,
             (true, None) => return,
             (false, _) => Duration::ZERO,
         };
         let turn = Turn {
             slide: open.slide,
-            audience_stand_in: open.audience_stand_in,
-            audience_exact,
-            presenter_stand_in: open.presenter_stand_in,
-            presenter_exact,
+            audience,
+            presenter,
         };
         self.open = None;
         if self.turns.len() == REMEMBERED_TURNS {
@@ -383,25 +343,12 @@ impl Latency {
         rendered: Duration,
         warming: bool,
         on_screen: bool,
-        refined: bool,
     ) {
         if warming {
             self.warming.record(elapsed);
             self.warming_worked.record(worked);
             self.warming_rendered.record(rendered);
             return;
-        }
-        // Warming is excluded, and the first attempt at this got that wrong.
-        // A thumbnail looks like coarse work and is not: it is submitted at
-        // `Refined` quality and a fraction of the width, so counting it here
-        // put six hundred one-millisecond thumbnails in the same bucket as
-        // the full pages and reported a full page as costing a millisecond.
-        // The tiers being compared are the two a *reader's* page is drawn at,
-        // and warming is neither of them.
-        if refined {
-            self.refined_rendered.record(rendered);
-        } else {
-            self.coarse_rendered.record(rendered);
         }
         self.render.record(elapsed);
         self.render_worked.record(worked);
@@ -468,14 +415,6 @@ impl Latency {
         &self.prefetch_inbox
     }
 
-    pub fn coarse_rendered(&self) -> &Stage {
-        &self.coarse_rendered
-    }
-
-    pub fn refined_rendered(&self) -> &Stage {
-        &self.refined_rendered
-    }
-
     pub fn warming_worked(&self) -> &Stage {
         &self.warming_worked
     }
@@ -508,27 +447,12 @@ mod tests {
         let base = Instant::now();
         let mut latency = Latency::default();
         latency.begin_turn(4, base);
-        latency.answered(Surface::Audience, Answer::Exact, 4, at(base, 30));
-        latency.answered(Surface::Presenter, Answer::Exact, 4, at(base, 80));
+        latency.answered(Surface::Audience, 4, at(base, 30));
+        latency.answered(Surface::Presenter, 4, at(base, 80));
 
         let turn = latency.turns().back().expect("a finished turn");
         assert_eq!(turn.settled(), Duration::from_millis(80));
         assert_eq!(turn.first_picture(), Duration::from_millis(30));
-    }
-
-    #[test]
-    fn a_stand_in_is_the_first_picture_without_ending_the_turn() {
-        let base = Instant::now();
-        let mut latency = Latency::default();
-        latency.begin_turn(4, base);
-        latency.answered(Surface::Presenter, Answer::StandIn, 4, at(base, 12));
-        assert!(latency.turns().is_empty(), "soft is not settled");
-
-        latency.answered(Surface::Audience, Answer::Exact, 4, at(base, 40));
-        latency.answered(Surface::Presenter, Answer::Exact, 4, at(base, 45));
-        let turn = latency.turns().back().expect("a finished turn");
-        assert_eq!(turn.first_picture(), Duration::from_millis(12));
-        assert_eq!(turn.settled(), Duration::from_millis(45));
     }
 
     /// A neighbour's prefetch landing is not an answer to this turn. Counting
@@ -538,8 +462,8 @@ mod tests {
         let base = Instant::now();
         let mut latency = Latency::default();
         latency.begin_turn(4, base);
-        latency.answered(Surface::Audience, Answer::Exact, 5, at(base, 10));
-        latency.answered(Surface::Presenter, Answer::Exact, 5, at(base, 10));
+        latency.answered(Surface::Audience, 5, at(base, 10));
+        latency.answered(Surface::Presenter, 5, at(base, 10));
         assert!(latency.turns().is_empty(), "page 5 did not answer for 4");
     }
 
@@ -556,8 +480,8 @@ mod tests {
         assert_eq!(latency.abandoned(), 2);
         assert!(latency.turns().is_empty());
 
-        latency.answered(Surface::Audience, Answer::Exact, 6, at(base, 60));
-        latency.answered(Surface::Presenter, Answer::Exact, 6, at(base, 70));
+        latency.answered(Surface::Audience, 6, at(base, 60));
+        latency.answered(Surface::Presenter, 6, at(base, 70));
         let turn = latency.turns().back().expect("the turn that landed");
         assert_eq!(turn.slide, 6);
         // Timed from the key that asked for page 6, not from the first key.
@@ -574,11 +498,11 @@ mod tests {
         let mut latency = Latency::default();
         latency.expect_audience(false);
         latency.begin_turn(3, base);
-        latency.answered(Surface::Presenter, Answer::Exact, 3, at(base, 25));
+        latency.answered(Surface::Presenter, 3, at(base, 25));
         let turn = latency.turns().back().expect("the turn settled alone");
         assert_eq!(turn.slide, 3);
         assert_eq!(turn.settled(), Duration::from_millis(25));
-        assert_eq!(turn.audience_exact, Duration::ZERO);
+        assert_eq!(turn.audience, Duration::ZERO);
     }
 
     /// And with a projector attached it still takes both, which is the case
@@ -589,9 +513,9 @@ mod tests {
         let mut latency = Latency::default();
         latency.expect_audience(true);
         latency.begin_turn(3, base);
-        latency.answered(Surface::Presenter, Answer::Exact, 3, at(base, 25));
+        latency.answered(Surface::Presenter, 3, at(base, 25));
         assert!(latency.turns().is_empty(), "the projector has not answered");
-        latency.answered(Surface::Audience, Answer::Exact, 3, at(base, 40));
+        latency.answered(Surface::Audience, 3, at(base, 40));
         let turn = latency.turns().back().expect("both surfaces answered");
         assert_eq!(turn.settled(), Duration::from_millis(40));
     }
@@ -605,7 +529,7 @@ mod tests {
         let mut latency = Latency::default();
         latency.expect_audience(true);
         latency.begin_turn(7, base);
-        latency.answered(Surface::Presenter, Answer::Exact, 7, at(base, 15));
+        latency.answered(Surface::Presenter, 7, at(base, 15));
         assert!(latency.turns().is_empty());
         latency.expect_audience(false);
         let turn = latency.turns().back().expect("released by the unplug");
@@ -627,14 +551,12 @@ mod tests {
             Duration::from_millis(38),
             false,
             true,
-            true,
         );
         // Speculative: quick to draw, sat in an inbox.
         latency.note_render(
             Duration::from_millis(20),
             Duration::from_millis(18),
             Duration::from_millis(3),
-            false,
             false,
             false,
         );
@@ -646,20 +568,13 @@ mod tests {
             Duration::from_millis(15),
             "the wait, not the drawing"
         );
-        // And the two tiers are told apart by what they cost to draw, which
-        // is the question "is the preview tier worth its complication?" in
-        // its measurable form.
-        assert_eq!(latency.refined_rendered().mean(), Duration::from_millis(38));
-        assert_eq!(latency.coarse_rendered().mean(), Duration::from_millis(3));
     }
 
-    /// A thumbnail is submitted at `Refined` quality and a fraction of the
-    /// width, so counting warming towards a tier puts hundreds of tiny
-    /// pictures beside the full pages and reports a full page as costing
-    /// what a thumbnail costs. The tiers are the two a reader's page is drawn
-    /// at; warming is neither.
+    /// Warming is nobody's page turn: a deck warms hundreds of thumbnails
+    /// nobody is waiting for, and averaging them into either half of the
+    /// live split would drown the handful that somebody is.
     #[test]
-    fn warming_belongs_to_neither_tier() {
+    fn warming_is_no_window_s_wait() {
         let mut latency = Latency::default();
         latency.note_render(
             Duration::from_millis(50),
@@ -667,14 +582,7 @@ mod tests {
             Duration::from_millis(1),
             true,
             false,
-            true,
         );
-        assert_eq!(
-            latency.refined_rendered().calls,
-            0,
-            "a thumbnail is not a page"
-        );
-        assert_eq!(latency.coarse_rendered().calls, 0);
         assert_eq!(latency.warming().calls, 1, "counted, as warming");
         assert_eq!(latency.on_screen().calls, 0);
         assert_eq!(latency.prefetch().calls, 0);
@@ -685,11 +593,11 @@ mod tests {
         let base = Instant::now();
         let mut latency = Latency::default();
         latency.begin_turn(1, base);
-        latency.answered(Surface::Audience, Answer::Exact, 1, at(base, 10));
-        latency.answered(Surface::Audience, Answer::Exact, 1, at(base, 90));
-        latency.answered(Surface::Presenter, Answer::Exact, 1, at(base, 20));
+        latency.answered(Surface::Audience, 1, at(base, 10));
+        latency.answered(Surface::Audience, 1, at(base, 90));
+        latency.answered(Surface::Presenter, 1, at(base, 20));
         let turn = latency.turns().back().expect("a turn");
-        assert_eq!(turn.audience_exact, Duration::from_millis(10));
+        assert_eq!(turn.audience, Duration::from_millis(10));
     }
 
     #[test]
@@ -698,8 +606,8 @@ mod tests {
         let mut latency = Latency::default();
         for slide in 0..REMEMBERED_TURNS + 5 {
             latency.begin_turn(slide, base);
-            latency.answered(Surface::Audience, Answer::Exact, slide, at(base, 5));
-            latency.answered(Surface::Presenter, Answer::Exact, slide, at(base, 5));
+            latency.answered(Surface::Audience, slide, at(base, 5));
+            latency.answered(Surface::Presenter, slide, at(base, 5));
         }
         assert_eq!(latency.turns().len(), REMEMBERED_TURNS);
         assert_eq!(latency.turns().back().unwrap().slide, REMEMBERED_TURNS + 4);

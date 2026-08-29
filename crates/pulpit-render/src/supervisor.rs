@@ -16,7 +16,7 @@ use pulpit_core::RenderGeneration;
 
 use crate::cache::Frame;
 use crate::protocol::{
-    read_message, write_message, OpenedDocument, Quality, RenderJob, Request, RequestId, Response,
+    read_message, write_message, OpenedDocument, RenderJob, Request, RequestId, Response,
     PROTOCOL_VERSION,
 };
 use crate::shm::{RegionNamer, SharedRegion};
@@ -166,15 +166,12 @@ pub struct RenderDiagnostics {
     pub workers_configured: usize,
     pub queued: usize,
     pub in_flight: usize,
-    /// Queued or in-flight jobs that would sharpen what is on screen.
-    pub pending_refined: usize,
     pub submitted: u64,
     pub dispatched: u64,
-    /// Frames delivered, per quality tier.
-    pub coarse_frames: u64,
-    pub refined_frames: u64,
-    /// The last frame the supervisor delivered: size and tier.
-    pub last_frame: Option<(u32, u32, Quality)>,
+    /// Frames delivered.
+    pub frames: u64,
+    /// The size of the last frame the supervisor delivered.
+    pub last_frame: Option<(u32, u32)>,
     /// The largest frame delivered, which is what the display asked for.
     pub peak_resolution: Option<(u32, u32)>,
     pub cancelled: u64,
@@ -215,23 +212,6 @@ impl RenderDiagnostics {
     /// presenter would want them. Empty when nothing is wrong.
     pub fn explanations(&self) -> Vec<String> {
         let mut out = Vec::new();
-
-        match self.last_frame {
-            Some((width, height, Quality::Coarse)) if self.pending_refined > 0 => {
-                out.push(format!(
-                "The slide on screen is blurry because the last frame delivered was the coarse \
-                 first pass ({width}×{height}). {} refined render(s) are still queued or in \
-                 flight; the sharp frame replaces it as soon as one lands.",
-                self.pending_refined
-            ))
-            }
-            Some((width, height, Quality::Coarse)) => out.push(format!(
-                "The slide on screen is the coarse first pass ({width}×{height}) and no refined \
-                 render is outstanding: the refined one was cancelled by a newer navigation or \
-                 failed, so the coarse frame stays until the page is requested again.",
-            )),
-            _ => {}
-        }
 
         if self.queued > self.workers_alive.max(1) * 2 {
             out.push(format!(
@@ -310,20 +290,16 @@ impl RenderDiagnostics {
             self.workers_given_up
         ));
         lines.push(format!(
-            "work: {} submitted, {} dispatched, {} queued, {} in flight ({} refined pending)",
-            self.submitted, self.dispatched, self.queued, self.in_flight, self.pending_refined
+            "work: {} submitted, {} dispatched, {} queued, {} in flight",
+            self.submitted, self.dispatched, self.queued, self.in_flight
         ));
         lines.push(format!(
-            "frames: {} coarse, {} refined, {} cancelled, {} failed, {} timed out",
-            self.coarse_frames, self.refined_frames, self.cancelled, self.failed, self.timed_out
+            "frames: {} delivered, {} cancelled, {} failed, {} timed out",
+            self.frames, self.cancelled, self.failed, self.timed_out
         ));
         lines.push(match self.last_frame {
-            Some((width, height, quality)) => format!(
-                "resolution: last {width}×{height} {}, peak {}",
-                match quality {
-                    Quality::Coarse => "coarse",
-                    Quality::Refined => "refined",
-                },
+            Some((width, height)) => format!(
+                "resolution: last {width}×{height}, peak {}",
                 match self.peak_resolution {
                     Some((width, height)) => format!("{width}×{height}"),
                     None => "none".to_string(),
@@ -366,9 +342,8 @@ struct Counters {
     backend_version: Option<String>,
     submitted: u64,
     dispatched: u64,
-    coarse_frames: u64,
-    refined_frames: u64,
-    last_frame: Option<(u32, u32, Quality)>,
+    frames: u64,
+    last_frame: Option<(u32, u32)>,
     peak_resolution: Option<(u32, u32)>,
     cancelled: u64,
     failed: u64,
@@ -409,12 +384,9 @@ impl Counters {
         self.failures.push(reason.to_string());
     }
 
-    fn record_frame(&mut self, width: u32, height: u32, quality: Quality) {
-        match quality {
-            Quality::Coarse => self.coarse_frames += 1,
-            Quality::Refined => self.refined_frames += 1,
-        }
-        self.last_frame = Some((width, height, quality));
+    fn record_frame(&mut self, width: u32, height: u32) {
+        self.frames += 1;
+        self.last_frame = Some((width, height));
         let pixels = |(width, height): (u32, u32)| width as u64 * height as u64;
         if self
             .peak_resolution
@@ -662,22 +634,6 @@ impl RendererSupervisor {
         self.workers.iter().map(|w| w.in_flight.len()).sum()
     }
 
-    /// Jobs that would sharpen what is on screen: refined work still queued or
-    /// in flight. A coarse frame with none of these outstanding is a frame
-    /// that will stay blurry.
-    pub fn pending_refined(&self) -> usize {
-        self.queue
-            .iter()
-            .filter(|job| job.quality == Quality::Refined)
-            .count()
-            + self
-                .workers
-                .iter()
-                .flat_map(|worker| &worker.in_flight)
-                .filter(|f| f.job.quality == Quality::Refined)
-                .count()
-    }
-
     /// A snapshot of how rendering is going, with the queue read at this
     /// instant and the counters accumulated since start.
     pub fn diagnostics(&self) -> RenderDiagnostics {
@@ -688,11 +644,9 @@ impl RendererSupervisor {
             workers_configured: self.config.workers,
             queued: self.queued(),
             in_flight: self.in_flight(),
-            pending_refined: self.pending_refined(),
             submitted: self.counters.submitted,
             dispatched: self.counters.dispatched,
-            coarse_frames: self.counters.coarse_frames,
-            refined_frames: self.counters.refined_frames,
+            frames: self.counters.frames,
             last_frame: self.counters.last_frame,
             peak_resolution: self.counters.peak_resolution,
             cancelled: self.counters.cancelled,
@@ -995,7 +949,6 @@ impl RendererSupervisor {
                 width,
                 height,
                 bytes,
-                quality,
                 pixels,
                 render_micros,
                 ..
@@ -1056,7 +1009,7 @@ impl RendererSupervisor {
                 let rendered = Duration::from_micros(render_micros);
                 self.counters.record_worked(worked);
                 self.counters.record_rendered(rendered);
-                self.counters.record_frame(width, height, quality);
+                self.counters.record_frame(width, height);
                 events.push(RenderEvent::Frame {
                     job: in_flight.job,
                     frame: Frame::new(width, height, pixels),
@@ -1327,11 +1280,7 @@ impl RendererSupervisor {
             let mut order: Vec<usize> = (0..self.queue.len()).collect();
             order.sort_by_key(|&position| {
                 let job = &self.queue[position];
-                (
-                    job.priority,
-                    matches!(job.quality, Quality::Refined),
-                    position,
-                )
+                (job.priority, position)
             });
             let choice = order.into_iter().find_map(|position| {
                 let job = &self.queue[position];
@@ -1487,9 +1436,9 @@ mod tests {
             backend_version: Some("/opt/lib/libpdfium.so".into()),
             workers_alive: 2,
             workers_configured: 2,
-            last_frame: Some((1920, 1080, Quality::Refined)),
+            last_frame: Some((1920, 1080)),
             peak_resolution: Some((1920, 1080)),
-            refined_frames: 3,
+            frames: 3,
             ..Default::default()
         }
     }
@@ -1500,36 +1449,9 @@ mod tests {
         assert!(diagnostics.explanations().is_empty());
         let report = diagnostics.to_report();
         assert!(report.contains("backend: pdfium (/opt/lib/libpdfium.so)"));
-        assert!(report.contains("last 1920×1080 refined"));
+        assert!(report.contains("last 1920×1080"));
         assert!(report.contains("rendering is healthy"));
         assert!(report.contains("cache: not reported"));
-    }
-
-    #[test]
-    fn a_blurry_slide_is_explained_by_the_refined_frame_that_has_not_landed() {
-        let diagnostics = RenderDiagnostics {
-            last_frame: Some((640, 360, Quality::Coarse)),
-            pending_refined: 2,
-            ..healthy()
-        };
-        let explanation = &diagnostics.explanations()[0];
-        assert!(explanation.contains("blurry"), "{explanation}");
-        assert!(explanation.contains("640×360"), "{explanation}");
-        assert!(explanation.contains("2 refined render(s)"), "{explanation}");
-    }
-
-    #[test]
-    fn a_coarse_frame_with_nothing_outstanding_says_the_refinement_is_not_coming() {
-        let diagnostics = RenderDiagnostics {
-            last_frame: Some((640, 360, Quality::Coarse)),
-            pending_refined: 0,
-            ..healthy()
-        };
-        let explanation = &diagnostics.explanations()[0];
-        assert!(
-            explanation.contains("cancelled by a newer navigation"),
-            "{explanation}"
-        );
     }
 
     #[test]
@@ -1604,12 +1526,11 @@ mod tests {
     #[test]
     fn counters_track_frames_failures_and_the_peak_resolution() {
         let mut counters = Counters::default();
-        counters.record_frame(640, 360, Quality::Coarse);
-        counters.record_frame(1920, 1080, Quality::Refined);
-        counters.record_frame(800, 600, Quality::Refined);
-        assert_eq!(counters.coarse_frames, 1);
-        assert_eq!(counters.refined_frames, 2);
-        assert_eq!(counters.last_frame, Some((800, 600, Quality::Refined)));
+        counters.record_frame(640, 360);
+        counters.record_frame(1920, 1080);
+        counters.record_frame(800, 600);
+        assert_eq!(counters.frames, 3);
+        assert_eq!(counters.last_frame, Some((800, 600)));
         assert_eq!(
             counters.peak_resolution,
             Some((1920, 1080)),

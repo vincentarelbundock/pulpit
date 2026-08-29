@@ -19,7 +19,7 @@ use pulpit_display::{
     WindowState,
 };
 use pulpit_render::cache::{FrameCache, FrameKey, FrameKind};
-use pulpit_render::protocol::{Priority, Quality, RenderJob, RequestId};
+use pulpit_render::protocol::{Priority, RenderJob, RequestId};
 use pulpit_render::supervisor::{RenderEvent, RendererSupervisor, SupervisorConfig, WorkerCommand};
 
 use crate::platform::{Inhibitor, Platform};
@@ -2889,12 +2889,10 @@ impl App {
                 ));
                 if let Some(turn) = turns.back() {
                     report.push_str(&format!(
-                        "- last turn (slide {}): projector {}{}, panel {}{}\n",
+                        "- last turn (slide {}): projector {}, panel {}\n",
                         turn.slide + 1,
-                        millis(turn.audience_exact),
-                        stand_in_note(turn.audience_stand_in),
-                        millis(turn.presenter_exact),
-                        stand_in_note(turn.presenter_stand_in),
+                        millis(turn.audience),
+                        millis(turn.presenter),
                     ));
                 }
             }
@@ -3033,24 +3031,6 @@ impl App {
                 views.calls,
                 millis(views.mean()),
                 millis(views.worst),
-            ));
-        }
-        // What each tier of picture costs the rasteriser. Reported next to
-        // each other because the only question they answer is comparative:
-        // whether a preview is cheap enough to be worth its complication, and
-        // whether a full page is slow enough to need one.
-        for (name, stage) in [
-            ("a preview", self.latency.coarse_rendered()),
-            ("a full page", self.latency.refined_rendered()),
-        ] {
-            if stage.calls == 0 {
-                continue;
-            }
-            report.push_str(&format!(
-                "- rasterising {name}: {} drawn, {} typical, {} worst\n",
-                stage.calls,
-                millis(stage.mean()),
-                millis(stage.worst),
             ));
         }
         let copies = self.latency.copies();
@@ -6335,7 +6315,6 @@ impl App {
                         rendered,
                         was_thumbnail,
                         on_screen,
-                        job.quality == Quality::Refined,
                     );
                 }
                 if frame.cpu_bytes() >= pulpit_render::protocol::INLINE_FRAME_BYTES {
@@ -6380,7 +6359,7 @@ impl App {
                     self.pump_thumbnails();
                     return;
                 }
-                tracing::debug!(slide = key.slide, quality = ?key.quality, width = key.width, "frame cached");
+                tracing::debug!(slide = key.slide, width = key.width, "frame cached");
                 // A reader page rendered from a snapshot now shows every mark
                 // committed at or before that snapshot's revision, so their
                 // retained previews come down (§9.2).
@@ -7736,18 +7715,14 @@ impl App {
                 generation,
                 slide: entry.page.get(),
                 kind: FrameKind::Page,
-                quality: entry.quality,
                 width: entry.width,
                 height: entry.height,
             };
             still_wanted.push(key);
-            if self.cache.satisfies(
-                generation,
-                key.slide,
-                FrameKind::Page,
-                key.quality,
-                key.width,
-            ) {
+            if self
+                .cache
+                .satisfies(generation, key.slide, FrameKind::Page, key.width)
+            {
                 continue;
             }
             if self.pending.iter().any(|(_, pending)| *pending == key) {
@@ -7801,7 +7776,6 @@ impl App {
                 width: key.width,
                 height: key.height,
                 priority,
-                quality: key.quality,
                 with_annotations: true,
                 region_name: String::new(),
             });
@@ -12963,11 +12937,8 @@ impl App {
             width,
             height,
             // The reader is waiting on this with the pointer just up, so it
-            // outranks the pages being warmed in the margin. `Refined`
-            // because there is no coarse-then-fine here: one frame is drawn
-            // and it is the one that gets pasted.
+            // outranks the pages being warmed in the margin.
             priority: Priority::Presenter,
-            quality: pulpit_render::protocol::Quality::Refined,
             // The document's own marks are part of the page as the reader
             // sees it. Copying a page and getting it back without the
             // highlighting they put on it would be a picture of a different
@@ -15061,13 +15032,6 @@ impl App {
         for evicted in self.cache.take_evicted() {
             self.handles.remove(&evicted);
         }
-        // The panel's stand-in is a view-time choice with no slot of its own,
-        // so it is noticed here, by asking the very function the view asks —
-        // and before the slots move below, while the slot still holds the
-        // page being left, which is what makes a stand-in a stand-in.
-        if let Some(key) = self.presenter_stand_in() {
-            self.note_answer(crate::latency::Surface::Presenter, key);
-        }
         self.remember_presenter_frame();
         self.remember_reader_frame();
         self.mark_audience_frame();
@@ -15117,10 +15081,6 @@ impl App {
                 candidates.push(self.ready_frame_key(slide, FrameKind::Slide, audience));
             }
         }
-        // The coarse stand-in, which either window may have on screen right
-        // now. It is a megabyte against an audience frame's tens, and losing
-        // it is losing the picture that is up.
-        candidates.push(self.ready_frame_key(committed, FrameKind::Slide, self.coarse_width()));
         // The reader's own sheets, when the reader layout is up: each one is
         // the picture on screen, and evicting it blanks a page mid-read.
         for placed in self.reader.visible_pages() {
@@ -15161,9 +15121,8 @@ impl App {
         self.audience_frame_key().and_then(|key| self.picture(&key))
     }
 
-    /// The exact output-sized audience frame for the committed page, the
-    /// coarse stand-in while a cold page is still rendering, or the frame
-    /// already on the projector.
+    /// The exact output-sized audience frame for the committed page, or the
+    /// frame already on the projector while a cold page renders.
     fn audience_frame_key(&self) -> Option<FrameKey> {
         let slide = self.state.committed();
         let width = self.audience_width();
@@ -15176,41 +15135,9 @@ impl App {
         if let Some(key) = self.ready_frame_key(slide, FrameKind::Slide, width) {
             return Some(key);
         }
-        // Nothing output-sized yet. A stale page is the right answer while the
-        // *same* page sharpens, and the wrong one once the presenter has
-        // jumped somewhere cold: a correct page coarsely beats a sharp picture
-        // of somewhere else. That is the whole job of the coarse stand-in, and
-        // the only moment either window is allowed a two-step ladder.
-        //
-        // Never for the first frame of a session, where there is no wrong
-        // slide to correct: the projector is revealed with the real picture
-        // rather than with a soft one that sharpens in front of the room.
-        if self.wants_coarse_stand_in() {
-            if let Some(key) = self.ready_frame_key(slide, FrameKind::Slide, self.coarse_width()) {
-                return Some(key);
-            }
-        }
+        // Nothing output-sized yet: the frame already up stays until its
+        // replacement is complete, which is rule three.
         previous
-    }
-
-    /// Whether a coarse stand-in would be shown if one existed: a window is
-    /// holding some *other* page, which is the only thing the stand-in
-    /// improves on.
-    ///
-    /// Either window is enough to ask for it, and one render answers both.
-    /// The presenter panel alone is the ordinary case for a windowed session
-    /// with no projector attached, where nothing would otherwise be asked for
-    /// and the panel would sit on the previous page for a whole canonical
-    /// render.
-    fn wants_coarse_stand_in(&self) -> bool {
-        [self.last_audience, self.last_presenter]
-            .into_iter()
-            .any(|slot| wants_stand_in(self.held(slot), self.state.committed()))
-    }
-
-    /// A display slot's frame, if it is one a window can still draw.
-    fn held(&self, slot: Option<FrameKey>) -> Option<FrameKey> {
-        slot.filter(|key| self.handles.contains_key(key))
     }
 
     /// The projector's output width in pixels.
@@ -15275,18 +15202,6 @@ impl App {
         }
     }
 
-    /// The width of the stand-in rendered before the output-sized frame.
-    ///
-    /// Never wider than the output itself: on a small audience window the
-    /// coarse frame *is* the frame, and asking for two sizes of the same
-    /// picture would be a render and a texture for nothing.
-    fn coarse_width(&self) -> u32 {
-        self.settings
-            .rendering
-            .coarse_width
-            .min(self.audience_width())
-    }
-
     /// Every picture the audience window must be able to draw without
     /// waiting: what is on the projector now — blanked or not, because
     /// unblanking must not wait for an upload — and the two pages one step
@@ -15320,10 +15235,8 @@ impl App {
         let committed = self.state.committed();
         let count = self.state.slide_count();
         let widths = self.slide_widths();
-        // The stand-in ahead of the slot it is standing in for: it is on
-        // screen this pass, and the slot's own frame is by definition of the
-        // page the operator has already left.
-        let mut keys = vec![self.presenter_stand_in(), self.last_presenter];
+        // What the current-slide panel is drawing now.
+        let mut keys = vec![self.last_presenter];
         let mut ahead = Vec::new();
         for slide in [Some(committed + 1), committed.checked_sub(1)] {
             if let Some(slide) = slide.filter(|slide| *slide < count) {
@@ -15457,7 +15370,6 @@ impl App {
             if self.last_audience != Some(key) {
                 tracing::debug!(
                     slide = key.slide,
-                    quality = ?key.quality,
                     width = key.width,
                     "audience frame change"
                 );
@@ -15468,24 +15380,8 @@ impl App {
     }
 
     /// Record that a surface's picture just changed, for the turn timing.
-    ///
-    /// A frame at the projector's or the panel's own width is that surface's
-    /// real answer; anything narrower is the coarse stand-in. Reading the
-    /// width rather than tracking a separate flag keeps this honest if the
-    /// stand-in rules change: whatever is on screen is classified by what it
-    /// actually is.
     fn note_answer(&mut self, surface: crate::latency::Surface, key: FrameKey) {
-        let exact_width = match surface {
-            crate::latency::Surface::Audience => self.audience_width(),
-            crate::latency::Surface::Presenter => self.slide_widths().current,
-        };
-        let answer = if key.width >= exact_width {
-            crate::latency::Answer::Exact
-        } else {
-            crate::latency::Answer::StandIn
-        };
-        self.latency
-            .answered(surface, answer, key.slide, Instant::now());
+        self.latency.answered(surface, key.slide, Instant::now());
     }
 
     /// What a presenter panel draws for one page.
@@ -15503,10 +15399,8 @@ impl App {
         max_width: u32,
     ) -> Option<Picture> {
         let key = if kind == FrameKind::Slide && slide == self.state.committed() {
-            self.presenter_stand_in().or_else(|| {
-                self.last_presenter
-                    .filter(|key| self.handles.contains_key(key))
-            })
+            self.last_presenter
+                .filter(|key| self.handles.contains_key(key))
         } else {
             let width = if kind == FrameKind::Slide {
                 self.panel_width(slide)
@@ -15524,36 +15418,6 @@ impl App {
             None if kind == FrameKind::Slide => self.thumbnail(slide),
             None => None,
         }
-    }
-
-    /// The coarse frame Current Slide shows while the canonical one renders,
-    /// and only then.
-    ///
-    /// The presenter panel was the one surface with no stand-in at all: the
-    /// projector got a correct-but-soft picture within a coarse render of the
-    /// keypress while the panel the operator is actually watching held the
-    /// *previous* page until the full canonical render landed — the last
-    /// surface in the application to answer the key they pressed.
-    ///
-    /// The rules are the projector's, for the same reasons and with the same
-    /// bound of one extra step:
-    ///
-    /// - Only while the slot holds a *different* page. A stand-in over the
-    ///   right page is a downgrade, and this must never become a rung on a
-    ///   ladder — climbing one per turn is what the panels used to do, and
-    ///   what reads as flicker.
-    /// - Never before the slot has anything, where the thumbnail already
-    ///   stands in and a soft frame would be a second stand-in for the same
-    ///   emptiness.
-    /// - The frame is the projector's own coarse stand-in, not a render of
-    ///   its own: one picture, two windows, no extra work asked of a worker
-    ///   that is busy with the page being turned to.
-    fn presenter_stand_in(&self) -> Option<FrameKey> {
-        let committed = self.state.committed();
-        if !wants_stand_in(self.held(self.last_presenter), committed) {
-            return None;
-        }
-        self.ready_frame_key(committed, FrameKind::Slide, self.coarse_width())
     }
 
     /// The deck thumbnail for a page, if it belongs to the document on screen.
@@ -15640,24 +15504,8 @@ impl App {
         let next = ready_transition(self.last_reader, page.get(), candidate);
         if next != self.last_reader {
             if let Some(key) = next {
-                // Quality, not width. The panel's exactness test asks whether
-                // a frame is as wide as the surface, which is the right
-                // question there and the wrong one here: the reader's plan
-                // sizes a page from the *placed sheet*, so a perfectly sharp
-                // frame is narrower than the column it sits in and every
-                // answer scored as a stand-in — no reader turn could close.
-                // The plan already names the two frames it asks for, and they
-                // mean exactly what a stand-in and an exact answer mean: the
-                // coarse one is what a landing page paints from, the refined
-                // one is the page.
-                let answer = if key.quality == Quality::Refined {
-                    crate::latency::Answer::Exact
-                } else {
-                    crate::latency::Answer::StandIn
-                };
                 self.latency.answered(
                     crate::latency::Surface::Presenter,
-                    answer,
                     key.slide,
                     Instant::now(),
                 );
@@ -15861,7 +15709,6 @@ impl App {
                 generation,
                 slide,
                 kind: FrameKind::Slide,
-                quality: Quality::Refined,
                 width,
                 height,
             };
@@ -15888,7 +15735,6 @@ impl App {
                 width,
                 height,
                 priority,
-                quality: Quality::Refined,
                 with_annotations: false,
                 region_name: String::new(),
             });
@@ -15946,13 +15792,7 @@ impl App {
             neighbours.push(committed - 1);
         }
         for slide in neighbours {
-            wanted.push((
-                slide,
-                FrameKind::Slide,
-                Priority::Adjacent,
-                Quality::Refined,
-                audience_width,
-            ));
+            wanted.push((slide, FrameKind::Slide, Priority::Adjacent, audience_width));
         }
         // 5. Notes.
         if self.state.mapping().has_notes() {
@@ -15960,7 +15800,6 @@ impl App {
                 preview,
                 FrameKind::Notes,
                 Priority::Ancillary,
-                Quality::Refined,
                 preview_width,
             ));
         }
@@ -15976,7 +15815,7 @@ impl App {
         // the panels starved and the projector waited a full render latency
         // after every settle.
         let mut still_wanted: Vec<FrameKey> = Vec::new();
-        for (slide, kind, priority, quality, width) in wanted {
+        for (slide, kind, priority, width) in wanted {
             let source = match kind {
                 FrameKind::Slide => self
                     .state
@@ -16003,7 +15842,6 @@ impl App {
                 generation,
                 slide,
                 kind,
-                quality,
                 width,
                 height,
             };
@@ -16014,7 +15852,7 @@ impl App {
             if self.pending.iter().any(|(_, pending)| *pending == key) {
                 continue;
             }
-            jobs.push((key, source, priority, quality, width, height, document));
+            jobs.push((key, source, priority, width, height, document));
         }
 
         // Anything still in flight that the two windows no longer need is
@@ -16062,7 +15900,7 @@ impl App {
             self.thumbnail_requests.remove(&id);
             self.submitted_at.remove(&id);
         }
-        for (key, source, priority, quality, width, height, document) in jobs {
+        for (key, source, priority, width, height, document) in jobs {
             let id = supervisor.next_request_id();
             supervisor.submit(RenderJob {
                 id,
@@ -16073,7 +15911,6 @@ impl App {
                 width,
                 height,
                 priority,
-                quality,
                 with_annotations: false,
                 region_name: String::new(),
             });
@@ -16748,7 +16585,6 @@ mod residency_tests {
     use super::{page_residency, FrameKey, PageResidency};
     use pulpit_core::RenderGeneration;
     use pulpit_render::cache::FrameKind;
-    use pulpit_render::protocol::Quality;
 
     fn handle(fill: u8) -> iced::widget::image::Handle {
         iced::widget::image::Handle::from_rgba(1, 1, vec![fill, fill, fill, 255])
@@ -16759,7 +16595,6 @@ mod residency_tests {
             generation: RenderGeneration(1),
             slide: 0,
             kind: FrameKind::Page,
-            quality: Quality::Refined,
             width: 100,
             height: 130,
         }
@@ -17139,7 +16974,7 @@ fn topology_snapshots(
     })
 }
 
-type RenderWant = (usize, FrameKind, Priority, Quality, u32);
+type RenderWant = (usize, FrameKind, Priority, u32);
 
 /// The complete live slide plan before audience-neighbour and notes prefetch.
 ///
@@ -17161,13 +16996,7 @@ fn live_slide_plan(
     demand: crate::layout::panels::PanelDemand,
 ) -> Vec<RenderWant> {
     let mut wanted: Vec<RenderWant> = Vec::new();
-    wanted.push((
-        committed,
-        FrameKind::Slide,
-        Priority::Audience,
-        Quality::Refined,
-        audience,
-    ));
+    wanted.push((committed, FrameKind::Slide, Priority::Audience, audience));
 
     // The page on screen, at the width the current-slide panel draws it.
     let push = |slide: usize, width: u32, priority: Priority, wanted: &mut Vec<RenderWant>| {
@@ -17180,11 +17009,11 @@ fn live_slide_plan(
         // it did before rather than paying twice for one image.
         if wanted
             .iter()
-            .any(|(other, _, _, _, other_width)| *other == slide && *other_width == width)
+            .any(|(other, _, _, other_width)| *other == slide && *other_width == width)
         {
             return;
         }
-        wanted.push((slide, FrameKind::Slide, priority, Quality::Refined, width));
+        wanted.push((slide, FrameKind::Slide, priority, width));
     };
     if demand.current {
         push(committed, widths.current, Priority::Presenter, &mut wanted);
@@ -17230,13 +17059,6 @@ fn millis(duration: Duration) -> String {
 }
 
 /// How a stand-in reads in the report, or nothing when there was none.
-fn stand_in_note(stand_in: Option<Duration>) -> String {
-    match stand_in {
-        Some(at) => format!(" (soft at {})", millis(at)),
-        None => String::new(),
-    }
-}
-
 /// Whether a window holding `holding` should take a coarse stand-in for
 /// `wanted_slide` if one exists.
 ///
@@ -17295,10 +17117,6 @@ async fn pick_pdf_named(suggested: PathBuf) -> Option<PathBuf> {
         .save_file()
         .await
         .map(|handle| handle.path().to_path_buf())
-}
-
-fn wants_stand_in(holding: Option<FrameKey>, wanted_slide: usize) -> bool {
-    holding.is_some_and(|key| key.slide != wanted_slide)
 }
 
 /// How one reader page is kept resident: by its frame key, or as a picture.
@@ -17515,41 +17333,24 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
     if key.kind == FrameKind::Slide {
         cache.contains(&key)
     } else {
-        cache.satisfies(key.generation, key.slide, key.kind, key.quality, key.width)
+        cache.satisfies(key.generation, key.slide, key.kind, key.width)
     }
 }
 
 #[cfg(test)]
 mod canonical_frame_tests {
-    use super::{ready_transition, wants_stand_in};
+    use super::ready_transition;
     use pulpit_core::RenderGeneration;
     use pulpit_render::cache::{FrameKey, FrameKind};
-    use pulpit_render::protocol::Quality;
 
     fn key(slide: usize, width: u32) -> FrameKey {
         FrameKey {
             generation: RenderGeneration(1),
             slide,
             kind: FrameKind::Slide,
-            quality: Quality::Refined,
             width,
             height: width / 2,
         }
-    }
-
-    #[test]
-    fn a_stand_in_corrects_a_wrong_page_and_nothing_else() {
-        // The presenter panel is holding the page just left: this is the one
-        // case a soft picture is an improvement, and the case the panel used
-        // to answer by showing the previous slide until the full canonical
-        // render landed.
-        assert!(wants_stand_in(Some(key(3, 1280)), 4));
-        // Already on the right page. A stand-in here is the second rung of a
-        // ladder, which is the flicker, not the fix.
-        assert!(!wants_stand_in(Some(key(4, 1280)), 4));
-        // Nothing held: the thumbnail stands in, and the first real frame the
-        // window ever shows is a sharp one.
-        assert!(!wants_stand_in(None, 4));
     }
 
     const WIDTHS: crate::layout::panels::SlideWidths = crate::layout::panels::SlideWidths {
@@ -17568,7 +17369,6 @@ mod canonical_frame_tests {
     #[test]
     fn the_live_plan_has_no_progressive_presenter_ladder() {
         let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND);
-        assert!(plan.iter().all(|request| request.3 == Quality::Refined));
         assert_eq!(
             plan.iter()
                 .filter(|request| request.2 == pulpit_render::protocol::Priority::Audience)
@@ -17580,7 +17380,7 @@ mod canonical_frame_tests {
         assert!(plan
             .iter()
             .filter(|request| request.2 != pulpit_render::protocol::Priority::Audience)
-            .all(|request| request.4 == WIDTHS.current || request.4 == WIDTHS.neighbour));
+            .all(|request| request.3 == WIDTHS.current || request.3 == WIDTHS.neighbour));
     }
 
     /// A page is wanted small while it is the next slide and large the
@@ -17592,7 +17392,7 @@ mod canonical_frame_tests {
         let for_next: Vec<u32> = plan
             .iter()
             .filter(|request| request.0 == 5)
-            .map(|request| request.4)
+            .map(|request| request.3)
             .collect();
         assert!(for_next.contains(&WIDTHS.neighbour), "the next-slide panel");
         assert!(for_next.contains(&WIDTHS.current), "and the turn to come");
@@ -17664,26 +17464,27 @@ mod canonical_frame_tests {
         assert!(presenter_plan.iter().any(|request| {
             request.0 == 0
                 && request.2 == pulpit_render::protocol::Priority::Presenter
-                && request.3 == Quality::Refined
-                && request.4 == presenter_widths.current
+                && request.3 == presenter_widths.current
         }));
     }
 
-    /// The projector's own frame leads the plan, and nothing coarse precedes
-    /// it. A stand-in used to be asked for first; it was retired with the
+    /// The projector's own frame leads the plan, and nothing precedes it. A
+    /// coarse stand-in used to be asked for first; it was retired with the
     /// reader's preview tier, on the same measurement.
     #[test]
-    fn the_audience_frame_leads_the_plan_and_nothing_coarse_precedes_it() {
+    fn the_audience_frame_leads_the_plan() {
         let plan = super::live_slide_plan(4, 100, 3840, WIDTHS, FULL_DEMAND);
         let first = plan.first().expect("a plan");
         assert_eq!(first.0, 4, "the committed page, never a neighbour");
         assert_eq!(first.2, pulpit_render::protocol::Priority::Audience);
-        assert_eq!(first.3, Quality::Refined);
-        assert_eq!(first.4, 3840);
-        assert!(
-            plan.iter().all(|request| request.3 == Quality::Refined),
-            "no page is asked for at two qualities: {plan:?}"
-        );
+        assert_eq!(first.3, 3840, "at the projector's own width");
+        // One request per page and width: with no tiers there is nothing to
+        // ask for twice.
+        let mut seen: Vec<(usize, u32)> = plan.iter().map(|r| (r.0, r.3)).collect();
+        let asked = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), asked, "nothing is asked for twice: {plan:?}");
     }
 
     #[test]

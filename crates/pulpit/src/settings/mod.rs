@@ -685,8 +685,6 @@ pub struct RenderSettings {
     pub workers: usize,
     /// Combined CPU+GPU frame budget in mebibytes.
     pub cache_budget_mib: u64,
-    /// Width of the coarse first pass, in pixels.
-    pub coarse_width: u32,
     /// Seconds before an unresponsive worker is replaced.
     pub worker_deadline_secs: u64,
     /// Watch the open PDF and reload it when it is rebuilt.
@@ -715,7 +713,6 @@ impl Default for RenderSettings {
         Self {
             workers: default_workers(),
             cache_budget_mib: 256,
-            coarse_width: 640,
             worker_deadline_secs: 10,
             watch_document: true,
             watch_debounce_ms: 300,

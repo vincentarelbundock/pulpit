@@ -15,8 +15,6 @@ use std::sync::Arc;
 
 use pulpit_core::RenderGeneration;
 
-use crate::protocol::Quality;
-
 /// Which projection of the document a frame belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FrameKind {
@@ -32,27 +30,8 @@ pub struct FrameKey {
     pub generation: RenderGeneration,
     pub slide: usize,
     pub kind: FrameKind,
-    pub quality: Quality,
     pub width: u32,
     pub height: u32,
-}
-
-impl PartialOrd for Quality {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Quality {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        fn rank(q: &Quality) -> u8 {
-            match q {
-                Quality::Coarse => 0,
-                Quality::Refined => 1,
-            }
-        }
-        rank(self).cmp(&rank(other))
-    }
 }
 
 /// A decoded RGBA frame. Cheap to clone: the pixels are shared.
@@ -212,7 +191,7 @@ impl FrameCache {
             .filter(|(key, _)| {
                 key.generation == generation && key.slide == slide && key.kind == kind
             })
-            .max_by_key(|(key, _)| (key.quality, key.width))
+            .max_by_key(|(key, _)| key.width)
             .map(|(key, entry)| {
                 entry.last_used.set(self.tick());
                 (*key, entry.frame.clone())
@@ -237,14 +216,13 @@ impl FrameCache {
     ) -> Option<(FrameKey, Frame)> {
         self.entries
             .iter()
-            .filter(|(key, _)| {
+            .find(|(key, _)| {
                 key.generation == generation
                     && key.slide == slide
                     && key.kind == kind
                     && key.width == width
                     && key.height == height
             })
-            .max_by_key(|(key, _)| key.quality)
             .map(|(key, entry)| {
                 entry.last_used.set(self.tick());
                 (*key, entry.frame.clone())
@@ -270,7 +248,7 @@ impl FrameCache {
                     && key.kind == kind
                     && key.width <= max_width
             })
-            .max_by_key(|(key, _)| (key.quality, key.width))
+            .max_by_key(|(key, _)| key.width)
             .map(|(key, entry)| {
                 entry.last_used.set(self.tick());
                 (*key, entry.frame.clone())
@@ -287,36 +265,32 @@ impl FrameCache {
         kind: FrameKind,
         max_width: u32,
     ) -> Option<(FrameKey, Frame)> {
-        let mut within: Option<(&FrameKey, &Entry)> = None;
-        let mut any: Option<(&FrameKey, &Entry)> = None;
+        // Downsampling beats upsampling, so the smallest frame *at least* as
+        // wide as the cell wins; only when there is none does the widest
+        // narrower one stand in.
+        //
+        // Preferring the widest that fits — the obvious reading of "fitting"
+        // — is how leaving fullscreen used to leave every page soft and keep
+        // it that way. The cell shrinks, a small frame now fits, it is
+        // upsampled into the cell, and `satisfies` sees the *wide* frame,
+        // decides the page is covered and asks for no replacement. Nothing
+        // ever sharpens it. The two functions have to agree about which
+        // frame answers a request, and this is that agreement.
+        let mut at_least: Option<(&FrameKey, &Entry)> = None;
+        let mut below: Option<(&FrameKey, &Entry)> = None;
         for (key, entry) in &self.entries {
             if key.generation != generation || key.slide != slide || key.kind != kind {
                 continue;
             }
-            let rank = (key.quality, key.width);
-            if any.is_none_or(|(best, _)| rank > (best.quality, best.width)) {
-                any = Some((key, entry));
-            }
-            if key.width <= max_width
-                && within.is_none_or(|(best, _)| rank > (best.quality, best.width))
-            {
-                within = Some((key, entry));
+            if key.width >= max_width {
+                if at_least.is_none_or(|(best, _)| key.width < best.width) {
+                    at_least = Some((key, entry));
+                }
+            } else if below.is_none_or(|(best, _)| key.width > best.width) {
+                below = Some((key, entry));
             }
         }
-        // Quality outranks fit. A refined frame wider than the cell is
-        // downsampled on its way to the screen and still looks like the page;
-        // a coarse frame that happens to fit is *upsampled* and looks like a
-        // photograph of the page. Preferring the fitting one whatever its
-        // quality is how leaving fullscreen used to leave every page on
-        // screen soft and keep it that way: the reader's cell shrinks, the
-        // refined frames rendered for the full screen no longer fit, the
-        // coarse previews do — and `satisfies` sees those same wide refined
-        // frames and declines to render anything new, so nothing ever
-        // replaced the soft picture.
-        let choice = match (within, any) {
-            (Some(fitting), Some(best)) if best.0.quality > fitting.0.quality => Some(best),
-            (fitting, best) => fitting.or(best),
-        };
+        let choice = at_least.or(below);
         choice.map(|(key, entry)| {
             entry.last_used.set(self.tick());
             (*key, entry.frame.clone())
@@ -326,38 +300,21 @@ impl FrameCache {
     /// Whether a cached frame already satisfies a render request, so the
     /// request need not be submitted at all.
     ///
-    /// The two qualities have different satisfaction rules, and the
-    /// difference matters:
-    ///
-    /// A **coarse** request only exists to get *something correct* on screen
-    /// fast, so any frame at least as wide satisfies it — re-rendering a
-    /// small frame under a large one would be pure waste.
-    ///
-    /// A **refined** request asks for a frame *near* the requested width:
-    /// satisfied only by a refined frame in `[width, 2 × width]`. "Any wider
-    /// frame counts" was wrong here — once a slide had an audience-resolution
-    /// frame, its preview-size render was skipped forever, and the presenter
-    /// panels were left leaning on a thirty-megabyte frame that eviction
-    /// takes first. The panels' own small frames must keep being rendered
-    /// even when a giant exists.
+    /// A request asks for a frame *near* the requested width: satisfied only
+    /// by one in `[width, 2 × width]`. "Any wider frame counts" was wrong
+    /// here — once a slide had an audience-resolution frame, its preview-size
+    /// render was skipped forever, and the presenter panels were left leaning
+    /// on a thirty-megabyte frame that eviction takes first. The panels' own
+    /// small frames must keep being rendered even when a giant exists.
     pub fn satisfies(
         &self,
         generation: RenderGeneration,
         slide: usize,
         kind: FrameKind,
-        quality: Quality,
         width: u32,
     ) -> bool {
-        match quality {
-            Quality::Coarse => self
-                .best(generation, slide, kind)
-                .is_some_and(|(existing, _)| existing.width >= width),
-            Quality::Refined => self
-                .best_within(generation, slide, kind, width.saturating_mul(2))
-                .is_some_and(|(existing, _)| {
-                    existing.quality >= quality && existing.width >= width
-                }),
-        }
+        self.best_within(generation, slide, kind, width.saturating_mul(2))
+            .is_some_and(|(existing, _)| existing.width >= width)
     }
 
     pub fn insert(&mut self, key: FrameKey, frame: Frame) -> bool {
@@ -509,12 +466,11 @@ impl FrameCache {
 mod tests {
     use super::*;
 
-    fn key(generation: u64, slide: usize, quality: Quality) -> FrameKey {
+    fn key(generation: u64, slide: usize) -> FrameKey {
         FrameKey {
             generation: RenderGeneration(generation),
             slide,
             kind: FrameKind::Slide,
-            quality,
             width: 1920,
             height: 1080,
         }
@@ -528,12 +484,11 @@ mod tests {
         }
     }
 
-    fn sized_key(quality: Quality, width: u32) -> FrameKey {
+    fn sized_key(width: u32) -> FrameKey {
         FrameKey {
             generation: RenderGeneration(1),
             slide: 0,
             kind: FrameKind::Slide,
-            quality,
             width,
             height: width * 9 / 16,
         }
@@ -553,20 +508,18 @@ mod tests {
         // frame must not suppress the preview-size render the panels rely
         // on, because the giant is the first thing eviction takes.
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Refined, 3840), sized_frame(3840));
+        cache.insert(sized_key(3840), sized_frame(3840));
         let generation = RenderGeneration(1);
-        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
-        // But the same giant satisfies a request for its own size…
-        assert!(cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 3840));
-        // …and any coarse request: coarse only wants something correct fast.
-        assert!(cache.satisfies(generation, 0, FrameKind::Slide, Quality::Coarse, 640));
+        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, 1152));
+        // But the same giant satisfies a request for its own size.
+        assert!(cache.satisfies(generation, 0, FrameKind::Slide, 3840));
     }
 
     #[test]
     fn exact_lookup_never_promotes_an_audience_frame_into_a_presenter_slot() {
         let mut cache = FrameCache::new(100_000_000);
-        cache.insert(sized_key(Quality::Refined, 1280), sized_frame(1280));
-        cache.insert(sized_key(Quality::Refined, 3840), sized_frame(3840));
+        cache.insert(sized_key(1280), sized_frame(1280));
+        cache.insert(sized_key(3840), sized_frame(3840));
 
         let (key, _) = cache
             .best_exact(RenderGeneration(1), 0, FrameKind::Slide, 1280, 720)
@@ -582,7 +535,7 @@ mod tests {
         // The `/FitR` case: same page, same width, different height. Choosing
         // by width alone left the projector's picture to hash order.
         let mut cache = FrameCache::new(100_000_000);
-        let whole = sized_key(Quality::Refined, 1280);
+        let whole = sized_key(1280);
         let cropped = FrameKey {
             height: 900,
             ..whole
@@ -610,29 +563,18 @@ mod tests {
     #[test]
     fn a_frame_near_the_requested_width_satisfies_it() {
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Refined, 2000), sized_frame(2000));
+        cache.insert(sized_key(2000), sized_frame(2000));
         let generation = RenderGeneration(1);
         // Within [width, 2 × width]: good enough, no re-render.
-        assert!(cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
+        assert!(cache.satisfies(generation, 0, FrameKind::Slide, 1152));
         // Undersized never satisfies.
-        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 3840));
-    }
-
-    #[test]
-    fn a_coarse_frame_does_not_satisfy_a_refined_request() {
-        let mut cache = FrameCache::new(1_000_000);
-        cache.insert(sized_key(Quality::Coarse, 1152), sized_frame(1152));
-        let generation = RenderGeneration(1);
-        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Refined, 1152));
-        // A smaller coarse frame does not satisfy a wider coarse request.
-        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, Quality::Coarse, 1920));
-        assert!(cache.satisfies(generation, 0, FrameKind::Slide, Quality::Coarse, 640));
+        assert!(!cache.satisfies(generation, 0, FrameKind::Slide, 3840));
     }
 
     #[test]
     fn accounting_is_in_bytes_not_pages() {
         let mut cache = FrameCache::new(10_000_000);
-        cache.insert(key(1, 0, Quality::Refined), frame(4_000_000));
+        cache.insert(key(1, 0), frame(4_000_000));
         assert_eq!(cache.stats().cpu_bytes, 4_000_000);
         assert_eq!(cache.stats().frames, 1);
     }
@@ -641,7 +583,7 @@ mod tests {
     fn the_budget_is_never_exceeded() {
         let mut cache = FrameCache::new(10_000_000);
         for slide in 0..20 {
-            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000));
+            cache.insert(key(1, slide), frame(2_000_000));
             assert!(
                 cache.stats().total_bytes() <= cache.budget_bytes(),
                 "budget exceeded at slide {slide}: {} bytes",
@@ -654,12 +596,12 @@ mod tests {
     #[test]
     fn pinned_frames_survive_pressure() {
         let mut cache = FrameCache::new(6_000_000);
-        let on_screen = key(1, 0, Quality::Refined);
+        let on_screen = key(1, 0);
         cache.insert(on_screen, frame(2_000_000));
         cache.pin(vec![on_screen]);
 
         for slide in 1..10 {
-            cache.insert(key(1, slide, Quality::Refined), frame(2_000_000));
+            cache.insert(key(1, slide), frame(2_000_000));
         }
         assert!(
             cache.get(&on_screen).is_some(),
@@ -670,13 +612,10 @@ mod tests {
     #[test]
     fn a_frame_bigger_than_the_budget_is_refused_not_ruinous() {
         let mut cache = FrameCache::new(1_000_000);
-        cache.insert(key(1, 0, Quality::Coarse), frame(500_000));
-        assert!(!cache.insert(key(1, 1, Quality::Refined), frame(4_000_000)));
+        cache.insert(key(1, 0), frame(500_000));
+        assert!(!cache.insert(key(1, 1), frame(4_000_000)));
         assert_eq!(cache.stats().rejected, 1);
-        assert!(
-            cache.get(&key(1, 0, Quality::Coarse)).is_some(),
-            "existing frames survive"
-        );
+        assert!(cache.get(&key(1, 0)).is_some(), "existing frames survive");
     }
 
     #[test]
@@ -685,13 +624,13 @@ mod tests {
         // touched recency, "LRU" eviction was insertion order, and the
         // frame on screen the longest was the first to go.
         let mut cache = FrameCache::new(5_000_000);
-        let shown = key(1, 0, Quality::Refined);
-        let idle = key(1, 1, Quality::Refined);
+        let shown = key(1, 0);
+        let idle = key(1, 1);
         cache.insert(shown, frame(2_000_000));
         cache.insert(idle, frame(2_000_000));
         // The older entry is the one the view keeps drawing.
         cache.best(RenderGeneration(1), 0, FrameKind::Slide);
-        cache.insert(key(1, 2, Quality::Refined), frame(2_000_000));
+        cache.insert(key(1, 2), frame(2_000_000));
         assert!(cache.contains(&shown), "the fetched frame survives");
         assert!(!cache.contains(&idle), "the untouched frame is the victim");
     }
@@ -699,8 +638,8 @@ mod tests {
     #[test]
     fn resident_generations_track_what_is_actually_cached() {
         let mut cache = FrameCache::new(100_000_000);
-        cache.insert(key(3, 0, Quality::Refined), frame(1_000_000));
-        cache.insert(key(900, 0, Quality::Refined), frame(1_000_000));
+        cache.insert(key(3, 0), frame(1_000_000));
+        cache.insert(key(900, 0), frame(1_000_000));
         // Newest first, only generations with entries, capped at the asked
         // generation — a thousand reloads must not mean a thousand probes.
         assert_eq!(
@@ -726,89 +665,67 @@ mod tests {
         let mut cache = FrameCache::new(100_000_000);
         let page = FrameKey {
             kind: FrameKind::Page,
-            ..key(1, 0, Quality::Refined)
+            ..key(1, 0)
         };
         cache.insert(page, frame(1_000));
-        cache.insert(key(1, 0, Quality::Refined), frame(1_000));
+        cache.insert(key(1, 0), frame(1_000));
         assert_eq!(cache.evict_kind(FrameKind::Page), 1);
         assert!(!cache.contains(&page));
-        assert!(cache.contains(&key(1, 0, Quality::Refined)));
+        assert!(cache.contains(&key(1, 0)));
         assert_eq!(cache.take_evicted(), vec![page]);
     }
 
+    /// The tightest frame at least as wide as the cell, or — only when every
+    /// frame is narrower — the widest of those.
     #[test]
-    fn best_fitting_prefers_a_frame_within_the_width_but_falls_back() {
+    fn best_fitting_takes_the_tightest_frame_that_covers_the_cell() {
         let mut cache = FrameCache::new(100_000_000);
-        let sized = |width: u32| FrameKey {
-            width,
-            ..key(1, 0, Quality::Refined)
-        };
+        let sized = |width: u32| FrameKey { width, ..key(1, 0) };
         cache.insert(sized(1920), frame(1_000_000));
+        cache.insert(sized(800), frame(1_000_000));
         cache.insert(sized(400), frame(1_000_000));
         let (found, _) = cache
-            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 800)
+            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 600)
             .unwrap();
-        assert_eq!(found.width, 400, "the fitting frame wins");
+        assert_eq!(found.width, 800, "covers the cell with the least to spare");
+        // Exactly the right size is covered by "at least as wide".
         let (found, _) = cache
-            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 100)
+            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 1920)
+            .unwrap();
+        assert_eq!(found.width, 1920);
+        // Nothing covers it: the widest there is stands in rather than
+        // nothing at all.
+        let (found, _) = cache
+            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 4000)
             .unwrap();
         assert_eq!(found.width, 1920, "nothing fits, so the best stands in");
     }
 
+    /// Leaving fullscreen, exactly: a frame rendered for the full screen no
+    /// longer fits the cell, and an older small one does. Taking the small
+    /// one leaves the page soft — and `satisfies` sees the same wide frame,
+    /// decides the page is covered and asks for no replacement, so nothing
+    /// ever sharpens it again.
     #[test]
-    fn a_refined_frame_that_does_not_fit_beats_a_coarse_one_that_does() {
-        // Leaving fullscreen, exactly: the refined frames were rendered for
-        // the full screen and no longer fit the cell, and the coarse previews
-        // do. Taking the coarse one leaves the page soft — and `satisfies`
-        // sees the same wide refined frame and asks for no replacement, so
-        // nothing ever sharpens it again.
+    fn a_wide_frame_that_does_not_fit_beats_a_narrow_one_that_does() {
         let mut cache = FrameCache::new(100_000_000);
-        let sized = |quality: Quality, width: u32| FrameKey {
-            width,
-            quality,
-            ..key(1, 0, Quality::Refined)
-        };
-        cache.insert(sized(Quality::Refined, 1920), frame(1_000_000));
-        cache.insert(sized(Quality::Coarse, 400), frame(100_000));
+        let sized = |width: u32| FrameKey { width, ..key(1, 0) };
+        cache.insert(sized(1920), frame(1_000_000));
+        cache.insert(sized(400), frame(100_000));
         let (found, _) = cache
             .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 1200)
             .unwrap();
-        assert_eq!(found.quality, Quality::Refined);
         assert_eq!(found.width, 1920, "downsampling beats upsampling");
-        // And the reason nothing replaces it: the wide refined frame is
-        // taken to satisfy the narrower refined request.
-        assert!(cache.satisfies(
-            RenderGeneration(1),
-            0,
-            FrameKind::Slide,
-            Quality::Refined,
-            1200
-        ));
-    }
-
-    #[test]
-    fn the_narrower_of_two_refined_frames_still_wins() {
-        // The fit rule is untouched where both candidates are the same
-        // quality: a 400-wide refined frame in a 800-wide cell is the right
-        // picture, and the 1920 one is memory nobody is looking at.
-        let mut cache = FrameCache::new(100_000_000);
-        let sized = |width: u32| FrameKey {
-            width,
-            ..key(1, 0, Quality::Refined)
-        };
-        cache.insert(sized(1920), frame(1_000_000));
-        cache.insert(sized(400), frame(1_000_000));
-        let (found, _) = cache
-            .best_fitting(RenderGeneration(1), 0, FrameKind::Slide, 800)
-            .unwrap();
-        assert_eq!(found.width, 400);
+        // The two must agree: the frame `best_fitting` draws is the frame
+        // `satisfies` is counting on, or the page never sharpens.
+        assert!(cache.satisfies(RenderGeneration(1), 0, FrameKind::Slide, 1200));
     }
 
     #[test]
     fn pinned_overcommit_is_reported_not_hidden() {
         let mut cache = FrameCache::new(3_000_000);
-        let first = key(1, 0, Quality::Refined);
-        let second = key(1, 1, Quality::Refined);
+        let first = key(1, 0);
+        let second = key(1, 1);
         cache.insert(first, frame(2_000_000));
         cache.pin(vec![first, second]);
         cache.insert(second, frame(2_000_000));
@@ -816,14 +733,14 @@ mod tests {
         assert_eq!(cache.stats().pinned_overcommit_bytes, 1_000_000);
         // Pressure that can be relieved clears the overcommit report.
         cache.pin(vec![second]);
-        cache.insert(key(1, 2, Quality::Refined), frame(500_000));
+        cache.insert(key(1, 2), frame(500_000));
         assert_eq!(cache.stats().pinned_overcommit_bytes, 0);
     }
 
     #[test]
     fn clearing_forgets_pins_and_reports_the_evicted_keys() {
         let mut cache = FrameCache::new(10_000_000);
-        let pinned = key(1, 0, Quality::Refined);
+        let pinned = key(1, 0);
         cache.insert(pinned, frame(1_000_000));
         cache.pin(vec![pinned]);
         cache.clear();
@@ -831,16 +748,16 @@ mod tests {
         // A stale pin would exempt the next frame reusing this key from
         // eviction for ever.
         cache.insert(pinned, frame(8_000_000));
-        cache.insert(key(1, 1, Quality::Refined), frame(8_000_000));
+        cache.insert(key(1, 1), frame(8_000_000));
         assert!(cache.stats().total_bytes() <= cache.budget_bytes());
     }
 
     #[test]
     fn eviction_reports_the_keys_so_derived_handles_can_follow() {
         let mut cache = FrameCache::new(4_000_000);
-        let old = key(1, 0, Quality::Refined);
+        let old = key(1, 0);
         cache.insert(old, frame(3_000_000));
-        cache.insert(key(1, 1, Quality::Refined), frame(3_000_000));
+        cache.insert(key(1, 1), frame(3_000_000));
         assert_eq!(cache.take_evicted(), vec![old]);
         assert!(cache.take_evicted().is_empty(), "drained on read");
     }
@@ -849,12 +766,12 @@ mod tests {
     fn stale_generations_are_dropped_wholesale() {
         let mut cache = FrameCache::new(100_000_000);
         for slide in 0..5 {
-            cache.insert(key(1, slide, Quality::Refined), frame(1_000_000));
-            cache.insert(key(2, slide, Quality::Refined), frame(1_000_000));
+            cache.insert(key(1, slide), frame(1_000_000));
+            cache.insert(key(2, slide), frame(1_000_000));
         }
         assert_eq!(cache.evict_older_than(RenderGeneration(2)), 5);
-        assert!(cache.get(&key(1, 0, Quality::Refined)).is_none());
-        assert!(cache.get(&key(2, 0, Quality::Refined)).is_some());
+        assert!(cache.get(&key(1, 0)).is_none());
+        assert!(cache.get(&key(2, 0)).is_some());
         assert_eq!(cache.stats().cpu_bytes, 5_000_000);
     }
 
@@ -864,7 +781,7 @@ mod tests {
         let coarse = FrameKey {
             width: 480,
             height: 270,
-            ..key(3, 7, Quality::Coarse)
+            ..key(3, 7)
         };
         cache.insert(coarse, Frame::new(480, 270, vec![0; 480 * 270 * 4]));
         let (found, _) = cache
@@ -875,7 +792,7 @@ mod tests {
             "the coarse frame is shown until something better exists"
         );
 
-        let refined = key(3, 7, Quality::Refined);
+        let refined = key(3, 7);
         cache.insert(refined, frame(1920 * 1080 * 4));
         let (found, _) = cache
             .best(RenderGeneration(3), 7, FrameKind::Slide)
@@ -898,13 +815,13 @@ mod tests {
             let coarse = FrameKey {
                 width: 640,
                 height: 360,
-                ..key(1, slide, Quality::Coarse)
+                ..key(1, slide)
             };
             cache.insert(coarse, Frame::new(640, 360, vec![0; 640 * 360 * 4]));
             let refined = FrameKey {
                 width: 3840,
                 height: 2160,
-                ..key(1, slide, Quality::Refined)
+                ..key(1, slide)
             };
             cache.insert(refined, Frame::new(3840, 2160, vec![0; 3840 * 2160 * 4]));
             assert!(cache.stats().total_bytes() <= DEFAULT_BUDGET_BYTES);

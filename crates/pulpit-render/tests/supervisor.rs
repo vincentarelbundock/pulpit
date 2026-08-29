@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use pulpit_core::notes::Region;
 use pulpit_core::RenderGeneration;
-use pulpit_render::protocol::{Priority, Quality, RenderJob, RequestId};
+use pulpit_render::protocol::{Priority, RenderJob, RequestId};
 use pulpit_render::supervisor::{
     RenderEvent, RendererSupervisor, SupervisorConfig, Wakeup, WorkerCommand,
 };
@@ -76,7 +76,6 @@ fn job(id: u64, generation: u64, page: usize, priority: Priority) -> RenderJob {
         width: 320,
         height: 180,
         priority,
-        quality: Quality::Refined,
         with_annotations: false,
         // Replaced by the supervisor with the worker's own region.
         region_name: "placeholder".into(),
