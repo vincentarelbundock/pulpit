@@ -80,21 +80,6 @@ impl TimerSnapshot {
             running: timer.is_running(),
         }
     }
-
-    /// Rebuild a timer showing this elapsed time as of `now`.
-    ///
-    /// The elapsed time is reconstructed by starting the clock in the past;
-    /// a platform that refuses the subtraction simply restores a timer that
-    /// starts from where it was rather than panicking mid-recovery.
-    pub fn to_timer(self, now: Instant) -> Timer {
-        let mut timer = Timer::new(self.target_secs.map(Duration::from_secs));
-        let elapsed = Duration::from_secs(self.elapsed_secs);
-        timer.start(now.checked_sub(elapsed).unwrap_or(now));
-        if !self.running {
-            timer.pause(now);
-        }
-        timer
-    }
 }
 
 /// Everything worth recovering from an interrupted talk.
@@ -189,10 +174,7 @@ impl SessionSnapshot {
     /// Whether there is anything here worth restoring. A snapshot of an
     /// empty session with a stopped clock is not meaningful recovery.
     pub fn is_worth_offering(&self) -> bool {
-        self.document.is_some()
-            || self.committed != 0
-            || self.timer.elapsed_secs > 0
-            || self.blank.is_blanked()
+        self.document.is_some() || self.committed != 0 || self.blank.is_blanked()
     }
 
     /// Decide what may be restored, given what the document looks like *now*.
@@ -329,7 +311,12 @@ impl RestorePlan {
             state.apply(Nav::PreviewGoTo(preview), now);
         }
         state.apply(Nav::SetBlank(self.blank()), now);
-        *state.timer_mut() = self.snapshot.timer.to_timer(now);
+        // The timer is deliberately *not* restored. The snapshot was taken
+        // whenever the last run died, and a launch is now — restoring a
+        // running clock hands the presenter however much time passed in
+        // between, sailing past every alarm on the way and opening the new
+        // session flashing about a talk that is over. A fresh clock is what
+        // a fresh launch means; the page and the roles are the recovery.
         *roles = self.snapshot.roles.clone();
     }
 }
@@ -860,34 +847,12 @@ mod tests {
         assert_eq!(state.committed(), 11);
         assert_eq!(state.preview(), 13);
         assert_eq!(state.blank(), Blank::Black);
-        assert!(state.timer().is_running());
-        assert_eq!(
-            state.timer().elapsed(now).as_secs(),
-            754,
-            "the clock resumes where the crash left it"
-        );
-    }
-
-    #[test]
-    fn a_paused_clock_is_restored_paused() {
-        let snapshot = SessionSnapshot {
-            timer: TimerSnapshot {
-                elapsed_secs: 90,
-                target_secs: Some(1200),
-                running: false,
-            },
-            ..SessionSnapshot::default()
-        };
-        let now = Instant::now();
-        let timer = snapshot.timer.to_timer(now);
-        assert!(!timer.is_running());
-        assert_eq!(timer.elapsed(now).as_secs(), 90);
-        assert_eq!(
-            timer.elapsed(now + Duration::from_secs(60)).as_secs(),
-            90,
-            "a paused clock does not run on after recovery"
-        );
-        assert_eq!(timer.target, Some(Duration::from_secs(1200)));
+        // The clock does not come back: however long the machine was down,
+        // restoring a running timer hands the presenter that gap as elapsed
+        // time — past every alarm — and the new session opens flashing about
+        // a talk that is over. A new launch gets a fresh clock.
+        assert!(!state.timer().is_running());
+        assert_eq!(state.timer().elapsed(now).as_secs(), 0);
     }
 
     #[test]
@@ -930,7 +895,9 @@ mod tests {
     fn an_empty_session_is_not_worth_offering_back() {
         assert!(!SessionSnapshot::default().is_worth_offering());
         assert!(snapshot_of_an_interrupted_talk().is_worth_offering());
-        assert!(SessionSnapshot {
+        // A ticking clock alone is nothing to offer back: the timer is not
+        // restored, so a snapshot with nothing else in it restores nothing.
+        assert!(!SessionSnapshot {
             timer: TimerSnapshot {
                 elapsed_secs: 30,
                 ..TimerSnapshot::default()
