@@ -26,6 +26,7 @@ mod media;
 mod panel;
 mod platform;
 mod printing;
+mod probegen;
 mod reader;
 mod reader_journal;
 mod reader_link;

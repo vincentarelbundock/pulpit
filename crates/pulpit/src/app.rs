@@ -194,6 +194,11 @@ pub enum Message {
     SpeechProbed(Box<pulpit_media::speech::Probe>),
     /// The desktop answered what appearance and motion it prefers.
     AppearanceProbed(
+        /// Which probe this answers. A resume refreshes the preferences
+        /// synchronously and advances the generation, so a slower startup
+        /// probe that lands afterwards is recognised as stale and dropped
+        /// rather than putting the pre-suspend theme back.
+        u64,
         crate::platform::appearance::SystemAppearance,
         crate::platform::appearance::MotionPreference,
     ),
@@ -1532,6 +1537,10 @@ pub struct App {
     /// and on resume. Cached: the read is a blocking D-Bus round trip, and
     /// the colour editor was paying two of them per keystroke.
     appearance_probe: crate::platform::appearance::SystemAppearance,
+    /// Which asking of the appearance question is current. Advanced by the
+    /// synchronous resume refresh so the startup probe, if still out on its
+    /// thread, is recognised as stale when it lands.
+    appearance_generation: crate::probegen::ProbeGeneration,
     /// The desktop's reduced-motion preference, cached the same way.
     motion_probe: crate::platform::appearance::MotionPreference,
     /// Whether the settings have changed since they were last written.
@@ -2203,6 +2212,7 @@ impl App {
             session_fingerprint: None,
             diagnostics_report_cache: std::cell::RefCell::new(None),
             appearance_probe: system_appearance,
+            appearance_generation: crate::probegen::ProbeGeneration::default(),
             motion_probe,
             settings_dirty: false,
             settings_throttle: crate::session::SaveThrottle::default(),
@@ -2373,6 +2383,7 @@ impl App {
         // And the desktop's appearance and motion preferences: two portal
         // round trips that used to run before the event loop existed.
         let services = app.platform.services.clone();
+        let generation = app.appearance_generation.current();
         tasks.push(Task::future(async move {
             let (sender, receiver) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
@@ -2382,7 +2393,7 @@ impl App {
                 crate::platform::appearance::SystemAppearance::Unknown,
                 crate::platform::appearance::MotionPreference::Unknown,
             ));
-            Message::AppearanceProbed(appearance, motion)
+            Message::AppearanceProbed(generation, appearance, motion)
         }));
         (app, Task::batch(tasks))
     }
@@ -3881,7 +3892,14 @@ impl App {
                 self.platform.capabilities.speech = self.speech.capability();
                 Task::none()
             }
-            Message::AppearanceProbed(appearance, motion) => {
+            Message::AppearanceProbed(generation, appearance, motion) => {
+                // An answer to a question that has since been asked again —
+                // a resume refreshed the preferences while this was still on
+                // its thread. What it carries is the pre-suspend desktop, and
+                // applying it would put a stale theme back.
+                if !self.appearance_generation.accepts(generation) {
+                    return Task::none();
+                }
                 self.appearance_probe = appearance;
                 self.motion_probe = motion;
                 self.apply_appearance();
@@ -4790,6 +4808,9 @@ impl App {
     /// changed — startup and resume — never on the setting handlers, which
     /// only change pulpit's own preference.
     fn refresh_appearance_probe(&mut self) {
+        // Supersedes any probe still out on a thread: its answer predates
+        // this one and must not overwrite it when it lands.
+        self.appearance_generation.advance();
         self.appearance_probe = self.platform.services.system_appearance();
         self.motion_probe = self.platform.services.reduced_motion();
     }
