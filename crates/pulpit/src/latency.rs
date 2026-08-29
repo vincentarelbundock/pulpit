@@ -385,19 +385,23 @@ impl Latency {
         on_screen: bool,
         refined: bool,
     ) {
-        // Both tiers, warming included: a thumbnail pass is coarse work too,
-        // and leaving it out would describe the preview tier from the handful
-        // of previews a reader happens to scroll past.
-        if refined {
-            self.refined_rendered.record(rendered);
-        } else {
-            self.coarse_rendered.record(rendered);
-        }
         if warming {
             self.warming.record(elapsed);
             self.warming_worked.record(worked);
             self.warming_rendered.record(rendered);
             return;
+        }
+        // Warming is excluded, and the first attempt at this got that wrong.
+        // A thumbnail looks like coarse work and is not: it is submitted at
+        // `Refined` quality and a fraction of the width, so counting it here
+        // put six hundred one-millisecond thumbnails in the same bucket as
+        // the full pages and reported a full page as costing a millisecond.
+        // The tiers being compared are the two a *reader's* page is drawn at,
+        // and warming is neither of them.
+        if refined {
+            self.refined_rendered.record(rendered);
+        } else {
+            self.coarse_rendered.record(rendered);
         }
         self.render.record(elapsed);
         self.render_worked.record(worked);
@@ -649,22 +653,29 @@ mod tests {
         assert_eq!(latency.coarse_rendered().mean(), Duration::from_millis(3));
     }
 
-    /// A thumbnail pass is coarse work, and the preview tier must be judged
-    /// on every preview drawn rather than on the few a reader scrolls past.
+    /// A thumbnail is submitted at `Refined` quality and a fraction of the
+    /// width, so counting warming towards a tier puts hundreds of tiny
+    /// pictures beside the full pages and reports a full page as costing
+    /// what a thumbnail costs. The tiers are the two a reader's page is drawn
+    /// at; warming is neither.
     #[test]
-    fn warming_counts_towards_the_tier_it_drew() {
+    fn warming_belongs_to_neither_tier() {
         let mut latency = Latency::default();
         latency.note_render(
             Duration::from_millis(50),
             Duration::from_millis(30),
-            Duration::from_millis(4),
+            Duration::from_millis(1),
             true,
             false,
-            false,
+            true,
         );
-        assert_eq!(latency.coarse_rendered().calls, 1, "warming is coarse work");
-        assert_eq!(latency.warming().calls, 1);
-        // Warming is nobody's page turn, so it stays out of both.
+        assert_eq!(
+            latency.refined_rendered().calls,
+            0,
+            "a thumbnail is not a page"
+        );
+        assert_eq!(latency.coarse_rendered().calls, 0);
+        assert_eq!(latency.warming().calls, 1, "counted, as warming");
         assert_eq!(latency.on_screen().calls, 0);
         assert_eq!(latency.prefetch().calls, 0);
     }
