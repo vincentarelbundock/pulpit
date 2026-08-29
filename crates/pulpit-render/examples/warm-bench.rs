@@ -130,6 +130,7 @@ fn warm(
         deadline: Duration::from_secs(5),
         max_restarts: 3,
         restart_window: Duration::from_secs(60),
+        retire_after: Duration::from_secs(120),
     })
     .expect("start supervisor");
 

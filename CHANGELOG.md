@@ -136,6 +136,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Pulpit now weighs what a document viewer should.** Three changes, one
+  principle: memory follows what you are doing, not what might be done. The
+  renderer pool is elastic — a burst of work takes the whole pool and a
+  quiet half-minute gives it back, down to the one process an idle
+  application keeps, where it used to hold its busiest moment's worth for
+  the whole session. A deck's thumbnails are warmed when you first navigate
+  by picture — opening the overview, or dragging the slider — rather than
+  at open, and a presentation still warms eagerly, because a grid opened
+  mid-sentence must be ready. And each thumbnail is kept as an encoded
+  image rather than raw pixels: measured seventeen times smaller, at a cost
+  of two-thirds of a millisecond per page while warming. A six-hundred-page
+  book that held over a hundred megabytes of small pictures now holds a
+  handful.
+
 - **Pages arrive sharp, or they do not arrive.** Pulpit used to draw every
   page twice — a small blurry frame first, then the real one over it — on the
   belief that a full page took the better part of a second to rasterise.

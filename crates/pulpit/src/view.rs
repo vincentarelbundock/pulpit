@@ -477,9 +477,11 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
     // and shown a little larger than it was rendered — slightly soft, and
     // instant, which is the right trade for something you look at for a
     // second while your hand is moving.
-    let Some(handle) = app.thumbnails.get(slide) else {
-        return blank();
-    };
+    // `None` while warming has not reached this page — the card still
+    // appears, numbered, at its full size. Showing nothing made the very
+    // first scrub of a session a control that did not respond, exactly
+    // while an unwarmed deck was filling in behind it.
+    let handle = app.thumbnails.get(slide);
 
     let label = format!("{} / {}", slide + 1, app.state.slide_count());
     let aspect = app.slide_aspect();
@@ -518,14 +520,19 @@ fn scrub_layer(app: &App) -> Element<'_, Message> {
         // where being a few pixels out cannot be seen.
         let height = width / aspect + type_scale::BODY * 1.4 + gap::S * 3.0;
 
+        let picture: Element<'_, Message> = match handle.clone() {
+            Some(handle) => image(handle)
+                .content_fit(ContentFit::Contain)
+                .width(Length::Fixed(width))
+                .into(),
+            None => iced::widget::Space::new()
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(width / aspect))
+                .into(),
+        };
         let card = container(
             column![
-                container(
-                    image(handle.clone())
-                        .content_fit(ContentFit::Contain)
-                        .width(Length::Fixed(width))
-                )
-                .style(theme::ambient::canvas),
+                container(picture).style(theme::ambient::canvas),
                 theme::typography::body(label.clone()).color(theme::ambient::text()),
             ]
             .spacing(gap::S)

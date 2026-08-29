@@ -16,7 +16,7 @@ use pulpit_core::RenderGeneration;
 
 use crate::cache::Frame;
 use crate::protocol::{
-    read_message, write_message, OpenedDocument, Priority, RenderJob, Request, RequestId, Response,
+    read_message, write_message, OpenedDocument, RenderJob, Request, RequestId, Response,
     PROTOCOL_VERSION,
 };
 use crate::shm::{RegionNamer, SharedRegion};
@@ -40,6 +40,12 @@ pub struct SupervisorConfig {
     /// up and reports a persistent failure.
     pub max_restarts: u32,
     pub restart_window: Duration,
+    /// How long a worker may sit with nothing in flight before it is shut
+    /// down and its memory given back. The pool grows for a burst — a deck
+    /// warming its thumbnails, a talk turning pages — and a worker holds its
+    /// share of the parsed document for as long as it lives, so a pool that
+    /// only ever grew charged a whole session for its busiest moment.
+    pub retire_after: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -52,6 +58,7 @@ impl Default for SupervisorConfig {
             deadline: Duration::from_secs(10),
             max_restarts: 5,
             restart_window: Duration::from_secs(60),
+            retire_after: Duration::from_secs(30),
         }
     }
 }
@@ -181,6 +188,8 @@ pub struct RenderDiagnostics {
     pub timed_out: u64,
     pub worker_restarts: u32,
     pub workers_given_up: usize,
+    /// Idle workers shut down to give their memory back. Health, not harm.
+    pub workers_retired: u64,
     /// Cache accounting, when the application has reported it.
     pub cache: Option<crate::cache::CacheStats>,
     pub cache_budget_bytes: Option<u64>,
@@ -350,6 +359,7 @@ struct Counters {
     failures: Vec<String>,
     timed_out: u64,
     worker_restarts: u32,
+    workers_retired: u64,
     workers_given_up: usize,
     cache: Option<crate::cache::CacheStats>,
     cache_budget_bytes: Option<u64>,
@@ -514,6 +524,16 @@ pub struct RendererSupervisor {
     generation_floor: RenderGeneration,
     documents: Vec<(u64, String)>,
     counters: Counters,
+    /// Every spawn takes the next value, so no two worker instances ever
+    /// share an epoch. Per-index epochs were enough while an index was only
+    /// ever reused by `kill`'s replacement; retirement pops a worker and a
+    /// later burst pushes a fresh one at the same index, and a stale reader
+    /// thread's messages must not be attributable to it.
+    epochs: u64,
+    /// Children asked to exit, still being waited on. Waiting inline would
+    /// stall the event loop on a worker's shutdown; these are collected on
+    /// the pump and killed outright if they overstay.
+    retiring: Vec<(Child, Instant)>,
 }
 
 impl std::fmt::Debug for RendererSupervisor {
@@ -547,14 +567,66 @@ impl RendererSupervisor {
             documents: Vec::new(),
             counters: Counters::default(),
             config,
+            epochs: 0,
+            retiring: Vec::new(),
         };
         // One worker up front; the rest of the configured pool spawns on the
         // first queue contention. A worker process carries a whole PDFium,
         // and an idle application — or a small deck one worker keeps up
         // with — should not pay for two of them.
-        let worker = supervisor.spawn_worker(0, 0)?;
+        let epoch = supervisor.next_epoch();
+        let worker = supervisor.spawn_worker(0, epoch)?;
         supervisor.workers.push(worker);
         Ok(supervisor)
+    }
+
+    fn next_epoch(&mut self) -> u64 {
+        self.epochs += 1;
+        self.epochs
+    }
+
+    /// Shut down workers the pool no longer needs.
+    ///
+    /// Only ever the last worker, so the survivors keep their indices and a
+    /// late message cannot be misattributed; a long quiet spell retires the
+    /// pool one worker per interval from the back. Down to one, which is the
+    /// pool an idle application has always been allowed to keep. The child
+    /// is asked to exit and collected later rather than waited on here — a
+    /// pump must not stall on a worker's shutdown.
+    fn retire_idle(&mut self) {
+        if !self.queue.is_empty() {
+            return;
+        }
+        while self.workers.len() > 1 {
+            let worker = self.workers.last().expect("len checked");
+            let idle = worker.alive
+                && worker.in_flight.is_empty()
+                && worker.last_progress.elapsed() >= self.config.retire_after;
+            if !idle {
+                return;
+            }
+            let mut worker = self.workers.pop().expect("len checked");
+            let _ = write_message(&mut worker.stdin, &Request::Shutdown);
+            tracing::info!(worker = worker.index, "idle worker retired");
+            self.counters.workers_retired += 1;
+            self.retiring.push((worker.child, Instant::now()));
+        }
+    }
+
+    /// Collect retired children, forcibly after a grace period. Not a crash
+    /// path: nothing here counts against a restart budget or reports an
+    /// event, because nothing went wrong.
+    fn reap_retiring(&mut self) {
+        self.retiring
+            .retain_mut(|(child, asked)| match child.try_wait() {
+                Ok(Some(_)) => false,
+                _ if asked.elapsed() > Duration::from_secs(2) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    false
+                }
+                _ => true,
+            });
     }
 
     /// Bring up another worker from the configured pool, replaying the open
@@ -565,7 +637,8 @@ impl RendererSupervisor {
             return false;
         }
         let index = self.workers.len();
-        let mut worker = match self.spawn_worker(index, 0) {
+        let epoch = self.next_epoch();
+        let mut worker = match self.spawn_worker(index, epoch) {
             Ok(worker) => worker,
             Err(e) => {
                 tracing::warn!(worker = index, error = %e, "cannot spawn an additional worker");
@@ -654,6 +727,7 @@ impl RendererSupervisor {
             failures: self.counters.failures.clone(),
             timed_out: self.counters.timed_out,
             worker_restarts: self.counters.worker_restarts,
+            workers_retired: self.counters.workers_retired,
             workers_given_up: self.counters.workers_given_up,
             cache: self.counters.cache,
             cache_budget_bytes: self.counters.cache_budget_bytes,
@@ -865,6 +939,8 @@ impl RendererSupervisor {
         }
         self.enforce_deadlines(&mut events);
         self.reap(&mut events);
+        self.retire_idle();
+        self.reap_retiring();
         self.dispatch();
         // After the dispatch, so an answer it owes — a region that cannot be
         // sized — reaches the application in this same batch rather than a
@@ -1221,7 +1297,7 @@ impl RendererSupervisor {
         }
 
         let documents = self.documents.clone();
-        let epoch = self.workers[index].epoch + 1;
+        let epoch = self.next_epoch();
         match self.spawn_worker(index, epoch) {
             Ok(mut replacement) => {
                 replacement.restarts = self.workers[index].restarts;
@@ -1293,21 +1369,13 @@ impl RendererSupervisor {
             let Some((position, index)) = choice else {
                 // Work is waiting and nobody can take it: this is the
                 // contention the rest of the configured pool exists for.
-                //
-                // Only for work somebody is waiting on, though. A worker
-                // replays every open document, and a worker's memory follows
-                // the pages it draws — measured, a deck of heavy pages costs
-                // about sixty-five mebibytes per worker before it renders
-                // anything. Warming a deck submits a job per page at
-                // `Ancillary`, which saturated the pool instantly and grew it
-                // to its ceiling: the work nobody waits for was buying the
-                // most expensive resource here, to finish a background pass
-                // three seconds sooner.
-                let waited_on = self
-                    .queue
-                    .iter()
-                    .any(|job| matches!(job.priority, Priority::Audience | Priority::Presenter));
-                if waited_on && self.spawn_additional_worker() {
+                // Growth was briefly gated to frames a window waits for,
+                // because the pool never shrank and warming a deck was buying
+                // its ceiling for the life of the session. Retirement is what
+                // made an ungated pool affordable again: a burst — warming
+                // included — takes the whole pool, and a quiet half-minute
+                // gives it back.
+                if !self.queue.is_empty() && self.spawn_additional_worker() {
                     continue;
                 }
                 return;

@@ -583,10 +583,15 @@ pub const THUMBNAIL_WIDTH: u32 = 480;
 /// keeps the pages nearest the presenter.
 pub const THUMBNAIL_MIN_WIDTH: u32 = 120;
 
-/// What the whole deck's thumbnails may occupy. At 480×270 a page is about
-/// 520 kB, so this holds roughly two hundred and fifty of them — more than
-/// nearly any deck anyone brings to a talk; a longer one is warmed at
-/// whatever narrower width does fit, down to [`THUMBNAIL_MIN_WIDTH`].
+/// What the whole deck's thumbnails may occupy — and, through
+/// [`fitting_thumbnail_width`], the raw-pixel figure the warming width is
+/// chosen against. The store now holds each page *encoded*, measured
+/// seventeen times smaller than the pixels it was rendered from, so a warmed
+/// deck actually occupies a few megabytes and the budget is a backstop for
+/// pathological pages rather than a ceiling anyone reaches. The width
+/// formula deliberately still reasons in raw pixels: it keeps today's widths
+/// — the sizes every session has been judged at — rather than spending the
+/// compression on sharper pictures nobody has measured the cost of.
 /// Separate from the frame cache so the two can never evict each other.
 const THUMBNAIL_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -1504,6 +1509,12 @@ pub struct App {
     /// width it should be rendered at: coarse for coverage, fine for the
     /// band around the presenter once coverage is done.
     thumbnail_queue: std::collections::VecDeque<(usize, u32)>,
+    /// Whether anyone has asked to navigate by picture this session — the
+    /// overview opened, or a scrub begun. Until then a reader layout warms
+    /// nothing: the deck's thumbnails are a third of what this application
+    /// weighs, spent at open on a grid most reading sessions never look at.
+    thumbnails_demanded: bool,
+
     /// Which in-flight requests are warming work. Tracked explicitly rather
     /// than inferred from the frame size, because a small presenter panel can
     /// legitimately ask for a frame of exactly the thumbnail width, and
@@ -2243,6 +2254,7 @@ impl App {
                     .unwrap_or(THUMBNAIL_BUDGET_BYTES),
             ),
             thumbnail_queue: std::collections::VecDeque::new(),
+            thumbnails_demanded: false,
             thumbnail_requests: std::collections::HashSet::new(),
             area_copy: None,
             area_clipboard_text: None,
@@ -3048,8 +3060,9 @@ impl App {
         // than up front, so "configured" is a ceiling and not a count.
         if let Some(render) = self.supervisor.as_ref().map(|s| s.diagnostics()) {
             report.push_str(&format!(
-                "- renderer: {} of {} workers up, {} queued here, {} in worker hands\n",
+                "- renderer: {} of {} workers up, {} queued here, {} in worker hands, {} retired when idle\n",
                 render.workers_alive, render.workers_configured, render.queued, render.in_flight,
+                render.workers_retired,
             ));
         }
         let upload = self.upload_meter.get();
@@ -3348,6 +3361,11 @@ impl App {
                 // never happened, so the thumbnail is not left behind by
                 // some path nobody thought of.
                 self.scrubbing = matches!(command, Nav::PreviewGoTo(_));
+                if self.scrubbing {
+                    // The scrub card draws from the same store as the grid,
+                    // and a drag is as much "show me pictures" as opening it.
+                    self.thumbnails_demanded = true;
+                }
                 // A jump is what history is made of: `GoTo` and the commit of
                 // a preview both land somewhere the presenter chose, rather
                 // than one step along from where they were. `Next`,
@@ -3745,6 +3763,9 @@ impl App {
             }
             Message::ToggleOverview => {
                 self.overview = !self.overview;
+                if self.overview {
+                    self.thumbnails_demanded = true;
+                }
                 // It can be reached from the menu, which must not stay open
                 // over the grid it just opened.
                 self.menu_open = false;
@@ -6391,14 +6412,17 @@ impl App {
                 if was_thumbnail {
                     // A thumbnail lives in its own cache, on its own budget;
                     // it never enters the frame cache the windows draw from.
+                    // Encoded, not raw: at thumbnail sizes a JPEG is measured
+                    // seventeen times smaller than the RGBA it came from, at
+                    // two-thirds of a millisecond to make and an eighth to
+                    // read back — once, on the first draw of a cell. The
+                    // whole store for a six-hundred-page deck is megabytes
+                    // where it was a third of what this application weighed.
+                    let (handle, held_bytes) = encoded_thumbnail(&frame);
                     self.thumbnails.insert(
                         key.slide,
-                        iced::widget::image::Handle::from_rgba(
-                            frame.width,
-                            frame.height,
-                            shared_pixels(&frame.pixels),
-                        ),
-                        frame.pixels.len() as u64,
+                        handle,
+                        held_bytes,
                         frame.width,
                         // Room is kept around whatever the grid is showing,
                         // for the same reason warming works outwards from it.
@@ -15671,7 +15695,27 @@ impl App {
     /// moves, so what arrives next is what they are most likely to look at.
     /// A whole deck's worth of `usize` is nothing; it is the *rendering* that
     /// is expensive, and that is what the ordering is protecting.
+    /// Whether warming should run at all.
+    ///
+    /// Asked of the session: a layout with slide panels draws thumbnails as
+    /// the panels' stand-ins, and a running presentation must have the grid
+    /// ready mid-sentence, so both warm eagerly. A plain reader warms only
+    /// once somebody navigates by picture — the grid fills from where they
+    /// are at a screenful in a couple of hundred milliseconds, which is the
+    /// same trade the rest of this file makes: pay on demand, not on spec.
+    fn thumbnails_wanted(&self) -> bool {
+        if self.thumbnails_demanded || self.audience_started {
+            return true;
+        }
+        let demand = crate::layout::panels::demand(&self.active_layout);
+        demand.current || demand.neighbour
+    }
+
     fn plan_thumbnails(&mut self) {
+        if !self.thumbnails_wanted() {
+            return;
+        }
+
         let generation = self.state.generation();
         let count = self.state.slide_count();
         // This runs on every 50 ms tick, but the plan only changes when one
@@ -16321,6 +16365,36 @@ struct MarksSignature {
 /// handle and the frame cache reference the *same* allocation, where a
 /// `Vec` clone both copied the frame and doubled its residency for as long
 /// as the handle lived.
+/// A thumbnail's handle, holding encoded bytes rather than pixels, and what
+/// those bytes weigh for the cache's accounting. A page that will not encode
+/// — it cannot happen for an opaque rendered page, but the encoder's error
+/// type says it can — is kept raw rather than lost.
+fn encoded_thumbnail(frame: &pulpit_render::cache::Frame) -> (iced::widget::image::Handle, u64) {
+    let encoded = image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels.to_vec())
+        .map(|img| image::DynamicImage::ImageRgba8(img).to_rgb8())
+        .and_then(|rgb| {
+            let mut out = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82)
+                .encode_image(&rgb)
+                .ok()
+                .map(|()| out)
+        });
+    match encoded {
+        Some(bytes) => {
+            let held = bytes.len() as u64;
+            (iced::widget::image::Handle::from_bytes(bytes), held)
+        }
+        None => (
+            iced::widget::image::Handle::from_rgba(
+                frame.width,
+                frame.height,
+                shared_pixels(&frame.pixels),
+            ),
+            frame.pixels.len() as u64,
+        ),
+    }
+}
+
 fn shared_pixels(pixels: &std::sync::Arc<Vec<u8>>) -> bytes::Bytes {
     struct SharedPixels(std::sync::Arc<Vec<u8>>);
     impl AsRef<[u8]> for SharedPixels {

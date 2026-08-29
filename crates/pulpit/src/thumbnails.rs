@@ -2,12 +2,13 @@
 //!
 //! Two reasons this is not just more entries in [`FrameCache`]:
 //!
-//! An audience frame at 4K is about thirty megabytes; a thumbnail is a fifth
-//! of one. Sharing a single LRU means a handful of page turns evicts the
-//! entire grid, which is then rendered again from scratch the next time it is
-//! opened — the churn is invisible until the moment it matters, which is
-//! mid-talk. A separate budget makes the two kinds of frame unable to hurt
-//! each other.
+//! An audience frame at 4K is about thirty megabytes; a thumbnail, held as
+//! the encoded image the handle carries rather than as raw pixels, is tens
+//! of kilobytes. Sharing a single LRU means a handful of page turns evicts
+//! the entire grid, which is then rendered again from scratch the next time
+//! it is opened — the churn is invisible until the moment it matters, which
+//! is mid-talk. A separate budget makes the two kinds of frame unable to
+//! hurt each other.
 //!
 //! And thumbnails are wanted for *every* page rather than the few around the
 //! current one, so their eviction policy is different in kind: when the
@@ -138,9 +139,11 @@ impl ThumbnailCache {
     ///
     /// What the pages actually cost is better evidence than what they ought
     /// to cost, so the measured average is used once there is one; the
-    /// dimensions are the estimate for an empty cache. An eighth is held
-    /// back either way, because pages within one document are not all the
-    /// same size and the average is only an average.
+    /// dimensions are the estimate for an empty cache — a raw-pixel figure,
+    /// which overstates an encoded page enormously and so only makes the
+    /// first window smaller than it could be, the safe direction. An eighth
+    /// is held back either way, because pages within one document are not
+    /// all the same size and the average is only an average.
     pub fn capacity_at(&self, width: u32, height: u32, count: usize) -> usize {
         let per_page = if self.entries.is_empty() {
             (width as u64)

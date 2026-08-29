@@ -23,6 +23,7 @@ fn a_worker_process_refuses_to_spawn_workers() {
         deadline: Duration::from_secs(5),
         max_restarts: 3,
         restart_window: Duration::from_secs(60),
+        retire_after: Duration::from_secs(120),
     };
 
     // Outside a worker, both forms start normally.

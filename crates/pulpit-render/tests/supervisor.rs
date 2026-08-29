@@ -24,6 +24,9 @@ fn config(workers: usize) -> SupervisorConfig {
         deadline: Duration::from_secs(5),
         max_restarts: 3,
         restart_window: Duration::from_secs(60),
+        // Far longer than any test runs, so the pool never shrinks under a
+        // test that is not about retirement.
+        retire_after: Duration::from_secs(120),
     }
 }
 
@@ -886,25 +889,53 @@ fn two_identical_jobs_from_different_requesters_are_both_answered() {
     supervisor.shutdown();
 }
 
-/// Growing the pool costs a worker's share of the document — measured, sixty
-/// mebibytes or so on a deck of heavy pages, before it draws anything. Work
-/// nobody waits for must not buy that: warming a deck submits a job per page
-/// at `Ancillary`, which used to saturate the pool and grow it to its ceiling
-/// to finish a background pass a few seconds sooner.
+/// The pool is elastic: any burst may take the whole configured pool — a
+/// worker's share of the document is worth paying for a second or two of
+/// warming — and a quiet spell gives it back, down to the one worker an idle
+/// application has always kept. Growth without retirement charged a whole
+/// session for its busiest moment.
 #[test]
-fn warming_never_grows_the_pool() {
-    let mut supervisor = start(4);
+fn a_burst_takes_the_pool_and_idleness_gives_it_back() {
+    let mut config = config(3);
+    config.retire_after = Duration::from_millis(150);
+    let mut supervisor = start_with(config, &[]);
     supervisor.open(1, "fixture:pages=200");
-    let before = supervisor.diagnostics().workers_alive;
 
-    for page in 0..64usize {
+    for page in 0..48usize {
         supervisor.submit(job(page as u64 + 1, 1, page, Priority::Ancillary));
     }
-    assert_eq!(
-        supervisor.diagnostics().workers_alive,
-        before,
-        "a deck warming itself is nobody's page turn"
+    assert!(
+        supervisor.diagnostics().workers_alive > 1,
+        "contention grew the pool"
     );
+
+    // Drain every frame, then sit quiet past the retirement age.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while supervisor.in_flight() > 0 || supervisor.queued() > 0 {
+        assert!(Instant::now() < deadline, "jobs never drained");
+        supervisor.pump_blocking(Duration::from_millis(50));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while supervisor.diagnostics().workers_alive > 1 {
+        assert!(
+            Instant::now() < deadline,
+            "idle workers were never retired: {:?}",
+            supervisor.diagnostics()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        supervisor.pump();
+    }
+    assert!(supervisor.diagnostics().workers_retired >= 1);
+
+    // And the pool is still a pool: new contention grows it again.
+    for page in 0..48usize {
+        supervisor.submit(job(1000 + page as u64, 1, page, Priority::Ancillary));
+    }
+    assert!(
+        supervisor.diagnostics().workers_alive > 1,
+        "a retired pool must grow back"
+    );
+    supervisor.shutdown();
 }
 
 /// And a page somebody is waiting for still does, which is what the rest of
