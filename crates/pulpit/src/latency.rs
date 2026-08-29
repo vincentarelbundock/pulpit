@@ -184,6 +184,17 @@ impl UploadMeter {
 /// The recorder. One per application.
 #[derive(Debug, Default)]
 pub struct Latency {
+    /// Whether there is no audience surface to wait for.
+    ///
+    /// A turn is finished when every surface that exists has answered, and
+    /// on a laptop with no projector attached only one does. Requiring the
+    /// audience unconditionally — which is what this once did — left every
+    /// turn of a single-screen session open forever, so the report said
+    /// "nothing measured yet" no matter how many pages were turned.
+    ///
+    /// Phrased as an absence so that `Default` — which every test and the
+    /// application both start from — still means "wait for both".
+    audience_absent: bool,
     open: Option<Open>,
     turns: VecDeque<Turn>,
     /// Turns abandoned because the next one began first.
@@ -275,17 +286,36 @@ impl Latency {
         self.close_if_complete();
     }
 
-    /// A turn is finished when both surfaces have their exact frame. Recorded
-    /// then rather than on the next turn, so a presenter who stops on a slide
-    /// still sees the turn that got them there.
+    /// Whether a projector is attached, and so whether a turn has to wait for
+    /// it. Set from the application whenever the audience window comes or
+    /// goes; a turn already open is judged by the answer in force when its
+    /// last surface reports.
+    pub fn expect_audience(&mut self, expected: bool) {
+        self.audience_absent = !expected;
+        // A projector unplugged mid-turn leaves a turn waiting for a surface
+        // that no longer exists. It can finish now.
+        if !expected {
+            self.close_if_complete();
+        }
+    }
+
+    /// A turn is finished when every surface that exists has its exact frame.
+    /// Recorded then rather than on the next turn, so a presenter who stops on
+    /// a slide still sees the turn that got them there.
     fn close_if_complete(&mut self) {
         let Some(open) = self.open.as_ref() else {
             return;
         };
-        let (Some(audience_exact), Some(presenter_exact)) =
-            (open.audience_exact, open.presenter_exact)
-        else {
+        let Some(presenter_exact) = open.presenter_exact else {
             return;
+        };
+        // With no projector the audience columns are reported as zero rather
+        // than omitted: a report whose shape changed with the hardware would
+        // be one nobody could compare across sessions.
+        let audience_exact = match (!self.audience_absent, open.audience_exact) {
+            (true, Some(exact)) => exact,
+            (true, None) => return,
+            (false, _) => Duration::ZERO,
         };
         let turn = Turn {
             slide: open.slide,
@@ -477,6 +507,55 @@ mod tests {
         assert_eq!(turn.slide, 6);
         // Timed from the key that asked for page 6, not from the first key.
         assert_eq!(turn.settled(), Duration::from_millis(30));
+    }
+
+    /// A laptop with no projector has one surface, and a turn that waits for
+    /// a second one never finishes. Every reading session was measured this
+    /// way — which is to say not at all — until the turn stopped requiring an
+    /// audience that was not there.
+    #[test]
+    fn one_surface_settles_a_turn_when_there_is_no_projector() {
+        let base = Instant::now();
+        let mut latency = Latency::default();
+        latency.expect_audience(false);
+        latency.begin_turn(3, base);
+        latency.answered(Surface::Presenter, Answer::Exact, 3, at(base, 25));
+        let turn = latency.turns().back().expect("the turn settled alone");
+        assert_eq!(turn.slide, 3);
+        assert_eq!(turn.settled(), Duration::from_millis(25));
+        assert_eq!(turn.audience_exact, Duration::ZERO);
+    }
+
+    /// And with a projector attached it still takes both, which is the case
+    /// the single-surface rule must not have loosened.
+    #[test]
+    fn a_projector_is_still_waited_for_when_there_is_one() {
+        let base = Instant::now();
+        let mut latency = Latency::default();
+        latency.expect_audience(true);
+        latency.begin_turn(3, base);
+        latency.answered(Surface::Presenter, Answer::Exact, 3, at(base, 25));
+        assert!(latency.turns().is_empty(), "the projector has not answered");
+        latency.answered(Surface::Audience, Answer::Exact, 3, at(base, 40));
+        let turn = latency.turns().back().expect("both surfaces answered");
+        assert_eq!(turn.settled(), Duration::from_millis(40));
+    }
+
+    /// Unplugging mid-turn must release the turn that was waiting on the
+    /// screen that went away, rather than stranding it until the next one
+    /// abandons it.
+    #[test]
+    fn unplugging_mid_turn_releases_the_waiting_turn() {
+        let base = Instant::now();
+        let mut latency = Latency::default();
+        latency.expect_audience(true);
+        latency.begin_turn(7, base);
+        latency.answered(Surface::Presenter, Answer::Exact, 7, at(base, 15));
+        assert!(latency.turns().is_empty());
+        latency.expect_audience(false);
+        let turn = latency.turns().back().expect("released by the unplug");
+        assert_eq!(turn.slide, 7);
+        assert_eq!(latency.abandoned(), 0);
     }
 
     #[test]

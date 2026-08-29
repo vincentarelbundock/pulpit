@@ -1056,6 +1056,16 @@ pub struct App {
     /// The last allocated canonical frame shown in the Current Slide panel.
     /// A cold jump holds this frame until the target allocation is ready.
     last_presenter: Option<FrameKey>,
+    /// The same, for the reader's own document column. Kept apart from
+    /// `last_presenter` because the two surfaces are never both showing: a
+    /// reader page is a `FrameKind::Page` at the column's width, and the
+    /// panel's is a `FrameKind::Slide` at the panel's.
+    last_reader: Option<FrameKey>,
+    /// How deep the current `on_read_command` is. Only the outermost call
+    /// times a turn: several commands answer by calling this handler again,
+    /// and an inner call that moved the page would otherwise start a turn
+    /// the outer one immediately abandons.
+    read_command_depth: u32,
     /// One texture handle per cached frame, dropped with the frame it names.
     ///
     /// A handle is a name, not a residency: which *window* can draw it at once
@@ -2063,6 +2073,8 @@ impl App {
             reader_patch_images: std::collections::HashMap::new(),
             last_audience: None,
             last_presenter: None,
+            last_reader: None,
+            read_command_depth: 0,
             documents: DocumentManager::new(
                 initial.clone().unwrap_or_default(),
                 ReloadPolicy {
@@ -2728,6 +2740,12 @@ impl App {
         // After every message, not per handler: annotations mutate from a
         // dozen places, and the view must never draw a stale snapshot.
         self.sync_annotation_layers();
+        // Likewise for whether a turn has a projector to wait for. Set here
+        // rather than at the three places the audience window is opened and
+        // closed, for the same reason: a turn left waiting on a surface that
+        // went away never finishes, and never being told is how that happens.
+        let audience = self.audience_window.is_some();
+        self.latency.expect_audience(audience);
         // Likewise for the presenter window's own mode: `f`, Escape and a
         // layout that mounts fullscreen all move the same flag, and each of
         // them wants the window itself to follow.
@@ -2844,32 +2862,37 @@ impl App {
     /// time when the headline is bad.
     fn latency_report(&self) -> String {
         let mut report = String::from("\n## Page turns\n");
-        let Some((typical, worst)) = self.latency.settled_summary() else {
-            report.push_str("- nothing measured yet\n");
-            return report;
-        };
-        let turns = self.latency.turns();
-        let first: Duration = turns
-            .iter()
-            .map(|turn| turn.first_picture())
-            .sum::<Duration>()
-            / turns.len() as u32;
-        report.push_str(&format!(
-            "- {} turns: settled {} typical, {} worst; first picture {} typical\n",
-            turns.len(),
-            millis(typical),
-            millis(worst),
-            millis(first),
-        ));
-        if let Some(turn) = turns.back() {
-            report.push_str(&format!(
-                "- last turn (slide {}): projector {}{}, panel {}{}\n",
-                turn.slide + 1,
-                millis(turn.audience_exact),
-                stand_in_note(turn.audience_stand_in),
-                millis(turn.presenter_exact),
-                stand_in_note(turn.presenter_stand_in),
-            ));
+        // A session with no finished turn still has plenty to say: every
+        // stage and meter below counts from the moment the process started,
+        // and returning here — as this once did — threw all of them away and
+        // reported an idle event loop on a machine that was thrashing.
+        match self.latency.settled_summary() {
+            Some((typical, worst)) => {
+                let turns = self.latency.turns();
+                let first: Duration = turns
+                    .iter()
+                    .map(|turn| turn.first_picture())
+                    .sum::<Duration>()
+                    / turns.len() as u32;
+                report.push_str(&format!(
+                    "- {} turns: settled {} typical, {} worst; first picture {} typical\n",
+                    turns.len(),
+                    millis(typical),
+                    millis(worst),
+                    millis(first),
+                ));
+                if let Some(turn) = turns.back() {
+                    report.push_str(&format!(
+                        "- last turn (slide {}): projector {}{}, panel {}{}\n",
+                        turn.slide + 1,
+                        millis(turn.audience_exact),
+                        stand_in_note(turn.audience_stand_in),
+                        millis(turn.presenter_exact),
+                        stand_in_note(turn.presenter_stand_in),
+                    ));
+                }
+            }
+            None => report.push_str("- no turn finished yet\n"),
         }
         if self.latency.abandoned() > 0 {
             report.push_str(&format!(
@@ -5691,6 +5714,12 @@ impl App {
         if self.pump_reader() {
             tasks.push(Task::done(Message::ReaderReady));
         }
+        // A page already in the cache answers its turn with no delivery to
+        // drain, so the frame path alone would leave exactly the fastest
+        // turns — the ones that cost nothing — permanently open, and then
+        // abandoned by the next one. Reading them out is what stops the
+        // measurement from being a record of cache misses only.
+        self.remember_reader_frame();
         self.pump_search();
 
         // Search replaces the outline in the view pass after Ctrl-F. By this
@@ -9052,7 +9081,40 @@ impl App {
     /// belongs to the worker and is posted to it. Nothing is applied locally
     /// on the way — a mark that has not been committed must not be drawn as
     /// though it had been (A1, §9.2).
+    /// Every reader input, timed.
+    ///
+    /// The reader is the layout most sessions actually sit in, and until this
+    /// existed it opened no turns at all: `begin_turn` was reached only from
+    /// the `Nav` handler, which is slide navigation. A report from a reading
+    /// session therefore said "nothing measured yet" however hard the machine
+    /// was working.
+    ///
+    /// Bracketing rather than a call per command, because the page moves from
+    /// a dozen places — keys, the wheel, an outline row, a form jump, speech —
+    /// and three of them return early. The page the reader is on before and
+    /// after is the honest test of whether any of them was a turn.
     fn on_read_command(&mut self, command: crate::widgets::event::ReadCommand) -> Task<Message> {
+        let outermost = self.read_command_depth == 0;
+        let before = outermost.then(|| self.reader.current_page()).flatten();
+        self.read_command_depth += 1;
+        let task = self.dispatch_read_command(command);
+        self.read_command_depth -= 1;
+        if outermost {
+            let after = self.reader.current_page();
+            // The wall clock, not `self.now`: the same reason the `Nav` path
+            // gives. `self.now` is as old as the last tick, and dating a turn
+            // to it hides up to a tick of the wait it exists to measure.
+            if let Some(page) = after.filter(|page| Some(*page) != before) {
+                self.latency.begin_turn(page.get(), Instant::now());
+            }
+        }
+        task
+    }
+
+    fn dispatch_read_command(
+        &mut self,
+        command: crate::widgets::event::ReadCommand,
+    ) -> Task<Message> {
         use crate::widgets::event::ReadCommand;
 
         if matches!(command, ReadCommand::PagePressed) {
@@ -14840,6 +14902,7 @@ impl App {
             self.note_answer(crate::latency::Surface::Presenter, key);
         }
         self.remember_presenter_frame();
+        self.remember_reader_frame();
         self.mark_audience_frame();
         self.remember_audience_frame();
         self.pin_visible();
@@ -15249,6 +15312,19 @@ impl App {
             crate::latency::Surface::Audience => self.audience_width(),
             crate::latency::Surface::Presenter => self.slide_widths().current,
         };
+        self.note_answer_at(surface, key, exact_width);
+    }
+
+    /// The same, for a surface whose exact width is not one of the two the
+    /// slide model knows. The reader's column is sized by the layout tree and
+    /// rendered at the display's scale, so only the caller can say what
+    /// "exact" means for it.
+    fn note_answer_at(
+        &mut self,
+        surface: crate::latency::Surface,
+        key: FrameKey,
+        exact_width: u32,
+    ) {
         let answer = if key.width >= exact_width {
             crate::latency::Answer::Exact
         } else {
@@ -15390,6 +15466,31 @@ impl App {
             }
         }
         (crop, (width as f32 / aspect).max(1.0) as u32)
+    }
+
+    /// The reader column's answer to the turn `on_read_command` opened.
+    ///
+    /// Reported against `Surface::Presenter`: in the reader there is one
+    /// surface a person is waiting on, and it is this one. A coarse frame
+    /// that fits arrives first and counts as the stand-in, exactly as the
+    /// panel's does.
+    fn remember_reader_frame(&mut self) {
+        let Some(page) = self.reader.current_page() else {
+            self.last_reader = None;
+            return;
+        };
+        let Some((width, _)) = self.page_surface_size() else {
+            return;
+        };
+        let candidate = self.ready_reader_frame_key(page, width);
+        let next = ready_transition(self.last_reader, page.get(), candidate);
+        if next != self.last_reader {
+            if let Some(key) = next {
+                let exact = crate::reader::rendered_width(width, self.presenter_scale_factor());
+                self.note_answer_at(crate::latency::Surface::Presenter, key, exact);
+            }
+            self.last_reader = next;
+        }
     }
 
     /// Atomically advance Current Slide when its canonical texture is ready.
