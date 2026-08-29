@@ -118,24 +118,42 @@ impl ThumbnailCache {
         self.entries.values().next().map(|entry| entry.width)
     }
 
-    /// Roughly how many pages of `width` this budget holds, never more than
-    /// `count`.
+    /// Roughly how many pages of `width` and `height` this budget holds,
+    /// never more than `count`.
     ///
     /// Used to bound a re-sweep of pages that went missing: a window this
     /// size around the presenter is one the cache can hold all of, so filling
-    /// it cannot evict anything else in it.
-    pub fn capacity_at(&self, width: u32, count: usize) -> usize {
-        // The aspect is not known here and does not need to be: a page is
-        // taller than it is wide often enough that assuming square is the
-        // conservative reading, and being conservative means a smaller
-        // window, which is the safe direction.
-        let per_page = (width as u64)
-            .saturating_mul(width as u64)
-            .saturating_mul(4);
+    /// it cannot evict anything else in it. That property is the whole point,
+    /// and an estimate that comes out too *high* destroys it — the sweep
+    /// reaches past what fits, evicts the near end to reach the far end, then
+    /// re-requests the near end, for ever.
+    ///
+    /// Which is what happened. This assumed a square page on the stated
+    /// grounds that "a page is taller than it is wide, so square is the
+    /// conservative reading" — but that has it backwards: a square page is
+    /// *cheaper* than a real one, so the estimate made pages look small and
+    /// the capacity look large. On a 655-page deck at 176px it claimed 135
+    /// pages fit where 87 did, and the warmer rendered the deck twenty-one
+    /// times in one sitting.
+    ///
+    /// What the pages actually cost is better evidence than what they ought
+    /// to cost, so the measured average is used once there is one; the
+    /// dimensions are the estimate for an empty cache. An eighth is held
+    /// back either way, because pages within one document are not all the
+    /// same size and the average is only an average.
+    pub fn capacity_at(&self, width: u32, height: u32, count: usize) -> usize {
+        let per_page = if self.entries.is_empty() {
+            (width as u64)
+                .saturating_mul(height.max(1) as u64)
+                .saturating_mul(4)
+        } else {
+            self.used_bytes / self.entries.len() as u64
+        };
         if per_page == 0 {
             return count;
         }
-        ((self.budget_bytes / per_page) as usize).min(count)
+        let headroom = self.budget_bytes - self.budget_bytes / 8;
+        ((headroom / per_page) as usize).min(count)
     }
 
     /// Keep a picture, making room by dropping the pages furthest from

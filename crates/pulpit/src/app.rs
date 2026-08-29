@@ -32,11 +32,6 @@ pub(crate) const DOCUMENTATION_URL: &str = "https://vincentarelbundock.github.io
 
 /// Cadence for animations and short UI deadlines. Worker delivery is
 /// event-driven and does not wait for this clock.
-/// The most the frame-cache budget may be multiplied by for a dense
-/// display. Four is a 2x panel exactly; beyond that this is resident memory
-/// and the budget stops following.
-const MAX_CACHE_SCALE: f64 = 4.0;
-
 const TICK: Duration = Duration::from_millis(50);
 /// The watchdog tick while nothing is live: fast enough for the clock,
 /// deadlines and resume detection, slow enough that an idle talk barely
@@ -3495,7 +3490,6 @@ impl App {
                 if (self.presenter_scale - scale).abs() > f32::EPSILON {
                     tracing::debug!(scale, "presenter pixel ratio");
                     self.presenter_scale = scale;
-                    self.follow_display_with_the_cache_budget();
                     // Every panel frame is now the wrong size by definition:
                     // ask for the right ones rather than upscale for ever.
                     self.request_renders();
@@ -15199,35 +15193,6 @@ impl App {
             .map(|mib| mib * 1024 * 1024)
     }
 
-    /// Size the frame cache for the display it is actually feeding.
-    ///
-    /// The configured budget is a count of frames in disguise, and a frame's
-    /// size is a property of the display: at 2× a page costs four times what
-    /// the same page costs at 1×, so the same budget holds a quarter of the
-    /// document. Measured on a 3600×2250 panel, a 256 MiB budget held 33
-    /// pages of a 509-page book and evicted 264 times in one sitting — the
-    /// reader was re-rendering pages it had already drawn, for the whole
-    /// session.
-    ///
-    /// So the configured figure is read as a budget *for a 1× display* and
-    /// multiplied by the pixels this one actually has. Capped, because this
-    /// is resident memory and a 3× display should not quietly ask for a
-    /// gigabyte.
-    fn follow_display_with_the_cache_budget(&mut self) {
-        // An explicit budget is obeyed exactly. Scaling it would defeat the
-        // one reason to set it.
-        if let Some(fixed) = Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB") {
-            self.cache.set_budget(fixed);
-            return;
-        }
-        let configured = self.settings.rendering.cache_budget_mib * 1024 * 1024;
-        let scale = self.presenter_scale_factor();
-        let factor = (f64::from(scale) * f64::from(scale)).clamp(1.0, MAX_CACHE_SCALE);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let scaled = (configured as f64 * factor) as u64;
-        self.cache.set_budget(scaled);
-    }
-
     /// The projector's output width in pixels.
     fn audience_width(&self) -> u32 {
         self.audience_size.width.max(320.0) as u32
@@ -15708,7 +15673,7 @@ impl App {
                 .first_page_size()
                 .map(|size| size.aspect_ratio())
                 .unwrap_or(16.0 / 9.0);
-            let width = fitting_thumbnail_width(count, aspect, THUMBNAIL_BUDGET_BYTES);
+            let width = fitting_thumbnail_width(count, aspect, self.thumbnails.budget_bytes());
             self.thumbnail_plan_width = width;
             self.thumbnail_queue = (0..count)
                 .filter(|s| !self.thumbnails.contains(*s))
@@ -15729,7 +15694,15 @@ impl App {
         // presenter is looking at, and then re-request that.
         if self.thumbnail_queue.is_empty() && self.thumbnail_requests.is_empty() {
             let width = self.thumbnail_plan_width;
-            let reach = self.thumbnails.capacity_at(width, count).max(1) / 2;
+            // The same height the render request will ask for, so the
+            // estimate is of the pictures actually being made.
+            let aspect = self
+                .state
+                .first_page_size()
+                .map(|size| size.aspect_ratio())
+                .unwrap_or(16.0 / 9.0);
+            let height = (width as f32 / aspect).max(1.0) as u32;
+            let reach = self.thumbnails.capacity_at(width, height, count).max(1) / 2;
             let first = centre.saturating_sub(reach);
             let last = centre.saturating_add(reach).min(count.saturating_sub(1));
             self.thumbnail_queue = (first..=last)

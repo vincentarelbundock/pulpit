@@ -53,6 +53,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A long deck no longer renders its thumbnails over and over.** The warmer
+  keeps a window of pages around where you are, sized to what the budget
+  holds — but it estimated that by pretending a page is square, and a square
+  page is cheaper than a real one, so it thought more fitted than did. The
+  window reached past the end of the budget, evicted the pages nearest you to
+  reach the far ones, then fetched those back, for as long as the document
+  was open. A 655-page book warmed itself twenty-one times in one sitting.
+  The window is now measured from what the pages actually cost.
+
 - **A page can no longer stay blurry for the rest of the session.** The
   application asks for a page's sharp frame once and waits for the answer
   before ever asking again — and three supervisor paths could drop a render
@@ -127,13 +136,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with it: pages that stayed soft because the sharp frame was cancelled and
   never asked for again, and pages that stayed soft after leaving fullscreen
   for as long as you looked at them.
-
-- **The frame cache follows the display it is feeding.** The configured budget
-  is really a number of pages, and a page on a 2× display costs four times
-  what it costs at 1× — so the same setting held a quarter of the document and
-  a long book re-rendered pages it had already drawn, all session. The budget
-  is now read as a figure for a 1× display and scaled by the pixels the screen
-  actually has, up to four times.
 
 - **One row of sidebar tabs, and no Pages view.** The sidebar's icon row is
   now the only level — Outline, Fields (where the document has a form),
