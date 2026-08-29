@@ -3475,13 +3475,6 @@ impl ReaderSession {
             };
             distance(a).total_cmp(&distance(b))
         });
-        // Is the reader moving, or looking? A full page of a real document
-        // takes the better part of a second to rasterise, which is forever at
-        // scrolling speed: a reader who is moving gets a small frame that
-        // arrives in a fraction of that, and the sharp one is rendered when
-        // they stop. Blurred text for a moment beats white paper — the page
-        // is *there*, and it is what they are steering by (A7).
-        let moving = (self.controls.offset - self.last_render_offset).abs() > VIEWPORT_EPSILON;
         self.last_render_offset = self.controls.offset;
 
         use pulpit_render::protocol::Quality;
@@ -3505,31 +3498,25 @@ impl ReaderSession {
                 (placed.width, placed.height)
             };
             let full = renderable_size(upright_width * scale, upright_height * scale);
-            let preview = preview_size(full);
-            // The coarse frame first, always: it is what a freshly landed
-            // page paints from while the full one renders, and asking for it
-            // costs nothing once anything at least as wide is cached.
+            // One frame per page, at the size it is drawn at.
+            //
+            // There was a coarse frame before this, asked for first and
+            // always, with the sharp one following once the reader stopped
+            // moving. It was built on the belief that a full page "takes the
+            // better part of a second to rasterise". Measured, it takes nine
+            // milliseconds — only about twice what the preview cost, because
+            // most of a page's expense is parsing and laying it out, which is
+            // paid at any size. The tier was tripling the jobs submitted to
+            // save four milliseconds of rasterising, and the queueing that
+            // caused was half of what a page turn actually waited.
             wanted.push(PlannedRender {
                 page: placed.page,
-                width: preview.0,
-                height: preview.1,
-                quality: Quality::Coarse,
+                width: full.0,
+                height: full.1,
+                quality: Quality::Refined,
                 visible,
                 region: window,
             });
-            // The sharp frame only once the reader has settled: rendered
-            // mid-scroll it would be finished for a page already left, and
-            // the worker time it took was taken from the page arrived at.
-            if !moving {
-                wanted.push(PlannedRender {
-                    page: placed.page,
-                    width: full.0,
-                    height: full.1,
-                    quality: Quality::Refined,
-                    visible,
-                    region: window,
-                });
-            }
         }
         wanted
     }
@@ -4555,27 +4542,6 @@ impl ReaderSession {
 /// past it the frame is drawn at this size and scaled up, which is a slightly
 /// soft page rather than a surprise allocation.
 const MAX_FRAME_PIXELS: f64 = 16.0 * 1024.0 * 1024.0;
-
-/// The widest a moving reader's frame is rendered, in physical pixels.
-///
-/// Chosen for latency rather than for legibility: at this size a page comes
-/// back in a fraction of the time a full one takes, which is the difference
-/// between scrolling over pages and scrolling over white paper. The sharp
-/// frame replaces it as soon as the reader stops.
-const PREVIEW_MAX_WIDTH: u32 = 480;
-
-/// The coarse size to render `full` at while the reader is moving.
-fn preview_size(full: (u32, u32)) -> (u32, u32) {
-    let (width, height) = full;
-    if width <= PREVIEW_MAX_WIDTH {
-        return full;
-    }
-    let shrink = f64::from(PREVIEW_MAX_WIDTH) / f64::from(width);
-    (
-        PREVIEW_MAX_WIDTH,
-        ((f64::from(height) * shrink).round() as u32).max(1),
-    )
-}
 
 /// How far two heights or offsets may differ and still count as the same, in
 /// layout points.
@@ -5686,23 +5652,33 @@ mod tests {
         assert!(width <= cap && height >= 1);
     }
 
+    /// One frame per page, whether the reader is moving or looking.
+    ///
+    /// A coarse tier used to go ahead of the sharp one, and a moving reader
+    /// got only the coarse frame. Measurement retired it: a full page costs
+    /// about twice a preview rather than the order of magnitude the tier
+    /// assumed, and asking for both tripled the work queued in front of the
+    /// page somebody was actually waiting for.
     #[test]
-    fn a_moving_reader_plans_a_coarse_page_now_and_a_sharp_one_when_they_stop() {
+    fn every_planned_page_is_asked_for_once_at_the_size_it_is_drawn() {
         use pulpit_render::protocol::Quality;
         let mut session = open(20);
-        // Standing still: the full-size refined frame is in the plan, with a
-        // coarse one ahead of it for the first paint.
         let settled = session.render_plan(2.0);
+        assert!(!settled.is_empty());
         assert!(settled
             .iter()
-            .any(|entry| entry.quality == Quality::Refined && entry.width > PREVIEW_MAX_WIDTH));
-        assert!(settled
-            .iter()
-            .any(|entry| entry.quality == Quality::Coarse && entry.width <= PREVIEW_MAX_WIDTH));
+            .all(|entry| entry.quality == Quality::Refined));
 
-        // Scrolling: only what can be drawn quickly, so the reader is not
-        // steering by white paper and a worker is never mid-way through a
-        // sharp render of a page already left behind.
+        // A page appears once in the plan, not once per tier.
+        let mut pages: Vec<_> = settled.iter().map(|entry| entry.page).collect();
+        let planned = pages.len();
+        pages.sort();
+        pages.dedup();
+        assert_eq!(pages.len(), planned, "one request per page: {settled:?}");
+
+        // Moving asks for the same thing as standing still: a page that
+        // scrolls out of the margin before it arrives is cancelled, which is
+        // a cheaper answer than a second picture of every page.
         session.apply(&ReadCommand::ScrollTo {
             offset: 4_000.0,
             offset_x: 0.0,
@@ -5710,19 +5686,7 @@ mod tests {
         });
         let moving = session.render_plan(2.0);
         assert!(!moving.is_empty());
-        for entry in &moving {
-            assert!(
-                entry.width <= PREVIEW_MAX_WIDTH && entry.quality == Quality::Coarse,
-                "a page asked for mid-scroll must be one that arrives: {entry:?}"
-            );
-        }
-
-        // Stopped: the same offset twice is settled, and the plan sharpens.
-        let stopped = session.render_plan(2.0);
-        assert!(
-            stopped.iter().any(|entry| entry.width > PREVIEW_MAX_WIDTH),
-            "a reader who has stopped gets the real page: {stopped:?}"
-        );
+        assert!(moving.iter().all(|entry| entry.quality == Quality::Refined));
     }
 
     #[test]
