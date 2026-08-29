@@ -2951,18 +2951,33 @@ impl App {
         // The distinction that decides everything: a render for the page a
         // window is showing is one a presenter waits on, and a render for
         // the page after it is not. Both are "live"; only one is urgent.
-        for (name, stage) in [
-            ("for the page on screen", self.latency.on_screen()),
-            ("for a page one step away", self.latency.prefetch()),
+        for (name, stage, inbox) in [
+            (
+                "for the page on screen",
+                self.latency.on_screen(),
+                self.latency.on_screen_inbox(),
+            ),
+            (
+                "for a page one step away",
+                self.latency.prefetch(),
+                self.latency.prefetch_inbox(),
+            ),
         ] {
             if stage.calls == 0 {
                 continue;
             }
+            // The inbox wait beside the total, because the two together are
+            // what says whether an urgent page was *delayed* or merely
+            // expensive. Reported alone, as they were, a visible page that
+            // finished after a speculative one looked like a priority
+            // inversion and was as likely to be a bigger picture.
             report.push_str(&format!(
-                "    {name}: {} finished, {} typical, {} worst\n",
+                "    {name}: {} finished, {} typical, {} worst; waiting behind other work {} typical, {} worst\n",
                 stage.calls,
                 millis(stage.mean()),
                 millis(stage.worst),
+                millis(inbox.mean()),
+                millis(inbox.worst),
             ));
         }
         // Everything below happens on the event loop, where the interface is
@@ -7147,14 +7162,18 @@ impl App {
                     // the tree it hands back is the only signal the rail
                     // gets, so it is adopted here. The last effect wins when
                     // a transaction carried several.
-                    if let Some(outline) = applied.effects.iter().rev().find_map(|effect| {
-                        match effect {
-                            pulpit_render::document::AppliedEffect::Outline(outline) => {
-                                Some((**outline).clone())
-                            }
-                            _ => None,
-                        }
-                    }) {
+                    if let Some(outline) =
+                        applied
+                            .effects
+                            .iter()
+                            .rev()
+                            .find_map(|effect| match effect {
+                                pulpit_render::document::AppliedEffect::Outline(outline) => {
+                                    Some((**outline).clone())
+                                }
+                                _ => None,
+                            })
+                    {
                         self.set_reader_outline(outline);
                     }
 

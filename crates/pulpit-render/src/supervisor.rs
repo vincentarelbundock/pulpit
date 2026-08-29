@@ -957,6 +957,8 @@ impl RendererSupervisor {
             }) => {
                 self.counters.backend = Some(backend.clone());
                 self.counters.backend_version = Some(backend_version);
+                // `Hello` is the state at spawn; a later `BackendBound`
+                // supersedes it. See that variant's note.
                 if version != PROTOCOL_VERSION {
                     tracing::error!(
                         worker = index,
@@ -967,6 +969,14 @@ impl RendererSupervisor {
                 } else {
                     tracing::info!(worker = index, backend, "worker ready");
                 }
+            }
+            WorkerPayload::Response(Response::BackendBound {
+                backend,
+                backend_version,
+            }) => {
+                tracing::info!(worker = index, backend, "backend bound");
+                self.counters.backend = Some(backend);
+                self.counters.backend_version = Some(backend_version);
             }
             WorkerPayload::Response(Response::Opened(opened)) => {
                 // Only report the first worker's answer; the others are

@@ -266,6 +266,18 @@ pub enum Response {
         /// What the backend is, for diagnostics: a library path or a build.
         backend_version: String,
     },
+    /// What the worker is really rendering with, once it knows.
+    ///
+    /// `Hello` is sent before any document exists, and the PDF and DjVu
+    /// backends are bound lazily on the first `Open` that needs them — so the
+    /// version in `Hello` says "not bound yet" and, reported alone, went on
+    /// saying it for the life of the process. Every rendering question starts
+    /// by asking which backend is in use, and the diagnostics answered it
+    /// with the state at spawn.
+    BackendBound {
+        backend: String,
+        backend_version: String,
+    },
     Opened(OpenedDocument),
     OpenFailed {
         document: u64,

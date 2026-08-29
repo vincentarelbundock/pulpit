@@ -166,8 +166,22 @@ pub fn run(
                 )?;
             }
             Work::Control(Request::Open { document, path }) => {
+                // What the backend reported before this open and after it. A
+                // lazy bind happens inside `open`, so this is the only moment
+                // the worker learns what it is actually rendering with.
+                let before = backend.version();
                 match backend.open(std::path::Path::new(&path)) {
                     Ok(handle) => {
+                        let after = backend.version();
+                        if after != before {
+                            write_message(
+                                &mut output,
+                                &Response::BackendBound {
+                                    backend: backend.name().into(),
+                                    backend_version: after,
+                                },
+                            )?;
+                        }
                         let response = match backend.metadata(handle) {
                             Ok(metadata) => {
                                 let notes_pdfpc = read_pdfpc_attachment(

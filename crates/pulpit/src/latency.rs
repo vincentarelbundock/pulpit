@@ -222,6 +222,17 @@ pub struct Latency {
     on_screen: Stage,
     /// Renders for a page one step away, wanted soon, waited for by nobody.
     prefetch: Stage,
+    /// The wait in a worker's own inbox, split the same way.
+    ///
+    /// The two totals above cannot settle the question they raise. A visible
+    /// page that finishes later than a speculative one has either waited
+    /// behind less urgent work — which would be a priority inversion, and a
+    /// bug — or simply been a more expensive picture, which is not. The
+    /// inbox wait separates them: it is the part of a job's life spent held
+    /// by a worker that was rendering something else, and it is the only part
+    /// an ordering mistake could lengthen.
+    on_screen_inbox: Stage,
+    prefetch_inbox: Stage,
     /// The part of `render` a worker was holding the job. What is left is the
     /// wait in this process's queue.
     render_worked: Stage,
@@ -370,10 +381,13 @@ impl Latency {
         self.render.record(elapsed);
         self.render_worked.record(worked);
         self.render_rendered.record(rendered);
+        let inbox = worked.saturating_sub(rendered);
         if on_screen {
             self.on_screen.record(elapsed);
+            self.on_screen_inbox.record(inbox);
         } else {
             self.prefetch.record(elapsed);
+            self.prefetch_inbox.record(inbox);
         }
     }
 
@@ -419,6 +433,14 @@ impl Latency {
 
     pub fn prefetch(&self) -> &Stage {
         &self.prefetch
+    }
+
+    pub fn on_screen_inbox(&self) -> &Stage {
+        &self.on_screen_inbox
+    }
+
+    pub fn prefetch_inbox(&self) -> &Stage {
+        &self.prefetch_inbox
     }
 
     pub fn warming_worked(&self) -> &Stage {
@@ -556,6 +578,39 @@ mod tests {
         let turn = latency.turns().back().expect("released by the unplug");
         assert_eq!(turn.slide, 7);
         assert_eq!(latency.abandoned(), 0);
+    }
+
+    /// The inbox wait is what an ordering mistake would lengthen, so it is
+    /// kept apart from the rasterising a bigger picture costs. A visible page
+    /// that took longer only because it was larger must not look like one
+    /// that was made to wait.
+    #[test]
+    fn the_inbox_wait_is_split_from_the_rasterising() {
+        let mut latency = Latency::default();
+        // On screen: slow to draw, never held up.
+        latency.note_render(
+            Duration::from_millis(40),
+            Duration::from_millis(38),
+            Duration::from_millis(38),
+            false,
+            true,
+        );
+        // Speculative: quick to draw, sat in an inbox.
+        latency.note_render(
+            Duration::from_millis(20),
+            Duration::from_millis(18),
+            Duration::from_millis(3),
+            false,
+            false,
+        );
+        assert_eq!(latency.on_screen().mean(), Duration::from_millis(40));
+        assert_eq!(latency.on_screen_inbox().mean(), Duration::ZERO);
+        assert_eq!(latency.prefetch().mean(), Duration::from_millis(20));
+        assert_eq!(
+            latency.prefetch_inbox().mean(),
+            Duration::from_millis(15),
+            "the wait, not the drawing"
+        );
     }
 
     #[test]
