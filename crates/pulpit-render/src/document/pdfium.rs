@@ -68,6 +68,7 @@ mod subtype {
     use pdfium_render::prelude::*;
 
     pub const TEXT: FPDF_ANNOTATION_SUBTYPE = 1;
+    pub const LINK: FPDF_ANNOTATION_SUBTYPE = 2;
     pub const FREETEXT: FPDF_ANNOTATION_SUBTYPE = 3;
     pub const SQUARE: FPDF_ANNOTATION_SUBTYPE = 5;
     pub const CIRCLE: FPDF_ANNOTATION_SUBTYPE = 6;
@@ -76,6 +77,7 @@ mod subtype {
     pub const STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
     pub const INK: FPDF_ANNOTATION_SUBTYPE = 15;
     pub const STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
+    pub const POPUP: FPDF_ANNOTATION_SUBTYPE = 16;
     pub const WIDGET: FPDF_ANNOTATION_SUBTYPE = 20;
 }
 
@@ -1746,7 +1748,13 @@ impl<'a> PdfiumDocument<'a> {
     ) -> Option<AnnotationSummary> {
         let bindings = self.backend.bindings();
         let subtype = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) };
-        if subtype == subtype::WIDGET {
+        // Not everything in `/Annots` is a mark somebody made. A widget is a
+        // form field, classified separately (§8.6); a link is navigation
+        // structure the viewer follows rather than a note anybody wrote; a
+        // popup is the machinery a note opens into, never a mark of its own.
+        // Listing them read as "this document is full of things pulpit cannot
+        // edit" when the paper merely had a bibliography.
+        if subtype == subtype::WIDGET || subtype == subtype::LINK || subtype == subtype::POPUP {
             return None;
         }
         let kind = match subtype {

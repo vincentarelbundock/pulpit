@@ -29,6 +29,7 @@ use pulpit_render::pdf::synth::write_pdf;
 
 mod common;
 mod signing_fixture;
+mod testkit;
 
 fn temp_dir(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("pulpit-document-{name}"));
@@ -1628,4 +1629,50 @@ fn a_documents_own_strings_cannot_lay_out_the_dialog_that_shows_them() {
     );
     assert_eq!(keywords.text, "first second third");
     assert!(!keywords.truncated);
+}
+
+#[test]
+fn links_and_popups_are_structure_rather_than_marks() {
+    // A paper's bibliography is a page full of `/Link` annotations, and a
+    // note's `/Popup` is the window it opens into. Neither is a mark anybody
+    // made, so neither belongs in the annotations panel — where they used to
+    // appear as row after row of "not editable here". A genuinely foreign
+    // subtype (here a `/Caret`) still appears, because that *is* a mark, just
+    // one pulpit does not model.
+    let Some(mut guard) = common::pdfium("the PDFium document tests") else {
+        return;
+    };
+    let backend = &mut *guard;
+    let bytes = crate::testkit::builder::Pdf::from_objects([
+        // 1: catalog.
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        // 2: the page tree.
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        // 3: the page, carrying a link, a popup and a caret.
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Annots [4 0 R 5 0 R 6 0 R] >>",
+        // 4: a link, as a bibliography entry would carry.
+        "<< /Type /Annot /Subtype /Link /Rect [100 700 300 715] \
+         /A << /S /URI /URI (https://example.org) >> >>",
+        // 5: a popup.
+        "<< /Type /Annot /Subtype /Popup /Rect [100 600 300 680] >>",
+        // 6: a caret, which pulpit does not model but which is a mark.
+        "<< /Type /Annot /Subtype /Caret /Rect [100 500 120 520] >>",
+    ])
+    .build();
+    let directory = temp_dir("links-are-not-marks");
+    let path = directory.join("linked.pdf");
+    std::fs::write(&path, bytes).unwrap();
+    let document = open(backend, &path);
+
+    let annotations = document.annotations(PageIndex(0)).unwrap();
+    assert_eq!(
+        annotations.len(),
+        1,
+        "only the caret is a mark: {annotations:?}"
+    );
+    assert_eq!(
+        annotations[0].support,
+        pulpit_render::document::AnnotationSupport::Unsupported
+    );
 }
