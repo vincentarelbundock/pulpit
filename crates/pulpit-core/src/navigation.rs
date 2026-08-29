@@ -97,6 +97,249 @@ impl Outline {
     }
 }
 
+/// Where one entry sits in the outline tree: the child index at every level
+/// from the root down to the entry itself.
+///
+/// A path is positional, and that is safe *because* every edit travels in a
+/// revision-guarded transaction: a path built against revision N is only ever
+/// applied at revision N, so it cannot name a different entry than the one
+/// the reader was looking at. It is also what makes a journal replayable —
+/// paths resolve identically when the same transactions are applied in the
+/// same order to the same file, where a PDF object number would not survive
+/// the reopen.
+pub type BookmarkPath = Vec<usize>;
+
+/// One edit to the outline tree.
+///
+/// The outline's counterpart to `AnnotationCommand`: what a reader does to
+/// the bookmark rail, expressed so the renderer can apply it, invert it and
+/// journal it. `Create` carries everything the new entry is; the other two
+/// name an existing entry by its [`BookmarkPath`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BookmarkCommand {
+    /// Insert a new entry so that it ends up at `path`; the siblings from
+    /// that position on shift one place right.
+    Create {
+        path: BookmarkPath,
+        title: String,
+        page: usize,
+    },
+    /// Give the entry at `path` a new title.
+    Rename { path: BookmarkPath, title: String },
+    /// Remove the entry at `path`, and its whole subtree with it.
+    Delete { path: BookmarkPath },
+}
+
+impl BookmarkCommand {
+    /// What the history calls this step.
+    pub fn label(&self) -> &'static str {
+        match self {
+            BookmarkCommand::Create { .. } => "Add Bookmark",
+            BookmarkCommand::Rename { .. } => "Rename Bookmark",
+            BookmarkCommand::Delete { .. } => "Delete Bookmark",
+        }
+    }
+}
+
+/// Why an outline edit was refused. The variants mirror the module's bounds:
+/// an edit may not name a place the tree does not have, nest past
+/// [`MAX_OUTLINE_DEPTH`], or grow the tree past [`MAX_OUTLINE_ENTRIES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookmarkEditError {
+    NoSuchEntry,
+    TooDeep,
+    TooMany,
+    Untitled,
+}
+
+impl std::fmt::Display for BookmarkEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BookmarkEditError::NoSuchEntry => write!(f, "no bookmark at that position"),
+            BookmarkEditError::TooDeep => write!(f, "the bookmark tree is too deep"),
+            BookmarkEditError::TooMany => write!(f, "the bookmark tree is full"),
+            BookmarkEditError::Untitled => write!(f, "a bookmark needs a title"),
+        }
+    }
+}
+
+impl std::error::Error for BookmarkEditError {}
+
+impl Outline {
+    /// The entry at `path`, when the tree has one.
+    pub fn entry_at(&self, path: &[usize]) -> Option<&OutlineEntry> {
+        let (&last, parents) = path.split_last()?;
+        let mut level = &self.entries;
+        for &index in parents {
+            level = &level.get(index)?.children;
+        }
+        level.get(last)
+    }
+
+    /// Insert `entry` so it becomes the entry at `path`; the sibling that held
+    /// that position, and everything after it, shifts one place right. The
+    /// last path component may equal the sibling count, which appends.
+    ///
+    /// The inserted subtree's `depth` fields are renumbered from the path, so
+    /// a before-image captured at one position restores correctly wherever it
+    /// is put back.
+    pub fn insert_at(
+        &mut self,
+        path: &[usize],
+        entry: OutlineEntry,
+    ) -> Result<(), BookmarkEditError> {
+        let Some((&last, parents)) = path.split_last() else {
+            return Err(BookmarkEditError::NoSuchEntry);
+        };
+        if path.len() + subtree_height(&entry) > MAX_OUTLINE_DEPTH {
+            return Err(BookmarkEditError::TooDeep);
+        }
+        if self.len() + subtree_len(&entry) > MAX_OUTLINE_ENTRIES {
+            return Err(BookmarkEditError::TooMany);
+        }
+        let mut level = &mut self.entries;
+        for &index in parents {
+            level = &mut level
+                .get_mut(index)
+                .ok_or(BookmarkEditError::NoSuchEntry)?
+                .children;
+        }
+        if last > level.len() {
+            return Err(BookmarkEditError::NoSuchEntry);
+        }
+        level.insert(last, renumber(entry, path.len() - 1));
+        Ok(())
+    }
+
+    /// Insert a brand-new bookmark for `page` at `path`, with the title
+    /// cleaned the way a title read from a file is. A title that cleans to
+    /// nothing is refused: an unnamed row would read as an entry that failed
+    /// to load.
+    pub fn create_at(
+        &mut self,
+        path: &[usize],
+        title: &str,
+        page: usize,
+    ) -> Result<(), BookmarkEditError> {
+        let Some(depth) = path.len().checked_sub(1) else {
+            return Err(BookmarkEditError::NoSuchEntry);
+        };
+        let title = truncate_title(title);
+        if title.is_empty() {
+            return Err(BookmarkEditError::Untitled);
+        }
+        self.insert_at(
+            path,
+            OutlineEntry {
+                title,
+                target: LinkTarget::Page { page, zoom: None },
+                depth,
+                children: Vec::new(),
+            },
+        )
+    }
+
+    /// Remove and return the entry at `path`, subtree and all.
+    pub fn remove_at(&mut self, path: &[usize]) -> Result<OutlineEntry, BookmarkEditError> {
+        let Some((&last, parents)) = path.split_last() else {
+            return Err(BookmarkEditError::NoSuchEntry);
+        };
+        let mut level = &mut self.entries;
+        for &index in parents {
+            level = &mut level
+                .get_mut(index)
+                .ok_or(BookmarkEditError::NoSuchEntry)?
+                .children;
+        }
+        if last >= level.len() {
+            return Err(BookmarkEditError::NoSuchEntry);
+        }
+        Ok(level.remove(last))
+    }
+
+    /// Retitle the entry at `path`, returning the title it had. The new title
+    /// is trimmed and truncated the way a title read from a file is.
+    pub fn retitle_at(&mut self, path: &[usize], title: &str) -> Result<String, BookmarkEditError> {
+        let Some((&last, parents)) = path.split_last() else {
+            return Err(BookmarkEditError::NoSuchEntry);
+        };
+        let mut level = &mut self.entries;
+        for &index in parents {
+            level = &mut level
+                .get_mut(index)
+                .ok_or(BookmarkEditError::NoSuchEntry)?
+                .children;
+        }
+        let entry = level.get_mut(last).ok_or(BookmarkEditError::NoSuchEntry)?;
+        let title = truncate_title(title);
+        if title.is_empty() {
+            return Err(BookmarkEditError::Untitled);
+        }
+        Ok(std::mem::replace(&mut entry.title, title))
+    }
+
+    /// The path of the entry at `ordinal` in [`Outline::flattened`] order —
+    /// the bridge from a rail row back into the tree.
+    pub fn path_of_flattened(&self, ordinal: usize) -> Option<BookmarkPath> {
+        fn walk(entries: &[OutlineEntry], remaining: &mut usize, path: &mut BookmarkPath) -> bool {
+            for (index, entry) in entries.iter().enumerate() {
+                path.push(index);
+                if *remaining == 0 {
+                    return true;
+                }
+                *remaining -= 1;
+                if walk(&entry.children, remaining, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+        let mut remaining = ordinal;
+        let mut path = BookmarkPath::new();
+        walk(&self.entries, &mut remaining, &mut path).then_some(path)
+    }
+
+    /// Where a new top-level bookmark for `page` goes so the top level stays
+    /// in page order: after every top-level entry that starts at or before
+    /// `page`, and after any that orders nothing (a URI keeps its place).
+    pub fn top_level_insertion_index(&self, page: usize) -> usize {
+        let mut index = 0;
+        for (position, entry) in self.entries.iter().enumerate() {
+            match entry.page() {
+                Some(start) if start > page => break,
+                _ => index = position + 1,
+            }
+        }
+        index
+    }
+}
+
+/// Total entries in one entry's subtree, itself included.
+fn subtree_len(entry: &OutlineEntry) -> usize {
+    1 + entry.children.iter().map(subtree_len).sum::<usize>()
+}
+
+/// How many levels one entry's subtree spans, itself included.
+fn subtree_height(entry: &OutlineEntry) -> usize {
+    1 + entry.children.iter().map(subtree_height).max().unwrap_or(0)
+}
+
+/// Renumber an entry and its subtree to sit at `depth`.
+fn renumber(entry: OutlineEntry, depth: usize) -> OutlineEntry {
+    OutlineEntry {
+        title: entry.title,
+        target: entry.target,
+        depth,
+        children: entry
+            .children
+            .into_iter()
+            .map(|child| renumber(child, depth + 1))
+            .collect(),
+    }
+}
+
 /// A tree the outline can be built from, abstracted so the walk itself — the
 /// part with the cycle and depth guards — is testable without a PDF.
 pub trait OutlineSource {
@@ -409,6 +652,118 @@ mod tests {
             outline.entries[0].depth, 0,
             "a lifted child takes its parent's place"
         );
+    }
+
+    // -- edits --------------------------------------------------------------
+
+    fn entry(title: &str, page: usize) -> OutlineEntry {
+        OutlineEntry {
+            title: title.to_string(),
+            target: LinkTarget::Page { page, zoom: None },
+            depth: 0,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_path_names_the_same_entry_the_flattened_ordinal_does() {
+        let outline = talk();
+        for (ordinal, flat) in outline.flattened().iter().enumerate() {
+            let path = outline.path_of_flattened(ordinal).expect("path");
+            assert_eq!(outline.entry_at(&path).expect("entry").title, flat.title);
+        }
+        assert_eq!(outline.path_of_flattened(outline.len()), None);
+        assert_eq!(outline.entry_at(&[]), None);
+    }
+
+    #[test]
+    fn an_insert_shifts_siblings_and_a_removal_gives_the_subtree_back() {
+        let mut outline = talk();
+        outline
+            .insert_at(&[1], entry("Related work", 2))
+            .expect("insert");
+        let top: Vec<&str> = outline
+            .entries_at_depth(0)
+            .iter()
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(
+            top,
+            vec!["Introduction", "Related work", "Method", "Conclusion"]
+        );
+
+        // Removing "Method" takes its two subsections with it, and putting the
+        // before-image back restores the tree exactly.
+        let before = outline.clone();
+        let removed = outline.remove_at(&[2]).expect("remove");
+        assert_eq!(removed.title, "Method");
+        assert_eq!(outline.len(), before.len() - 3);
+        outline.insert_at(&[2], removed).expect("reinsert");
+        assert_eq!(outline, before);
+    }
+
+    #[test]
+    fn an_inserted_subtree_is_renumbered_from_its_new_position() {
+        let mut outline = talk();
+        let subsection = outline.remove_at(&[1, 0]).expect("Setup");
+        assert_eq!(subsection.depth, 1);
+        outline.insert_at(&[0], subsection).expect("insert");
+        assert_eq!(outline.entries[0].title, "Setup");
+        assert_eq!(outline.entries[0].depth, 0, "depth follows the path");
+    }
+
+    #[test]
+    fn a_retitle_returns_the_old_title_and_cleans_the_new_one() {
+        let mut outline = talk();
+        let old = outline
+            .retitle_at(&[0], "  Opening remarks \n")
+            .expect("retitle");
+        assert_eq!(old, "Introduction");
+        assert_eq!(outline.entries[0].title, "Opening remarks");
+    }
+
+    #[test]
+    fn an_edit_that_names_nothing_is_refused() {
+        let mut outline = talk();
+        assert_eq!(outline.remove_at(&[9]), Err(BookmarkEditError::NoSuchEntry));
+        assert_eq!(
+            outline.retitle_at(&[1, 5], "x"),
+            Err(BookmarkEditError::NoSuchEntry)
+        );
+        assert_eq!(
+            // Appending at the sibling count is allowed; past it is not.
+            outline.insert_at(&[4], entry("x", 0)),
+            Err(BookmarkEditError::NoSuchEntry)
+        );
+        outline.insert_at(&[3], entry("x", 0)).expect("append");
+    }
+
+    #[test]
+    fn the_edit_bounds_hold() {
+        let mut outline = talk();
+        let deep = vec![0; MAX_OUTLINE_DEPTH + 1];
+        assert_eq!(
+            outline.insert_at(&deep, entry("x", 0)),
+            Err(BookmarkEditError::TooDeep)
+        );
+        let mut full = Outline::default();
+        for index in 0..MAX_OUTLINE_ENTRIES {
+            full.insert_at(&[index], entry("x", 0)).expect("fill");
+        }
+        assert_eq!(
+            full.insert_at(&[0], entry("one too many", 0)),
+            Err(BookmarkEditError::TooMany)
+        );
+    }
+
+    #[test]
+    fn a_new_top_level_bookmark_lands_in_page_order() {
+        let outline = talk(); // pages 0, 4 (4, 7), 11
+        assert_eq!(outline.top_level_insertion_index(0), 1);
+        assert_eq!(outline.top_level_insertion_index(2), 1);
+        assert_eq!(outline.top_level_insertion_index(4), 2);
+        assert_eq!(outline.top_level_insertion_index(20), 3);
+        assert_eq!(Outline::default().top_level_insertion_index(5), 0);
     }
 
     // -- sections -----------------------------------------------------------

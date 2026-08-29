@@ -32,7 +32,7 @@
   [`Ctrl+Shift+Z`], [Redo the last stroke], [`C`], [Clear annotations],
   [`V`], [Show annotations to the audience], [], [],
   table.cell(colspan: 4)[#smallcaps[Read & search]],
-  [`Ctrl+B`], [Show or hide the outline], [`Ctrl+F` (`/`)], [Search],
+  [`Ctrl+B`], [Show or hide the bookmarks], [`Ctrl+F` (`/`)], [Search],
   [`F3` (`N`)], [Next match], [`Shift+F3` (`Shift+N`)], [Previous match],
   table.cell(colspan: 4)[#smallcaps[Page view]],
   [`Ctrl+=` (`+`)], [Zoom in], [`Ctrl+-` (`-`)], [Zoom out],

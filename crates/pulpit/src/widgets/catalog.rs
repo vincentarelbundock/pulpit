@@ -406,9 +406,9 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     WidgetDefinition {
         kind: WidgetKind::DocumentOutline,
         group: WidgetGroup::Document,
-        label: "Outline",
-        short_label: "Outline",
-        tooltip: "The document's bookmarks and page thumbnails, for getting somewhere quickly.",
+        label: "Bookmarks",
+        short_label: "Bookmarks",
+        tooltip: "The document's bookmarks, for getting somewhere quickly.",
         parts: NONE,
         placement: PlacementPolicy::single(),
         capabilities: &[WidgetCapability::ShowsDocument],

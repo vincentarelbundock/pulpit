@@ -357,16 +357,16 @@ mod layout_tests {
     #[test]
     fn long_bookmarks_gain_lines_only_when_the_rail_needs_them() {
         let title = "A long chapter title whose words need room to remain readable";
-        let (_, narrow) = bookmark_row_geometry(title, 2, 170.0);
-        let (_, wide) = bookmark_row_geometry(title, 2, 420.0);
+        let (_, narrow) = bookmark_row_geometry(title, 2, 170.0, false);
+        let (_, wide) = bookmark_row_geometry(title, 2, 420.0, false);
         assert!(narrow > wide);
         assert!(wide >= OUTLINE_COMPACT_ROW_HEIGHT);
     }
 
     #[test]
     fn narrow_deep_outlines_preserve_more_room_for_words() {
-        let (narrow_indent, _) = bookmark_row_geometry("Methods", 6, 170.0);
-        let (wide_indent, _) = bookmark_row_geometry("Methods", 6, 420.0);
+        let (narrow_indent, _) = bookmark_row_geometry("Methods", 6, 170.0, false);
+        let (wide_indent, _) = bookmark_row_geometry("Methods", 6, 420.0, false);
         assert!(narrow_indent < wide_indent);
         assert!(narrow_indent <= 170.0 * 0.32);
     }
@@ -1811,6 +1811,30 @@ fn outline<Message: Clone + 'static>(
     // title scale and inset. Every view is a first-class tab in the icon row
     // above the title; the second row of text tabs that used to sit under it
     // was a split inside the split, and it is gone.
+    // The bookmarks view is the one the reader curates, so its title row
+    // carries the one way to add to it: bookmark the page being shown.
+    let title: Element<'static, Message> =
+        if matches!(view, OutlineView::Bookmarks) && reader.annotatable() {
+            let mut add = button(theme::icon::icon(
+                theme::Icon::BookmarkPlus,
+                theme::type_scale::BODY,
+            ))
+            .padding(theme::space::XS)
+            .style(theme::ambient::tool_button);
+            if live {
+                add = add.on_press(send(ReadCommand::AddBookmark));
+            }
+            row![
+                text(view.label())
+                    .size(theme::type_scale::TITLE)
+                    .width(Length::Fill),
+                hint(add, "Bookmark this page"),
+            ]
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            text(view.label()).size(theme::type_scale::TITLE).into()
+        };
     let header = column![
         sidebar_tabs(
             match view {
@@ -1823,7 +1847,7 @@ fn outline<Message: Clone + 'static>(
             live,
             on_event
         ),
-        text(view.label()).size(theme::type_scale::TITLE),
+        title,
     ]
     .spacing(theme::space::XS);
 
@@ -1843,6 +1867,8 @@ fn outline<Message: Clone + 'static>(
                 reader.outline_viewport.clone(),
                 reader.outline_width.clone(),
                 live,
+                reader.annotatable(),
+                reader.bookmark_edit.clone(),
                 on_event,
             )
         }
@@ -1954,6 +1980,7 @@ fn outline<Message: Clone + 'static>(
     .height(Length::Fill);
 
     let keyboard_focus = reader.outline_focus.is_some();
+    let renaming = reader.bookmark_edit.is_some();
     if !live {
         return panel.into();
     }
@@ -1963,6 +1990,14 @@ fn outline<Message: Clone + 'static>(
 
         if modifiers.control() || modifiers.alt() || modifiers.logo() {
             return None;
+        }
+        // While a bookmark title is being typed, the keys spell the title.
+        // Only Escape is taken — to close the field — because this handler
+        // sees every key before the text input does, and an arrow or an
+        // Enter consumed here would be one stolen from the typing hand.
+        if renaming {
+            return matches!(key, Key::Named(Named::Escape))
+                .then(|| send(ReadCommand::CancelBookmarkTitle));
         }
         if !keyboard_focus {
             return matches!(key, Key::Named(Named::Tab)).then(|| {
@@ -2172,8 +2207,8 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
     // second row of text tabs under this one, which read as a split inside
     // the split.
     let mut tabs = row![tab(
-        theme::Icon::Outline,
-        "Outline",
+        theme::Icon::Bookmark,
+        "Bookmarks",
         selected == SidebarTab::Outline,
         PanelCommand::ShowView(OutlineView::Bookmarks)
     ),]
@@ -2236,11 +2271,21 @@ const OUTLINE_COMPACT_ROW_HEIGHT: f32 = 24.0;
 /// Continuation lines begin where the first line begins (the depth spacer is
 /// outside the text), producing a hanging indent. Deep trees surrender some
 /// indentation on narrow rails so hierarchy never consumes the title.
-pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32) -> (f32, f32) {
+/// The width the rename and delete controls take from a row's label — two
+/// icon buttons and their spacing — reserved only where the document can be
+/// edited at all, so a read-only rail keeps the full line.
+pub const BOOKMARK_ACTIONS_WIDTH: f32 = 44.0;
+
+pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32, editable: bool) -> (f32, f32) {
     let width = width.max(80.0);
     let indent_step = (width / 30.0).clamp(6.0, 10.0);
     let indent = (depth.min(6) as f32 * indent_step).min(width * 0.32);
-    let label_width = (width - indent - 31.0).max(36.0);
+    let actions = if editable {
+        BOOKMARK_ACTIONS_WIDTH
+    } else {
+        0.0
+    };
+    let label_width = (width - indent - 31.0 - actions).max(36.0);
     let ems = title.chars().map(|character| match character {
         ' ' | '\t' => 0.32,
         'i' | 'l' | 'I' | '.' | ',' | ':' | ';' | '!' | '|' => 0.34,
@@ -2257,6 +2302,7 @@ pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32) -> (f32, f32
     (indent, height)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn virtual_bookmark_outline<Message: Clone + 'static>(
     entries: std::sync::Arc<Vec<crate::widgets::context::OutlineRow>>,
     focus: Option<crate::widgets::document::model::OutlineItemId>,
@@ -2264,6 +2310,8 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
     measured_viewport: std::rc::Rc<std::cell::Cell<f32>>,
     measured_width: std::rc::Rc<std::cell::Cell<f32>>,
     live: bool,
+    editable: bool,
+    editing: Option<(usize, String)>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     responsive(move |size| {
@@ -2273,10 +2321,21 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
         measured_width.set(size.width);
         let geometry: Vec<(f32, f32)> = entries
             .iter()
-            .map(|entry| bookmark_row_geometry(&entry.title, entry.depth, size.width))
+            .map(|entry| bookmark_row_geometry(&entry.title, entry.depth, size.width, editable))
             .collect();
         let heights: Vec<f32> = geometry.iter().map(|(_, height)| *height).collect();
         let window = crate::widgets::scroll::variable_window(&heights, scroll, size.height);
+        // One shape for every small control a row carries, the annotations
+        // panel's: an icon button in the tool style, wrapped in its hint.
+        let action = move |icon, describe: &'static str, command: ReadCommand| {
+            let mut control = button(theme::icon::icon(icon, theme::type_scale::LABEL))
+                .padding(theme::space::XS)
+                .style(theme::ambient::tool_button);
+            if live {
+                control = control.on_press(on_event(WidgetEvent::Read(command)));
+            }
+            hint(control, describe)
+        };
         let mut rows = Column::new();
         if window.before > 0.0 {
             rows = rows.push(space::vertical().height(window.before));
@@ -2289,6 +2348,61 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
             };
             let focused = focus.as_ref() == Some(&id);
             let marker = outline_focus_marker(focused);
+
+            // The row whose title is open for editing holds the field where
+            // its label was, with a confirm and a cancel beside it. Submit
+            // commits; Escape reaches this panel's key handler and cancels.
+            if editable
+                && editing
+                    .as_ref()
+                    .is_some_and(|(ordinal, _)| *ordinal == entry.source_ordinal)
+            {
+                let draft = editing
+                    .as_ref()
+                    .map(|(_, draft)| draft.clone())
+                    .unwrap_or_default();
+                let mut field = iced::widget::text_input("Bookmark title", &draft)
+                    .id(bookmark_rename_input_id())
+                    .size(theme::type_scale::LABEL)
+                    .style(theme::ambient::text_field)
+                    .padding(Padding::from([2.0, 6.0]))
+                    .width(Length::Fill);
+                if live {
+                    field = field
+                        .on_input(move |typed| {
+                            on_event(WidgetEvent::Read(ReadCommand::TypeBookmarkTitle(typed)))
+                        })
+                        .on_submit(on_event(WidgetEvent::Read(
+                            ReadCommand::CommitBookmarkTitle,
+                        )));
+                }
+                rows = rows.push(
+                    container(
+                        row![
+                            marker,
+                            space::horizontal().width(Length::Fixed(indent)),
+                            field,
+                            action(
+                                theme::Icon::Check,
+                                "Rename",
+                                ReadCommand::CommitBookmarkTitle
+                            ),
+                            action(
+                                theme::Icon::Close,
+                                "Keep the old title",
+                                ReadCommand::CancelBookmarkTitle
+                            ),
+                        ]
+                        .spacing(theme::space::XS)
+                        .align_y(Alignment::Center),
+                    )
+                    .id(outline_item_id(&id))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(height)),
+                );
+                continue;
+            }
+
             let label = text(entry.title.clone())
                 .size(theme::type_scale::LABEL)
                 .line_height(iced::widget::text::LineHeight::Absolute(iced::Pixels(
@@ -2316,8 +2430,24 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
                     ReadCommand::ActivateOutlineItem(id.clone()),
                 )));
             }
+            let mut content = row![control]
+                .spacing(theme::space::XS)
+                .align_y(Alignment::Center);
+            if editable {
+                content = content
+                    .push(action(
+                        theme::Icon::Pencil,
+                        "Rename this bookmark",
+                        ReadCommand::RenameBookmark(entry.source_ordinal),
+                    ))
+                    .push(action(
+                        theme::Icon::Trash,
+                        "Delete this bookmark",
+                        ReadCommand::DeleteBookmark(entry.source_ordinal),
+                    ));
+            }
             rows = rows.push(
-                container(control)
+                container(content)
                     .id(outline_item_id(&id))
                     .width(Length::Fill)
                     .height(Length::Fixed(height)),
@@ -2388,6 +2518,12 @@ fn virtual_outline<Message: Clone + 'static>(
 /// The one mounted outline stream.
 pub fn outline_scrollable_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-document-outline")
+}
+
+/// The bookmark rename field. One stable identity, because at most one row
+/// is ever open for editing and a keybinding has to be able to focus it.
+pub fn bookmark_rename_input_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("pulpit-bookmark-rename")
 }
 
 /// Stable widget identity for a row whose list position may change.

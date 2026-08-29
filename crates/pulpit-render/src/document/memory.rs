@@ -511,18 +511,57 @@ impl DocumentBackend for MemoryDocument {
     }
 
     fn write_to(&mut self, destination: &Path, _options: SaveOptions) -> Result<u64> {
-        // Enough of a PDF to be recognisably one, and no more: a memory
-        // document is not a document anybody should be saving for real.
+        // A minimal but *well-formed* PDF — catalog, page tree, one empty
+        // page per page of geometry, a correct cross-reference table — rather
+        // than a bare header comment. The difference matters to exactly one
+        // caller: the engine's outline post-pass parses what was just written
+        // to append the edited bookmark tree, which makes the shape of this
+        // file part of the save path that unit tests exercise without PDFium.
         let mut bytes = Vec::from(&b"%PDF-1.7\n% pulpit in-memory document\n"[..]);
+        let pages = self.geometry.len();
+        let mut offsets = Vec::with_capacity(pages + 2);
+        let mut object = |bytes: &mut Vec<u8>, number: usize, body: String| {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{number} 0 obj\n{body}\nendobj\n").as_bytes());
+        };
+        object(
+            &mut bytes,
+            1,
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        );
+        let kids: Vec<String> = (0..pages).map(|page| format!("{} 0 R", page + 3)).collect();
+        object(
+            &mut bytes,
+            2,
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                kids.join(" ")
+            ),
+        );
+        for (page, geometry) in self.geometry.iter().enumerate() {
+            object(
+                &mut bytes,
+                page + 3,
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] >>",
+                    geometry.width, geometry.height
+                ),
+            );
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for offset in &offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
         bytes.extend_from_slice(
             format!(
-                "% {} pages, {} annotations\n",
-                self.geometry.len(),
-                self.total()
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                offsets.len() + 1
             )
             .as_bytes(),
         );
-        bytes.extend_from_slice(b"%%EOF\n");
         std::fs::write(destination, &bytes)?;
         Ok(bytes.len() as u64)
     }

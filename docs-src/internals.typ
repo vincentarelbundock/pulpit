@@ -865,6 +865,32 @@ from one character to another, and everything inside a rectangle), the outline
 lives in PDFium's form-fill environment, keyed to the live `FPDF_PAGE`, and
 exists in no saved copy.
 
+== Bookmarks: the one edit PDFium cannot hold
+
+The outline is the one thing the reader edits that PDFium cannot carry for
+them: `FPDFBookmark_\*` is a read-only family, so an edited bookmark tree has
+nowhere to live in the open document. It lives in the engine instead —
+`PdfDocument` adopts the tree as a model on the first bookmark edit — and
+every create, rename and delete is an ordinary `DocumentCommand` in an
+ordinary transaction: one revision, one undo entry, journalled and replayed
+like a mark. A command names its entry by tree path rather than by a minted
+identity, and the optimistic revision check is what makes a position sound: a
+path built against revision N is applied at revision N or refused, and a
+journal replay resolves every path identically because it replays the same
+transactions in the same order against the same file.
+
+The tree reaches the file the way ISO 32000-2 §7.5.6 says a finished file is
+modified. Save As lets the backend write as before; then `pdfoutline` appends
+an incremental update to what was written — a freshly numbered outline item
+per entry (§12.3.3), a new `/Outlines` root, and the catalog re-emitted under
+its own object number — composed, like `sign::apply`, from `verify` (finding
+the catalog, walking the page tree for `/Dest` page references) and
+`pdfwrite` (the incremental writer signing already uses). Every other viewer
+reads the result as ordinary bookmarks, because that is exactly what it is.
+An encrypted file is refused whole before anything is built, and A6 stands
+throughout: the source is never written, and a failure in the append fails
+the save while leaving the destination holding the backend's complete write.
+
 == The fold: what came from pdfform
 
 pdfform was a second Rust application for filling PDF forms, and it carried a

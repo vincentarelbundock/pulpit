@@ -365,7 +365,7 @@ impl Action {
             Action::FocusNextLink => "Focus the next link",
             Action::FocusPreviousLink => "Focus the previous link",
             Action::ToggleReader => "Read or present",
-            Action::ToggleOutline => "Show or hide the outline",
+            Action::ToggleOutline => "Show or hide the bookmarks",
             Action::FocusSearch => "Search",
             Action::FindNext => "Next match",
             Action::FindPrevious => "Previous match",

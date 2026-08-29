@@ -679,7 +679,7 @@ pub enum OutlineItemId {
 impl OutlineView {
     pub fn label(self) -> &'static str {
         match self {
-            OutlineView::Bookmarks => "Outline",
+            OutlineView::Bookmarks => "Bookmarks",
             OutlineView::Fields => "Fields",
             OutlineView::Annotations => "Annotations",
         }
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn the_outline_rail_opens_on_the_bookmarks() {
         assert_eq!(OutlineView::default(), OutlineView::Bookmarks);
-        assert_eq!(OutlineView::Bookmarks.label(), "Outline");
+        assert_eq!(OutlineView::Bookmarks.label(), "Bookmarks");
         // Each tab names itself, so a view that is in front is still labelled.
         assert!(!ReaderControls::default().navigation_overflow);
         assert!(!ReaderControls::default().tool_overflow);

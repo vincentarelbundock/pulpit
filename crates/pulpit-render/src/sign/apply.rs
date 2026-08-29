@@ -1362,13 +1362,13 @@ fn write_and_sync(
 
 // --- Reading the source ---------------------------------------------------
 
-fn entry<'a>(entries: &'a [(String, PdfObject)], key: &str) -> Option<&'a PdfObject> {
+pub(crate) fn entry<'a>(entries: &'a [(String, PdfObject)], key: &str) -> Option<&'a PdfObject> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 /// Set a key, in place when it already exists so that the dictionary's
 /// original order survives the round trip.
-fn set_entry(entries: &mut Vec<(String, PdfObject)>, key: &str, value: PdfObject) {
+pub(crate) fn set_entry(entries: &mut Vec<(String, PdfObject)>, key: &str, value: PdfObject) {
     match entries.iter_mut().find(|(k, _)| k == key) {
         Some(slot) => slot.1 = value,
         None => entries.push((key.to_string(), value)),
@@ -1377,7 +1377,7 @@ fn set_entry(entries: &mut Vec<(String, PdfObject)>, key: &str, value: PdfObject
 
 /// Parse the dictionary of object `obj_num` as it stands in the newest
 /// revision that defines it.
-fn parse_object_dictionary(
+pub(crate) fn parse_object_dictionary(
     bytes: &[u8],
     obj_num: u32,
 ) -> Result<Vec<(String, PdfObject)>, SignApplyError> {
@@ -1388,7 +1388,7 @@ fn parse_object_dictionary(
 ///
 /// Building an `ObjectResolver` re-parses the whole cross-reference chain, so
 /// a loop over the AcroForm's fields must build one, not one per field.
-fn parse_object_dictionary_with(
+pub(crate) fn parse_object_dictionary_with(
     resolver: &crate::verify::ObjectResolver<'_>,
     obj_num: u32,
 ) -> Result<Vec<(String, PdfObject)>, SignApplyError> {
@@ -1630,7 +1630,7 @@ const MAX_PAGE_TREE_NODES: usize = 50_000;
 /// producer that omits it still expects the node to be a page. The walk is
 /// bounded in depth and node count and refuses to revisit a node, so a cycle
 /// is a refusal rather than a hang.
-fn page_objects(
+pub(crate) fn page_objects(
     bytes: &[u8],
     catalog_entries: &[(String, PdfObject)],
 ) -> Result<Vec<u32>, SignApplyError> {

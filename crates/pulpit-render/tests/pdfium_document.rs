@@ -1676,3 +1676,69 @@ fn links_and_popups_are_structure_rather_than_marks() {
         pulpit_render::document::AnnotationSupport::Unsupported
     );
 }
+
+/// The full bookmark round trip: edits made as transactions, written to a
+/// file as a real `/Outlines` tree by Save As, and read back through PDFium's
+/// own bookmark API — the same walk any other viewer would make.
+#[test]
+fn an_edited_bookmark_tree_survives_a_save_and_a_pdfium_reopen() {
+    use pulpit_core::navigation::BookmarkCommand;
+
+    let Some(mut guard) = common::pdfium("the PDFium bookmark tests") else {
+        return;
+    };
+    let directory = temp_dir("bookmarks");
+    let path = source(&directory);
+    let saved = directory.join("bookmarked.pdf");
+
+    {
+        let backend = &mut *guard;
+        let mut document = open(backend, &path);
+        let bookmark = |path: &[usize], title: &str, page: usize| {
+            DocumentCommand::Bookmark(BookmarkCommand::Create {
+                path: path.to_vec(),
+                title: title.to_string(),
+                page,
+            })
+        };
+        document
+            .apply(
+                document.revision(),
+                DocumentTransaction(vec![
+                    bookmark(&[0], "Où commencer", 0),
+                    bookmark(&[1], "Results", 2),
+                    bookmark(&[1, 0], "Detail", 2),
+                ]),
+            )
+            .expect("the bookmarks are created");
+        document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(DocumentCommand::Bookmark(BookmarkCommand::Rename {
+                    path: vec![1],
+                    title: "Findings".to_string(),
+                })),
+            )
+            .expect("the rename lands");
+        document
+            .save_as(&saved, SaveOptions::verified())
+            .expect("the save succeeds");
+    }
+
+    let backend = &mut *guard;
+    let reopened = open(backend, &saved);
+    let outline = reopened.outline().expect("the saved file has an outline");
+    let titles: Vec<&str> = outline
+        .flattened()
+        .iter()
+        .map(|entry| entry.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["Où commencer", "Findings", "Detail"],
+        "the edited tree is what PDFium reads back"
+    );
+    assert_eq!(outline.entries[0].page(), Some(0));
+    let child = &outline.entries[1].children[0];
+    assert_eq!((child.depth, child.page()), (1, Some(2)));
+}

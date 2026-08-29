@@ -424,6 +424,9 @@ pub struct ReaderData<'a> {
     /// The outline row owned by the keyboard, when the sidebar rather than
     /// the document owns navigation.
     pub outline_focus: Option<&'a crate::widgets::document::model::OutlineItemId>,
+    /// The bookmark row whose title is open for editing — its flattened
+    /// ordinal — and what the rename field holds while it is typed.
+    pub bookmark_edit: Option<(usize, String)>,
     pub outline_scroll: f32,
     pub outline_viewport: std::rc::Rc<std::cell::Cell<f32>>,
     pub outline_width: std::rc::Rc<std::cell::Cell<f32>>,

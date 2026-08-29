@@ -129,6 +129,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         scale: 1.0,
         outline: std::sync::Arc::default(),
         outline_focus: None,
+        bookmark_edit: None,
         outline_scroll: 0.0,
         outline_viewport: std::rc::Rc::new(std::cell::Cell::new(600.0)),
         outline_width: std::rc::Rc::new(std::cell::Cell::new(280.0)),

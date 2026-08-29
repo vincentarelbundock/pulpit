@@ -1253,6 +1253,10 @@ pub enum DocumentCommand {
         #[serde(default)]
         selected: Vec<u32>,
     },
+    /// An edit to the document's outline tree (§12.3.3 of the PDF spec: the
+    /// bookmarks). Addressed by tree path, which the revision check makes
+    /// safe — see [`pulpit_core::navigation::BookmarkPath`].
+    Bookmark(pulpit_core::navigation::BookmarkCommand),
 }
 
 impl DocumentCommand {
@@ -1260,6 +1264,7 @@ impl DocumentCommand {
         match self {
             DocumentCommand::Annotation(command) => command.label(),
             DocumentCommand::SetField { name, .. } => format!("Fill {name}"),
+            DocumentCommand::Bookmark(command) => command.label().to_string(),
         }
     }
 }
@@ -1336,6 +1341,24 @@ impl DocumentTransaction {
                 DocumentCommand::SetField { value, .. } => {
                     limits::within("field value", value.len(), limits::MAX_FIELD_VALUE_BYTES)?;
                 }
+                DocumentCommand::Bookmark(bookmark) => {
+                    use pulpit_core::navigation::{
+                        BookmarkCommand, MAX_OUTLINE_DEPTH, MAX_OUTLINE_TITLE_CHARS,
+                    };
+                    let (path, title) = match bookmark {
+                        BookmarkCommand::Create { path, title, .. }
+                        | BookmarkCommand::Rename { path, title } => (path, Some(title)),
+                        BookmarkCommand::Delete { path } => (path, None),
+                    };
+                    limits::within("bookmark path depth", path.len(), MAX_OUTLINE_DEPTH)?;
+                    if let Some(title) = title {
+                        limits::within(
+                            "bookmark title",
+                            title.chars().count(),
+                            MAX_OUTLINE_TITLE_CHARS,
+                        )?;
+                    }
+                }
             }
         }
         limits::within(
@@ -1358,6 +1381,12 @@ pub enum AppliedEffect {
     /// one: a checkbox asked for "yes" reports the export value it actually
     /// took.
     Field { name: String, value: String },
+    /// The outline tree was edited; this is the whole of what it now is.
+    ///
+    /// The whole tree rather than a delta, because a bookmark edit repaints no
+    /// page — nothing else would tell the rail what to show, and the tree is
+    /// bounded to [`pulpit_core::navigation::MAX_OUTLINE_ENTRIES`].
+    Outline(Box<pulpit_core::navigation::Outline>),
 }
 
 /// What the engine has to keep in order to reverse one transaction (§6.2).
@@ -1412,6 +1441,20 @@ pub enum UndoOperation {
         /// kind, and absent from journals written before it existed.
         #[serde(default)]
         selected: Vec<u32>,
+    },
+    /// Put a deleted bookmark back where it was, subtree and all.
+    InsertBookmark {
+        path: pulpit_core::navigation::BookmarkPath,
+        before: Box<pulpit_core::navigation::OutlineEntry>,
+    },
+    /// Remove a bookmark that was created.
+    RemoveBookmark {
+        path: pulpit_core::navigation::BookmarkPath,
+    },
+    /// Put a bookmark's previous title back.
+    RetitleBookmark {
+        path: pulpit_core::navigation::BookmarkPath,
+        title: String,
     },
 }
 

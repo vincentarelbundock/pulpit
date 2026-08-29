@@ -338,6 +338,10 @@ pub struct ReaderSession {
     scale: f32,
     outline: std::sync::Arc<Vec<OutlineRow>>,
     outline_focus: Option<OutlineItemId>,
+    /// The bookmark row whose title is open for editing, by flattened
+    /// ordinal, and what the field holds while it is being typed — the rail's
+    /// counterpart of [`ReaderSession::page_entry`].
+    bookmark_edit: Option<(usize, String)>,
     /// One scroll offset, viewport and width per rail view, so switching tabs
     /// and switching back puts a reader where they were rather than at the
     /// top. Indexed by [`ReaderSession::outline_slot`].
@@ -1398,6 +1402,32 @@ impl ReaderSession {
         self.repair_outline_focus();
     }
 
+    /// Open one bookmark row's title for editing, priming the field with the
+    /// title it has. Answers whether the rail has such a row at all.
+    pub fn begin_bookmark_rename(&mut self, ordinal: usize) -> bool {
+        let Some(row) = self
+            .outline
+            .iter()
+            .find(|row| row.source_ordinal == ordinal)
+        else {
+            return false;
+        };
+        self.bookmark_edit = Some((ordinal, row.title.clone()));
+        true
+    }
+
+    /// The bookmark rename in progress: which row, and what the field holds.
+    pub fn bookmark_edit(&self) -> Option<(usize, &str)> {
+        self.bookmark_edit
+            .as_ref()
+            .map(|(ordinal, draft)| (*ordinal, draft.as_str()))
+    }
+
+    /// Close the rename and hand its state to whoever commits it.
+    pub fn take_bookmark_edit(&mut self) -> Option<(usize, String)> {
+        self.bookmark_edit.take()
+    }
+
     pub fn outline_len(&self) -> usize {
         match self.controls.outline {
             OutlineView::Bookmarks => self.outline.len(),
@@ -1592,6 +1622,7 @@ impl ReaderSession {
                         &entry.title,
                         entry.depth,
                         width,
+                        self.open && self.level.allows_annotation(),
                     )
                     .1
                 })
@@ -1741,6 +1772,14 @@ impl ReaderSession {
 
         let mut urgency = RasterUrgency::Deferred;
         for command in &transaction.0 {
+            // A bookmark edit changes no page at all, so nothing needs
+            // re-rendering for it.
+            if matches!(
+                command,
+                pulpit_render::document::DocumentCommand::Bookmark(_)
+            ) {
+                continue;
+            }
             let pulpit_render::document::DocumentCommand::Annotation(command) = command else {
                 // A form field's value is drawn by the renderer and by nothing
                 // else here.
@@ -3760,6 +3799,18 @@ impl ReaderSession {
                 self.page_entry = Some(typed.clone());
                 false
             }
+            ReadCommand::TypeBookmarkTitle(typed) => {
+                // Kept as typed for the same reason as the page box: whether
+                // it is a title is the commit's question.
+                if let Some((_, draft)) = &mut self.bookmark_edit {
+                    *draft = typed.clone();
+                }
+                false
+            }
+            ReadCommand::CancelBookmarkTitle => {
+                self.bookmark_edit = None;
+                false
+            }
             ReadCommand::CommitPage => {
                 let Some(entry) = self.page_entry.take() else {
                     return false;
@@ -4032,7 +4083,14 @@ impl ReaderSession {
             // either way — so it is handled there and reaches this only as
             // the reveal it turns into.
             | ReadCommand::GoToAnnotation(_)
-            | ReadCommand::EditSelected => false,
+            | ReadCommand::EditSelected
+            // Bookmark edits are document mutations built from the outline
+            // tree, which the application holds; beginning a rename needs a
+            // focus task only the application can return.
+            | ReadCommand::AddBookmark
+            | ReadCommand::RenameBookmark(_)
+            | ReadCommand::CommitBookmarkTitle
+            | ReadCommand::DeleteBookmark(_) => false,
         }
     }
 
@@ -4456,6 +4514,7 @@ impl ReaderSession {
             scale: self.scale,
             outline: self.outline.clone(),
             outline_focus: self.outline_focus.as_ref(),
+            bookmark_edit: self.bookmark_edit.clone(),
             outline_scroll: self.outline_scroll_position().0,
             outline_viewport: self.outline_viewport[self.outline_slot()].clone(),
             outline_width: self.outline_width[self.outline_slot()].clone(),

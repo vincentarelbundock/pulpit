@@ -79,6 +79,8 @@ pub enum DocumentError {
     },
     #[error("the mark cannot be written: {0}")]
     Rejected(#[from] pulpit_core::annotate::draft::DraftError),
+    #[error("the bookmark edit was refused: {0}")]
+    Bookmark(#[from] pulpit_core::navigation::BookmarkEditError),
     #[error(transparent)]
     Limit(#[from] LimitExceeded),
     #[error("this document does not allow being changed")]
@@ -307,6 +309,14 @@ pub struct PdfDocument<'a> {
     ids: IdGenerator,
     /// True from the first successful mutation. Visible in the UI (§11.2).
     dirty: bool,
+    /// The outline tree once a bookmark edit has touched it, loaded from the
+    /// backend on the first edit and authoritative from then on.
+    ///
+    /// Held here rather than in the backend because no PDF engine offers a
+    /// bookmark *write* — PDFium's `FPDFBookmark_*` family is read-only — so
+    /// the edited tree is a model of this engine, serialised into the file's
+    /// `/Outlines` only when the document is saved.
+    outline: Option<pulpit_core::navigation::Outline>,
 }
 
 impl std::fmt::Debug for PdfDocument<'_> {
@@ -328,6 +338,7 @@ impl<'a> PdfDocument<'a> {
             revision: DocumentRevision::INITIAL,
             ids: IdGenerator::new(id_seed),
             dirty: false,
+            outline: None,
         }
     }
 
@@ -470,9 +481,22 @@ impl<'a> PdfDocument<'a> {
         Ok(chunk)
     }
 
-    /// The document's bookmark tree, for the outline rail.
+    /// The document's bookmark tree, for the outline rail: the edited model
+    /// once one exists, the file's own tree until then.
     pub fn outline(&self) -> Result<pulpit_core::navigation::Outline> {
-        self.backend.outline()
+        match &self.outline {
+            Some(outline) => Ok(outline.clone()),
+            None => self.backend.outline(),
+        }
+    }
+
+    /// The tree a bookmark edit works on, loaded from the backend the first
+    /// time one arrives.
+    fn outline_model(&mut self) -> Result<&mut pulpit_core::navigation::Outline> {
+        if self.outline.is_none() {
+            self.outline = Some(self.backend.outline()?);
+        }
+        Ok(self.outline.as_mut().expect("just loaded"))
     }
 
     /// What the document says about itself, for the properties view.
@@ -632,7 +656,26 @@ impl<'a> PdfDocument<'a> {
                 return Err(DocumentError::SourceIsDestination);
             }
         }
-        let bytes = self.backend.write_to(destination, options)?;
+        let mut bytes = self.backend.write_to(destination, options)?;
+        // Bookmark edits live in this engine, not in the backend — no PDF
+        // library writes outlines — so a save serialises them itself: the
+        // file the backend just wrote gains an incremental update carrying
+        // the edited `/Outlines` tree, replaced with the same atomicity the
+        // backend used. A failure here fails the save whole; the destination
+        // still holds the backend's complete write, never a torn one.
+        if let Some(outline) = &self.outline {
+            let saved = std::fs::read(destination)?;
+            let updated = crate::pdfoutline::with_outline(&saved, outline)
+                .map_err(|error| DocumentError::Save(error.to_string()))?;
+            bytes = updated.len() as u64;
+            crate::atomic::replace(
+                destination,
+                "outline",
+                crate::atomic::Visibility::Inherited,
+                &updated,
+            )
+            .map_err(|error| DocumentError::Save(error.to_string()))?;
+        }
         Ok(SavedDocument {
             path: destination.to_path_buf(),
             revision: self.revision,
@@ -739,6 +782,25 @@ impl<'a> PdfDocument<'a> {
                         return Err(DocumentError::MutationForbidden);
                     }
                 }
+                DocumentCommand::Bookmark(bookmark) => {
+                    use pulpit_core::navigation::{BookmarkCommand, BookmarkEditError};
+                    match bookmark {
+                        BookmarkCommand::Create { title, page, .. } => {
+                            self.check_page(PageIndex(*page))?;
+                            if title.trim().is_empty() {
+                                return Err(BookmarkEditError::Untitled.into());
+                            }
+                        }
+                        BookmarkCommand::Rename { title, .. } => {
+                            if title.trim().is_empty() {
+                                return Err(BookmarkEditError::Untitled.into());
+                            }
+                        }
+                        // Whether the path names an entry is the tree's to
+                        // answer, at apply time.
+                        BookmarkCommand::Delete { .. } => {}
+                    }
+                }
             }
         }
         Ok(())
@@ -773,6 +835,31 @@ impl<'a> PdfDocument<'a> {
                 })
             }
             DocumentCommand::Annotation(AnnotationCommand::Delete { id }) => self.delete_step(id),
+            DocumentCommand::Bookmark(bookmark) => {
+                use pulpit_core::navigation::BookmarkCommand;
+                let outline = self.outline_model()?;
+                let undo = match bookmark {
+                    BookmarkCommand::Create { path, title, page } => {
+                        outline.create_at(path, title, *page)?;
+                        UndoOperation::RemoveBookmark { path: path.clone() }
+                    }
+                    BookmarkCommand::Rename { path, title } => {
+                        let previous = outline.retitle_at(path, title)?;
+                        UndoOperation::RetitleBookmark {
+                            path: path.clone(),
+                            title: previous,
+                        }
+                    }
+                    BookmarkCommand::Delete { path } => {
+                        let before = outline.remove_at(path)?;
+                        UndoOperation::InsertBookmark {
+                            path: path.clone(),
+                            before: Box::new(before),
+                        }
+                    }
+                };
+                Ok(Self::outline_step(outline, undo))
+            }
             DocumentCommand::SetField {
                 name,
                 value,
@@ -876,6 +963,48 @@ impl<'a> PdfDocument<'a> {
                     },
                 })
             }
+            UndoOperation::InsertBookmark { path, before } => {
+                let outline = self.outline_model()?;
+                outline.insert_at(path, (**before).clone())?;
+                Ok(Self::outline_step(
+                    outline,
+                    UndoOperation::RemoveBookmark { path: path.clone() },
+                ))
+            }
+            UndoOperation::RemoveBookmark { path } => {
+                let outline = self.outline_model()?;
+                let before = outline.remove_at(path)?;
+                Ok(Self::outline_step(
+                    outline,
+                    UndoOperation::InsertBookmark {
+                        path: path.clone(),
+                        before: Box::new(before),
+                    },
+                ))
+            }
+            UndoOperation::RetitleBookmark { path, title } => {
+                let outline = self.outline_model()?;
+                let previous = outline.retitle_at(path, title)?;
+                Ok(Self::outline_step(
+                    outline,
+                    UndoOperation::RetitleBookmark {
+                        path: path.clone(),
+                        title: previous,
+                    },
+                ))
+            }
+        }
+    }
+
+    /// The step every outline edit produces: no page and no region — a
+    /// bookmark repaints nothing — and the whole tree as the effect, because
+    /// the tree is the only thing the rail can show.
+    fn outline_step(outline: &pulpit_core::navigation::Outline, undo: UndoOperation) -> Step {
+        Step {
+            page: None,
+            region: None,
+            effect: AppliedEffect::Outline(Box::new(outline.clone())),
+            undo,
         }
     }
 
@@ -1792,5 +1921,189 @@ mod tests {
             .save_as(&directory.path().join("out.pdf"), SaveOptions::verified())
             .unwrap();
         assert_eq!(saved.revision, document.revision());
+    }
+
+    // -- bookmarks -----------------------------------------------------------
+
+    use pulpit_core::navigation::BookmarkCommand;
+
+    fn add_bookmark(path: &[usize], title: &str, page: usize) -> DocumentCommand {
+        DocumentCommand::Bookmark(BookmarkCommand::Create {
+            path: path.to_vec(),
+            title: title.to_string(),
+            page,
+        })
+    }
+
+    fn outline_titles(document: &PdfDocument<'_>) -> Vec<String> {
+        document
+            .outline()
+            .unwrap()
+            .flattened()
+            .iter()
+            .map(|entry| entry.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_bookmark_edit_is_a_transaction_like_any_other() {
+        let mut document = document();
+        let applied = document
+            .apply(
+                DocumentRevision::INITIAL,
+                DocumentTransaction::one(add_bookmark(&[0], "Introduction", 0)),
+            )
+            .unwrap();
+        assert_eq!(document.revision(), DocumentRevision(1));
+        assert!(document.is_dirty());
+        assert!(
+            applied.dirty_pages.is_empty() && applied.dirty_region.is_none(),
+            "a bookmark repaints nothing"
+        );
+        match &applied.effects[0] {
+            AppliedEffect::Outline(outline) => {
+                assert_eq!(outline.entries[0].title, "Introduction");
+                assert_eq!(outline.entries[0].page(), Some(0));
+            }
+            other => panic!("expected the outline, got {other:?}"),
+        }
+        assert_eq!(outline_titles(&document), vec!["Introduction"]);
+    }
+
+    #[test]
+    fn a_bookmark_survives_the_undo_redo_cycle_it_documents() {
+        let mut document = document();
+        let created = document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(add_bookmark(&[0], "Results", 2)),
+            )
+            .unwrap();
+        let renamed = document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(DocumentCommand::Bookmark(BookmarkCommand::Rename {
+                    path: vec![0],
+                    title: "Findings".to_string(),
+                })),
+            )
+            .unwrap();
+        assert_eq!(outline_titles(&document), vec!["Findings"]);
+
+        // Undo the rename, redo it through the returned inverse, undo again —
+        // every Applied's `undo` reverses the one before it (§9.5).
+        let undone = document.undo(document.revision(), renamed.undo).unwrap();
+        assert_eq!(outline_titles(&document), vec!["Results"]);
+        let redone = document.undo(document.revision(), undone.undo).unwrap();
+        assert_eq!(outline_titles(&document), vec!["Findings"]);
+        document.undo(document.revision(), redone.undo).unwrap();
+        assert_eq!(outline_titles(&document), vec!["Results"]);
+
+        // Undo all the way back: the tree is empty again.
+        document.undo(document.revision(), created.undo).unwrap();
+        assert!(document.outline().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_deleted_subtree_comes_back_whole() {
+        let mut document = document();
+        document
+            .apply(
+                document.revision(),
+                DocumentTransaction(vec![
+                    add_bookmark(&[0], "Method", 1),
+                    add_bookmark(&[0, 0], "Setup", 1),
+                    add_bookmark(&[0, 1], "Measurements", 2),
+                ]),
+            )
+            .unwrap();
+        let before = document.outline().unwrap();
+        let deleted = document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(DocumentCommand::Bookmark(BookmarkCommand::Delete {
+                    path: vec![0],
+                })),
+            )
+            .unwrap();
+        assert!(document.outline().unwrap().is_empty());
+        document.undo(document.revision(), deleted.undo).unwrap();
+        assert_eq!(document.outline().unwrap(), before);
+    }
+
+    #[test]
+    fn a_bookmark_edit_that_fails_rolls_the_transaction_back() {
+        let mut document = document();
+        let error = document
+            .apply(
+                document.revision(),
+                DocumentTransaction(vec![
+                    add_bookmark(&[0], "Kept back", 0),
+                    // Path [5] names nothing: the whole transaction must fail.
+                    DocumentCommand::Bookmark(BookmarkCommand::Delete { path: vec![5] }),
+                ]),
+            )
+            .unwrap_err();
+        assert!(matches!(error, DocumentError::Bookmark(_)));
+        assert_eq!(document.revision(), DocumentRevision::INITIAL);
+        assert!(document.outline().unwrap().is_empty(), "rolled back");
+    }
+
+    #[test]
+    fn a_saved_document_carries_its_edited_bookmarks() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut document = document();
+        document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(add_bookmark(&[0], "Introduction", 1)),
+            )
+            .unwrap();
+        let destination = directory.path().join("out.pdf");
+        document
+            .save_as(&destination, SaveOptions::verified())
+            .unwrap();
+
+        let bytes = std::fs::read(&destination).unwrap();
+        let resolver = crate::verify::ObjectResolver::new(&bytes);
+        let root = resolver.root_ref().expect("a saved file has a catalog");
+        let catalog = resolver.resolve(root.0).unwrap().0;
+        let catalog = catalog.as_dict().expect("the catalog is a dictionary");
+        let outlines = resolver
+            .deref(catalog.get("Outlines").expect("/Outlines was appended"))
+            .unwrap();
+        let outlines = outlines.as_dict().expect("a dictionary");
+        let first = resolver
+            .deref(outlines.get("First").expect("one item"))
+            .unwrap();
+        let first = first.as_dict().expect("a dictionary");
+        match first.get("Title") {
+            Some(crate::verify::PdfValue::Str(title)) => {
+                assert_eq!(crate::pdftext::decode_text_string(title), "Introduction");
+            }
+            other => panic!("expected a /Title string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bookmark_for_a_page_the_document_does_not_have_is_refused() {
+        let mut document = document();
+        let error = document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(add_bookmark(&[0], "Nowhere", 9)),
+            )
+            .unwrap_err();
+        assert!(matches!(error, DocumentError::NoSuchPage { .. }));
+        let error = document
+            .apply(
+                document.revision(),
+                DocumentTransaction::one(add_bookmark(&[0], "   ", 0)),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DocumentError::Bookmark(pulpit_core::navigation::BookmarkEditError::Untitled)
+        ));
     }
 }

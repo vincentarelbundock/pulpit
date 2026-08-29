@@ -250,6 +250,22 @@ pub enum ReadCommand {
     /// which is the only reasonable way to remove one from a page nobody is
     /// looking at.
     DeleteAnnotation(pulpit_core::annotate::AnnotationId),
+    /// Bookmark the page being shown: a new top-level entry in the document's
+    /// outline tree, placed in page order (§12.3.3 of the PDF spec).
+    AddBookmark,
+    /// Open one bookmark row's title for editing, named by its flattened
+    /// ordinal in the rail.
+    RenameBookmark(usize),
+    /// What the open rename field currently holds. Kept as typed; deciding
+    /// whether it is a title is the commit's job.
+    TypeBookmarkTitle(String),
+    /// Commit the open rename as a document transaction.
+    CommitBookmarkTitle,
+    /// Close the open rename without changing anything.
+    CancelBookmarkTitle,
+    /// Take one bookmark — and its subtree — out of the document's outline,
+    /// named by its flattened ordinal in the rail.
+    DeleteBookmark(usize),
     /// Show bookmarks or thumbnails in the outline rail.
     SetOutlineView(crate::widgets::document::model::OutlineView),
     MoveOutlineFocus(i32),

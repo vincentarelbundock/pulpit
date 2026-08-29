@@ -26,6 +26,7 @@ pub mod document;
 pub mod formats;
 pub mod images;
 pub mod pdf;
+pub mod pdfoutline;
 pub mod pdftext;
 pub mod pdfwrite;
 pub mod protocol;

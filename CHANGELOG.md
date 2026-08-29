@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bookmarks you can make, rename and delete — written into the PDF
+  itself.** The sidebar's Outline tab is now called Bookmarks, wears the
+  bookmark icon, and edits the document's real outline tree rather than only
+  showing it: a button in its title row bookmarks the page being shown, and
+  every row carries a rename (edited in place, in the rail) and a delete.
+  Each edit is one undoable step in the same history as the marks, and Save
+  As writes the tree as genuine `/Outlines` entries — an incremental update,
+  the way the PDF specification modifies a finished file — so Acrobat,
+  Okular and every other reader show your bookmarks as ordinary bookmarks.
+  There is no sidecar and nothing to sync: the file is the only copy.
+
 - **Shapes: a box, an ellipse, a line and an arrow.** One tool in the document
   palette with four modes, drawn by dragging, in the pen's own colour and
   width — the same shape the highlighter's three nibs and the band's three

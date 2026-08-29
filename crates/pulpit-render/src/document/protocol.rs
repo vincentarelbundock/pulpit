@@ -21,7 +21,7 @@ use super::model::{
 /// Bumped whenever the document wire format changes. Carried alongside the
 /// renderer's own [`crate::protocol::PROTOCOL_VERSION`]: a worker that does not
 /// answer with the same version is shut down rather than trusted.
-pub const DOCUMENT_PROTOCOL_VERSION: u32 = 6;
+pub const DOCUMENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Open a document for reading and annotating.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -858,6 +858,10 @@ impl From<&super::DocumentError> for DocumentFailure {
             }
             E::NoSuchAnnotation(id) => DocumentFailure::NotFound(format!("annotation {id}")),
             E::NoSuchField(name) => DocumentFailure::NotFound(format!("field {name}")),
+            E::Bookmark(pulpit_core::navigation::BookmarkEditError::NoSuchEntry) => {
+                DocumentFailure::NotFound("bookmark at that position".to_string())
+            }
+            E::Bookmark(_) => DocumentFailure::Refused(error.to_string()),
             E::NotEditable(_)
             | E::Rejected(_)
             | E::Limit(_)
@@ -969,6 +973,23 @@ impl DocumentRequest {
     }
 }
 
+/// The receipt-side bounds on a bookmark tree (A8): however it was built, no
+/// more entries than [`pulpit_core::navigation::MAX_OUTLINE_ENTRIES`] and no
+/// title past [`pulpit_core::navigation::MAX_OUTLINE_TITLE_CHARS`].
+fn validate_outline(outline: &pulpit_core::navigation::Outline) -> Result<(), LimitExceeded> {
+    use pulpit_core::navigation::{MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TITLE_CHARS};
+    let flattened = outline.flattened();
+    limits::within("outline entries", flattened.len(), MAX_OUTLINE_ENTRIES)?;
+    for entry in flattened {
+        limits::within(
+            "an outline title",
+            entry.title.chars().count(),
+            MAX_OUTLINE_TITLE_CHARS,
+        )?;
+    }
+    Ok(())
+}
+
 impl DocumentResponse {
     /// Check an answer before anything is built from it. The worker is
     /// supervised, not trusted: it has just parsed a hostile document.
@@ -1017,6 +1038,18 @@ impl DocumentResponse {
                         limit: 0,
                     })
                 }
+            }
+            // The bookmark tree, whether read whole or carried back as the
+            // effect of an edit: built from a hostile file, so its bounds are
+            // checked where it crosses the wire, not only where it was built.
+            DocumentResponse::Outline(outline) => validate_outline(outline),
+            DocumentResponse::Applied(applied) => {
+                for effect in &applied.effects {
+                    if let crate::document::AppliedEffect::Outline(outline) = effect {
+                        validate_outline(outline)?;
+                    }
+                }
+                Ok(())
             }
             DocumentResponse::Form(result) => {
                 limits::within(

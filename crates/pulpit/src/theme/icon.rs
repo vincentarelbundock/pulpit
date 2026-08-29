@@ -127,6 +127,11 @@ pub enum Icon {
     ChevronRight,
     /// The bookmark tree: `list-tree`.
     Outline,
+    /// One bookmark, and the sidebar tab holding the tree of them:
+    /// `bookmark`.
+    Bookmark,
+    /// Bookmark the page being shown: `bookmark-plus`.
+    BookmarkPlus,
     /// Find text in the document: `search`.
     Search,
     /// A document, for a page thumbnail with nothing in it yet: `file-text`.
@@ -195,6 +200,8 @@ impl Icon {
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Outline => include_bytes!("../../assets/icons/list-tree.svg"),
+            Icon::Bookmark => include_bytes!("../../assets/icons/bookmark.svg"),
+            Icon::BookmarkPlus => include_bytes!("../../assets/icons/bookmark-plus.svg"),
             Icon::Search => include_bytes!("../../assets/icons/search.svg"),
             Icon::Document => include_bytes!("../../assets/icons/file-text.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
@@ -216,7 +223,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 53] = [
+    const ALL: [Icon; 55] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -261,6 +268,8 @@ impl Icon {
         Icon::ChevronLeft,
         Icon::ChevronRight,
         Icon::Outline,
+        Icon::Bookmark,
+        Icon::BookmarkPlus,
         Icon::Search,
         Icon::Document,
         Icon::Check,
