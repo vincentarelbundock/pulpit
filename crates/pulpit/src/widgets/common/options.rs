@@ -73,7 +73,11 @@ impl<Message: Clone + 'static> Options<Message> {
 
 impl<Message: Clone + 'static> From<Options<Message>> for Element<'static, Message> {
     fn from(options: Options<Message>) -> Self {
-        let header = panel_header(options.title, options.on_close);
+        // The header's spacer fills, and a filling child inside a hugging
+        // column resolves to whatever the popover's overlay offers — the
+        // whole window. Boxed to the controls' own width, the panel hugs.
+        let header = container(panel_header(options.title, options.on_close))
+            .width(iced::Length::Fixed(CONTROL_WIDTH));
 
         let mut panel: Column<'static, Message> = column![header].spacing(theme::space::S);
         for (label, control) in options.rows {

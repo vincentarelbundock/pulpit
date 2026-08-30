@@ -9816,6 +9816,7 @@ impl App {
                         text: String::new(),
                         typst: false,
                         editing: None,
+                        font_size: self.reader.controls().text_size,
                     });
                 }
                 unfocus()
@@ -9900,6 +9901,7 @@ impl App {
                     text: found.text,
                     typst: found.typst,
                     editing: Some(found.id),
+                    font_size: found.font_size,
                 })
             }
             ReadCommand::PageDoubleClicked => {
@@ -9918,6 +9920,7 @@ impl App {
                     text: found.text,
                     typst: found.typst,
                     editing: Some(found.id),
+                    font_size: found.font_size,
                 })
             }
             ReadCommand::PageReleased => {
@@ -10032,6 +10035,16 @@ impl App {
                     self.pending_auto_crop = None;
                 }
                 let needs_render = self.reader.apply(&command);
+                // A size chosen while a mark is being written shows up in the
+                // box being typed into, not only in the mark it will commit
+                // as: the choice is visible before it is made (§8.5). Read
+                // back from the session so the editor composes at the size
+                // the slider's repair actually kept.
+                if matches!(command, ReadCommand::SetTextSize(_)) {
+                    if let Some(composing) = &mut self.composing_mark {
+                        composing.font_size = self.reader.controls().text_size;
+                    }
+                }
                 // A colour chosen here is the colour at the lectern too: one
                 // pen, whichever mode it was picked up in. The presenter's
                 // palette keeps the choice, so it also survives into the next
@@ -10189,7 +10202,22 @@ impl App {
                 (colour.1 * 255.0) as u8,
                 (colour.2 * 255.0) as u8,
             );
-            match crate::typst_annotation::rasterise(&composing.text, 240.0, 12.0, colour, 2.0) {
+            // The compile is set at the size the slider chose and to the room
+            // the mark actually has — the page edge for a new mark, its own
+            // box for a rewrite — rather than at one size on one guessed
+            // width for every mark.
+            let width_pt = self.reader.typst_compose_width(
+                composing.page,
+                composing.at,
+                composing.editing.as_ref(),
+            );
+            match crate::typst_annotation::rasterise(
+                &composing.text,
+                width_pt,
+                composing.font_size,
+                colour,
+                2.0,
+            ) {
                 Ok(rendered) => {
                     // A rewrite keeps the mark's identity and its corner; only
                     // a new mark chooses where it goes (A3, §8.4).
@@ -10200,12 +10228,14 @@ impl App {
                             composing.at,
                             composing.text,
                             rendered,
+                            composing.font_size,
                         ),
                         None => self.reader.place_typst(
                             composing.page,
                             composing.at,
                             composing.text,
                             rendered,
+                            composing.font_size,
                         ),
                     };
                     if let Some(transaction) = transaction {
@@ -10220,9 +10250,12 @@ impl App {
         }
 
         let transaction = match &composing.editing {
-            Some(id) => self
-                .reader
-                .replace_text(id, composing.page, composing.text.clone()),
+            Some(id) => self.reader.replace_text(
+                id,
+                composing.page,
+                composing.text.clone(),
+                composing.font_size,
+            ),
             None => {
                 self.reader
                     .place_text(composing.page, composing.at, composing.tool, composing.text)

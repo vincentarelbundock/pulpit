@@ -1305,20 +1305,48 @@ fn compose_layer<'a, Message: Clone + 'static>(
     origin: (f32, f32),
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
-    /// How wide the writing box is on screen, in layout points.
+    /// How wide the Typst source box is on screen, in layout points.
     const EDITOR_WIDTH: f32 = 260.0;
 
     let (scale_x, scale_y) = super::page_to_screen(canonical, drawn);
-    // Clamped to the sheet: a mark placed near the right or bottom edge is
-    // still written in a box the reader can see all of.
-    let width = EDITOR_WIDTH.min(drawn.0.max(0.0));
-    // The box grows with what has been written, up to a point: a note is a
-    // paragraph often enough that a one-line slot would hide most of it, and
-    // past a handful of lines a box that kept growing would cover the page it
-    // is a comment on. After that the editor scrolls, as it should.
-    let lines = buffer.map_or(1, |buffer| buffer.line_count()).clamp(1, 6);
-    let height = (COMPOSE_HEIGHT + (lines - 1) as f32 * theme::type_scale::BODY * 1.3)
-        .min(drawn.1.max(COMPOSE_HEIGHT));
+    let (width, height, font_size, padding, line_height) = if composing.typst {
+        // Typst source is code, not the mark: it is typed at the UI's own
+        // size, and the picture it compiles to is measured by Typst. The box
+        // grows with what has been written, up to a point: past a handful of
+        // lines a box that kept growing would cover the page it is a comment
+        // on. After that the editor scrolls, as it should.
+        let lines = buffer.map_or(1, |buffer| buffer.line_count()).clamp(1, 6);
+        let height = (COMPOSE_HEIGHT + (lines - 1) as f32 * theme::type_scale::BODY * 1.3)
+            .min(drawn.1.max(COMPOSE_HEIGHT));
+        (
+            EDITOR_WIDTH.min(drawn.0.max(0.0)),
+            height,
+            theme::type_scale::BODY,
+            theme::space::XS,
+            1.3,
+        )
+    } else {
+        // The words are composed at the size and the leading the mark will be
+        // set at, scaled to the page's zoom, in a box measured the way the
+        // commit measures it — so what is typed is the size it will be on the
+        // sheet, and the mark does not jump when it is placed (§8.5). An
+        // empty box opens a few ems wide so there is somewhere to aim the
+        // first character; from then on it tracks the measurement. The box is
+        // bounded by the sheet rather than by a line count, and scrolls past
+        // that, exactly as the committed mark is clipped to the page.
+        let font_px = composing.font_size * scale_y;
+        let padding = (font_px * 0.3).clamp(4.0, 24.0);
+        let (width_pt, height_pt) =
+            pulpit_core::annotate::text_box::fit(&composing.text, composing.font_size);
+        (
+            (width_pt.max(composing.font_size * 3.0) * scale_x + padding * 2.0)
+                .min(drawn.0.max(1.0)),
+            (height_pt * scale_y + padding * 2.0).min(drawn.1.max(1.0)),
+            font_px,
+            padding,
+            pulpit_core::annotate::text_box::LEADING,
+        )
+    };
     let left = ((composing.at.x - origin.0) * scale_x).clamp(0.0, (drawn.0 - width).max(0.0));
     let top = ((composing.at.y - origin.1) * scale_y).clamp(0.0, (drawn.1 - height).max(0.0));
 
@@ -1329,9 +1357,10 @@ fn compose_layer<'a, Message: Clone + 'static>(
     let editor: Element<'a, Message> = match buffer {
         Some(buffer) => text_editor(buffer)
             .id(compose_input_id())
-            .size(theme::type_scale::BODY)
+            .size(font_size)
+            .line_height(iced::widget::text::LineHeight::Relative(line_height))
             .height(Length::Fixed(height))
-            .padding(theme::space::XS)
+            .padding(padding)
             .key_binding(move |press| {
                 use iced::widget::text_editor::{Binding, KeyPress};
                 let KeyPress { key, modifiers, .. } = &press;
@@ -2863,7 +2892,10 @@ fn document_tool_control<Message: Clone + 'static>(
     );
 
     let panel = options_open.then(|| document_tool_options_panel(tool, state, on_event));
+    // Below the tool's own icon: this toolbar sits at the top of the window,
+    // so a panel that opened upward would leave it.
     crate::widgets::common::popover::Popover::new(trigger, panel)
+        .prefer_below()
         .on_dismiss(on_event(WidgetEvent::Read(ReadCommand::ToolOptions(None))))
         .into()
 }

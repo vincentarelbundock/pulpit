@@ -371,6 +371,11 @@ pub struct ComposingMark {
     pub at: pulpit_core::page::PagePoint,
     pub tool: pulpit_core::annotation::AnnotationTool,
     pub text: String,
+    /// The size the mark will be set at, in page points: the tool's chosen
+    /// size for a new mark, the mark's own for one being rewritten (§8.5).
+    /// The editor composes at this size so the words on screen are the size
+    /// they will be on the sheet, and the options slider updates it live.
+    pub font_size: f32,
     /// The mark being rewritten, when this is an edit rather than a new mark
     /// (§8.5). A rewrite keeps the annotation's identity (A3), so one undo
     /// puts back what it said before rather than removing it.

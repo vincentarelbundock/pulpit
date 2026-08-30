@@ -26,6 +26,11 @@ pub struct Popover<'a, Message> {
     /// way: clicking off it is what every other menu here already means.
     on_dismiss: Option<Message>,
     gap: f32,
+    /// Open under the trigger rather than over it. A palette at the bottom
+    /// of a window hangs its panels upward; a toolbar at the top hangs them
+    /// downward, below the very icon that opened them. Either way the panel
+    /// falls to the other side when its own side has no room.
+    below: bool,
 }
 
 impl<'a, Message> Popover<'a, Message> {
@@ -38,7 +43,14 @@ impl<'a, Message> Popover<'a, Message> {
             popup,
             on_dismiss: None,
             gap: 6.0,
+            below: false,
         }
+    }
+
+    /// Prefer opening the panel below the trigger instead of above it.
+    pub fn prefer_below(mut self) -> Self {
+        self.below = true;
+        self
     }
 
     /// Close on a press outside the panel.
@@ -133,6 +145,7 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
         );
         let on_dismiss = self.on_dismiss.as_ref();
         let gap = self.gap;
+        let below = self.below;
         let popup = self.popup.as_mut().map(|popup| {
             overlay::Element::new(Box::new(PopupOverlay {
                 anchor: layout.bounds() + translation,
@@ -140,6 +153,7 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
                 tree: children.next().expect("popup state"),
                 on_dismiss,
                 gap,
+                below,
             }))
         });
 
@@ -165,6 +179,7 @@ struct PopupOverlay<'a, 'b, Message> {
     tree: &'b mut widget::Tree,
     on_dismiss: Option<&'b Message>,
     gap: f32,
+    below: bool,
 }
 
 impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
@@ -178,12 +193,21 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
         );
         let popup_bounds = popup.bounds();
         let mut x = self.anchor.center_x() - popup_bounds.width / 2.0;
-        let mut y = self.anchor.y - popup_bounds.height - self.gap;
         x = x.clamp(0.0, (bounds.width - popup_bounds.width).max(0.0));
-        if y < 0.0 {
-            y = (self.anchor.y + self.anchor.height + self.gap)
-                .min((bounds.height - popup_bounds.height).max(0.0));
-        }
+        let above = self.anchor.y - popup_bounds.height - self.gap;
+        let under = self.anchor.y + self.anchor.height + self.gap;
+        // The preferred side, unless the panel would not fit there.
+        let y = if self.below {
+            if under + popup_bounds.height <= bounds.height {
+                under
+            } else {
+                above.max(0.0)
+            }
+        } else if above >= 0.0 {
+            above
+        } else {
+            under.min((bounds.height - popup_bounds.height).max(0.0))
+        };
         popup.translate(Vector::new(x, y))
     }
 

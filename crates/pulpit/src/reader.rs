@@ -50,6 +50,9 @@ pub struct EditableText {
     /// itself for a plain one.
     pub text: String,
     pub typst: bool,
+    /// The size the mark is set at, in page points, so reopening it composes
+    /// at that size rather than at the tool's current one (§8.5).
+    pub font_size: f32,
 }
 
 /// One committed mark, kept drawn by the UI while the round trip that puts it
@@ -2567,6 +2570,20 @@ impl ReaderSession {
             tool,
             text,
             typst,
+            // Repaired the way the slider's own input is, because the size is
+            // read out of a file pulpit did not necessarily write. A `/DA`
+            // size of zero is PDF's "auto", not a four-point wish, so it takes
+            // the tool's current size rather than the clamp's floor.
+            font_size: if summary.style.font_size > 0.0 {
+                pulpit_core::annotate::MarkStyle {
+                    font_size: summary.style.font_size,
+                    ..self.interaction.text_style()
+                }
+                .sanitised()
+                .font_size
+            } else {
+                self.interaction.text_style().font_size
+            },
         })
     }
 
@@ -2580,6 +2597,7 @@ impl ReaderSession {
         id: &pulpit_core::annotate::AnnotationId,
         page: PageIndex,
         text: String,
+        font_size: f32,
     ) -> Option<DocumentTransaction> {
         let geometry = self.pages.get(page.get()).copied()?;
         let summary = self
@@ -2589,26 +2607,30 @@ impl ReaderSession {
             .find(|summary| &summary.id == id)?;
         let replacement = match summary.to_draft()? {
             pulpit_core::annotate::AnnotationDraft::FreeText(mut free) => {
-                // The box grows to hold what was typed and never shrinks: the
-                // appearance is clipped to the `/Rect`, so a longer second
-                // thought written into a box measured for the first would be
-                // cut off — and a reader who dragged the box bigger meant it
-                // to stay that way.
-                let (width, height) =
-                    pulpit_core::annotate::text_box::fit(&text, free.style.font_size);
+                // On a text edit the box grows to hold what was typed and
+                // never shrinks: the appearance is clipped to the `/Rect`, so
+                // a longer second thought written into a box measured for the
+                // first would be cut off — and a reader who dragged the box
+                // bigger meant it to stay that way. A *size* change is a
+                // re-typesetting act, not a text edit, so it remeasures the
+                // box outright: keeping a 48-point box around 12-point text
+                // would leave dead space nobody can see or aim at.
+                let resized = (font_size - free.style.font_size).abs() > 0.01;
+                free.style.font_size = font_size;
+                let (width, height) = pulpit_core::annotate::text_box::fit(&text, font_size);
+                let (right, bottom) = if resized {
+                    (free.rect.left + width, free.rect.top + height)
+                } else {
+                    (
+                        free.rect.right.max(free.rect.left + width),
+                        free.rect.bottom.max(free.rect.top + height),
+                    )
+                };
                 // Growth stops at the edge of the page, and a box that was
                 // already past it — pulpit did not place every mark it edits
                 // — is left the size it was rather than cut down.
-                free.rect.right = free
-                    .rect
-                    .right
-                    .max(free.rect.left + width)
-                    .min(geometry.width.max(free.rect.right));
-                free.rect.bottom = free
-                    .rect
-                    .bottom
-                    .max(free.rect.top + height)
-                    .min(geometry.height.max(free.rect.bottom));
+                free.rect.right = right.min(geometry.width.max(free.rect.right));
+                free.rect.bottom = bottom.min(geometry.height.max(free.rect.bottom));
                 free.text = text;
                 pulpit_core::annotate::AnnotationDraft::FreeText(free)
             }
@@ -2647,6 +2669,7 @@ impl ReaderSession {
         at: PagePoint,
         source: String,
         rendered: crate::typst_annotation::RasterisedText,
+        font_size: f32,
     ) -> Option<pulpit_core::annotate::AnnotationDraft> {
         let geometry = self.pages.get(page.get()).copied()?;
         let draft =
@@ -2663,11 +2686,49 @@ impl ReaderSession {
                     pixel_height: rendered.pixel_height,
                     rgba: rendered.rgba,
                 },
-                style: self.interaction.ink_style(),
+                // The size the markup was compiled at, recorded on the mark
+                // so reopening it composes at that size rather than at the
+                // tool's current one (§8.5).
+                style: pulpit_core::annotate::MarkStyle {
+                    font_size,
+                    ..self.interaction.ink_style()
+                },
                 source: Some(source),
             });
         draft.validate(&geometry).ok()?;
         Some(draft)
+    }
+
+    /// The width a Typst mark's compile is set to, in page points.
+    ///
+    /// A new mark is set to the room left between its spot and the page's
+    /// right edge; one being rewritten is set to the box it already occupies,
+    /// so its lines rebreak where they broke when it was made. The floor
+    /// keeps a mark placed at the very edge compilable at all.
+    pub fn typst_compose_width(
+        &self,
+        page: PageIndex,
+        at: PagePoint,
+        editing: Option<&pulpit_core::annotate::AnnotationId>,
+    ) -> f32 {
+        const FLOOR: f32 = 20.0;
+        if let Some(id) = editing {
+            if let Some(summary) = self
+                .summaries
+                .get(&page)
+                .and_then(|marks| marks.iter().find(|summary| &summary.id == id))
+            {
+                let width = summary.bounds.right - summary.bounds.left;
+                if width > FLOOR {
+                    return width;
+                }
+            }
+        }
+        let room = self
+            .pages
+            .get(page.get())
+            .map_or(0.0, |geometry| geometry.width - at.x);
+        room.max(FLOOR)
     }
 
     /// Rewrite a Typst mark in place from freshly compiled markup (§7.4).
@@ -2682,8 +2743,9 @@ impl ReaderSession {
         at: PagePoint,
         source: String,
         rendered: crate::typst_annotation::RasterisedText,
+        font_size: f32,
     ) -> Option<DocumentTransaction> {
-        let draft = self.typst_draft(page, at, source, rendered)?;
+        let draft = self.typst_draft(page, at, source, rendered, font_size)?;
         Some(DocumentTransaction::from_annotations([
             pulpit_core::annotate::AnnotationCommand::Replace {
                 id: id.clone(),
@@ -2787,8 +2849,9 @@ impl ReaderSession {
         at: PagePoint,
         source: String,
         rendered: crate::typst_annotation::RasterisedText,
+        font_size: f32,
     ) -> Option<DocumentTransaction> {
-        let draft = self.typst_draft(page, at, source, rendered)?;
+        let draft = self.typst_draft(page, at, source, rendered, font_size)?;
         Some(DocumentTransaction::from_annotations([
             pulpit_core::annotate::AnnotationCommand::Create(draft),
         ]))
@@ -8577,10 +8640,13 @@ mod tests {
         let was = mark.bounds;
         session.set_annotations(PageIndex(0), &[mark]);
 
+        // The mark's own size, so this rewrite is a text edit and not a
+        // resize.
+        let size = pulpit_core::annotate::MarkStyle::default().font_size;
         let long = "a second thought considerably longer than the first".to_string();
         let grown = text_rect(
             &session
-                .replace_text(&id, PageIndex(0), long.clone())
+                .replace_text(&id, PageIndex(0), long.clone(), size)
                 .expect("the rewrite commits"),
         );
         assert_eq!(grown.left, was.left, "it is rewritten where it already is");
@@ -8595,10 +8661,50 @@ mod tests {
         // were typing into it.
         let shrunk = text_rect(
             &session
-                .replace_text(&id, PageIndex(0), "hi".into())
+                .replace_text(&id, PageIndex(0), "hi".into(), size)
                 .expect("the rewrite commits"),
         );
         assert_eq!(shrunk, was, "an edit never takes the box away");
+    }
+
+    #[test]
+    fn changing_a_text_marks_size_remeasures_its_box_outright() {
+        // A size change is a re-typesetting act, unlike a text edit: the box
+        // is refit to the words at the new size, shrinking included, because
+        // a 48-point box around 12-point text is dead space nobody can see
+        // or aim at.
+        let mut session = open(2);
+        let mark = text_box();
+        let id = mark.id.clone();
+        let was = mark.bounds;
+        let text = mark.contents.text.clone();
+        session.set_annotations(PageIndex(0), &[mark]);
+
+        let bigger = text_rect(
+            &session
+                .replace_text(&id, PageIndex(0), text.clone(), 30.0)
+                .expect("the rewrite commits"),
+        );
+        assert_eq!(bigger.left, was.left, "the corner stays put");
+        assert_eq!(bigger.top, was.top);
+        let (width, height) = pulpit_core::annotate::text_box::fit(&text, 30.0);
+        assert!(
+            (bigger.width() - width).abs() < 0.001 && (bigger.height() - height).abs() < 0.001,
+            "the box is the measurement at the new size: {bigger:?}"
+        );
+
+        // …and back down again: the refit shrinks, where a text edit never
+        // would. The fixture's box (200 wide) is larger than its words need,
+        // so a shrink below it proves the point.
+        let smaller = text_rect(
+            &session
+                .replace_text(&id, PageIndex(0), text.clone(), 8.0)
+                .expect("the rewrite commits"),
+        );
+        assert!(
+            smaller.width() < was.width(),
+            "the box shrank to the words at the smaller size: {smaller:?}"
+        );
     }
 
     #[test]
