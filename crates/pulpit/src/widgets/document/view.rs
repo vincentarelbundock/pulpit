@@ -21,7 +21,7 @@ use crate::widgets::event::ReadCommand;
 use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetEvent, WidgetKind};
 
-use super::model::{CropState, OutlineView, PageSpread, SidebarTab, Zoom};
+use super::model::{CropChoice, CropState, OutlineView, PageSpread, SidebarTab, Zoom};
 
 /// One outline row plus the two-point gap below it.
 pub const OUTLINE_ROW_HEIGHT: f32 = 28.0;
@@ -1411,19 +1411,25 @@ pub fn compose_input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("pulpit-reader-compose-mark")
 }
 
-/// The crop latch, and the question a drawn rectangle asks.
+/// The crop latch, and the arrow that says what a drawn rectangle will mean.
 ///
 /// A latch rather than a momentary press, because what it does is not over
 /// when the press is: while it is down the pointer draws rectangles instead of
 /// reaching the page, and after a crop is taken it is what puts the margins
 /// back. One press on, one press off.
+///
+/// The rectangle's meaning — a zoom into it, or a crop on every page — hangs
+/// off an options arrow exactly like the shape tool's shape or the
+/// highlighter's mark, chosen *before* the drag: asking afterwards hung a
+/// dialog over the very rectangle the answer was about, and made every crop a
+/// draw-then-answer two-step.
 fn crop_control<Message: Clone + 'static>(
     crop: CropState,
+    choice: CropChoice,
+    options_open: bool,
     live: bool,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
-    use super::model::{CropChoice, CropState};
-
     let send = move |command: ReadCommand| -> Message { on_event(WidgetEvent::Read(command)) };
     let control = button(theme::icon::icon(
         theme::Icon::Crop,
@@ -1440,36 +1446,50 @@ fn crop_control<Message: Clone + 'static>(
     } else {
         control
     };
-    let trigger = hint(control, crop.label());
+    let control = hint(control, crop.label());
 
-    // The question, anchored to the button rather than thrown up as a dialog:
-    // the rectangle the reader is being asked about is on the page behind it,
-    // and a dialog in the middle of the window would cover the very thing the
-    // answer is about.
-    // Two choices and no third: Escape takes the rectangle back, and so does a
-    // press on the page — a cancel button would be a control for something
-    // the reader already has two ways of doing.
-    let panel = (live && matches!(crop, CropState::Choosing(_))).then(|| {
-        let choice = |label: &str, command: ReadCommand| -> Element<'static, Message> {
-            button(text(label.to_string()).size(theme::type_scale::LABEL))
+    let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, 9.0))
+        .padding(0)
+        .width(Length::Fixed(12.0))
+        .height(Length::Fixed(12.0))
+        .style(theme::ambient::tool_button);
+    if live {
+        arrow = arrow.on_press(send(ReadCommand::CropOptions(!options_open)));
+    }
+    let trigger: Element<'static, Message> = row![
+        control,
+        container(arrow)
+            .height(Length::Fixed(theme::type_scale::HEADING + 8.0))
+            .align_y(Alignment::End),
+    ]
+    .spacing(0)
+    .align_y(Alignment::Center)
+    .into();
+
+    let panel = options_open.then(|| {
+        let mut meanings = Column::new().spacing(theme::space::XS);
+        for meaning in CropChoice::ALL {
+            let mut option = button(text(meaning.label()).size(theme::type_scale::LABEL))
                 .padding(Padding::from([6.0, 10.0]))
                 .width(Length::Fixed(180.0))
-                .style(theme::ambient::tool_button)
-                .on_press(send(command))
-                .into()
-        };
-        container(
-            column![
-                choice("Zoom on this page", ReadCommand::TakeCrop(CropChoice::Zoom),),
-                choice("Crop every page", ReadCommand::TakeCrop(CropChoice::Pages)),
-            ]
-            .spacing(theme::space::XS),
-        )
-        .padding(theme::space::XS)
-        .style(theme::ambient::dialog)
-        .into()
+                .style(if choice == meaning {
+                    theme::ambient::selected_button
+                } else {
+                    theme::ambient::tool_button
+                });
+            if live {
+                option = option.on_press(send(ReadCommand::SetCropChoice(meaning)));
+            }
+            meanings = meanings.push(option);
+        }
+        crate::widgets::common::options::Options::new("Crop")
+            .on_close(live.then(|| send(ReadCommand::CropOptions(false))))
+            .row("A drawn rectangle", meanings)
+            .into()
     });
-    crate::widgets::common::popover::Popover::new(trigger, panel).into()
+    crate::widgets::common::popover::Popover::new(trigger, panel)
+        .on_dismiss(send(ReadCommand::CropOptions(false)))
+        .into()
 }
 
 /// The navigation band: where you are, and how big the page is.
@@ -1490,6 +1510,8 @@ fn navigation<Message: Clone + 'static>(
         zoom_label: format!("{}%", (reader.scale * 100.0).round() as i32),
         spread: reader.controls.spread,
         crop: reader.controls.crop,
+        crop_choice: reader.controls.crop_choice,
+        crop_options: reader.controls.crop_options,
         overflow_open: reader.controls.navigation_overflow,
     };
     responsive(move |size| navigation_band(state.clone(), size.width, on_event)).into()
@@ -1505,6 +1527,8 @@ struct NavigationState {
     zoom_label: String,
     spread: PageSpread,
     crop: CropState,
+    crop_choice: CropChoice,
+    crop_options: bool,
     overflow_open: bool,
 }
 
@@ -1560,10 +1584,17 @@ fn navigation_band<Message: Clone + 'static>(
             .push(space::horizontal().width(Length::Fill))
             .spacing(theme::space::XS)
             .align_y(Alignment::Center);
-        // Once armed, Crop stays visible: the choice for a drawn rectangle
-        // hangs from this button and must not disappear into a closed menu.
+        // Once armed, Crop stays visible — like the tools band keeping its
+        // armed tool on the row — so the latch (and its options arrow) never
+        // disappears into a closed menu while the pointer belongs to it.
         if state.crop.is_on() {
-            band = band.push(crop_control(state.crop, state.live, on_event));
+            band = band.push(crop_control(
+                state.crop,
+                state.crop_choice,
+                state.crop_options,
+                state.live,
+                on_event,
+            ));
         }
         band = band.push(navigation_overflow(&state, on_event));
         return container(band)
@@ -1596,7 +1627,13 @@ fn navigation_band<Message: Clone + 'static>(
             ReadCommand::SetZoom(Zoom::FitPage),
             true,
         ),
-        crop_control(state.crop, state.live, on_event),
+        crop_control(
+            state.crop,
+            state.crop_choice,
+            state.crop_options,
+            state.live,
+            on_event
+        ),
         step(
             match state.spread.other() {
                 PageSpread::Single => theme::Icon::SinglePage,
@@ -2280,8 +2317,10 @@ pub fn bookmark_row_geometry(title: &str, depth: usize, width: f32, editable: bo
     let width = width.max(80.0);
     let indent_step = (width / 30.0).clamp(6.0, 10.0);
     let indent = (depth.min(6) as f32 * indent_step).min(width * 0.32);
+    // Editable rows also give up the scroll lane, so the rename and delete
+    // buttons never sit under the thumb (see `widgets::scroll::thumbed`).
     let actions = if editable {
-        BOOKMARK_ACTIONS_WIDTH
+        BOOKMARK_ACTIONS_WIDTH + crate::widgets::tokens::SCROLL_LANE_WIDTH + theme::space::XS
     } else {
         0.0
     };
@@ -2392,6 +2431,8 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
                                 "Keep the old title",
                                 ReadCommand::CancelBookmarkTitle
                             ),
+                            space::horizontal()
+                                .width(Length::Fixed(crate::widgets::tokens::SCROLL_LANE_WIDTH)),
                         ]
                         .spacing(theme::space::XS)
                         .align_y(Alignment::Center),
@@ -2444,7 +2485,14 @@ fn virtual_bookmark_outline<Message: Clone + 'static>(
                         theme::Icon::Trash,
                         "Delete this bookmark",
                         ReadCommand::DeleteBookmark(entry.source_ordinal),
-                    ));
+                    ))
+                    // The scroll thumb draws in a lane over the right edge;
+                    // leave it empty ground so the delete button is never
+                    // under the thumb.
+                    .push(
+                        space::horizontal()
+                            .width(Length::Fixed(crate::widgets::tokens::SCROLL_LANE_WIDTH)),
+                    );
             }
             rows = rows.push(
                 container(content)
