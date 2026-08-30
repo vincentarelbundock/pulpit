@@ -41,6 +41,11 @@ zeroize = { workspace = true }
 # The same `Bytes` iced's image handles hold, so cached pixels can back a
 # handle without being copied.
 bytes = "1"
+# Encodes pixels the app hands on: the thumbnail cache keeps pages as JPEG
+# rather than raw RGBA on every platform, and the Wayland clipboard offers a
+# copied region as PNG. The version iced and arboard already build, so this
+# adds two codecs, not a dependency.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The system clipboard, for the one thing Iced's does not carry: an image.
 # `wayland-data-control` is what gets a Wayland session a clipboard at all;
 # without it this crate is X11-only on Linux and the select tool's image kind
@@ -88,9 +93,6 @@ zbus = { workspace = true }
 # cannot make. The same crate and version arboard already resolves, so this
 # adds a name, not a dependency.
 wl-clipboard-rs = "0.9"
-# Encodes that region to PNG once for both offers. The version iced and
-# arboard already build; `png` is the only codec the clipboard needs.
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Elsewhere the display crate builds without a session backend; the Win32 and
 # CoreGraphics adapters are selected by target inside the crate itself.

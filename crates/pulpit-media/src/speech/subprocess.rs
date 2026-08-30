@@ -327,12 +327,18 @@ mod tests {
 
     /// A synthesiser that never produces a byte and never exits, which is
     /// what a wedged model load looks like from here.
+    ///
+    /// `exec`, because some shells (Ubuntu's dash among them) run the command
+    /// as a child and stay: the kill then reaches only the shell, and the
+    /// orphaned sleep holds the stdout pipe open for its full term. A real
+    /// engine is launched directly, so the exec is what makes this stand-in
+    /// die the way piper would.
     #[cfg(unix)]
     fn never_answers() -> SubprocessEngine {
         SubprocessEngine::new(
             EngineManifest {
                 id: "sleeper".into(),
-                args: vec![ArgTemplate::new("-c"), ArgTemplate::new("sleep 300")],
+                args: vec![ArgTemplate::new("-c"), ArgTemplate::new("exec sleep 300")],
             },
             PathBuf::from("/bin/sh"),
             |_| Some(PathBuf::from("/voices/x.onnx")),
