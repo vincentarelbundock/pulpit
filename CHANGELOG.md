@@ -53,6 +53,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Waking the laptop can no longer freeze pulpit solid.** On Wayland, the
+  thread that waits for word of a monitor being plugged or unplugged held the
+  display adapter's locks while it waited — and the connection it waits on
+  carries only that word, so a resume that changed no display meant the
+  compositor never spoke again. The interface's own resume work then queued
+  behind those locks forever: a window that would not redraw and could not be
+  closed, only killed. The waiter now watches the wire itself, holding
+  nothing, and gives up on silence after a bound; the locks only ever cover
+  work the compositor answers.
+
 - **Pulpit asks the machine for a great deal less.** Reading a PDF with no
   projector attached no longer reserves the memory a projector needs: a
   four-thousand-pixel audience frame is thirty-three megabytes and the room
