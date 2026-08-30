@@ -18,6 +18,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the way the PDF specification modifies a finished file — so Acrobat,
   Okular and every other reader show your bookmarks as ordinary bookmarks.
   There is no sidecar and nothing to sync: the file is the only copy.
+  Adding one answers immediately: the rail scrolls to the new row and opens
+  its title for editing, primed with the page's name — press Enter to keep
+  it, or type to replace it.
 
 - **Shapes: a box, an ellipse, a line and an arrow.** One tool in the document
   palette with four modes, drawn by dragging, in the pen's own colour and

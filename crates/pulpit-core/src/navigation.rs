@@ -301,6 +301,24 @@ impl Outline {
         walk(&self.entries, &mut remaining, &mut path).then_some(path)
     }
 
+    /// The flattened ordinal of the entry at `path` — the inverse of
+    /// [`Self::path_of_flattened`], for finding the rail row of an entry an
+    /// edit just placed in the tree.
+    pub fn flattened_of_path(&self, path: &[usize]) -> Option<usize> {
+        let mut entries = &self.entries;
+        let mut ordinal = 0;
+        for (level, &index) in path.iter().enumerate() {
+            let entry = entries.get(index)?;
+            ordinal += entries[..index].iter().map(subtree_len).sum::<usize>();
+            if level + 1 < path.len() {
+                // Descending: the entry itself precedes its subtree.
+                ordinal += 1;
+                entries = &entry.children;
+            }
+        }
+        (!path.is_empty()).then_some(ordinal)
+    }
+
     /// Where a new top-level bookmark for `page` goes so the top level stays
     /// in page order: after every top-level entry that starts at or before
     /// `page`, and after any that orders nothing (a URI keeps its place).
@@ -582,6 +600,20 @@ mod tests {
             .collect();
         assert_eq!(nested, vec!["Setup", "Measurements"]);
         assert_eq!(outline.len(), 5);
+    }
+
+    #[test]
+    fn a_path_and_its_flattened_ordinal_round_trip_both_ways() {
+        let outline = talk();
+        for ordinal in 0..outline.len() {
+            let path = outline
+                .path_of_flattened(ordinal)
+                .expect("every row has a path");
+            assert_eq!(outline.flattened_of_path(&path), Some(ordinal));
+        }
+        assert_eq!(outline.flattened_of_path(&[]), None);
+        assert_eq!(outline.flattened_of_path(&[9]), None);
+        assert_eq!(outline.flattened_of_path(&[0, 0]), None);
     }
 
     #[test]

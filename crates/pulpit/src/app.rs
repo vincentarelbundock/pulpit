@@ -1391,6 +1391,11 @@ pub struct App {
     /// what turns a rail row's flattened ordinal back into the tree path a
     /// [`pulpit_core::navigation::BookmarkCommand`] carries.
     reader_outline: pulpit_core::navigation::Outline,
+    /// The flattened ordinal of a bookmark the presenter just added, confirmed
+    /// by the worker and waiting for the tick's `Task`s to reveal its rail row
+    /// and open its title for editing. The pump that learns of it cannot
+    /// return a `Task`, so it parks the row here, like `sign_resume_pending`.
+    bookmark_added: Option<usize>,
     /// What the open document declares that pulpit will flatten or ignore.
     pub capabilities: std::collections::HashMap<u64, pulpit_render::DocumentCapabilities>,
     /// Overlay declarations, staging and the frames they produce.
@@ -2219,6 +2224,7 @@ impl App {
             document_survey_requested: std::collections::HashSet::new(),
             navigation: std::collections::HashMap::new(),
             reader_outline: pulpit_core::navigation::Outline::default(),
+            bookmark_added: None,
             capabilities: std::collections::HashMap::new(),
             media: crate::media::MediaCoordinator::new(),
             // Unprobed: probing runs the candidate browsers' `--version`,
@@ -5837,6 +5843,31 @@ impl App {
         if self.pump_reader() {
             tasks.push(Task::done(Message::ReaderReady));
         }
+        // 1b-0. A bookmark the worker just confirmed. Without this the add
+        //       button has no visible answer at all: the row lands wherever
+        //       page order puts it, often below the fold. The rail scrolls
+        //       to it and its title opens for editing, primed and selected,
+        //       so Enter keeps the default name and typing replaces it.
+        if let Some(ordinal) = self.bookmark_added.take() {
+            let id = crate::widgets::document::model::OutlineItemId::Bookmark {
+                source_ordinal: ordinal,
+            };
+            if self.reader.focus_outline_item(id.clone())
+                && self.reader.begin_bookmark_rename(ordinal)
+            {
+                if let Some(index) = self.reader.outline_index_of(&id) {
+                    tasks.push(self.reveal_outline_selection(
+                        index,
+                        crate::widgets::scroll::RevealDirection::Nearest,
+                    ));
+                }
+                let input = crate::widgets::document::view::bookmark_rename_input_id();
+                tasks.push(
+                    iced::widget::operation::focus(input.clone())
+                        .chain(iced::widget::operation::select_all(input)),
+                );
+            }
+        }
         // A page already in the cache answers its turn with no delivery to
         // drain, so the frame path alone would leave exactly the fastest
         // turns — the ones that cost nothing — permanently open, and then
@@ -7142,6 +7173,7 @@ impl App {
     fn forget_per_document_edit_state(&mut self) {
         self.form_flow.forget_document();
         self.reader_outline = pulpit_core::navigation::Outline::default();
+        self.bookmark_added = None;
         self.reader_patch_images.clear();
         self.reader_pending.clear();
         self.form_move.abandon();
@@ -7364,6 +7396,30 @@ impl App {
                             })
                     {
                         self.set_reader_outline(outline);
+                        // A bookmark the presenter just added must not land
+                        // silently in page order, possibly off screen. Its
+                        // row is parked for the tick, which reveals it and
+                        // opens its title for editing — Enter keeps the
+                        // default name, typing replaces it. Undo and redo
+                        // carry no transaction, so replaying a create does
+                        // not reopen the field.
+                        let created =
+                            pending.as_ref().and_then(|pending| {
+                                pending.transaction.as_ref()?.0.iter().find_map(|command| {
+                                    match command {
+                                        pulpit_render::document::DocumentCommand::Bookmark(
+                                            pulpit_core::navigation::BookmarkCommand::Create {
+                                                path,
+                                                ..
+                                            },
+                                        ) => Some(path),
+                                        _ => None,
+                                    }
+                                })
+                            });
+                        if let Some(path) = created {
+                            self.bookmark_added = self.reader_outline.flattened_of_path(path);
+                        }
                     }
 
                     // An edit drops the annotation list of every page it
@@ -9844,11 +9900,25 @@ impl App {
                     crate::reader::Released::Nothing => {
                         self.ask_form_pointer(FormPointer::Up);
                     }
+                    crate::reader::Released::CropApplied => {
+                        // The rectangle acted on release, as the crop button
+                        // was set to have it act. The viewport moved, so the
+                        // worker is owed frames and the surface a scroll —
+                        // exactly what taking a crop through a command used
+                        // to earn below.
+                        self.request_reader_renders();
+                        return self.scroll_surface_to_reader();
+                    }
                 }
                 Task::none()
             }
             ReadCommand::PageCancelled => {
-                self.reader.pointer_cancelled();
+                // A drag that left the sheet can still have taken a crop on
+                // its way out, which moves the viewport like any release.
+                if self.reader.pointer_cancelled() {
+                    self.request_reader_renders();
+                    return self.scroll_surface_to_reader();
+                }
                 Task::none()
             }
             _ => {
@@ -10007,10 +10077,10 @@ impl App {
                         | ReadCommand::SetZoom(_)
                         | ReadCommand::ZoomIn
                         | ReadCommand::ZoomOut
-                        // Taking a crop and clearing one both move the
-                        // viewport — one fills the window with a rectangle,
-                        // the other puts the reader back where it was taken.
-                        | ReadCommand::TakeCrop(_)
+                        // Clearing a crop moves the viewport: it puts the
+                        // reader back where the crop was taken. (Taking one
+                        // happens on the marquee's release, not through a
+                        // command — see `Released::CropApplied`.)
                         | ReadCommand::ArmCrop(_)
                 ) {
                     return self.scroll_surface_to_reader();
