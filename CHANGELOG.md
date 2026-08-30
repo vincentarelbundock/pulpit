@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.12] — 2026-08-30
+
 ### Added
 
 - **Bookmarks you can make, rename and delete — written into the PDF
@@ -21,38 +23,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Adding one answers immediately: the rail scrolls to the new row and opens
   its title for editing, primed with the page's name — press Enter to keep
   it, or type to replace it.
-
-- **Shapes: a box, an ellipse, a line and an arrow.** One tool in the document
-  palette with four modes, drawn by dragging, in the pen's own colour and
-  width — the same shape the highlighter's three nibs and the band's three
-  kinds have. A box becomes a `/Square` and an ellipse a `/Circle`, the
-  annotations PDF has for exactly them, so a marked-up document opens as
-  shapes in Okular and Acrobat rather than as a picture. A line and an arrow
-  are strokes of ink, because `/Line` keeps its geometry in arrays PDFium
-  cannot write and a malformed annotation travels worse than an honest
-  stroke; the arrowhead is drawn as part of the same stroke, so it is one
-  mark to select, move, resize and erase. All four are movable and resizable
-  afterwards like any other mark.
-
-- **The stamp can be reached.** A check and a cross, placed with one click,
-  centred on where you clicked and resizable afterwards. The tool existed and
-  was not in the palette, and the two marks it puts down had no appearance at
-  all — a check placed before this was an annotation in the file and on
-  nobody's screen. It is never described as a signature.
-
-- **The marks in a document are listed.** A third tab in the sidebar that
-  already holds the outline and the search results — its own icon, no
-  shortcut, and offered only for a document that can carry marks — lists every
-  annotation in the file in page order: what it says, what kind it is and what
-  page it is on. Pressing a row goes to the mark and picks it up; the trash
-  beside it takes the mark out of the document as one edit, which is the only
-  reasonable way to remove a mark from a page nobody is looking at. Marks the
-  document arrived with are listed beside your own and say when pulpit will
-  not rewrite them — `read-only`, `not editable here`, `malformed` — rather
-  than offering a control that would refuse. The list walks the whole document
-  a chunk of pages at a time and fills in as the answers arrive, and it
-  follows the document's revision rather than a timer, so a mark deleted on
-  the page leaves the list in the same instant.
 
 ### Fixed
 
@@ -100,52 +70,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the next plan simply asks again, and the deduplication is gone: the rare
   genuine collision renders twice, which is cheap next to a page that never
   sharpens.
-
-- **Exporting a document no longer writes through a planted symlink.** Saving
-  a PDF creates a scratch file beside the destination first, so an interrupted
-  save cannot leave half a document where a whole one was. That scratch file
-  was created with a predictable name and an ordinary open, which follows a
-  symlink and truncates whatever it finds — so in a directory another local
-  user can write, the export could be redirected into a file pulpit was never
-  asked to touch. It is now created exclusively, under a name that cannot be
-  guessed from the process id, and a name somebody else has taken is a refusal
-  rather than a write. The same seven steps had been written four times across
-  the tree and had drifted apart; they are now one primitive that every writer
-  uses, which also gives the settings, layout and session files the durability
-  fsync after the rename that two of the four were missing. Permissions are
-  unchanged: a file of the reader's own stays owner-only, and a document they
-  asked us to export still takes their umask.
-
-- **The media worker's shared-memory rings are no longer world-readable.** A
-  ring carries decoded video frames of whatever is on the audience screen, and
-  it lives in `/dev/shm`, which every local user can write to. The render
-  crate had long created its regions with an unguessable name, `create_new`
-  and mode `0600`; the media crate, doing the same job with a different data
-  structure, had none of the three — its rings were named
-  `pulpit-media-<pid>-0` upwards, adopted an existing file rather than
-  refusing it, and took whatever the umask gave, usually `0644`. Another user
-  on the same machine could read a ring, or pre-create one at the name the
-  worker was about to use. The two now create their regions on identical
-  terms. Found by comparing the two implementations rather than by a report;
-  the rule it produced is in `docs-src/internals.typ` under *Superfluity*.
-
-- **A typeset text mark no longer disappears when it is dragged.** Every edit
-  to an annotation clears the picture the engine is holding for it, and a
-  stamp is a kind nothing redraws by itself — so moving a mark whose
-  appearance pulpit could not rebuild left an annotation in the file that
-  nothing draws. Pulpit now records which mark it placed, redraws it wherever
-  it lands, and holds rather than drags the marks it cannot draw again:
-  another producer's stamp, and a text mark's rendered picture, which is
-  rewritten by editing its source rather than by moving it.
-
-- **Shared memory is reclaimed after a crash with a media overlay playing.**
-  Pulpit sweeps the shared-memory files left by a previous run whose process
-  is gone, and the sweep could not read the names the media overlays use — so
-  it reclaimed the renderer's and skipped theirs. The rings a crashed
-  presentation left behind stayed in `/dev/shm` until the machine was
-  rebooted; on a 4K overlay that is tens of megabytes each time. The sweep now
-  reads every naming scheme pulpit writes, and the names come from one place
-  so a future one cannot be missed.
 
 ### Changed
 
@@ -208,6 +132,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   window to close is now zero, with the one bounded bus trip on a helper
   thread. The log carries startup marks (`stage`, `elapsed_ms`) so a launch
   regression can be measured rather than felt.
+
+## [0.0.11] — 2026-08-27
+
+### Added
+
+- **Shapes: a box, an ellipse, a line and an arrow.** One tool in the document
+  palette with four modes, drawn by dragging, in the pen's own colour and
+  width — the same shape the highlighter's three nibs and the band's three
+  kinds have. A box becomes a `/Square` and an ellipse a `/Circle`, the
+  annotations PDF has for exactly them, so a marked-up document opens as
+  shapes in Okular and Acrobat rather than as a picture. A line and an arrow
+  are strokes of ink, because `/Line` keeps its geometry in arrays PDFium
+  cannot write and a malformed annotation travels worse than an honest
+  stroke; the arrowhead is drawn as part of the same stroke, so it is one
+  mark to select, move, resize and erase. All four are movable and resizable
+  afterwards like any other mark.
+
+- **The stamp can be reached.** A check and a cross, placed with one click,
+  centred on where you clicked and resizable afterwards. The tool existed and
+  was not in the palette, and the two marks it puts down had no appearance at
+  all — a check placed before this was an annotation in the file and on
+  nobody's screen. It is never described as a signature.
+
+- **The marks in a document are listed.** A third tab in the sidebar that
+  already holds the outline and the search results — its own icon, no
+  shortcut, and offered only for a document that can carry marks — lists every
+  annotation in the file in page order: what it says, what kind it is and what
+  page it is on. Pressing a row goes to the mark and picks it up; the trash
+  beside it takes the mark out of the document as one edit, which is the only
+  reasonable way to remove a mark from a page nobody is looking at. Marks the
+  document arrived with are listed beside your own and say when pulpit will
+  not rewrite them — `read-only`, `not editable here`, `malformed` — rather
+  than offering a control that would refuse. The list walks the whole document
+  a chunk of pages at a time and fills in as the answers arrive, and it
+  follows the document's revision rather than a timer, so a mark deleted on
+  the page leaves the list in the same instant.
+
+### Fixed
+
+- **Exporting a document no longer writes through a planted symlink.** Saving
+  a PDF creates a scratch file beside the destination first, so an interrupted
+  save cannot leave half a document where a whole one was. That scratch file
+  was created with a predictable name and an ordinary open, which follows a
+  symlink and truncates whatever it finds — so in a directory another local
+  user can write, the export could be redirected into a file pulpit was never
+  asked to touch. It is now created exclusively, under a name that cannot be
+  guessed from the process id, and a name somebody else has taken is a refusal
+  rather than a write. The same seven steps had been written four times across
+  the tree and had drifted apart; they are now one primitive that every writer
+  uses, which also gives the settings, layout and session files the durability
+  fsync after the rename that two of the four were missing. Permissions are
+  unchanged: a file of the reader's own stays owner-only, and a document they
+  asked us to export still takes their umask.
+
+- **The media worker's shared-memory rings are no longer world-readable.** A
+  ring carries decoded video frames of whatever is on the audience screen, and
+  it lives in `/dev/shm`, which every local user can write to. The render
+  crate had long created its regions with an unguessable name, `create_new`
+  and mode `0600`; the media crate, doing the same job with a different data
+  structure, had none of the three — its rings were named
+  `pulpit-media-<pid>-0` upwards, adopted an existing file rather than
+  refusing it, and took whatever the umask gave, usually `0644`. Another user
+  on the same machine could read a ring, or pre-create one at the name the
+  worker was about to use. The two now create their regions on identical
+  terms. Found by comparing the two implementations rather than by a report;
+  the rule it produced is in `docs-src/internals.typ` under *Superfluity*.
+
+- **A typeset text mark no longer disappears when it is dragged.** Every edit
+  to an annotation clears the picture the engine is holding for it, and a
+  stamp is a kind nothing redraws by itself — so moving a mark whose
+  appearance pulpit could not rebuild left an annotation in the file that
+  nothing draws. Pulpit now records which mark it placed, redraws it wherever
+  it lands, and holds rather than drags the marks it cannot draw again:
+  another producer's stamp, and a text mark's rendered picture, which is
+  rewritten by editing its source rather than by moving it.
+
+- **Shared memory is reclaimed after a crash with a media overlay playing.**
+  Pulpit sweeps the shared-memory files left by a previous run whose process
+  is gone, and the sweep could not read the names the media overlays use — so
+  it reclaimed the renderer's and skipped theirs. The rings a crashed
+  presentation left behind stayed in `/dev/shm` until the machine was
+  rebooted; on a 4K overlay that is tens of megabytes each time. The sweep now
+  reads every naming scheme pulpit writes, and the names come from one place
+  so a future one cannot be missed.
+
+### Changed
 
 - **Dead code is visible again, and about a thousand lines of it are gone.**
   Five subsystems — `layout`, `settings`, `doc`, `media` and `platform` — had
