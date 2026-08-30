@@ -134,16 +134,13 @@ pub enum CropState {
     Off,
     /// Armed and waiting for a drag. Nothing is drawn yet.
     Armed,
-    /// A rectangle has been drawn and the reader is choosing what it means.
-    Choosing(Region),
     /// A crop is in force: every page is read through this window.
     Cropped(Region),
 }
 
 impl CropState {
     /// The window every page is read through, which is the whole page unless
-    /// a crop is in force. Deliberately not the rectangle being *chosen*: a
-    /// rectangle is still a proposal until the reader says what it means.
+    /// a crop is in force.
     pub fn window(self) -> Region {
         match self {
             CropState::Cropped(region) => region,
@@ -153,10 +150,10 @@ impl CropState {
 
     /// Does the pointer belong to the marquee rather than to the page?
     pub fn takes_the_pointer(self) -> bool {
-        matches!(self, CropState::Armed | CropState::Choosing(_))
+        matches!(self, CropState::Armed)
     }
 
-    /// Is the control lit — armed, mid-choice, or holding a crop?
+    /// Is the control lit — armed, or holding a crop?
     pub fn is_on(self) -> bool {
         !matches!(self, CropState::Off)
     }
@@ -171,13 +168,33 @@ impl CropState {
     }
 }
 
-/// What a drawn rectangle was taken to mean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a drawn rectangle is taken to mean.
+///
+/// Chosen from the crop button's options before the rectangle is drawn, the
+/// way the shape tool's shape or the highlighter's mark is, so the rectangle
+/// acts the moment it is released. It used to be asked afterwards, which hung
+/// a dialog over the very thing the answer was about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CropChoice {
-    /// Fill the window with it, once. A zoom and nothing more.
+    /// Fill the window with it, once. A zoom and nothing more — and the
+    /// default, because it is the meaning that leaves nothing in force.
+    #[default]
     Zoom,
     /// Read every page through it until the crop is cleared.
     Pages,
+}
+
+impl CropChoice {
+    /// The two meanings, in the order the options panel offers them.
+    pub const ALL: [CropChoice; 2] = [CropChoice::Zoom, CropChoice::Pages];
+
+    /// What the options panel says a drawn rectangle will do.
+    pub fn label(self) -> &'static str {
+        match self {
+            CropChoice::Zoom => "Zoom into it, once",
+            CropChoice::Pages => "Crop every page to it",
+        }
+    }
 }
 
 /// The smallest crop worth honouring, as a fraction of the page.
@@ -598,8 +615,14 @@ pub struct ReaderControls {
     /// not a document edit — nothing here sets the dirty flag or reaches the
     /// file, and the audience never sees it.
     pub rotation: PageRotation,
-    /// The marquee crop: armed, mid-choice, or in force.
+    /// The marquee crop: armed, or in force.
     pub crop: CropState,
+    /// What the next drawn rectangle will mean. Mirrored here for the same
+    /// reason the tool kinds are: the toolbar is drawn from the controls
+    /// alone.
+    pub crop_choice: CropChoice,
+    /// Whether the crop button's options popover is open.
+    pub crop_options: bool,
     //
     // Whether the outline rail is out is deliberately *not* here. It is
     // chrome around the document rather than a control of it, it outlives any
@@ -633,6 +656,8 @@ impl Default for ReaderControls {
             spread: PageSpread::default(),
             rotation: PageRotation::default(),
             crop: CropState::default(),
+            crop_choice: CropChoice::default(),
+            crop_options: false,
         }
     }
 }

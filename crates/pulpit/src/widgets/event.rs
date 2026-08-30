@@ -206,15 +206,22 @@ pub enum ReadCommand {
     /// in force clears the crop and restores the zoom and the offsets it
     /// replaced, so one press undoes what one press did.
     ArmCrop(bool),
-    /// Take the drawn rectangle as a zoom into it, or as a crop on every page.
+    /// Which of its two meanings the next drawn rectangle takes: a zoom into
+    /// it, or a crop on every page.
     ///
-    /// Asked rather than guessed: a marquee reads equally as "look at this
+    /// Chosen rather than guessed: a marquee reads equally as "look at this
     /// figure for a moment" and "take the margins off this scan", and the two
     /// answers are not each other's neighbours — one is a zoom, the other
-    /// changes every page until it is cleared.
-    TakeCrop(crate::widgets::document::model::CropChoice),
-    /// Abandon the drawn rectangle. The tool stays armed, so the reader who
-    /// mis-drew one draws another rather than re-arming first.
+    /// changes every page until it is cleared. Chosen from the crop button's
+    /// options *before* the drag, like the shape tool's shape: asking after
+    /// the drag hung a dialog over the very rectangle being asked about.
+    /// Choosing also arms the marquee when it is not already on — picking
+    /// what a rectangle will mean is reaching for the tool.
+    SetCropChoice(crate::widgets::document::model::CropChoice),
+    /// Open or close the crop button's options popover.
+    CropOptions(bool),
+    /// Abandon the rectangle being dragged. The tool stays armed, so the
+    /// reader who mis-drew one draws another rather than re-arming first.
     CancelCrop,
     /// What has been typed into the page box, as typed. The model decides
     /// what of it is a page number.

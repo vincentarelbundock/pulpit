@@ -169,6 +169,11 @@ pub enum Released {
         rect: PageRect,
         kind: SelectKind,
     },
+    /// A marquee came up and the rectangle did what the crop button is set
+    /// to have it do — a zoom into it, or a crop on every page. Nothing
+    /// reaches the document; the viewport has moved, so the caller owes the
+    /// worker a render pass and the surface a scroll.
+    CropApplied,
 }
 
 /// What a page did with a partial repaint that arrived for it.
@@ -485,13 +490,10 @@ pub struct ReaderSession {
     /// where the pointer is now, in that page's own points.
     ///
     /// Here rather than on the controls because it changes with every pointer
-    /// sample and the controls are diffed on every view pass; the rectangle
-    /// the reader is asked about *is* on the controls, because by then it has
-    /// stopped moving.
+    /// sample and the controls are diffed on every view pass; the release
+    /// takes it as the meaning the crop button is set to, so it never
+    /// outlives the drag.
     marquee: Option<(PageIndex, PagePoint, PagePoint)>,
-    /// Which page the rectangle being chosen about was drawn on, so it is
-    /// still drawn where it was drawn while the question is being answered.
-    marquee_page: Option<PageIndex>,
     /// Where the reader was before a crop took hold, restored when it is
     /// cleared.
     ///
@@ -3142,12 +3144,15 @@ impl ReaderSession {
     /// resolved to nothing — a selection with no text under it, an eraser
     /// sweep that touched nothing — returns `None` and is not an error.
     pub fn pointer_released(&mut self) -> Released {
-        // A marquee comes up as a question rather than as an edit: the
-        // rectangle is frozen and the reader is asked what it means. Nothing
-        // is committed either way — a crop is a zoom control (§8.1) and never
-        // touches the document.
+        // A marquee comes up as a view change rather than as an edit: the
+        // rectangle acts as the crop button is set to have it act, chosen
+        // from the button's options before the drag. Nothing is committed
+        // either way — a crop is a zoom control (§8.1) and never touches the
+        // document.
         if self.controls.crop.takes_the_pointer() {
-            self.finish_marquee();
+            if self.finish_marquee() {
+                return Released::CropApplied;
+            }
             return Released::Nothing;
         }
         // Letting go of the hand ends the pan and commits nothing: the
@@ -3288,78 +3293,62 @@ impl ReaderSession {
     }
 
     /// The gesture was abandoned — the pointer left the page, or Escape was
-    /// pressed. Nothing is committed and nothing is reported (§8.1).
-    pub fn pointer_cancelled(&mut self) {
+    /// pressed. Nothing is committed and nothing is reported (§8.1). Returns
+    /// whether a marquee it ended moved the viewport, exactly as a release
+    /// answers [`Released::CropApplied`].
+    pub fn pointer_cancelled(&mut self) -> bool {
         // The pointer leaving the sheet mid-drag ends the marquee where it
         // was, rather than dropping it: a rectangle dragged off the bottom of
         // a figure is the rectangle the reader meant, and losing it at the
         // page edge would make the tool unusable for anything that reaches
         // one.
-        if self.marquee.is_some() {
-            self.finish_marquee();
-        }
+        let viewport_moved = self.marquee.is_some() && self.finish_marquee();
         self.interaction.cancel();
         self.cursor = None;
         self.transform_origin = None;
         self.pan = None;
+        viewport_moved
     }
 
-    /// Take the drawn rectangle as far as a proposal: frozen on the page, and
-    /// waiting to be told what it means.
+    /// Take the drawn rectangle as what the crop button is set to mean — a
+    /// zoom into it, or a crop on every page. Returns whether the viewport
+    /// moved.
     ///
     /// A rectangle too small to read a page through is a click rather than a
     /// drag, and leaves the tool armed for the drag that was meant.
-    fn finish_marquee(&mut self) {
+    fn finish_marquee(&mut self) -> bool {
         let Some((page, start, end)) = self.marquee.take() else {
-            return;
+            return false;
         };
         let Some(geometry) = self.pages.get(page.get()).copied() else {
             self.controls.crop = CropState::Armed;
-            return;
+            return false;
         };
         let region = crate::widgets::document::model::crop_between(
             (start.x, start.y),
             (end.x, end.y),
             &geometry,
         );
-        if crate::widgets::document::model::is_usable_crop(&region) {
-            self.controls.crop = CropState::Choosing(region);
-            self.marquee_page = Some(page);
-        } else {
+        if !crate::widgets::document::model::is_usable_crop(&region) {
             self.controls.crop = CropState::Armed;
-            self.marquee_page = None;
+            return false;
         }
+        self.take_crop(page, region)
     }
 
     /// The marquee as the surface draws it: the page it is on and the
-    /// rectangle it covers, in that page's own points.
-    ///
-    /// The open drag first, and the frozen proposal after it — the reader
-    /// being asked about a rectangle must still be able to see the rectangle.
+    /// rectangle it covers, in that page's own points. Only an open drag: a
+    /// released rectangle has already acted, so there is nothing frozen to
+    /// show.
     pub fn marquee(&self) -> Option<(PageIndex, pulpit_core::page::PageRect)> {
-        if let Some((page, start, end)) = self.marquee {
-            return Some((
-                page,
-                pulpit_core::page::PageRect::new(
-                    start.x.min(end.x),
-                    start.y.min(end.y),
-                    start.x.max(end.x),
-                    start.y.max(end.y),
-                ),
-            ));
-        }
-        let CropState::Choosing(region) = self.controls.crop else {
-            return None;
-        };
-        let page = self.marquee_page?;
-        let geometry = self.pages.get(page.get())?;
+        let (page, start, end) = self.marquee?;
         Some((
             page,
             pulpit_core::page::PageRect::new(
-                region.x * geometry.width,
-                region.y * geometry.height,
-                (region.x + region.width) * geometry.width,
-                (region.y + region.height) * geometry.height,
+                start.x.min(end.x),
+                start.y.min(end.y),
+                start.x.max(end.x),
+                start.y.max(end.y),
             ),
         ))
     }
@@ -4018,16 +4007,28 @@ impl ReaderSession {
                 false
             }
             ReadCommand::ArmCrop(on) => self.arm_crop(*on),
-            ReadCommand::TakeCrop(choice) => self.take_crop(*choice),
-            ReadCommand::CancelCrop => {
-                // Armed, not off: the reader who mis-drew a rectangle wants
-                // to draw another one, and dropping the tool would make them
-                // press the button again first.
-                self.marquee = None;
-                self.marquee_page = None;
-                if self.controls.crop.takes_the_pointer() {
-                    self.controls.crop = CropState::Armed;
+            ReadCommand::CropOptions(open) => {
+                self.controls.crop_options = *open;
+                false
+            }
+            ReadCommand::SetCropChoice(choice) => {
+                self.controls.crop_choice = *choice;
+                // The popover's question has been answered; and choosing what
+                // a rectangle will mean is reaching for the marquee, exactly
+                // as choosing a shape is reaching for the shape tool. A crop
+                // already in force is left in force: the choice is about the
+                // *next* rectangle.
+                self.controls.crop_options = false;
+                if !self.controls.crop.is_on() {
+                    self.arm_crop(true);
                 }
+                false
+            }
+            ReadCommand::CancelCrop => {
+                // The tool stays armed: the reader who mis-drew a rectangle
+                // wants to draw another one, and dropping the tool would make
+                // them press the button again first.
+                self.marquee = None;
                 false
             }
             // The rest are the application's to route to the worker: a page
@@ -4170,7 +4171,9 @@ impl ReaderSession {
     /// application to take the surface with it.
     fn arm_crop(&mut self, on: bool) -> bool {
         self.marquee = None;
-        self.marquee_page = None;
+        // The latch answers the button; a popover left open past it would be
+        // a question nobody is asking any more.
+        self.controls.crop_options = false;
         if on {
             // One pointer owner at a time: a marquee and an armed pen would
             // both take the same press, and the reader would find out which
@@ -4205,15 +4208,10 @@ impl ReaderSession {
         true
     }
 
-    /// Take the rectangle the reader drew as a zoom, or as a crop.
-    fn take_crop(&mut self, choice: CropChoice) -> bool {
-        let CropState::Choosing(region) = self.controls.crop else {
-            return false;
-        };
-        let page = self.marquee_page.unwrap_or(self.controls.page);
-        self.marquee = None;
-        self.marquee_page = None;
-        match choice {
+    /// Take the rectangle the reader drew on `page` as what the crop button
+    /// is set to mean: a zoom into it, or a crop on every page.
+    fn take_crop(&mut self, page: PageIndex, region: pulpit_core::notes::Region) -> bool {
+        match self.controls.crop_choice {
             CropChoice::Zoom => {
                 // A one-shot: after this the reader is at an ordinary fixed
                 // zoom, the latch is off, and the next press of zoom-out is
@@ -8808,7 +8806,7 @@ mod tests {
             "the marquee did not take the press"
         );
         session.pointer_moved(PageIndex(0), 400.0, 500.0);
-        assert!(matches!(session.pointer_released(), Released::Nothing));
+        assert!(matches!(session.pointer_released(), Released::CropApplied));
         assert!(!session.is_dirty(), "a crop touched the document");
     }
 
@@ -8817,14 +8815,14 @@ mod tests {
     #[test]
     fn a_marquee_drawn_backwards_is_the_same_rectangle() {
         let mut session = open(3);
-        session.apply(&ReadCommand::ArmCrop(true));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
         session.pointer_moved(PageIndex(0), 459.0, 594.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 153.0, 198.0);
         session.pointer_released();
-        let CropState::Choosing(region) = session.controls().crop else {
+        let CropState::Cropped(region) = session.controls().crop else {
             panic!(
-                "the drag did not become a question: {:?}",
+                "the drag did not become a crop: {:?}",
                 session.controls().crop
             );
         };
@@ -8832,6 +8830,27 @@ mod tests {
         assert!((region.y - 0.25).abs() < 1e-3);
         assert!((region.width - 0.5).abs() < 1e-3);
         assert!((region.height - 0.5).abs() < 1e-3);
+    }
+
+    /// Choosing what a rectangle will mean is reaching for the tool: the
+    /// choice arms the marquee, exactly as choosing a shape arms the shape
+    /// tool. A crop already in force is left in force — the choice is about
+    /// the next rectangle, not the one on screen.
+    #[test]
+    fn choosing_a_meaning_arms_the_marquee() {
+        let mut session = open(3);
+        assert_eq!(session.controls().crop, CropState::Off);
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
+        assert_eq!(session.controls().crop, CropState::Armed);
+        assert_eq!(session.controls().crop_choice, CropChoice::Pages);
+        session.pointer_moved(PageIndex(0), 0.0, 0.0);
+        session.pointer_pressed();
+        session.pointer_moved(PageIndex(0), 612.0, 396.0);
+        session.pointer_released();
+        let cropped = session.controls().crop;
+        assert!(matches!(cropped, CropState::Cropped(_)));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Zoom));
+        assert_eq!(session.controls().crop, cropped);
     }
 
     /// A press that did not travel is a click, not a rectangle: the tool is
@@ -8849,8 +8868,9 @@ mod tests {
         assert_eq!(session.controls().zoom, before);
     }
 
-    /// "Zoom here" fills the window with the rectangle and leaves nothing
-    /// behind: an ordinary fixed zoom, and the latch off.
+    /// "Zoom into it" — the default meaning — fills the window with the
+    /// rectangle the moment it is released and leaves nothing behind: an
+    /// ordinary fixed zoom, and the latch off.
     #[test]
     fn zooming_here_fills_the_window_and_leaves_the_tool_off() {
         let mut session = open(3);
@@ -8860,7 +8880,6 @@ mod tests {
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 459.0, 594.0);
         session.pointer_released();
-        session.apply(&ReadCommand::TakeCrop(CropChoice::Zoom));
         assert_eq!(session.controls().crop, CropState::Off);
         // The smaller of the two fits, so the whole rectangle is on screen:
         // 400 / 396 rather than 612 / 306.
@@ -8876,12 +8895,11 @@ mod tests {
     fn a_crop_shrinks_every_page_in_the_column() {
         let mut session = open(4);
         let full = session.column.pages[1].top;
-        session.apply(&ReadCommand::ArmCrop(true));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
         session.pointer_moved(PageIndex(0), 0.0, 0.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 612.0, 396.0);
         session.pointer_released();
-        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
         assert!(matches!(session.controls().crop, CropState::Cropped(_)));
         // Half the height, at the same fit-width scale: the second page now
         // starts half a page plus a gap down the column.
@@ -8920,12 +8938,11 @@ mod tests {
             false,
         );
         session.set_cell(612.0, 400.0);
-        session.apply(&ReadCommand::ArmCrop(true));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
         session.pointer_moved(PageIndex(0), 61.2, 79.2);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 550.8, 712.8);
         session.pointer_released();
-        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
         let scale = session.scale;
         assert!((session.column.pages[0].height - 792.0 * 0.8 * scale).abs() < 1.0);
         assert!((session.column.pages[1].height - 842.0 * 0.8 * scale).abs() < 1.0);
@@ -8944,12 +8961,11 @@ mod tests {
             session.controls().offset,
             session.controls().page,
         );
-        session.apply(&ReadCommand::ArmCrop(true));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
         session.pointer_moved(PageIndex(4), 61.2, 79.2);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(4), 550.8, 712.8);
         session.pointer_released();
-        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
         assert_ne!(session.controls().offset, offset);
         session.apply(&ReadCommand::ArmCrop(false));
         assert_eq!(session.controls().crop, CropState::Off);
@@ -8967,12 +8983,11 @@ mod tests {
             .render_plan(1.0)
             .iter()
             .all(|entry| entry.region == pulpit_core::notes::Region::FULL));
-        session.apply(&ReadCommand::ArmCrop(true));
+        session.apply(&ReadCommand::SetCropChoice(CropChoice::Pages));
         session.pointer_moved(PageIndex(0), 0.0, 0.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 612.0, 396.0);
         session.pointer_released();
-        session.apply(&ReadCommand::TakeCrop(CropChoice::Pages));
         let plan = session.render_plan(1.0);
         assert!(!plan.is_empty());
         for entry in plan {
@@ -8981,19 +8996,23 @@ mod tests {
         }
     }
 
-    /// Escape's command drops the rectangle and keeps the tool: the reader
-    /// who mis-drew one draws another rather than re-arming first.
+    /// Escape's command drops the rectangle being dragged and keeps the
+    /// tool: the reader who mis-drew one draws another rather than re-arming
+    /// first, and the release that follows acts on nothing.
     #[test]
     fn cancelling_a_rectangle_leaves_the_tool_armed() {
         let mut session = open(3);
+        let before = session.controls().zoom;
         session.apply(&ReadCommand::ArmCrop(true));
         session.pointer_moved(PageIndex(0), 100.0, 100.0);
         session.pointer_pressed();
         session.pointer_moved(PageIndex(0), 500.0, 600.0);
-        session.pointer_released();
-        assert!(matches!(session.controls().crop, CropState::Choosing(_)));
+        assert!(session.marquee().is_some());
         session.apply(&ReadCommand::CancelCrop);
+        assert!(session.marquee().is_none());
+        assert!(matches!(session.pointer_released(), Released::Nothing));
         assert_eq!(session.controls().crop, CropState::Armed);
+        assert_eq!(session.controls().zoom, before);
     }
 
     /// A mark on `page`, saying `says`, that pulpit understands or does not.

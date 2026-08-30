@@ -419,8 +419,8 @@ pub fn page_surface_id() -> iced::advanced::widget::Id {
 struct Pointer {
     /// The armed annotation tool, if any.
     armed: Option<AnnotationTool>,
-    /// Is the marquee crop armed or waiting on an answer? It outranks the
-    /// armed tool: while it is on, no tool and no link can have the press.
+    /// Is the marquee crop armed? It outranks the armed tool: while it is
+    /// on, no tool and no link can have the press.
     marqueeing: bool,
     /// Is the hand dragging the page about?
     panning: bool,
