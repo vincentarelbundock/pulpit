@@ -27,7 +27,18 @@ use pulpit_display::DisplayRoles;
 use serde::{Deserialize, Serialize};
 
 /// Current settings schema version. Bump it *and* add a migration.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
+
+/// Seconds since the Unix epoch, for the per-entry timestamps that let two
+/// running copies of pulpit merge their settings instead of clobbering each
+/// other's. Wall-clock seconds are exactly precise enough: the question the
+/// timestamp answers is "which afternoon", not "which frame".
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
 
 /// How pulpit reacts when a second display appears mid-talk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -59,7 +70,7 @@ pub struct Settings {
     /// migration design is ready to support it well.
     #[serde(skip)]
     pub keymap: Keymap,
-    pub recent: VecDeque<PathBuf>,
+    pub recent: VecDeque<RecentDocument>,
     pub diagnostics: DiagnosticsSettings,
     pub layout: LayoutSettings,
     pub appearance: AppearanceSettings,
@@ -336,6 +347,25 @@ pub struct DocumentLayout {
     pub hash: String,
     /// The layout's identifier, as in [`LayoutSettings::active`].
     pub layout: String,
+    /// When this choice was made, in Unix seconds. Zero in records written
+    /// before the timestamp existed, which merging reads as "older than
+    /// anything stamped".
+    #[serde(default)]
+    pub updated: u64,
+}
+
+/// One entry in the recent-documents list.
+///
+/// The timestamp is what lets two running copies of pulpit agree about which
+/// document really was opened last: without it, whichever instance saved its
+/// settings last rewrote the whole list from its own — possibly hours-old —
+/// memory of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecentDocument {
+    pub path: PathBuf,
+    /// When the document was last opened, in Unix seconds.
+    #[serde(default)]
+    pub opened: u64,
 }
 
 /// How many files remember a layout. Beyond this the least recently chosen
@@ -354,9 +384,16 @@ impl LayoutSettings {
 
     /// Record a deliberate choice for this file, most recent first.
     pub fn remember_layout_for_document(&mut self, hash: String, layout: String) {
+        self.remember_layout_for_document_at(hash, layout, unix_now());
+    }
+
+    fn remember_layout_for_document_at(&mut self, hash: String, layout: String, now: u64) {
         self.per_document.retain(|entry| entry.hash != hash);
-        self.per_document
-            .push_front(DocumentLayout { hash, layout });
+        self.per_document.push_front(DocumentLayout {
+            hash,
+            layout,
+            updated: now,
+        });
         while self.per_document.len() > MAX_REMEMBERED_LAYOUTS {
             self.per_document.pop_back();
         }
@@ -385,6 +422,12 @@ pub struct ReadingSettings {
     /// Whether leaving a document records where you were. Off means the list
     /// stops growing; clearing it is a separate, deliberate act.
     pub remember: bool,
+    /// When the list was last deliberately cleared, in Unix seconds; zero if
+    /// never. Merging refuses to resurrect a position older than this from
+    /// another instance's file: "forget what I read" must survive a
+    /// still-running window saving its settings afterwards.
+    #[serde(default)]
+    pub cleared_at: u64,
 }
 
 impl Default for ReadingSettings {
@@ -395,6 +438,7 @@ impl Default for ReadingSettings {
             // expects of a document, and one that has to be found and switched
             // on is one most readers never get.
             remember: true,
+            cleared_at: 0,
         }
     }
 }
@@ -446,6 +490,25 @@ pub struct ReadingPosition {
     /// Whether the search pane was open. Same reasoning as `outline_open`.
     #[serde(default)]
     pub search_open: bool,
+    /// When the position was recorded, in Unix seconds. Zero in records
+    /// written before the timestamp existed. Not part of *where* the reader
+    /// was — [`ReadingPosition::same_place`] compares without it.
+    #[serde(default)]
+    pub updated: u64,
+}
+
+impl ReadingPosition {
+    /// Whether two records describe the same place in the same document,
+    /// regardless of when each was taken. The per-tick "did anything move"
+    /// check must use this rather than `==`: a fresh record differs from the
+    /// stored one by its timestamp alone on every tick that nothing moved.
+    pub fn same_place(&self, other: &ReadingPosition) -> bool {
+        let stamped = ReadingPosition {
+            updated: other.updated,
+            ..self.clone()
+        };
+        stamped == *other
+    }
 }
 
 /// The reader's zoom, in the settings schema's own vocabulary.
@@ -542,6 +605,11 @@ impl ReadingSettings {
     /// whole list with one paper in an afternoon and evict every other
     /// document to hold a hundred stale copies of that one.
     pub fn remember_position(&mut self, position: ReadingPosition) {
+        self.remember_position_at(position, unix_now());
+    }
+
+    fn remember_position_at(&mut self, mut position: ReadingPosition, now: u64) {
+        position.updated = now;
         self.positions.retain(|entry| {
             let same_document = match (&entry.hash, &position.hash) {
                 (Some(existing), Some(new)) => existing == new,
@@ -561,6 +629,10 @@ impl ReadingSettings {
     #[allow(dead_code)] // unreached, including by its own tests
     pub fn forget_all(&mut self) {
         self.positions.clear();
+        // The clearing is a fact with a time, not just an empty list: without
+        // it, the next merge with another instance's file would put every
+        // forgotten position straight back.
+        self.cleared_at = unix_now();
     }
 }
 
@@ -588,9 +660,100 @@ impl Default for Settings {
 const MAX_RECENT: usize = 10;
 
 impl Settings {
+    /// Fold another instance's saved settings into this one before writing.
+    ///
+    /// Settings are loaded once at startup, and a save writes the whole
+    /// document — so with two windows open, the last one to save used to
+    /// rewrite the shared lists from its own stale memory of them: open a
+    /// paper in a new window, turn a page in the old one, and the old
+    /// window's save has made *its* paper the most recent again (and possibly
+    /// evicted the new one from the list entirely).
+    ///
+    /// The per-file lists are therefore merged by entry, newest timestamp
+    /// winning, with ties going to this instance — the writer. Everything
+    /// else keeps this instance's value: scalar preferences have no per-entry
+    /// history to merge, and last-writer-wins is the honest rule for "which
+    /// theme did I pick".
+    pub fn absorb(&mut self, disk: Settings) {
+        // Recent documents: union by path, most recently opened first.
+        for theirs in disk.recent {
+            match self.recent.iter_mut().find(|ours| ours.path == theirs.path) {
+                Some(ours) => {
+                    if theirs.opened > ours.opened {
+                        ours.opened = theirs.opened;
+                    }
+                }
+                None => self.recent.push_back(theirs),
+            }
+        }
+        let mut recent: Vec<_> = std::mem::take(&mut self.recent).into();
+        recent.sort_by_key(|entry| std::cmp::Reverse(entry.opened));
+        recent.truncate(MAX_RECENT);
+        self.recent = recent.into();
+
+        // Reading positions: the same union, keyed the way the list itself
+        // dedups — by content hash when both sides have one, else by path —
+        // and gated by the clear epoch, so a deliberate "forget what I read"
+        // in either instance is not undone by the other's old file.
+        let cleared_at = self.reading.cleared_at.max(disk.reading.cleared_at);
+        self.reading.cleared_at = cleared_at;
+        self.reading
+            .positions
+            .retain(|entry| entry.updated > cleared_at || cleared_at == 0);
+        for theirs in disk.reading.positions {
+            if theirs.updated <= cleared_at && cleared_at != 0 {
+                continue;
+            }
+            let ours = self.reading.positions.iter_mut().find(|ours| {
+                let same_hash = match (&ours.hash, &theirs.hash) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                same_hash || ours.path == theirs.path
+            });
+            match ours {
+                Some(ours) => {
+                    if theirs.updated > ours.updated {
+                        *ours = theirs;
+                    }
+                }
+                None => self.reading.positions.push_back(theirs),
+            }
+        }
+        let mut positions: Vec<_> = std::mem::take(&mut self.reading.positions).into();
+        positions.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
+        positions.truncate(MAX_REMEMBERED_POSITIONS);
+        self.reading.positions = positions.into();
+
+        // Per-document layouts: union by content hash.
+        for theirs in disk.layout.per_document {
+            match self
+                .layout
+                .per_document
+                .iter_mut()
+                .find(|ours| ours.hash == theirs.hash)
+            {
+                Some(ours) => {
+                    if theirs.updated > ours.updated {
+                        *ours = theirs;
+                    }
+                }
+                None => self.layout.per_document.push_back(theirs),
+            }
+        }
+        let mut layouts: Vec<_> = std::mem::take(&mut self.layout.per_document).into();
+        layouts.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
+        layouts.truncate(MAX_REMEMBERED_LAYOUTS);
+        self.layout.per_document = layouts.into();
+    }
+
     pub fn remember_recent(&mut self, path: PathBuf) {
-        self.recent.retain(|existing| existing != &path);
-        self.recent.push_front(path);
+        self.remember_recent_at(path, unix_now());
+    }
+
+    fn remember_recent_at(&mut self, path: PathBuf, now: u64) {
+        self.recent.retain(|existing| existing.path != path);
+        self.recent.push_front(RecentDocument { path, opened: now });
         while self.recent.len() > MAX_RECENT {
             self.recent.pop_back();
         }
@@ -1050,6 +1213,7 @@ mod tests {
             page,
             zoom: StoredZoom::FitPage,
             fraction: 0.5,
+            updated: 0,
             outline_open: false,
             search_open: false,
         }
@@ -1324,18 +1488,85 @@ mod tests {
         settings.remember_recent(PathBuf::from("/decks/19.pdf"));
         assert_eq!(settings.recent.len(), MAX_RECENT);
         assert_eq!(
-            settings.recent.front().unwrap(),
-            &PathBuf::from("/decks/19.pdf")
+            settings.recent.front().unwrap().path,
+            PathBuf::from("/decks/19.pdf")
         );
         assert_eq!(
             settings
                 .recent
                 .iter()
-                .filter(|p| p.ends_with("19.pdf"))
+                .filter(|p| p.path.ends_with("19.pdf"))
                 .count(),
             1,
             "no duplicates"
         );
+    }
+
+    #[test]
+    fn absorbing_another_instances_file_keeps_the_newest_opening_first() {
+        // Instance A opened its paper at t=100 and has not looked at the
+        // disk since. Instance B opened another paper at t=200 and saved.
+        // A's save must not make A's paper "last" again.
+        let mut ours = Settings::default();
+        ours.remember_recent_at(PathBuf::from("/papers/a.pdf"), 100);
+        let mut disk = Settings::default();
+        disk.remember_recent_at(PathBuf::from("/papers/a.pdf"), 90);
+        disk.remember_recent_at(PathBuf::from("/papers/b.pdf"), 200);
+        ours.absorb(disk);
+        let paths: Vec<_> = ours.recent.iter().map(|entry| entry.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/papers/b.pdf"),
+                PathBuf::from("/papers/a.pdf")
+            ]
+        );
+        // And the shared entry kept the newest of its two timestamps.
+        assert_eq!(ours.recent[1].opened, 100);
+    }
+
+    #[test]
+    fn absorbing_merges_positions_by_document_and_respects_a_clear() {
+        let mut ours = Settings::default();
+        ours.reading
+            .remember_position_at(position(Some("aaa"), "/papers/a.pdf", 3), 100);
+        let mut disk = Settings::default();
+        // The other instance read further in the same document...
+        disk.reading
+            .remember_position_at(position(Some("aaa"), "/papers/a.pdf", 9), 150);
+        // ...and left a position in another one.
+        disk.reading
+            .remember_position_at(position(Some("bbb"), "/papers/b.pdf", 2), 120);
+        ours.absorb(disk);
+        assert_eq!(ours.reading.positions.len(), 2);
+        assert_eq!(ours.reading.positions[0].page, 9, "the further read wins");
+        assert_eq!(ours.reading.positions[1].page, 2);
+
+        // A deliberate clear in this instance is not undone by a disk file
+        // whose positions predate it.
+        let mut cleared = Settings::default();
+        cleared.reading.cleared_at = 500;
+        let mut stale = Settings::default();
+        stale
+            .reading
+            .remember_position_at(position(Some("ccc"), "/papers/c.pdf", 7), 400);
+        cleared.absorb(stale);
+        assert!(cleared.reading.positions.is_empty());
+    }
+
+    #[test]
+    fn absorbing_merges_per_document_layouts_by_newest_choice() {
+        let mut ours = Settings::default();
+        ours.layout
+            .remember_layout_for_document_at("aaa".into(), "reader".into(), 100);
+        let mut disk = Settings::default();
+        disk.layout
+            .remember_layout_for_document_at("aaa".into(), "presenter".into(), 200);
+        disk.layout
+            .remember_layout_for_document_at("bbb".into(), "reader".into(), 50);
+        ours.absorb(disk);
+        assert_eq!(ours.layout.layout_for_document("aaa"), Some("presenter"));
+        assert_eq!(ours.layout.layout_for_document("bbb"), Some("reader"));
     }
 
     #[test]

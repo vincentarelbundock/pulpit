@@ -10251,10 +10251,20 @@ impl App {
             fraction,
             outline_open: self.outline_rail.is_open(),
             search_open: self.search_pane.is_open(),
+            // Stamped by `remember_position`; zero here so `same_place`
+            // against the stored front is the only comparison that matters.
+            updated: 0,
         };
         // Nothing to write when nothing moved, which is most ticks: the
         // settings are only dirtied by a position that is actually new.
-        if self.settings.reading.positions.front() == Some(&position) {
+        // Compared without the timestamp, which differs on every tick.
+        if self
+            .settings
+            .reading
+            .positions
+            .front()
+            .is_some_and(|front| position.same_place(front))
+        {
             return;
         }
         self.settings.reading.remember_position(position);

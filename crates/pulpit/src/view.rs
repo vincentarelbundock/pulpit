@@ -1069,12 +1069,12 @@ const MENU_HEADER: f32 = 20.0;
 const RECENT_MENU_LIMIT: usize = 5;
 
 fn recent_menu_documents(
-    recent: &std::collections::VecDeque<std::path::PathBuf>,
+    recent: &std::collections::VecDeque<crate::settings::RecentDocument>,
 ) -> impl Iterator<Item = &std::path::Path> {
     recent
         .iter()
         .take(RECENT_MENU_LIMIT)
-        .map(std::path::PathBuf::as_path)
+        .map(|entry| entry.path.as_path())
 }
 
 fn recent_menu_label(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
@@ -4428,7 +4428,10 @@ mod tests {
     #[test]
     fn recent_menu_keeps_the_five_newest_paths_in_order() {
         let recent = (0..7)
-            .map(|index| std::path::PathBuf::from(format!("deck-{index}.pdf")))
+            .map(|index| crate::settings::RecentDocument {
+                path: std::path::PathBuf::from(format!("deck-{index}.pdf")),
+                opened: 100 - index,
+            })
             .collect();
         let shown: Vec<_> = recent_menu_documents(&recent).collect();
         assert_eq!(shown.len(), 5);

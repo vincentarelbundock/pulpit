@@ -97,6 +97,14 @@ impl SettingsStore {
     /// previous version retained as a backup.
     pub fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
         let mut settings = settings.clone();
+        // Another instance may have saved since this one loaded. Fold its
+        // per-file lists in rather than rewriting them from this instance's
+        // memory — the whole reason `Settings::absorb` exists. A file that
+        // does not load (absent, corrupt) merges nothing, deliberately: this
+        // write then repairs it.
+        if let Ok(disk) = self.try_load(&self.path) {
+            settings.absorb(disk);
+        }
         settings.schema = SCHEMA_VERSION;
         let text = toml::to_string_pretty(&settings)
             .map_err(|e| SettingsError::Serialise(e.to_string()))?;
@@ -202,6 +210,39 @@ fn migrate(value: &mut toml::Value, from: u32) -> Result<(), SettingsError> {
             // default is an empty profile list, so old files need no value
             // transformation.
             3 => {}
+            // Schema 5 timestamps the shared per-file lists so concurrent
+            // instances can merge them. `recent` changes shape from a list of
+            // path strings to a list of tables; the timestamps synthesized
+            // here count down from now so the old file's order survives the
+            // first merge. Positions and layouts gain their field through
+            // `serde(default)` as zero — "older than anything stamped".
+            4 => {
+                if let Some(recent) = value
+                    .as_table_mut()
+                    .and_then(|table| table.get_mut("recent"))
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs())
+                        .unwrap_or(0);
+                    let paths = recent.as_array().cloned().unwrap_or_default();
+                    let entries = paths
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .enumerate()
+                        .map(|(index, path)| {
+                            let mut entry = toml::value::Table::new();
+                            entry.insert("path".into(), toml::Value::String(path.into()));
+                            entry.insert(
+                                "opened".into(),
+                                toml::Value::Integer(now.saturating_sub(index as u64) as i64),
+                            );
+                            toml::Value::Table(entry)
+                        })
+                        .collect();
+                    *recent = toml::Value::Array(entries);
+                }
+            }
             other => {
                 return Err(SettingsError::Parse(format!(
                     "no migration from schema {other}"
@@ -287,11 +328,68 @@ mod tests {
             "#123456"
         );
         assert_eq!(
-            loaded.recent.front().unwrap(),
-            &PathBuf::from("/decks/talk.pdf")
+            loaded.recent.front().unwrap().path,
+            PathBuf::from("/decks/talk.pdf")
         );
         assert_eq!(loaded.schema, SCHEMA_VERSION);
         assert_eq!(loaded.signatures, settings.signatures);
+    }
+
+    #[test]
+    fn a_stale_instances_save_does_not_clobber_a_newer_recent_list() {
+        let (_dir, store) = store();
+        // Both instances load the same (empty) file at startup.
+        let mut first = store.load();
+        let mut second = store.load();
+        // The second instance opens a paper and saves.
+        second.remember_recent(PathBuf::from("/papers/new.pdf"));
+        store.save(&second).unwrap();
+        // The first instance — which has never heard of that paper — saves
+        // afterwards, from its stale copy.
+        first.remember_recent(PathBuf::from("/papers/old.pdf"));
+        // An opening recorded before the other instance's, as wall clocks
+        // see it.
+        first.recent.front_mut().unwrap().opened -= 60;
+        store.save(&first).unwrap();
+        let merged = store.load();
+        let paths: Vec<_> = merged
+            .recent
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/papers/new.pdf"),
+                PathBuf::from("/papers/old.pdf")
+            ],
+            "the most recently opened paper stays first"
+        );
+    }
+
+    #[test]
+    fn a_schema_four_recent_list_of_strings_migrates_in_order() {
+        let (_dir, store) = store();
+        std::fs::write(
+            store.path(),
+            "schema = 4\nrecent = [\"/decks/first.pdf\", \"/decks/second.pdf\"]\n",
+        )
+        .unwrap();
+        let loaded = store.load();
+        let paths: Vec<_> = loaded
+            .recent
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/decks/first.pdf"),
+                PathBuf::from("/decks/second.pdf")
+            ]
+        );
+        // Synthesized timestamps preserve the old order through a merge.
+        assert!(loaded.recent[0].opened > loaded.recent[1].opened);
     }
 
     #[test]
