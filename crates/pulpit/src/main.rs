@@ -10,6 +10,7 @@
 //! ship, sign or find on `PATH`.
 
 mod app;
+mod autocrop;
 mod coalesce;
 mod datefield;
 mod designer;

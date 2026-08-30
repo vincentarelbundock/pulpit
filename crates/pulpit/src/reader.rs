@@ -4031,6 +4031,11 @@ impl ReaderSession {
                 self.marquee = None;
                 false
             }
+            // Measuring the margins takes the deck's thumbnails, which the
+            // application holds — and in a plain reader the press is what
+            // starts warming them. The crop it yields comes back through
+            // [`Session::auto_crop`].
+            ReadCommand::AutoCrop => false,
             // The rest are the application's to route to the worker: a page
             // gesture, a field edit, an undo or a save is not a viewport
             // change, and this type owns only the viewport.
@@ -4242,6 +4247,49 @@ impl ReaderSession {
                 true
             }
         }
+    }
+
+    /// Take `region` — measured from the deck's own pictures rather than
+    /// drawn — as a crop on every page: the automatic half of
+    /// [`Session::take_crop`]'s `Pages` meaning, landing in the same state
+    /// so clearing, restoring and the rotation all work unchanged.
+    ///
+    /// The zoom and offsets are recorded only when no crop holds them
+    /// already: pressing the option again refines the window without
+    /// overwriting the place a clear should return to.
+    ///
+    /// Returns whether anything changed, which is what tells the
+    /// application to re-render and take the surface with it.
+    pub fn auto_crop(&mut self, region: pulpit_core::notes::Region) -> bool {
+        self.controls.crop_options = false;
+        if !crate::widgets::document::model::is_usable_crop(&region)
+            || self.controls.crop == CropState::Cropped(region)
+        {
+            return false;
+        }
+        // An armed marquee yields: the measurement answered the question a
+        // drag would have.
+        self.marquee = None;
+        if self.crop_restore.is_none() {
+            self.crop_restore = Some((
+                self.controls.zoom,
+                self.controls.offset,
+                self.controls.offset_x,
+            ));
+        }
+        self.controls.crop = CropState::Cropped(region);
+        // The page being read stays the page being read: every page has
+        // just changed size, exactly as in `take_crop`.
+        let anchor = self.controls.page;
+        self.relayout();
+        if let Some(offset) = self.column.offset_of(anchor) {
+            self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
+            self.controls.page = anchor;
+        }
+        self.controls.offset_x = self
+            .column
+            .clamp_offset_x(self.controls.offset_x, self.cell.0);
+        true
     }
 
     /// Fill the window with `region` of `page`.
@@ -8994,6 +9042,54 @@ mod tests {
             assert!((entry.region.height - 0.5).abs() < 1e-3);
             assert_eq!(entry.region.y, 0.0);
         }
+    }
+
+    /// An automatic crop lands in the same state a drawn one does: every
+    /// page read through the window, the latch lit, and one press of the
+    /// latch putting the reader back where they were.
+    #[test]
+    fn an_automatic_crop_is_a_crop_like_any_other() {
+        let mut session = open(4);
+        let (zoom, offset) = (session.controls().zoom, session.controls().offset);
+        let window = pulpit_core::notes::Region::new(0.1, 0.1, 0.8, 0.8);
+        assert!(session.auto_crop(window));
+        assert_eq!(session.controls().crop, CropState::Cropped(window));
+        for page in &session.column.pages {
+            assert!(
+                (page.height - 792.0 * 0.8 * session.scale).abs() < 1.0,
+                "page {:?} kept its margins",
+                page.page
+            );
+        }
+        session.apply(&ReadCommand::ArmCrop(false));
+        assert_eq!(session.controls().crop, CropState::Off);
+        assert_eq!(session.controls().zoom, zoom);
+        assert!((session.controls().offset - offset).abs() < 1.0);
+    }
+
+    /// Pressing the option again refines the window without overwriting the
+    /// place a clear should return to, and a repeat of the same window — or
+    /// an unusable one — changes nothing.
+    #[test]
+    fn refining_an_automatic_crop_keeps_the_way_back() {
+        let mut session = open(4);
+        session.apply(&ReadCommand::SetZoom(Zoom::Fixed(1.5)));
+        let zoom = session.controls().zoom;
+        assert!(session.auto_crop(pulpit_core::notes::Region::new(0.1, 0.1, 0.8, 0.8)));
+        let window = pulpit_core::notes::Region::new(0.2, 0.2, 0.6, 0.6);
+        assert!(session.auto_crop(window));
+        assert!(!session.auto_crop(window), "the same window is not news");
+        assert!(
+            !session.auto_crop(pulpit_core::notes::Region::new(0.5, 0.5, 0.001, 0.001)),
+            "a sliver is not a crop"
+        );
+        assert_eq!(session.controls().crop, CropState::Cropped(window));
+        session.apply(&ReadCommand::ArmCrop(false));
+        assert_eq!(
+            session.controls().zoom,
+            zoom,
+            "clearing returns to the pre-crop zoom, not the refined one"
+        );
     }
 
     /// Escape's command drops the rectangle being dragged and keeps the

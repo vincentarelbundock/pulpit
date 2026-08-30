@@ -223,6 +223,16 @@ pub enum ReadCommand {
     /// Abandon the rectangle being dragged. The tool stays armed, so the
     /// reader who mis-drew one draws another rather than re-arming first.
     CancelCrop,
+    /// Crop every page to its measured margins, no rectangle drawn: the
+    /// crop button's third option.
+    ///
+    /// The margins are read off the deck's thumbnails — pixels, not the
+    /// PDF's object bounds, because pixels cannot lie about what is visible
+    /// — so this is the application's to answer: it holds the thumbnails,
+    /// and in a plain reader this press is what starts warming them. The
+    /// crop lands through the session once the measurements are in, exactly
+    /// as if the rectangle had been drawn by hand.
+    AutoCrop,
     /// What has been typed into the page box, as typed. The model decides
     /// what of it is a page number.
     TypePage(String),

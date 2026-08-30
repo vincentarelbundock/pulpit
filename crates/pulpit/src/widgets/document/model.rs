@@ -185,16 +185,10 @@ pub enum CropChoice {
 }
 
 impl CropChoice {
-    /// The two meanings, in the order the options panel offers them.
+    /// The two meanings, in the order the options panel offers them. The
+    /// panel shows each as an icon with a hover hint; the words live there,
+    /// beside the glyphs they explain.
     pub const ALL: [CropChoice; 2] = [CropChoice::Zoom, CropChoice::Pages];
-
-    /// What the options panel says a drawn rectangle will do.
-    pub fn label(self) -> &'static str {
-        match self {
-            CropChoice::Zoom => "Zoom into it, once",
-            CropChoice::Pages => "Crop every page to it",
-        }
-    }
 }
 
 /// The smallest crop worth honouring, as a fraction of the page.

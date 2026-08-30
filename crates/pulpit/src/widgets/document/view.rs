@@ -1467,24 +1467,54 @@ fn crop_control<Message: Clone + 'static>(
     .into();
 
     let panel = options_open.then(|| {
-        let mut meanings = Column::new().spacing(theme::space::XS);
-        for meaning in CropChoice::ALL {
-            let mut option = button(text(meaning.label()).size(theme::type_scale::LABEL))
-                .padding(Padding::from([6.0, 10.0]))
-                .width(Length::Fixed(180.0))
-                .style(if choice == meaning {
+        // Icons alone, as the reader's bands are: the glyph carries the
+        // difference — a magnifier, the crop frame, the scan brackets — and
+        // the hint under the resting pointer says what one press will do,
+        // which is more than a short label ever managed.
+        let item = |icon: theme::Icon,
+                    tip: &str,
+                    selected: bool,
+                    command: ReadCommand|
+         -> Element<'static, Message> {
+            let mut control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
+                .padding(Padding::from([4.0, 8.0]))
+                .style(if selected {
                     theme::ambient::selected_button
                 } else {
                     theme::ambient::tool_button
                 });
             if live {
-                option = option.on_press(send(ReadCommand::SetCropChoice(meaning)));
+                control = control.on_press(send(command));
             }
-            meanings = meanings.push(option);
+            hint(control, tip)
+        };
+        let mut options = Row::new()
+            .spacing(theme::space::XS)
+            .align_y(Alignment::Center);
+        for meaning in CropChoice::ALL {
+            let (icon, tip) = match meaning {
+                CropChoice::Zoom => (theme::Icon::ZoomIn, "A drawn rectangle zooms, once"),
+                CropChoice::Pages => (theme::Icon::Crop, "A drawn rectangle crops every page"),
+            };
+            options = options.push(item(
+                icon,
+                tip,
+                choice == meaning,
+                ReadCommand::SetCropChoice(meaning),
+            ));
         }
+        // The third way a crop happens: measured rather than drawn. One
+        // press, no rectangle — the margins are read off the deck's own
+        // pictures and every page is cropped to the ink.
+        options = options.push(item(
+            theme::Icon::ScanText,
+            "Measure the margins and crop them away",
+            false,
+            ReadCommand::AutoCrop,
+        ));
         crate::widgets::common::options::Options::new("Crop")
             .on_close(live.then(|| send(ReadCommand::CropOptions(false))))
-            .row("A drawn rectangle", meanings)
+            .bare_row(options)
             .into()
     });
     crate::widgets::common::popover::Popover::new(trigger, panel)

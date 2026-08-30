@@ -150,6 +150,9 @@ pub enum Icon {
     Pause,
     /// Put a timer back to the beginning: `rotate-ccw`.
     Reset,
+    /// Measure where the content sits and act on it — the automatic margin
+    /// crop: `scan-text`, corner brackets reading lines of text.
+    ScanText,
 }
 
 impl Icon {
@@ -211,6 +214,7 @@ impl Icon {
             Icon::Play => include_bytes!("../../assets/icons/play.svg"),
             Icon::Pause => include_bytes!("../../assets/icons/pause.svg"),
             Icon::Reset => include_bytes!("../../assets/icons/rotate-ccw.svg"),
+            Icon::ScanText => include_bytes!("../../assets/icons/scan-text.svg"),
         }
     }
 
@@ -223,7 +227,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 55] = [
+    const ALL: [Icon; 56] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -279,6 +283,7 @@ impl Icon {
         Icon::Play,
         Icon::Pause,
         Icon::Reset,
+        Icon::ScanText,
     ];
 
     /// Every variant is in `ALL`, at the slot its own discriminant names.

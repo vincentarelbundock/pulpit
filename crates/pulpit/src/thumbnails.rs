@@ -47,6 +47,12 @@ pub struct ThumbnailCache {
     generation: RenderGeneration,
     budget_bytes: u64,
     used_bytes: u64,
+    /// Where each measured page's ink sits, as fractions of the page — the
+    /// raw material of the automatic margin crop. Kept apart from the
+    /// pictures because eviction must not forget them: a measurement is
+    /// sixteen bytes and stays true after the picture that yielded it is
+    /// dropped. Only a new generation makes them stale.
+    margins: HashMap<usize, pulpit_core::notes::Region>,
 }
 
 impl std::fmt::Debug for ThumbnailCache {
@@ -66,6 +72,7 @@ impl ThumbnailCache {
             generation: RenderGeneration(0),
             budget_bytes,
             used_bytes: 0,
+            margins: HashMap::new(),
         }
     }
 
@@ -79,6 +86,36 @@ impl ThumbnailCache {
         self.entries.clear();
         self.used_bytes = 0;
         self.generation = generation;
+        self.margins.clear();
+    }
+
+    /// Record where a page's ink was measured to sit, or that the page had
+    /// nothing to measure.
+    ///
+    /// `None` — a blank page — removes any earlier answer rather than being
+    /// dropped, so a page that a reload emptied stops holding the margins
+    /// open. A blank page says nothing about the deck's margins; it is the
+    /// measured pages that decide.
+    pub fn note_margins(&mut self, slide: usize, bounds: Option<pulpit_core::notes::Region>) {
+        match bounds {
+            Some(region) => {
+                self.margins.insert(slide, region);
+            }
+            None => {
+                self.margins.remove(&slide);
+            }
+        }
+    }
+
+    /// Every measured page's ink bounds, in page order.
+    ///
+    /// The order is load-bearing: the automatic crop treats the first and
+    /// last measured pages as a book's covers, and only page order says
+    /// which those are.
+    pub fn margins(&self) -> Vec<pulpit_core::notes::Region> {
+        let mut pairs: Vec<_> = self.margins.iter().collect();
+        pairs.sort_unstable_by_key(|(slide, _)| **slide);
+        pairs.into_iter().map(|(_, region)| *region).collect()
     }
 
     pub fn contains(&self, slide: usize) -> bool {
@@ -268,6 +305,44 @@ mod tests {
         cache.insert(5, handle(), 800, 960, 5);
         assert!(cache.has_at_least(5, 960), "a wider one still replaces it");
         assert_eq!(cache.used_bytes(), 800, "and frees the one it replaced");
+    }
+
+    #[test]
+    fn margins_outlive_the_pictures_but_not_the_generation() {
+        use pulpit_core::notes::Region;
+        // Room for one picture: inserting a second evicts the first.
+        let mut cache = cache(100);
+        cache.insert(10, handle(), 100, 240, 11);
+        cache.note_margins(10, Some(Region::new(0.1, 0.1, 0.8, 0.8)));
+        cache.insert(11, handle(), 100, 240, 11);
+        assert!(!cache.contains(10), "the far picture went");
+        assert_eq!(cache.margins().len(), 1, "its measurement stayed");
+
+        // A blank page takes its earlier answer back.
+        cache.note_margins(10, None);
+        assert!(cache.margins().is_empty());
+
+        cache.note_margins(11, Some(Region::new(0.2, 0.2, 0.6, 0.6)));
+        cache.reset(RenderGeneration(1));
+        assert!(
+            cache.margins().is_empty(),
+            "an old document's measurements are stale"
+        );
+    }
+
+    #[test]
+    fn margins_come_back_in_page_order() {
+        use pulpit_core::notes::Region;
+        // Measurements land in warming order, which walks outward from the
+        // presenter — but the covers are the first and last *pages*, so the
+        // answer must be in page order regardless.
+        let mut cache = cache(1000);
+        for slide in [7usize, 2, 9, 0] {
+            let x = slide as f32 / 100.0;
+            cache.note_margins(slide, Some(Region::new(x, 0.1, 0.5, 0.8)));
+        }
+        let xs: Vec<f32> = cache.margins().iter().map(|r| r.x).collect();
+        assert_eq!(xs, vec![0.00, 0.02, 0.07, 0.09]);
     }
 
     #[test]

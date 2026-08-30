@@ -1520,6 +1520,13 @@ pub struct App {
     /// weighs, spent at open on a grid most reading sessions never look at.
     thumbnails_demanded: bool,
 
+    /// An automatic margin crop waiting for the deck's measurements, and the
+    /// generation whose deck the press was about. Warming is a trickle, so
+    /// the press usually lands before every picture has: the tick keeps
+    /// asking until the queue drains, and a new document makes the press
+    /// moot rather than cropping a deck nobody meant.
+    pending_auto_crop: Option<pulpit_core::RenderGeneration>,
+
     /// Which in-flight requests are warming work. Tracked explicitly rather
     /// than inferred from the frame size, because a small presenter panel can
     /// legitimately ask for a frame of exactly the thumbnail width, and
@@ -2267,6 +2274,7 @@ impl App {
             ),
             thumbnail_queue: std::collections::VecDeque::new(),
             thumbnails_demanded: false,
+            pending_auto_crop: None,
             thumbnail_requests: std::collections::HashSet::new(),
             area_copy: None,
             area_clipboard_text: None,
@@ -6024,6 +6032,9 @@ impl App {
         // so opening the overview shows a finished grid.
         self.plan_thumbnails();
         self.pump_thumbnails();
+        // An automatic margin crop waiting on those pictures applies the
+        // moment the last measurement is in.
+        tasks.push(self.try_apply_auto_crop());
 
         // 2. File watching.
         if self.settings.rendering.watch_document {
@@ -6463,6 +6474,24 @@ impl App {
                     // read back — once, on the first draw of a cell. The
                     // whole store for a six-hundred-page deck is megabytes
                     // where it was a third of what this application weighed.
+                    // Measured before the pixels are traded for a JPEG: the
+                    // ink bounds feed the automatic margin crop, and this is
+                    // the one moment the raw frame is in hand. Only a slide
+                    // that is its whole page is measured — a slide carved
+                    // from a region of its page (a split notes layout) would
+                    // report that region's margins, not the page the reader
+                    // would be cropping.
+                    if self
+                        .state
+                        .mapping()
+                        .audience_source(key.slide, self.state.pdf_pages())
+                        .is_some_and(|source| source.region == pulpit_core::notes::Region::FULL)
+                    {
+                        self.thumbnails.note_margins(
+                            key.slide,
+                            crate::autocrop::ink_bounds(frame.width, frame.height, &frame.pixels),
+                        );
+                    }
                     let (handle, held_bytes) = encoded_thumbnail(&frame);
                     self.thumbnails.insert(
                         key.slide,
@@ -9675,6 +9704,20 @@ impl App {
                 );
                 task
             }
+            ReadCommand::AutoCrop => {
+                // The popover's question has been answered, whichever way
+                // the measurement goes.
+                self.reader.apply(&ReadCommand::CropOptions(false));
+                // A plain reader may never have warmed the deck: this press
+                // is the demand that starts it. The crop applies the moment
+                // the measurements are all in — at once when they already
+                // are, a beat later when warming has to run first.
+                self.pending_auto_crop = Some(self.state.generation());
+                self.thumbnails_demanded = true;
+                self.plan_thumbnails();
+                self.pump_thumbnails();
+                self.try_apply_auto_crop()
+            }
             ReadCommand::SaveAs => self.ask_where_to_save_document(),
             ReadCommand::Print => self.handle_print(PrintMsg::Open),
             ReadCommand::Sign => self.handle_sign(crate::signing::SignMsg::Start),
@@ -9980,6 +10023,13 @@ impl App {
                     self.ask_form_key(pulpit_render::document::protocol::FormInputEvent::Focus {
                         gained: false,
                     });
+                }
+                // A hand on the crop latch makes a waiting automatic crop
+                // stale: whichever way the latch goes, the reader has
+                // spoken, and a measurement landing later must not overrule
+                // them.
+                if matches!(command, ReadCommand::ArmCrop(_)) {
+                    self.pending_auto_crop = None;
                 }
                 let needs_render = self.reader.apply(&command);
                 // A colour chosen here is the colour at the lectern too: one
@@ -15897,6 +15947,46 @@ impl App {
         }
         let demand = crate::layout::panels::demand(&self.active_layout);
         demand.current || demand.neighbour
+    }
+
+    /// Apply the pending automatic margin crop once the measurements are in.
+    ///
+    /// "In" means the warming queue has drained with nothing outstanding:
+    /// every page that will get a picture has one, so the union taken is of
+    /// the whole deck — or of the bounded sample the budget allows on a very
+    /// long one — rather than of whichever pages happened to land first. A
+    /// crop that tightened page by page would move under the reader.
+    ///
+    /// Called from the press itself, for the deck whose pictures are already
+    /// warm, and from the tick, which is what carries a press made while
+    /// warming was still running.
+    fn try_apply_auto_crop(&mut self) -> Task<Message> {
+        let Some(generation) = self.pending_auto_crop else {
+            return Task::none();
+        };
+        if generation != self.state.generation() {
+            // The press was about a document that is gone.
+            self.pending_auto_crop = None;
+            return Task::none();
+        }
+        if !self.thumbnail_queue.is_empty() || !self.thumbnail_requests.is_empty() {
+            // Still measuring; the tick asks again.
+            return Task::none();
+        }
+        self.pending_auto_crop = None;
+        let Some(region) = crate::autocrop::combined_crop(&self.thumbnails.margins()) else {
+            // Honest rather than silent: the latch did not light and the
+            // reader should hear why — the pages are already tight, a page
+            // is full-bleed and may not lose ink, or nothing could be
+            // measured at all.
+            self.notify("No margins worth cropping were found.".to_string());
+            return Task::none();
+        };
+        if !self.reader.auto_crop(region) {
+            return Task::none();
+        }
+        self.request_reader_renders();
+        self.scroll_surface_to_reader()
     }
 
     fn plan_thumbnails(&mut self) {
