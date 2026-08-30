@@ -17,8 +17,10 @@
 //! by **name** (`HDMI-A-1`, `eDP-1`, …), which is stable within a session and
 //! is what the user sees in the display selector.
 
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
@@ -42,8 +44,6 @@ pub const AUDIENCE_APP_ID: &str = "pulpit-audience";
 struct Outputs {
     registry: RegistryState,
     outputs: OutputState,
-    /// Bumped whenever the compositor adds, changes or removes an output.
-    revision: Arc<AtomicU64>,
 }
 
 impl OutputHandler for Outputs {
@@ -51,17 +51,17 @@ impl OutputHandler for Outputs {
         &mut self.outputs
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.revision.fetch_add(1, Ordering::Relaxed);
-    }
+    // The three callbacks below are deliberately empty. `OutputState` has
+    // already folded the event in by the time we are called, and enumeration
+    // is authoritative: the listener's only question is whether the
+    // connection said anything at all, which it answers from the descriptor.
+    // A change counter used to live here, and nothing ever read it.
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.revision.fetch_add(1, Ordering::Relaxed);
-    }
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.revision.fetch_add(1, Ordering::Relaxed);
-    }
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 impl ProvidesRegistryState for Outputs {
@@ -79,10 +79,7 @@ pub struct WaylandBackend {
     connection: Connection,
     queue: Mutex<EventQueue<Outputs>>,
     state: Mutex<Outputs>,
-    revision: Arc<AtomicU64>,
     sequence: AtomicU64,
-    /// Last revision folded into a snapshot, so `has_changed` is cheap.
-    seen_revision: AtomicU64,
 }
 
 impl std::fmt::Debug for WaylandBackend {
@@ -100,11 +97,9 @@ impl WaylandBackend {
             .map_err(|e| BackendError::Protocol(format!("Wayland registry: {e}")))?;
         let handle = queue.handle();
 
-        let revision = Arc::new(AtomicU64::new(0));
         let mut state = Outputs {
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &handle),
-            revision: Arc::clone(&revision),
         };
         // One round trip so the initial output set, including xdg-output
         // logical geometry, has arrived before the first snapshot.
@@ -119,9 +114,7 @@ impl WaylandBackend {
             connection,
             queue: Mutex::new(queue),
             state: Mutex::new(state),
-            revision,
             sequence: AtomicU64::new(0),
-            seen_revision: AtomicU64::new(0),
         })
     }
 
@@ -136,30 +129,86 @@ impl WaylandBackend {
         Ok(())
     }
 
-    /// True when the compositor reported an output change since the last
-    /// call. A hint only: enumeration remains authoritative.
-    pub fn has_changed(&self) -> bool {
-        let _ = self.pump();
-        let current = self.revision.load(Ordering::Relaxed);
-        self.seen_revision.swap(current, Ordering::Relaxed) != current
-    }
-
-    /// Block until the compositor sends something, so a subscription thread
-    /// does not have to spin. Returns on any event, not only output changes.
-    pub fn wait_for_change(&self) -> Result<(), BackendError> {
-        // `blocking_dispatch` needs both locks; take them in the same order
-        // as `pump` to keep the ordering trivially deadlock-free.
-        let mut queue = self.queue.lock().unwrap();
-        let mut state = self.state.lock().unwrap();
-        queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| BackendError::Protocol(format!("Wayland dispatch: {e}")))?;
-        Ok(())
+    /// Wait until the compositor has something to say, holding no lock while
+    /// waiting.
+    ///
+    /// This is what makes the adapter's mutexes safe for the event-loop
+    /// thread to contend for. Every read of the socket happens inside
+    /// `roundtrip`, which is bounded request/response work; the open-ended
+    /// part — sitting on a connection that may never speak again — happens
+    /// here, on the raw descriptor, with no lock held. An earlier version
+    /// called `blocking_dispatch` with both locks held, and a suspend/resume
+    /// that changed no output was enough to park the UI thread forever behind
+    /// a listener thread that was itself waiting on a silent compositor.
+    ///
+    /// `Ok(true)` means the connection is readable and the caller should
+    /// re-enumerate; `Ok(false)` means nothing arrived within
+    /// [`WAIT_HINT_TIMEOUT`] and the caller should fall back to its own poll
+    /// cadence; an error means the connection is unusable, which sends the
+    /// caller to that same fallback rather than into a spin.
+    pub fn wait_for_change(&self) -> Result<bool, BackendError> {
+        // Flush first, so anything another thread queued is on the wire
+        // before we wait for a reply to it. `flush` writes what it can and
+        // reports `WouldBlock`; it never waits on the compositor. The queue
+        // lock is held only for that call, and released before the wait.
+        {
+            let _queue = self.queue.lock().unwrap();
+            self.connection
+                .flush()
+                .map_err(|e| BackendError::Protocol(format!("Wayland flush: {e}")))?;
+        }
+        wait_readable(self.connection.as_fd(), WAIT_HINT_TIMEOUT)
     }
 
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
+}
+
+/// How long a waiter sits on a silent connection before reporting "no hint".
+///
+/// The wait has to be bounded. This connection carries registry and output
+/// events only, so after a resume that changed nothing the compositor may
+/// legitimately say nothing for the rest of the session, and a thread whose
+/// progress cannot be observed is a thread whose locks cannot be reasoned
+/// about. A couple of seconds is long enough that a quiet compositor costs
+/// only an occasional wake-up, and short enough that the listener visibly
+/// ticks. When it expires the caller re-enumerates on its own fallback
+/// cadence — exactly what it does on a platform with no native listener.
+const WAIT_HINT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Wait for `fd` to become readable, for at most `timeout`, holding nothing.
+///
+/// `Ok(true)` is "readable", `Ok(false)` is "the timeout expired, no hint".
+/// A hang-up or invalid descriptor is an error *even when data is also
+/// pending*: a closed socket stays readable forever, so calling that a hint
+/// would turn the caller's loop into a spin, whereas an error drops it onto
+/// its slow fallback poll. An interrupted `poll` is likewise reported as "no
+/// hint" rather than retried; the caller already handles that answer well,
+/// and it keeps this function's own bound honest.
+fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> Result<bool, BackendError> {
+    let mut pollfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `pollfd` is a single initialised record owned by this frame,
+    // and the borrowed descriptor outlives the call.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(BackendError::Protocol(format!("poll: {error}")));
+    }
+    if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(BackendError::Protocol(
+            "the Wayland connection was hung up or is no longer valid".into(),
+        ));
+    }
+    Ok(ready > 0 && pollfd.revents & libc::POLLIN != 0)
 }
 
 impl DisplayBackend for WaylandBackend {
@@ -168,7 +217,7 @@ impl DisplayBackend for WaylandBackend {
     }
 
     fn wait_for_topology_change(&self) -> Result<bool, BackendError> {
-        WaylandBackend::wait_for_change(self).map(|()| true)
+        WaylandBackend::wait_for_change(self)
     }
 
     fn snapshot(&self) -> Result<DisplaySnapshot, BackendError> {
@@ -341,6 +390,48 @@ impl WaylandBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The waiter's contract, exercised on a socket pair rather than a
+    /// compositor: nothing to read means "no hint" after the timeout and not
+    /// a moment longer, a byte on the wire means "readable", and a peer that
+    /// has gone away is an error even though the descriptor is readable —
+    /// which is what keeps the listener loop off a spin when the connection
+    /// dies. Needs no display, so it runs in CI.
+    #[test]
+    fn waiting_for_readability_is_bounded_and_honest() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+
+        let (ours, mut theirs) = UnixStream::pair().expect("socket pair");
+
+        let started = Instant::now();
+        let timeout = Duration::from_millis(120);
+        assert!(
+            !wait_readable(ours.as_fd(), timeout).expect("a silent peer is not an error"),
+            "a silent peer times out with no hint"
+        );
+        assert!(
+            started.elapsed() >= timeout,
+            "the wait is not allowed to return early"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait is bounded by its timeout"
+        );
+
+        theirs.write_all(b"x").expect("write a byte");
+        assert!(
+            wait_readable(ours.as_fd(), timeout).expect("a readable peer is not an error"),
+            "a byte on the wire is a hint"
+        );
+
+        drop(theirs);
+        assert!(
+            wait_readable(ours.as_fd(), timeout).is_err(),
+            "a hung-up peer is an error, not an endless hint"
+        );
+    }
 
     #[test]
     fn scale_checks_report_the_arithmetic_plainly() {

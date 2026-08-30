@@ -294,6 +294,17 @@ _every_ media overlay, not just for HTML. That is accepted, not a gap.
   belongs in adapter modules, not in state transitions or views. `unsafe` and
   FFI are confined to the smallest adapter module, each block documenting its
   lifetime, thread and ownership invariants.
++ *No lock is held across an unbounded wait.* A lock the event-loop thread can
+  contend for MUST NOT be held by any thread across a wait that has no bound —
+  a syscall or a dispatch that may block until an event that is not promised
+  to arrive. Work done with such a lock held is bounded request/response
+  (a round trip, a flush, an enumeration); a helper thread that waits for the
+  platform to speak does so with no shared lock held and with its own timeout,
+  after which it reports "no hint" and the caller falls back to polling. The
+  Wayland output adapter deadlocked the whole UI on exactly this: its listener
+  thread held both adapter mutexes inside a blocking dispatch, and a
+  suspend/resume that changed no output meant the compositor never spoke
+  again, so the event-loop thread's next snapshot parked forever.
 + *Persisted values are portable.* Settings, cache and log locations use
   platform-standard directories; paths are `Path`/`PathBuf`, not assumed
   UTF-8. Nothing persisted may encode a monitor index, absolute window

@@ -46,8 +46,13 @@ pub trait DisplayBackend: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
     /// Block a caller-owned helper thread until the platform hints that the
-    /// topology changed. `Ok(false)` means no native listener is available
-    /// and the caller should use its slow fallback poll.
+    /// topology changed.
+    ///
+    /// `Ok(false)` means "no hint": either the platform has no native
+    /// listener at all, or an adapter that bounds its own wait reached that
+    /// bound with the connection still silent. Either way the caller should
+    /// re-enumerate on its slow fallback poll. An implementation MUST NOT
+    /// hold a lock the event-loop thread can contend for while it waits.
     fn wait_for_topology_change(&self) -> Result<bool, BackendError> {
         Ok(false)
     }

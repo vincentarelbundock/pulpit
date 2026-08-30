@@ -5024,6 +5024,7 @@ dependencies = [
 name = "pulpit-display"
 version = "0.0.11"
 dependencies = [
+ "libc",
  "serde",
  "smithay-client-toolkit 0.21.1",
  "thiserror 2.0.20",

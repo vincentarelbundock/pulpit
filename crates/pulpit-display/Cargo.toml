@@ -14,7 +14,7 @@ path = "src/bin/topology.rs"
 [features]
 default = ["x11", "wayland"]
 x11 = ["dep:x11rb"]
-wayland = ["dep:smithay-client-toolkit", "dep:wayland-client"]
+wayland = ["dep:smithay-client-toolkit", "dep:wayland-client", "dep:libc"]
 
 [dependencies]
 serde = { workspace = true }
@@ -29,3 +29,6 @@ tracing = { workspace = true }
 x11rb = { workspace = true, optional = true, features = ["randr"] }
 smithay-client-toolkit = { workspace = true, optional = true }
 wayland-client = { workspace = true, optional = true }
+# `poll(2)` on the Wayland connection descriptor, so the topology listener can
+# wait for readability with a bound and with no adapter lock held.
+libc = { workspace = true, optional = true }
