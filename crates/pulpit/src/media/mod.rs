@@ -12,11 +12,13 @@
 // deleting it to satisfy a lint would throw away that guarantee.
 
 pub mod coordinator;
+pub mod gesture;
 pub mod input;
 pub mod overlay;
 
 #[allow(unused_imports)]
 pub use coordinator::{MediaCoordinator, Need, OverlayFrame, TransportCommand, TransportTarget};
+pub use gesture::MediaGesture;
 #[allow(unused_imports)]
 pub use input::{InputRouter, Routed};
 #[allow(unused_imports)]

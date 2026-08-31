@@ -139,6 +139,31 @@ fn transport_row<Message: Clone + 'static>(
             controls = controls.push(sound);
         }
 
+        // Project the media across the whole slide area, audience and
+        // presenter together. Drawn as pressed-in while active, because the
+        // button is the state's most visible record on the presenter side.
+        let fullscreen = transport.fullscreen;
+        let mut project = button(
+            text("\u{26F6}")
+                .size((height * 0.36).clamp(11.0, 18.0))
+                .center()
+                .width(Length::Fill),
+        )
+        .width(Length::Fixed(height))
+        .height(Length::Fixed(height))
+        .padding(0)
+        .style(if fullscreen {
+            theme::ambient::forward_button
+        } else {
+            theme::ambient::back_button
+        });
+        if live {
+            project = project.on_press(on(WidgetEvent::Transport(
+                TransportRequest::SetFullscreen(!fullscreen),
+            )));
+        }
+        controls = controls.push(project);
+
         container(controls)
             .width(Length::Fill)
             .height(Length::Fill)

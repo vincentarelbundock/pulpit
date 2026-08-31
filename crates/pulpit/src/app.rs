@@ -1419,6 +1419,16 @@ pub struct App {
     media_runtime_warned: bool,
     /// Which overlay has focus, and what a keypress means.
     pub input_router: crate::media::InputRouter,
+    /// A press held down on the slide's own video or animation, being
+    /// interpreted as a transport gesture: click toggles, drag scrubs.
+    media_gesture: Option<crate::media::MediaGesture>,
+    /// The overlay currently projected across the whole slide area, on the
+    /// audience and presenter screens together. Only honoured while the
+    /// overlay is on the committed page; navigation away simply outgrows it.
+    media_fullscreen: Option<pulpit_core::OverlayId>,
+    /// The last click that toggled playback, so a second one soon after on
+    /// the same overlay reads as a double-click and toggles fullscreen.
+    last_media_click: Option<(pulpit_core::OverlayId, Instant)>,
     /// Overlay declarations gathered per page, awaiting the page labels that
     /// group them into logical slides.
     overlay_declarations:
@@ -2249,6 +2259,9 @@ impl App {
             attachments_requested: std::collections::HashSet::new(),
             media_runtime_warned: false,
             input_router: crate::media::InputRouter::new(),
+            media_gesture: None,
+            media_fullscreen: None,
+            last_media_click: None,
             overlay_declarations: std::collections::BTreeMap::new(),
             overlays_dirty: false,
             pending_overlay_diagnostics: Vec::new(),
@@ -3595,6 +3608,12 @@ impl App {
                 self.slide_cursor = Some((x, y));
                 self.hovered_link = self.link_under_cursor();
                 self.track_annotation((x, y));
+                // A drag scrubbing the slide's media owns the pointer until
+                // the button comes up; hover routing would tell some other
+                // overlay about a pointer that is not theirs to follow.
+                if self.drag_media_gesture() {
+                    return Task::none();
+                }
                 // Interactive overlays follow the pointer, including being
                 // told when it leaves — otherwise a hover state inside the
                 // page sticks after the pointer has gone.
@@ -3744,6 +3763,12 @@ impl App {
                 } else {
                     let finished = self.annotations.end_stroke();
                     self.commit_presenter_gesture(finished);
+                }
+                // A press held on the slide's media resolves here, into a
+                // toggle or a final seek; the raw release must not also go
+                // to a session that never heard the press.
+                if self.release_media_gesture() {
+                    return Task::none();
                 }
                 // The same is true of a press inside a browser: a mouseup it
                 // never hears leaves the page dragging for ever.
@@ -4764,6 +4789,7 @@ impl App {
                 transport: if live {
                     crate::widgets::media::model::Transport::for_target(
                         self.media.transport_target(self.state.committed()),
+                        self.media_fullscreen_active().is_some(),
                     )
                 } else {
                     crate::widgets::sample::transport()
@@ -4776,9 +4802,6 @@ impl App {
     fn on_transport_request(&mut self, request: crate::widgets::event::TransportRequest) {
         use crate::media::TransportCommand;
         use crate::widgets::event::TransportRequest;
-        let Some(supervisor) = self.media_supervisor.as_mut() else {
-            return;
-        };
         let Some(target) = self.media.transport_target(self.state.committed()) else {
             return;
         };
@@ -4787,6 +4810,15 @@ impl App {
             TransportRequest::Pause => TransportCommand::Pause,
             TransportRequest::SeekTo(seconds) => TransportCommand::SeekTo(seconds),
             TransportRequest::SetMuted(muted) => TransportCommand::SetMuted(muted),
+            // Fullscreen is presentation state, not a media command: the
+            // session keeps playing exactly as it was, only drawn larger.
+            TransportRequest::SetFullscreen(on) => {
+                self.media_fullscreen = on.then_some(target.overlay);
+                return;
+            }
+        };
+        let Some(supervisor) = self.media_supervisor.as_mut() else {
+            return;
         };
         self.media.control(supervisor, target.overlay, command);
     }
@@ -4864,7 +4896,9 @@ impl App {
         let Some(source) = self.state.audience_source() else {
             return Vec::new();
         };
-        self.media
+        let fullscreen = self.media_fullscreen_active();
+        let mut overlays: Vec<crate::widgets::context::SlideOverlay> = self
+            .media
             .index()
             .on_page(source.pdf_page)
             .into_iter()
@@ -4874,9 +4908,29 @@ impl App {
                     region: overlay.region,
                     handle: frame.handle.clone(),
                     interactive: overlay.is_interactive(),
+                    fullscreen: fullscreen == Some(overlay.id),
                 })
             })
-            .collect()
+            .collect();
+        // The projected overlay is drawn above everything, whatever its
+        // declared z-order was while it sat in its rectangle.
+        if fullscreen.is_some() {
+            overlays.sort_by_key(|overlay| overlay.fullscreen);
+        }
+        overlays
+    }
+
+    /// The overlay projected across the whole slide area right now, if the
+    /// committed page still shows it. The stored choice outlives navigation
+    /// so it is validated here, once, for every consumer.
+    fn media_fullscreen_active(&self) -> Option<pulpit_core::OverlayId> {
+        let id = self.media_fullscreen?;
+        let source = self.state.audience_source()?;
+        self.media
+            .index()
+            .get(id)
+            .filter(|overlay| overlay.covers_page(source.pdf_page))
+            .map(|overlay| overlay.id)
     }
 
     /// Which monitor a role is actually on, once automatic choice and
@@ -5146,6 +5200,7 @@ impl App {
                     || self.overview
             }
             Rung::EditorPages => self.page != crate::designer::Page::Presenter,
+            Rung::MediaFullscreen => self.media_fullscreen_active().is_some(),
             Rung::MediaOverlay => self.input_router.focused().is_some(),
             Rung::DocumentViewer => self.document_viewer_live(),
             Rung::ReaderFullscreen => self.reader_fullscreen,
@@ -5316,6 +5371,10 @@ impl App {
                 }
                 Some(self.editor_key(key, mods))
             }
+            Rung::MediaFullscreen => (key == Some("Escape")).then(|| {
+                self.media_fullscreen = None;
+                Task::none()
+            }),
             Rung::MediaOverlay => {
                 if let Some(name) = key {
                     let routed = self.input_router.key_pressed(name, None);
@@ -15192,6 +15251,15 @@ impl App {
         }
         let (x, y) = self.cursor_on_page()?;
         let source = self.state.audience_source()?;
+        // Projected media owns the whole slide: every press on the page is a
+        // press on it, and the scrub range runs across the full visible page
+        // rather than the rectangle it came from.
+        if let Some(id) = self.media_fullscreen_active() {
+            let crop = source.region;
+            if crop.width > 0.0 && crop.height > 0.0 {
+                return Some((id, ((x - crop.x) / crop.width, (y - crop.y) / crop.height)));
+            }
+        }
         let overlay = self.media.index().hit(source.pdf_page, x, y)?;
         let region = overlay.region;
         if region.width <= 0.0 || region.height <= 0.0 {
@@ -15290,14 +15358,108 @@ impl App {
     ///
     /// Returns true when an overlay took it, so the caller knows not to
     /// follow a PDF link underneath.
+    ///
+    /// A press on a video or an animation becomes a transport gesture —
+    /// click toggles, drag scrubs — rather than a raw event: the runtimes
+    /// have click-toggle parity of their own, so forwarding the press *and*
+    /// interpreting it here would toggle twice. Raw input, and the keyboard
+    /// focus that comes with it, stay the web overlays' alone.
     fn press_overlay(&mut self) -> bool {
         let over = self.overlay_under_cursor();
+        if let Some((overlay, (x, _))) = over {
+            let kind = self.media.index().get(overlay).map(|o| o.content.kind());
+            if let Some(
+                kind @ (pulpit_core::overlay::ContentKind::Video
+                | pulpit_core::overlay::ContentKind::AnimatedImage),
+            ) = kind
+            {
+                let duration = self.media.progress(overlay).and_then(|p| p.duration);
+                self.media_gesture = Some(crate::media::MediaGesture::press(
+                    overlay, kind, duration, x,
+                ));
+                return true;
+            }
+        }
         let taken = over.is_some();
         let routed = self
             .input_router
             .pointer_pressed(over, pulpit_media::PointerButton::Left);
         self.deliver(routed);
         taken
+    }
+
+    /// Feed a pointer move to the media gesture in progress, if any, and
+    /// forward whatever seek it decides on. Returns true while a gesture
+    /// holds the pointer, so hover routing leaves the drag alone.
+    fn drag_media_gesture(&mut self) -> bool {
+        let Some(overlay) = self.media_gesture.as_ref().map(|g| g.overlay()) else {
+            return false;
+        };
+        // The horizontal fraction inside the overlay, from page coordinates:
+        // the same mapping `overlay_under_cursor` uses, except a drag keeps
+        // its grip outside the rectangle instead of letting go, exactly as
+        // the transport widget's slider would. Projected media spans the
+        // whole visible page, so its scrub range does too.
+        let position = self.cursor_on_page();
+        let region = if self.media_fullscreen_active() == Some(overlay) {
+            self.state.audience_source().map(|source| source.region)
+        } else {
+            self.media.index().get(overlay).map(|o| o.region)
+        };
+        let command = match (position, region, self.media_gesture.as_mut()) {
+            (Some((x, _)), Some(region), Some(gesture)) if region.width > 0.0 => {
+                gesture.moved((x - region.x) / region.width)
+            }
+            _ => None,
+        };
+        if let (Some(command), Some(supervisor)) = (command, self.media_supervisor.as_mut()) {
+            self.media.control(supervisor, overlay, command);
+        }
+        true
+    }
+
+    /// The button came up on a media gesture: send the click's toggle or the
+    /// scrub's final position. Returns true when a gesture consumed the
+    /// release, so the raw release is not also delivered to a session that
+    /// never heard the press.
+    fn release_media_gesture(&mut self) -> bool {
+        use crate::media::TransportCommand;
+        /// Two clicks this close on one overlay are a double-click.
+        const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+        let Some(gesture) = self.media_gesture.take() else {
+            return false;
+        };
+        let overlay = gesture.overlay();
+        // Unknown state reads as paused, so the first click on a clip that
+        // has not reported yet asks it to play rather than doing nothing.
+        let paused = self
+            .media
+            .progress(overlay)
+            .map(|progress| progress.paused)
+            .unwrap_or(true);
+        let command = gesture.release(paused);
+        // A second click soon after the first toggles fullscreen, the way
+        // every video player does. The play/pause of each click still goes:
+        // the second undoes the first, so playback ends where it began.
+        if let Some(TransportCommand::Play | TransportCommand::Pause) = command {
+            let now = Instant::now();
+            let double = self
+                .last_media_click
+                .take()
+                .is_some_and(|(clicked, at)| clicked == overlay && now - at < DOUBLE_CLICK);
+            if double {
+                self.media_fullscreen = match self.media_fullscreen_active() {
+                    Some(_) => None,
+                    None => Some(overlay),
+                };
+            } else {
+                self.last_media_click = Some((overlay, now));
+            }
+        }
+        if let (Some(command), Some(supervisor)) = (command, self.media_supervisor.as_mut()) {
+            self.media.control(supervisor, overlay, command);
+        }
+        true
     }
 
     /// The link outlines the presenter should see.
@@ -16638,6 +16800,11 @@ impl App {
     fn rebuild_overlays(&mut self, diagnostics: Vec<String>) {
         let generation = self.state.generation();
         self.input_router.reset();
+        // A drag caught mid-rebuild would resolve against overlays that no
+        // longer mean the same thing, and a projection would be of an overlay
+        // that may no longer exist.
+        self.media_gesture = None;
+        self.media_fullscreen = None;
         // The coordinator forgets what it staged when the generation moves on,
         // so this must forget what it *asked for* at the same moment —
         // otherwise an attachment the coordinator no longer holds would never
@@ -16734,6 +16901,19 @@ impl App {
             reduce_motion,
         );
         self.media.follow_page(media, source.pdf_page);
+        // Navigating away from the projected overlay ends the projection for
+        // good: coming back to the slide later must show it as authored, not
+        // resume a fullscreen nobody asked for a second time.
+        if let Some(id) = self.media_fullscreen {
+            let still_here = self
+                .media
+                .index()
+                .get(id)
+                .is_some_and(|overlay| overlay.covers_page(source.pdf_page));
+            if !still_here {
+                self.media_fullscreen = None;
+            }
+        }
     }
 
     /// The aspect ratio of the page the audience is showing.

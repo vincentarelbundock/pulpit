@@ -170,6 +170,9 @@ pub struct SlideOverlay {
     /// Interactive overlays get a presenter-only focus ring and a pointer
     /// cursor; a video or a GIF does not.
     pub interactive: bool,
+    /// Projected across the whole slide area, letterboxed on black, above
+    /// everything else. At most one overlay in a list is drawn this way.
+    pub fullscreen: bool,
 }
 
 impl SlideData<'_> {

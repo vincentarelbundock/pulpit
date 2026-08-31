@@ -42,6 +42,9 @@ pub struct Transport {
     /// Audio exists and is currently silenced.
     pub mutable: bool,
     pub muted: bool,
+    /// Whether the media is currently projected across the whole slide area,
+    /// on the audience and presenter screens together.
+    pub fullscreen: bool,
     /// The line shown where the times go.
     pub readout: String,
 }
@@ -54,7 +57,7 @@ impl Transport {
     /// still gets a transport, drawn inert, because a presenter who put a
     /// video on this slide should be told it is not going to play rather than
     /// be shown an empty pane.
-    pub fn for_target(target: Option<TransportTarget>) -> Option<Transport> {
+    pub fn for_target(target: Option<TransportTarget>, fullscreen: bool) -> Option<Transport> {
         let target = target?;
         let progress = target.progress;
         let paused = progress.map(|p| p.paused).unwrap_or(true);
@@ -72,6 +75,7 @@ impl Transport {
             scrubbable: enabled && duration.is_some(),
             mutable: enabled && video,
             muted: progress.map(|p| p.muted).unwrap_or(false),
+            fullscreen,
             readout: readout(target, position, duration),
         })
     }
@@ -141,16 +145,19 @@ mod tests {
 
     #[test]
     fn a_slide_with_no_media_has_no_transport() {
-        assert!(Transport::for_target(None).is_none());
+        assert!(Transport::for_target(None, false).is_none());
     }
 
     #[test]
     fn a_playing_clip_offers_pause_and_a_scrub_bar() {
-        let transport = Transport::for_target(Some(target(
-            ContentKind::Video,
-            Some(progress(30.0, Some(120.0), false)),
-            true,
-        )))
+        let transport = Transport::for_target(
+            Some(target(
+                ContentKind::Video,
+                Some(progress(30.0, Some(120.0), false)),
+                true,
+            )),
+            false,
+        )
         .unwrap();
         assert_eq!(transport.action, Action::Pause);
         assert!(transport.scrubbable);
@@ -162,11 +169,14 @@ mod tests {
 
     #[test]
     fn a_paused_clip_offers_play() {
-        let transport = Transport::for_target(Some(target(
-            ContentKind::Video,
-            Some(progress(0.0, Some(10.0), true)),
-            true,
-        )))
+        let transport = Transport::for_target(
+            Some(target(
+                ContentKind::Video,
+                Some(progress(0.0, Some(10.0), true)),
+                true,
+            )),
+            false,
+        )
         .unwrap();
         assert_eq!(transport.action, Action::Play);
     }
@@ -176,7 +186,7 @@ mod tests {
     #[test]
     fn media_whose_runtime_never_started_is_shown_but_not_offered() {
         let transport =
-            Transport::for_target(Some(target(ContentKind::Video, None, false))).unwrap();
+            Transport::for_target(Some(target(ContentKind::Video, None, false)), false).unwrap();
         assert!(!transport.enabled, "a dead session must not offer controls");
         assert!(!transport.scrubbable);
         assert_eq!(transport.readout, "Not playing");
@@ -184,11 +194,14 @@ mod tests {
 
     #[test]
     fn an_animation_can_be_stopped_but_not_scrubbed_or_muted() {
-        let transport = Transport::for_target(Some(target(
-            ContentKind::AnimatedImage,
-            Some(progress(0.0, None, false)),
-            true,
-        )))
+        let transport = Transport::for_target(
+            Some(target(
+                ContentKind::AnimatedImage,
+                Some(progress(0.0, None, false)),
+                true,
+            )),
+            false,
+        )
         .unwrap();
         assert_eq!(transport.action, Action::Pause);
         assert!(transport.enabled, "a GIF can still be frozen");
@@ -201,14 +214,41 @@ mod tests {
     /// shown rather than the whole readout being thrown away.
     #[test]
     fn a_clip_with_no_known_duration_still_reports_where_it_is() {
-        let transport = Transport::for_target(Some(target(
-            ContentKind::Video,
-            Some(progress(75.0, None, false)),
-            true,
-        )))
+        let transport = Transport::for_target(
+            Some(target(
+                ContentKind::Video,
+                Some(progress(75.0, None, false)),
+                true,
+            )),
+            false,
+        )
         .unwrap();
         assert_eq!(transport.readout, "1:15 / —");
         assert!(!transport.scrubbable, "there is no range to scrub within");
+    }
+
+    #[test]
+    fn the_transport_reports_the_projection_it_was_told_about() {
+        let projected = Transport::for_target(
+            Some(target(
+                ContentKind::Video,
+                Some(progress(30.0, Some(120.0), false)),
+                true,
+            )),
+            true,
+        )
+        .unwrap();
+        assert!(projected.fullscreen);
+        let ordinary = Transport::for_target(
+            Some(target(
+                ContentKind::Video,
+                Some(progress(30.0, Some(120.0), false)),
+                true,
+            )),
+            false,
+        )
+        .unwrap();
+        assert!(!ordinary.fullscreen);
     }
 
     #[test]

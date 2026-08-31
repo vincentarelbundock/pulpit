@@ -88,6 +88,7 @@ pub fn transport() -> Option<crate::widgets::media::model::Transport> {
         scrubbable: true,
         mutable: true,
         muted: false,
+        fullscreen: false,
         readout: "1:35 / 3:34".to_string(),
     })
 }

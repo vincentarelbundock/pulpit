@@ -184,7 +184,6 @@ impl MediaCoordinator {
         self.sessions.get(&overlay).copied()
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests
     pub fn progress(&self, overlay: OverlayId) -> Option<PlaybackProgress> {
         self.progress.get(&overlay).copied()
     }

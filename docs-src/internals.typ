@@ -267,6 +267,14 @@ any later change. The key words *MUST*, *MUST NOT*, *SHOULD*, *SHOULD NOT* and
   translates into calls on the page's `window.__tp`. The page reports its
   playhead back through `__tpReport`. Host commands are built from a fixed
   vocabulary in the worker; there is deliberately no generic `eval`.
++ *The clip itself is a transport too.* A press on a video or an animation on
+  the presenter's slide is interpreted by the application — click toggles
+  playback, a horizontal drag on a clip scrubs it, a double-click projects it
+  across the whole slide area — and reaches the session as the same
+  `MediaRequest::{Video, Image}` commands the widget sends. Raw pointer
+  events go to web overlays alone: the runtimes carry click-toggle parity of
+  their own (the mpv worker and the wrapper pages), and forwarding the press
+  *and* interpreting it would toggle twice.
 
 One runtime implements animated images, video and interactive HTML:
 `external-chromium`, an installed Chromium-family browser driven over the
@@ -1891,6 +1899,14 @@ What it offers follows what the content can answer. A clip gets a scrub bar
 and a mute button; an animation has no playhead and no audio, so it gets the
 button alone. Media whose runtime never started still gets a transport, drawn
 inert and reading *Not playing*.
+
+The same controls live on the clip itself: a click toggles playback, a
+horizontal drag scrubs, and a double-click — or the transport's projection
+button — throws the media across the whole slide area on the audience and
+presenter screens together, letterboxed on black above everything else.
+Escape, or navigating to another slide, puts it back. The projection is
+drawing state only: the session keeps its viewport and its playhead, so the
+frames are scaled up rather than re-rendered, and nothing restarts.
 
 === Accent and alert
 

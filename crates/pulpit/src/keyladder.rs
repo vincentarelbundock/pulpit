@@ -95,6 +95,10 @@ pub enum Rung {
     /// audience while someone types a layout name — and Escape on the pages
     /// with a Back button means that button.
     EditorPages,
+    /// Media projected across the whole slide area. Escape puts it back in
+    /// its rectangle; everything above — popups, panels, marquees — answers
+    /// the key first, so backing out happens inside-out.
+    MediaFullscreen,
     /// A focused media overlay owns every key; Escape is interpreted by the
     /// overlay router as releasing focus. No press falls through.
     MediaOverlay,
@@ -115,7 +119,7 @@ pub enum Rung {
 impl Rung {
     /// Every rung, for the exhaustiveness check. Order is meaningless here;
     /// [`LADDER`] is the order.
-    pub const ALL: [Rung; 21] = [
+    pub const ALL: [Rung; 22] = [
         Rung::AnnotationTyping,
         Rung::ComposingMark,
         Rung::HeldMarks,
@@ -133,6 +137,7 @@ impl Rung {
         Rung::AnnotationPanel,
         Rung::PresenterPopups,
         Rung::EditorPages,
+        Rung::MediaFullscreen,
         Rung::MediaOverlay,
         Rung::DocumentViewer,
         Rung::ReaderFullscreen,
@@ -142,7 +147,7 @@ impl Rung {
 
 /// The order itself. Top to bottom; first active rung to consume the key
 /// wins.
-pub const LADDER: [Rung; 21] = [
+pub const LADDER: [Rung; 22] = [
     // Typing surfaces first: while characters are being written, letters
     // are letters.
     Rung::AnnotationTyping,
@@ -171,6 +176,10 @@ pub const LADDER: [Rung; 21] = [
     // Whole-page owners, after the popups so a dialog over the settings
     // page closes before the page itself is left.
     Rung::EditorPages,
+    // Projected media backs out before a focused overlay releases focus:
+    // the projection is the larger, more visible state, and only Escape
+    // means anything to it, so no other key is lost on the way down.
+    Rung::MediaFullscreen,
     Rung::MediaOverlay,
     Rung::DocumentViewer,
     // Fullscreen wants Escape *least*: a marquee, a panel, an overlay and a

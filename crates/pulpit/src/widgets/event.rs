@@ -520,6 +520,9 @@ pub enum TransportRequest {
     /// Move the playhead, in seconds from the start.
     SeekTo(f32),
     SetMuted(bool),
+    /// Project the slide's media across the whole slide area, on the
+    /// audience and presenter screens together — or put it back.
+    SetFullscreen(bool),
 }
 
 /// What the annotation palette can ask for.

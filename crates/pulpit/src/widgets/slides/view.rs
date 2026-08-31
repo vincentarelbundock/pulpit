@@ -250,6 +250,24 @@ pub fn composite<'a, Message: Clone + 'a>(
     // which have no overlays, links or ink, never doing it.
     let mut layers = stack![page];
     for overlay in overlays {
+        // A fullscreened overlay ignores its page rectangle: the frame is
+        // letterboxed across the whole panel on black, above everything —
+        // the projector's own margins, not app chrome. The page underneath
+        // stays in the stack, so leaving fullscreen costs no repaint depth
+        // change and no frame.
+        if overlay.fullscreen {
+            let projected = container(
+                image(overlay.handle.clone())
+                    .content_fit(ContentFit::Contain)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .style(theme::ambient::slide_letterbox)
+            .width(Length::Fill)
+            .height(Length::Fill);
+            layers = layers.push(projected);
+            continue;
+        }
         let Some(rectangle) = crate::media::place(panel, aspect, fit, crop, overlay.region) else {
             continue;
         };
