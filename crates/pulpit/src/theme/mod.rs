@@ -243,6 +243,85 @@ pub fn keycap(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
     }
 }
 
+/// A sheet: a dialog-sized surface floating over the canvas rather than
+/// filling it. The edge is the quiet hairline, not the dialog's strong one —
+/// the broad, soft shadow is what says "above", and a heavy border as well
+/// would say it twice. The shadow is plain translucent black in every
+/// palette: on a dark canvas it fades into the ground and the hairline
+/// carries the separation, which is how dark surfaces behave everywhere.
+pub fn sheet(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
+    move |_| container::Style {
+        background: Some(Background::Color(palette.surface)),
+        border: Border {
+            color: palette.border(),
+            width: 1.0,
+            radius: radius::DIALOG.into(),
+        },
+        text_color: Some(palette.text),
+        shadow: iced::Shadow {
+            color: Palette::tinted(Color::BLACK, 0.18),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 40.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The ground a sheet floats on: the canvas colour edge to edge, with no
+/// border or radius of its own — those belong to the sheet above it.
+pub fn backdrop(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
+    move |_| container::Style {
+        background: Some(Background::Color(palette.canvas)),
+        text_color: Some(palette.text),
+        ..container::Style::default()
+    }
+}
+
+/// The pale square behind a surface's naming icon: an anchor for the eye,
+/// not a control, so it has a tint and a radius and nothing that could read
+/// as pressable.
+pub fn icon_chip(palette: Palette) -> impl Fn(&Theme) -> container::Style + Copy {
+    move |_| container::Style {
+        background: Some(Background::Color(Palette::tinted(palette.accent, 0.12))),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: radius::MEDIUM.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A circular dismissal: a pale disc apart from the title it closes, darker
+/// under the pointer. Neutral rather than accent-tinted — closing is the one
+/// act on a sheet that should promise nothing.
+pub fn dismiss_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
+    move |_, status| {
+        let fill = match status {
+            button::Status::Hovered => tokens::mix(palette.surface, palette.text, 0.14),
+            button::Status::Pressed => tokens::mix(palette.surface, palette.text, 0.20),
+            button::Status::Active | button::Status::Disabled => {
+                tokens::mix(palette.surface, palette.text, 0.07)
+            }
+        };
+        button::Style {
+            background: Some(Background::Color(fill)),
+            text_color: match status {
+                button::Status::Disabled => palette.muted,
+                _ => palette.text,
+            },
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                // Far past any plausible diameter, which is what keeps the
+                // disc a disc whatever padding the icon brings.
+                radius: 999.0.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 /// A drop-down, in this application's colours rather than the library's.
 ///
 /// Iced styles an unstyled `pick_list` from its own built-in theme, whose
@@ -1054,6 +1133,18 @@ pub mod ambient {
     }
     pub fn keycap(theme: &Theme) -> container::Style {
         super::keycap(palette())(theme)
+    }
+    pub fn sheet(theme: &Theme) -> container::Style {
+        super::sheet(palette())(theme)
+    }
+    pub fn backdrop(theme: &Theme) -> container::Style {
+        super::backdrop(palette())(theme)
+    }
+    pub fn icon_chip(theme: &Theme) -> container::Style {
+        super::icon_chip(palette())(theme)
+    }
+    pub fn dismiss_button(theme: &Theme, status: button::Status) -> button::Style {
+        super::dismiss_button(palette())(theme, status)
     }
     pub fn drop_down(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         super::drop_down(palette())(theme, status)

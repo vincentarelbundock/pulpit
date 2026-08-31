@@ -1281,42 +1281,58 @@ fn menu(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// One action's bindings as keycaps: the caps of a chord sit tight together,
+/// separate bindings a clear step apart, so `Ctrl` `Shift` `S` reads as one
+/// grip and the Vim/Zathura alternative beside it as another key entirely.
+/// Standard bindings stay first, but the alternatives keep the same visual
+/// weight instead of being demoted to parenthetical prose.
 fn shortcut_hint<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
-    let (primary, alternate) = app.action_shortcut_parts(action);
-    let mut hint = Row::new().spacing(2.0).align_y(Alignment::Center);
-    // Every binding is a key in its own right. Standard bindings stay first,
-    // but Vim/Zathura alternatives have the same visual weight instead of
-    // being demoted to parenthetical prose.
-    for key in shortcut_labels(primary, alternate) {
-        hint = hint.push(shortcut_keycap(key));
+    let mut bindings = Row::new().spacing(gap::S).align_y(Alignment::Center);
+    for caps in app.action_keycap_groups(action) {
+        let mut chord = Row::new().spacing(2.0).align_y(Alignment::Center);
+        for cap in caps {
+            chord = chord.push(shortcut_keycap(cap));
+        }
+        bindings = bindings.push(chord);
     }
-    hint.wrap().into()
-}
-
-fn shortcut_labels(primary: Vec<String>, alternate: Vec<String>) -> Vec<String> {
-    primary.into_iter().chain(alternate).collect()
+    bindings.wrap().into()
 }
 
 fn shortcut_keycap(label: String) -> Element<'static, Message> {
     container(text(label).size(type_scale::CAPTION))
-        .padding(iced::Padding::from([2.0, gap::XS]))
+        .padding(iced::Padding::from([2.0, gap::XS + 2.0]))
         .style(theme::ambient::keycap)
         .into()
 }
 
+/// One command: the action reads from the left edge, its keys hang from a
+/// shared right edge, and the open space between is what lets the eye run
+/// down either column of the sheet without the other getting in the way.
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
-    container(
-        row![
-            container(theme::typography::label(action.label())).width(Length::FillPortion(2)),
-            container(shortcut_hint(app, action))
-                .width(Length::FillPortion(3))
-                .align_x(Alignment::Start),
-        ]
-        .spacing(gap::S)
-        .align_y(Alignment::Center),
-    )
-    .padding(iced::Padding::from([gap::XS, gap::S]))
+    row![
+        container(theme::typography::label(action.label())).width(Length::Fill),
+        shortcut_hint(app, action),
+    ]
+    .spacing(gap::M)
+    .align_y(Alignment::Center)
+    .padding(iced::Padding::from([3.0, 0.0]))
     .into()
+}
+
+/// The line icon a category is found by. Keyed by the group's title, so a
+/// renamed or added group falls to the header's keyboard — which the test
+/// below refuses — rather than silently going unmarked.
+fn shortcut_group_icon(title: &'static str) -> theme::Icon {
+    match title {
+        "Files & application" => theme::Icon::Document,
+        "Move through pages" => theme::Icon::Compass,
+        "Present" => theme::Icon::Monitor,
+        "Read aloud" => theme::Icon::Volume,
+        "Annotate" => theme::Icon::Pen,
+        "Read & search" => theme::Icon::Search,
+        "Page view" => theme::Icon::ZoomIn,
+        _ => theme::Icon::Keyboard,
+    }
 }
 
 fn shortcut_group<'a>(
@@ -1324,12 +1340,18 @@ fn shortcut_group<'a>(
     title: &'static str,
     actions: &'static [Action],
 ) -> Element<'a, Message> {
-    let mut content = Column::new().spacing(0).push(
-        container(theme::typography::label(title).color(theme::ambient::accent()))
-            .width(Length::Fill)
-            .padding(iced::Padding::from([gap::XS, gap::S]))
-            .style(theme::ambient::empty_cell),
-    );
+    // No boxed strip behind the heading: the icon, the accent and the weight
+    // are the grouping, and the whitespace around each group does the rest.
+    let heading = row![
+        theme::icon::tinted(shortcut_group_icon(title), 15.0, theme::ambient::accent()),
+        text(title)
+            .size(type_scale::BODY)
+            .font(theme::font::EMPHASIS)
+            .color(theme::ambient::accent()),
+    ]
+    .spacing(gap::S)
+    .align_y(Alignment::Center);
+    let mut content = Column::new().spacing(gap::XS).push(heading);
     for action in actions {
         content = content.push(shortcut_entry(app, *action));
     }
@@ -1347,7 +1369,6 @@ const SHORTCUT_TABLE_ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 // left, working through a document on the right.
 const SHORTCUT_TABLE_LEFT: &[usize] = &[0, 2, 3, 6];
 const SHORTCUT_TABLE_RIGHT: &[usize] = &[1, 4, 5];
-const SHORTCUT_TABLE_WIDTH: f32 = 480.0;
 
 fn split_shortcut_tables(width: f32) -> bool {
     width >= 1_100.0
@@ -1356,7 +1377,9 @@ fn split_shortcut_tables(width: f32) -> bool {
 fn shortcut_table<'a>(app: &'a App, groups: &[usize]) -> Element<'a, Message> {
     use crate::settings::keys::SHORTCUT_GROUPS;
 
-    let mut table = Column::new().spacing(0);
+    // Two levels of spacing carry the whole hierarchy: a wide step between
+    // categories, tight rows within one, and no boxes anywhere.
+    let mut table = Column::new().spacing(gap::XL);
     for index in groups {
         let group = SHORTCUT_GROUPS[*index];
         table = table.push(shortcut_group(app, group.title, group.actions));
@@ -1376,78 +1399,110 @@ fn shortcut_table_separator() -> Element<'static, Message> {
         .into()
 }
 
-/// The one mode-neutral welcome and shortcut-reference surface.
+/// The one mode-neutral welcome and shortcut-reference surface, laid out as
+/// a sheet: one large rounded surface floating on the canvas, the reference
+/// inside it, generous margins all round.
 ///
 /// If a document is already open, `can_close` exposes it again without
 /// making a second, subtly different help layout.
 fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
-    let guide = responsive(move |size| {
-        if split_shortcut_tables(size.width) {
-            container(
-                row![
-                    container(
-                        container(shortcut_table(app, SHORTCUT_TABLE_LEFT))
-                            .width(Length::Fill)
-                            .max_width(SHORTCUT_TABLE_WIDTH),
-                    )
-                    // Each half hugs the rule between them rather than
-                    // centring in its own share of the window: a wide window
-                    // should widen the margins, not the gutter.
-                    .width(Length::FillPortion(1))
-                    .align_x(Alignment::End),
-                    shortcut_table_separator(),
-                    container(
-                        container(shortcut_table(app, SHORTCUT_TABLE_RIGHT))
-                            .width(Length::Fill)
-                            .max_width(SHORTCUT_TABLE_WIDTH),
-                    )
-                    .width(Length::FillPortion(1))
-                    .align_x(Alignment::Start),
+    let surface = responsive(move |size| {
+        let split = split_shortcut_tables(size.width);
+
+        // The sheet names itself once, quietly: an icon in a pale chip, the
+        // title beside it, and — apart from both, when there is a document to
+        // go back to — a round dismissal.
+        let chip = container(theme::icon::tinted(
+            theme::Icon::Keyboard,
+            22.0,
+            theme::ambient::accent(),
+        ))
+        .padding(gap::S)
+        .style(theme::ambient::icon_chip);
+        let mut header = Row::new()
+            .spacing(gap::M)
+            .align_y(Alignment::Center)
+            .push(chip)
+            .push(
+                column![
+                    theme::typography::title("Keyboard shortcuts"),
+                    theme::typography::note("Every key Pulpit answers to."),
                 ]
-                .width(Length::Fill)
-                .align_y(Alignment::Start),
+                .spacing(2.0),
             )
+            .push(space::horizontal());
+        if can_close {
+            header = header.push(
+                button(theme::icon::icon(theme::Icon::Close, type_scale::BODY))
+                    .padding(gap::S)
+                    .style(theme::ambient::dismiss_button)
+                    .on_press(Message::CloseShortcuts),
+            );
+        }
+
+        let guide: Element<'_, Message> = if split {
+            row![
+                container(shortcut_table(app, SHORTCUT_TABLE_LEFT)).width(Length::FillPortion(1)),
+                shortcut_table_separator(),
+                container(shortcut_table(app, SHORTCUT_TABLE_RIGHT)).width(Length::FillPortion(1)),
+            ]
             .width(Length::Fill)
-            .align_x(Alignment::Center)
+            .align_y(Alignment::Start)
             .into()
         } else {
-            container(
-                container(shortcut_table(app, SHORTCUT_TABLE_ALL))
-                    .width(Length::Fill)
-                    .max_width(SHORTCUT_TABLE_WIDTH),
-            )
+            shortcut_table(app, SHORTCUT_TABLE_ALL)
+        };
+
+        // The footer teaches the reference's own two meta-keys — the one
+        // that summons it and the one that puts it away — from the live
+        // keymap, and keeps the documentation between them.
+        let mut footer = Row::new().spacing(gap::S).align_y(Alignment::Center);
+        if let Some(open_key) = app.action_shortcut(Action::ShowShortcuts) {
+            footer = footer
+                .push(shortcut_keycap(open_key))
+                .push(theme::typography::caption("shows this reference anytime"));
+        }
+        footer = footer.push(space::horizontal()).push(
+            button(theme::typography::label(DOCUMENTATION_URL).color(theme::ambient::accent()))
+                .style(theme::ambient::tool_button)
+                .on_press(Message::OpenDocumentation),
+        );
+        if can_close {
+            let escape = app
+                .platform
+                .input
+                .keycaps(&crate::platform::Shortcut {
+                    modifiers: Vec::new(),
+                    key: "Escape".into(),
+                })
+                .pop()
+                .unwrap_or_else(|| "Esc".into());
+            footer = footer
+                .push(space::horizontal())
+                .push(shortcut_keycap(escape))
+                .push(theme::typography::caption("closes it"));
+        }
+
+        let sheet = container(column![header, guide, rule(), footer].spacing(gap::XL))
+            .padding(gap::XXL)
+            .width(Length::Fill)
+            .max_width(if split { 1_080.0 } else { 620.0 })
+            .style(theme::ambient::sheet);
+
+        // The centring has to happen *inside* the scrollable. A vertical
+        // scrollable hands its child a full-width, infinite-height box, so
+        // the outer container has nothing narrower than itself to centre and
+        // the capped-width sheet would sit against the left edge.
+        let centred = container(sheet)
             .width(Length::Fill)
             .align_x(Alignment::Center)
+            .padding(iced::Padding::from([gap::XL, gap::L]));
+        container(scrollable(centred).style(theme::ambient::scrollbar))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::ambient::backdrop)
             .into()
-        }
     });
-
-    let documentation =
-        button(theme::typography::label(DOCUMENTATION_URL).color(theme::ambient::accent()))
-            .style(theme::ambient::tool_button)
-            .on_press(Message::OpenDocumentation);
-    let brand = container(
-        column![theme::typography::title("Pulpit"), documentation]
-            .spacing(2.0)
-            .align_x(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .align_x(Alignment::Center);
-    let content = column![brand, guide].spacing(gap::M).width(Length::Fill);
-
-    // The centring has to happen *inside* the scrollable. A vertical
-    // scrollable hands its child a full-width, infinite-height box, so the
-    // outer container has nothing narrower than itself to centre and the
-    // capped-width column just sits against the left edge.
-    let compact = container(content).width(Length::Fill).max_width(1_600.0);
-    let centred = container(compact)
-        .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .padding(gap::L);
-    let surface = container(scrollable(centred).style(theme::ambient::scrollbar))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::ambient::surface);
 
     // The menu button sits in the window's own top-left corner, exactly where
     // the toolbar puts it on every other surface: it is the same control, so
@@ -4304,12 +4359,27 @@ mod tests {
     }
 
     #[test]
-    fn every_shortcut_remains_its_own_keycap_and_alternates_stand_beside_the_others() {
-        let labels = shortcut_labels(
-            vec!["\u{2192}".into(), "PgDn".into()],
-            vec!["J".into(), "Space".into()],
-        );
-        assert_eq!(labels, ["\u{2192}", "PgDn", "J", "Space"]);
+    fn every_shortcut_group_is_found_by_its_own_icon() {
+        use crate::settings::keys::SHORTCUT_GROUPS;
+
+        // The icon map is keyed by title, so a renamed group would quietly
+        // fall to the fallback — the header's keyboard, which no category may
+        // wear — and a copy-pasted arm would give two groups one shape.
+        let mut seen = Vec::new();
+        for group in SHORTCUT_GROUPS {
+            let icon = shortcut_group_icon(group.title);
+            assert!(
+                icon != theme::Icon::Keyboard,
+                "{} has no icon of its own",
+                group.title
+            );
+            assert!(
+                !seen.contains(&icon),
+                "{} shares its icon with another group",
+                group.title
+            );
+            seen.push(icon);
+        }
     }
 
     #[test]

@@ -72,6 +72,13 @@ pub trait InputPolicy: Send + Sync {
     /// Format a shortcut for display.
     fn format(&self, shortcut: &Shortcut) -> String;
 
+    /// One shortcut, spelled as the caps a hand would press — every modifier
+    /// this desktop's way round, then the key — rather than as one joined
+    /// string. The shortcut reference draws each part as its own keycap, and
+    /// splitting a formatted string back apart would re-derive here what
+    /// this trait already knows.
+    fn keycaps(&self, shortcut: &Shortcut) -> Vec<String>;
+
     /// Does this collide with something the desktop reserves? Best effort:
     /// a false negative is acceptable, a false positive is not.
     #[allow(dead_code)] // reached by its tests, not by the application
@@ -110,6 +117,15 @@ impl InputPolicy for DesktopInput {
     }
 
     fn format(&self, shortcut: &Shortcut) -> String {
+        let parts = self.keycaps(shortcut);
+        if MACOS {
+            parts.concat()
+        } else {
+            parts.join("+")
+        }
+    }
+
+    fn keycaps(&self, shortcut: &Shortcut) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         // A stable order, so the same binding always reads the same way.
         for modifier in [
@@ -136,11 +152,7 @@ impl InputPolicy for DesktopInput {
             );
         }
         parts.push(pretty_key(&shortcut.key));
-        if MACOS {
-            parts.concat()
-        } else {
-            parts.join("+")
-        }
+        parts
     }
 
     fn is_reserved(&self, shortcut: &Shortcut) -> Option<&'static str> {

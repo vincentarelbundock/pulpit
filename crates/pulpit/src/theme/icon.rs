@@ -153,6 +153,18 @@ pub enum Icon {
     /// Measure where the content sits and act on it — the automatic margin
     /// crop: `scan-text`, corner brackets reading lines of text.
     ScanText,
+
+    // The shortcut reference. Its sheet names itself with a keyboard and
+    // marks each category with one line icon, so a reader can find a group
+    // by shape before reading a single heading.
+    /// The keys themselves: `keyboard`.
+    Keyboard,
+    /// Moving through the deck: `compass`.
+    Compass,
+    /// The room's screen, and everything done to it live: `monitor`.
+    Monitor,
+    /// Reading aloud: `volume-2`.
+    Volume,
 }
 
 impl Icon {
@@ -215,6 +227,10 @@ impl Icon {
             Icon::Pause => include_bytes!("../../assets/icons/pause.svg"),
             Icon::Reset => include_bytes!("../../assets/icons/rotate-ccw.svg"),
             Icon::ScanText => include_bytes!("../../assets/icons/scan-text.svg"),
+            Icon::Keyboard => include_bytes!("../../assets/icons/keyboard.svg"),
+            Icon::Compass => include_bytes!("../../assets/icons/compass.svg"),
+            Icon::Monitor => include_bytes!("../../assets/icons/monitor.svg"),
+            Icon::Volume => include_bytes!("../../assets/icons/volume-2.svg"),
         }
     }
 
@@ -227,7 +243,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 56] = [
+    const ALL: [Icon; 60] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -284,15 +300,11 @@ impl Icon {
         Icon::Pause,
         Icon::Reset,
         Icon::ScanText,
+        Icon::Keyboard,
+        Icon::Compass,
+        Icon::Monitor,
+        Icon::Volume,
     ];
-
-    /// Every variant is in `ALL`, at the slot its own discriminant names.
-    ///
-    /// `ALL` is what the handle cache is indexed by, so a variant added to
-    /// the enum and not to the list is a panic the first time something
-    /// draws it — which is how the shape tools shipped once. `Reset` is the
-    /// last variant; keep it that way, or move this anchor with it.
-    const _COMPLETE: () = assert!(Icon::ALL.len() == Icon::Reset as usize + 1);
 
     /// The handle for this icon, built once per process.
     ///
@@ -310,6 +322,17 @@ impl Icon {
         .clone()
     }
 }
+
+/// Every variant is in `ALL`, at the slot its own discriminant names.
+///
+/// `ALL` is what the handle cache is indexed by, so a variant added to the
+/// enum and not to the list is a panic the first time something draws it —
+/// which is how the shape tools shipped once. A free const rather than an
+/// associated one: the compiler only evaluates an associated const somebody
+/// reads, which is how the old anchor sat stale on `Reset` while `ScanText`
+/// shipped past it without a murmur. `Volume` is the last variant; move this
+/// with it.
+const _COMPLETE: () = assert!(Icon::ALL.len() == Icon::Volume as usize + 1);
 
 /// An icon at `size` points square, in the palette's text colour.
 pub fn icon<'a, Message: 'a>(icon: Icon, size: f32) -> Element<'a, Message> {

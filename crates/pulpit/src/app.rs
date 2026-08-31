@@ -4914,28 +4914,49 @@ impl App {
         }))
     }
 
-    /// Primary keyboard bindings and the Vim/Zathura alternative, formatted
-    /// for this desktop. Hardware aliases are deliberately absent.
-    pub fn action_shortcut_parts(
-        &self,
-        action: crate::settings::keys::Action,
-    ) -> (Vec<String>, Vec<String>) {
+    /// One binding as the caps a hand would press, or `None` for a scancode,
+    /// which names nothing a reader could look down and find. The same "?"
+    /// convention as [`Self::format_key_binding`]: the character printed on
+    /// the key, not its Shift+/ event shape.
+    fn key_binding_caps(&self, binding: &crate::settings::KeyBinding) -> Option<Vec<String>> {
+        use crate::platform::Shortcut;
+        use crate::settings::keys::KeyBinding;
+
+        let KeyBinding::Named { key, mods } = binding else {
+            return None;
+        };
+        if key == "/" && mods.shift && !mods.primary && !mods.control && !mods.alt {
+            return Some(vec!["?".into()]);
+        }
+        let modifiers = crate::settings::keys::modifiers_of(mods);
+        Some(self.platform.input.keycaps(&Shortcut {
+            modifiers,
+            key: crate::settings::keys::display_key(key),
+        }))
+    }
+
+    /// Every visible binding for an action, one inner list of caps per
+    /// binding — primary bindings first, then the Vim/Zathura alternatives.
+    /// The shortcut reference draws each cap as its own key, so a chord
+    /// reads as the keys under the fingers rather than as a joined string.
+    pub fn action_keycap_groups(&self, action: crate::settings::keys::Action) -> Vec<Vec<String>> {
         let mut primary = Vec::new();
         let mut alternate = Vec::new();
         for (binding, bound) in &self.settings.keymap.bindings {
             if *bound != action {
                 continue;
             }
-            let Some(formatted) = self.format_key_binding(binding) else {
+            let Some(caps) = self.key_binding_caps(binding) else {
                 continue;
             };
             if crate::settings::Keymap::is_alternate(action, binding) {
-                alternate.push(formatted);
+                alternate.push(caps);
             } else {
-                primary.push(formatted);
+                primary.push(caps);
             }
         }
-        (primary, alternate)
+        primary.extend(alternate);
+        primary
     }
 
     pub fn document_title(&self) -> String {
