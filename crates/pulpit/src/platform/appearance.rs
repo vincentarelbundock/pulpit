@@ -60,6 +60,24 @@ impl SystemAppearance {
     pub fn fell_back(self, preference: Appearance) -> bool {
         self == SystemAppearance::Unknown && preference == Appearance::System
     }
+
+    /// [`Self::resolve`], but dark while the pages are inverted (issue #17):
+    /// an inverted page inside light chrome makes the chrome — the menu bars,
+    /// the margins around the page — the brightest thing in a room that just
+    /// went dark, which defeats the reason the key was pressed. The whole
+    /// interface follows the pages, an explicit Light preference included:
+    /// inverting *is* asking for a dark room, right now, and the preference
+    /// is about every other moment. Nothing is stored and nothing restored —
+    /// the darkness is derived, so switching the mode off simply resolves as
+    /// before, and a crash mid-invert leaves no wrong preference behind.
+    /// High contrast still wins over everything: it is an accessibility
+    /// setting, not a taste.
+    pub fn resolve_with_inverted_pages(self, preference: Appearance, inverted: bool) -> Resolved {
+        match self.resolve(preference) {
+            Resolved::Light if inverted => Resolved::Dark,
+            resolved => resolved,
+        }
+    }
 }
 
 /// The palette actually in use.
@@ -232,5 +250,39 @@ mod tests {
         assert!(SystemAppearance::Unknown.fell_back(Appearance::System));
         assert!(!SystemAppearance::Unknown.fell_back(Appearance::Light));
         assert!(!SystemAppearance::Dark.fell_back(Appearance::System));
+    }
+
+    #[test]
+    fn inverted_pages_darken_the_whole_interface() {
+        // Whatever made the chrome light — the system, or an explicit Light
+        // preference — inverting the pages darkens it too: light chrome
+        // around an inverted page is the brightest thing in the room.
+        assert_eq!(
+            SystemAppearance::Light.resolve_with_inverted_pages(Appearance::System, true),
+            Resolved::Dark
+        );
+        assert_eq!(
+            SystemAppearance::Light.resolve_with_inverted_pages(Appearance::Light, true),
+            Resolved::Dark
+        );
+        // High contrast is an accessibility setting and beats the bias…
+        assert_eq!(
+            SystemAppearance::HighContrast.resolve_with_inverted_pages(Appearance::System, true),
+            Resolved::HighContrast
+        );
+        // …and with the mode off, every case resolves exactly as before.
+        for system in [
+            SystemAppearance::Light,
+            SystemAppearance::Dark,
+            SystemAppearance::Unknown,
+            SystemAppearance::HighContrast,
+        ] {
+            for preference in Appearance::ALL {
+                assert_eq!(
+                    system.resolve_with_inverted_pages(preference, false),
+                    system.resolve(preference)
+                );
+            }
+        }
     }
 }

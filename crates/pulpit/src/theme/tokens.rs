@@ -221,6 +221,13 @@ pub const LIGHT: Palette = Palette {
     alert: radix::RED_LIGHT[10],
 };
 
+/// The sheet a page is drawn on before its frame arrives: paper-white, an
+/// assumption about documents rather than a theme role — a PDF's own
+/// background does not follow the chrome. The colour mode recolours it with
+/// the pages (issue #17), which is why it is named here instead of written
+/// as a literal where the sheet is drawn.
+pub const PAGE_SHEET: Color = rgb(1.0, 1.0, 1.0);
+
 /// Maximum separation, for a system in high-contrast mode.
 pub const HIGH_CONTRAST: Palette = Palette {
     canvas: rgb(0.0, 0.0, 0.0),

@@ -132,6 +132,11 @@ pub enum Action {
     FitWidth,
     RotateReader,
     ToggleDualPage,
+    /// Cycle the page colours: as rendered, inverted, or on the chosen paper
+    /// colour (issue #17). One key round the whole loop, because the reason
+    /// to want a different mode — the lights just went up, or out — arrives
+    /// suddenly, and pressing on always comes back to normal.
+    CycleColorMode,
     Quit,
 }
 
@@ -231,6 +236,7 @@ pub const SHORTCUT_GROUPS: [ShortcutGroup; 7] = [
             Action::FitWidth,
             Action::RotateReader,
             Action::ToggleDualPage,
+            Action::CycleColorMode,
         ],
     },
 ];
@@ -264,7 +270,7 @@ impl Action {
     /// enum declaration, so a visual diff against it is enough to catch the
     /// next omission.
     #[allow(dead_code)] // reached by its tests, not by the application
-    pub const ALL: [Action; 54] = [
+    pub const ALL: [Action; 55] = [
         Action::Next,
         Action::Previous,
         Action::First,
@@ -318,6 +324,7 @@ impl Action {
         Action::FitWidth,
         Action::RotateReader,
         Action::ToggleDualPage,
+        Action::CycleColorMode,
         Action::Quit,
     ];
 
@@ -376,6 +383,7 @@ impl Action {
             Action::FitWidth => "Fit width",
             Action::RotateReader => "Rotate pages",
             Action::ToggleDualPage => "Toggle two-page view",
+            Action::CycleColorMode => "Page colours",
             Action::Quit => "Quit",
         }
     }
@@ -796,6 +804,11 @@ impl Default for Keymap {
                 // primary-with-shift is the row redo already lives on.
                 with("r", Mods::primary_shift(), Action::RotateReader),
                 named("d", Action::ToggleDualPage),
+                // "i" for invert, the mode the key exists for; it carries on
+                // round paper and back. Bare, like blanking: the hand that
+                // wants it is reaching in a hurry, and pressing again always
+                // moves on rather than leaving the room stuck.
+                named("i", Action::CycleColorMode),
                 with("r", Mods::primary(), Action::ReloadDocument),
                 named("f", Action::ToggleAudienceFullscreen),
                 with("q", Mods::primary(), Action::Quit),

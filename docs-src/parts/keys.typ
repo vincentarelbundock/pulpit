@@ -38,5 +38,5 @@
   [`Ctrl+=` (`+`)], [Zoom in], [`Ctrl+-` (`-`)], [Zoom out],
   [`Ctrl+1` (`=`)], [Actual size], [`Ctrl+0` (`A`)], [Fit page],
   [`Ctrl+2`], [Fit width], [`Ctrl+Shift+R`], [Rotate pages],
-  [`D`], [Toggle two-page view], [], [],
+  [`D`], [Toggle two-page view], [`I`], [Page colours],
 )

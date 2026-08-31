@@ -490,6 +490,13 @@ pub struct ReadingPosition {
     /// Whether the search pane was open. Same reasoning as `outline_open`.
     #[serde(default)]
     pub search_open: bool,
+    /// How the pages were being recoloured (issue #17). Lives beside the
+    /// page for the same reason the sidebar flags do: reading a paper
+    /// inverted at night is part of where the reader was in *this* document.
+    /// `serde(default)` reads an older record as normal, which is what every
+    /// document was before the mode existed.
+    #[serde(default)]
+    pub color_mode: StoredColorMode,
     /// When the position was recorded, in Unix seconds. Zero in records
     /// written before the timestamp existed. Not part of *where* the reader
     /// was — [`ReadingPosition::same_place`] compares without it.
@@ -527,6 +534,18 @@ pub enum StoredZoom {
     Fixed(f32),
 }
 
+/// The reader's colour mode, in the settings schema's own vocabulary — a
+/// mirror of [`crate::page_colors::ColorMode`], kept apart for the same
+/// compatibility reason [`StoredZoom`] mirrors the reader's `Zoom`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredColorMode {
+    #[default]
+    Normal,
+    Inverted,
+    Paper,
+}
+
 /// What a lookup found, and how much of it can be believed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RestoredPosition {
@@ -538,6 +557,7 @@ pub enum RestoredPosition {
         fraction: f32,
         outline_open: bool,
         search_open: bool,
+        color_mode: StoredColorMode,
     },
     /// The same path, different bytes: the document was rebuilt or edited
     /// under us. The page number is the most that can honestly survive that —
@@ -550,11 +570,14 @@ pub enum RestoredPosition {
     /// The sidebar state survives this drop, unlike the fraction and the
     /// zoom: whether the rail was open is a UI choice, not a coordinate into
     /// the text, so it stays meaningful even when the bytes underneath moved
-    /// and only the page number could honestly come with it.
+    /// and only the page number could honestly come with it. The colour mode
+    /// survives for the same reason: inverted is about the room, not the
+    /// bytes.
     PageOnly {
         page: usize,
         outline_open: bool,
         search_open: bool,
+        color_mode: StoredColorMode,
     },
 }
 
@@ -585,6 +608,7 @@ impl ReadingSettings {
                     fraction: entry.fraction,
                     outline_open: entry.outline_open,
                     search_open: entry.search_open,
+                    color_mode: entry.color_mode,
                 });
             }
         }
@@ -595,6 +619,7 @@ impl ReadingSettings {
                 page: entry.page,
                 outline_open: entry.outline_open,
                 search_open: entry.search_open,
+                color_mode: entry.color_mode,
             })
     }
 
@@ -1024,6 +1049,11 @@ pub struct AppearanceSettings {
     /// default; an explicit choice here wins, because someone who reached
     /// for it meant this application in particular.
     pub motion: crate::platform::MotionSetting,
+    /// What the `Paper` colour mode multiplies white down to (issue #17), as
+    /// `#RRGGBB`. A value that will not parse falls back to the default
+    /// rather than to an unrecoloured page, so a typo in the file still
+    /// gives the key its third mode.
+    pub paper_color: String,
 }
 
 impl Default for AppearanceSettings {
@@ -1032,6 +1062,7 @@ impl Default for AppearanceSettings {
             appearance: crate::platform::Appearance::System,
             colors: ColorSettings::default(),
             motion: crate::platform::MotionSetting::default(),
+            paper_color: crate::page_colors::DEFAULT_PAPER_HEX.to_string(),
         }
     }
 }
@@ -1216,6 +1247,7 @@ mod tests {
             updated: 0,
             outline_open: false,
             search_open: false,
+            color_mode: StoredColorMode::default(),
         }
     }
 
@@ -1232,6 +1264,7 @@ mod tests {
                 fraction: 0.5,
                 outline_open: false,
                 search_open: false,
+                color_mode: StoredColorMode::Normal,
             })
         );
     }
@@ -1252,6 +1285,7 @@ mod tests {
                 fraction: 0.5,
                 outline_open: true,
                 search_open: true,
+                color_mode: StoredColorMode::Normal,
             })
         );
     }
@@ -1284,6 +1318,7 @@ mod tests {
                 page: 8,
                 outline_open: false,
                 search_open: false,
+                color_mode: StoredColorMode::Normal,
             })
         );
     }
@@ -1304,6 +1339,7 @@ mod tests {
                 page: 8,
                 outline_open: true,
                 search_open: true,
+                color_mode: StoredColorMode::Normal,
             })
         );
     }
@@ -1321,6 +1357,7 @@ mod tests {
                 page: 8,
                 outline_open: false,
                 search_open: false,
+                color_mode: StoredColorMode::Normal,
             })
         );
         assert_eq!(
@@ -1406,6 +1443,41 @@ mod tests {
         let entry = &read.reading.positions[0];
         assert!(!entry.outline_open);
         assert!(!entry.search_open);
+    }
+
+    #[test]
+    fn a_position_recorded_before_colour_modes_reads_as_normal() {
+        // Same contract as the sidebar flags: a record without the key is a
+        // document nobody ever recoloured.
+        let toml = r#"
+            schema = 2
+
+            [[reading.positions]]
+            hash = "abc"
+            path = "/papers/draft.pdf"
+            page = 8
+            zoom = "fit-page"
+            fraction = 0.5
+        "#;
+        let read: Settings = toml::from_str(toml).expect("settings parse");
+        assert_eq!(
+            read.reading.positions[0].color_mode,
+            StoredColorMode::Normal
+        );
+    }
+
+    #[test]
+    fn a_colour_mode_survives_a_round_trip_through_the_settings_file() {
+        let mut settings = Settings::default();
+        let mut inverted = position(Some("abc"), "/papers/draft.pdf", 8);
+        inverted.color_mode = StoredColorMode::Inverted;
+        settings.reading.remember_position(inverted);
+        let written = toml::to_string_pretty(&settings).expect("settings serialise");
+        let read: Settings = toml::from_str(&written).expect("settings parse");
+        assert_eq!(
+            read.reading.positions[0].color_mode,
+            StoredColorMode::Inverted
+        );
     }
 
     #[test]

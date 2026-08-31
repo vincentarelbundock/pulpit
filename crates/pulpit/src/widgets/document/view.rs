@@ -219,6 +219,7 @@ struct PageSurface {
     date_language: crate::datefield::Locale,
     focused_widget: Option<pulpit_render::document::protocol::FocusedWidget>,
     focused_hint: Option<String>,
+    sheet_color: iced::Color,
 }
 
 impl From<&ReaderData<'_>> for PageSurface {
@@ -239,6 +240,7 @@ impl From<&ReaderData<'_>> for PageSurface {
             date_language: reader.date_language,
             focused_widget: reader.focused_widget.cloned(),
             focused_hint: reader.focused_hint.map(str::to_owned),
+            sheet_color: reader.sheet_color,
         }
     }
 }
@@ -308,6 +310,7 @@ impl PageSurface {
                     self.date_language,
                     self.focused_widget.as_ref(),
                     self.focused_hint.as_deref(),
+                    self.sheet_color,
                     on_event,
                 ));
             }
@@ -447,6 +450,7 @@ fn sheet<'a, Message: Clone + 'static>(
     language: crate::datefield::Locale,
     focused: Option<&pulpit_render::document::protocol::FocusedWidget>,
     focused_hint: Option<&str>,
+    sheet_color: iced::Color,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
     // The frame is always an upright raster; the sheet turns the picture to
@@ -474,8 +478,11 @@ fn sheet<'a, Message: Clone + 'static>(
     let sheet = container(inner)
         .width(Length::Fixed(drawn.0))
         .height(Length::Fixed(drawn.1))
-        .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::WHITE)),
+        .style(move |_theme| container::Style {
+            // The paper-white sheet token, through the colour mode: a page
+            // still rendering matches the pages around it instead of
+            // flashing white into an inverted read.
+            background: Some(iced::Background::Color(sheet_color)),
             ..container::Style::default()
         });
 

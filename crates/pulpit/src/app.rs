@@ -1083,6 +1083,14 @@ pub struct App {
     /// A handle is a name, not a residency: which *window* can draw it at once
     /// is decided by that window's own view, in `residency`.
     handles: std::collections::HashMap<FrameKey, iced::widget::image::Handle>,
+    /// How the open document's pages are recoloured on their way to the
+    /// screen (issue #17). Session state for the document, applied when a
+    /// handle is minted rather than kept in the cache key: the cache holds
+    /// frames as rendered, so changing mode re-mints handles from cached
+    /// bytes instead of re-rendering — and nothing on any window is taken
+    /// down before its recoloured replacement exists. Persisted per document
+    /// through [`crate::settings::ReadingPosition`].
+    color_mode: crate::page_colors::ColorMode,
     /// Page pictures with a retained highlight multiplied into them, keyed by
     /// the page and a hash of the frame and the washes. Interior mutability
     /// because the composite is made on demand inside the view's frame lookup,
@@ -2109,6 +2117,7 @@ impl App {
                     .unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
             ),
             handles: std::collections::HashMap::new(),
+            color_mode: crate::page_colors::ColorMode::default(),
             wash_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             form_flow: crate::form_flow::FormFlow::default(),
             reader_patch_images: std::collections::HashMap::new(),
@@ -4696,6 +4705,9 @@ impl App {
                     // any one session, so the application is what knows it.
                     reader.can_go_back = self.nav_history.can_go_back();
                     reader.can_go_forward = self.nav_history.can_go_forward();
+                    // And the colour mode, which recolours the sheet a page
+                    // shows before its frame arrives.
+                    reader.sheet_color = self.sheet_color();
                 }
                 reader
             },
@@ -5021,9 +5033,22 @@ impl App {
             crate::platform::Motion::resolve(self.motion_probe, self.settings.appearance.motion);
         self.diagnostics.note(format!("motion: {:?}", self.motion));
         self.theme = ThemeState::new(
-            system.resolve(preference),
+            system.resolve_with_inverted_pages(
+                preference,
+                self.color_mode == crate::page_colors::ColorMode::Inverted,
+            ),
             system.fell_back(preference),
             &self.settings.appearance.colors,
+        );
+        // The neutral surround beside a page follows the pages' own colours:
+        // rebuilt from the palette's token above and recoloured here, so a
+        // mode change cannot compound and switching it off restores the
+        // role's own value. Without this, an inverted read keeps a light
+        // grey shining beside every dark page.
+        self.theme.palette.slide_canvas = crate::page_colors::recolor(
+            self.color_mode,
+            self.paper_rgb(),
+            self.theme.palette.slide_canvas,
         );
         self.diagnostics.note(format!(
             "appearance: {} ({})",
@@ -5406,6 +5431,10 @@ impl App {
             Action::RotateReader => {
                 self.on_reader_action(crate::widgets::event::ReadCommand::RotateView)
             }
+            // Deliberately not routed through `on_reader_action`: the bright
+            // page in the dark hall is the *presenting* case, so the key
+            // works whatever layout is mounted.
+            Action::CycleColorMode => self.cycle_color_mode(),
             Action::ToggleDualPage => {
                 let spread = self.reader.controls().spread.other();
                 self.on_reader_action(crate::widgets::event::ReadCommand::SetSpread(spread))
@@ -6492,16 +6521,13 @@ impl App {
                     }
                 }
                 if self.cache.insert(key, frame.clone()) {
-                    // The handle shares the cached frame's own allocation, so
-                    // naming a frame costs nothing. Uploading it is a separate
-                    // question, asked once per window by the view that draws
-                    // it — never here, where the answer would be "upload it
-                    // everywhere, and keep it there for ever".
-                    let handle = iced::widget::image::Handle::from_rgba(
-                        frame.width,
-                        frame.height,
-                        shared_pixels(&frame.pixels),
-                    );
+                    // In the normal mode the handle shares the cached frame's
+                    // own allocation, so naming a frame costs nothing; other
+                    // colour modes pay for a recoloured copy here. Uploading
+                    // it is a separate question, asked once per window by the
+                    // view that draws it — never here, where the answer would
+                    // be "upload it everywhere, and keep it there for ever".
+                    let handle = self.mode_handle(&frame);
                     self.frame_ready(key, handle);
                 }
                 self.pin_visible();
@@ -8889,7 +8915,7 @@ impl App {
     /// once something is owed for the page, so an answer to nothing — a page
     /// scrolled away, a document reopened under the round trip — cannot take
     /// a preview off a page that is still standing in for an edit.
-    fn reader_patch_landed(&mut self, frame: pulpit_render::document::protocol::DocumentFrame) {
+    fn reader_patch_landed(&mut self, mut frame: pulpit_render::document::protocol::DocumentFrame) {
         let page = frame.page;
         if !self.form_flow.has_pending(page) {
             return;
@@ -8918,9 +8944,13 @@ impl App {
                 // being memcpy'd into a clone of the page every time the page
                 // is drawn. Kilobytes: under iced_wgpu's threshold for a
                 // synchronous upload, so it is on screen the pass it appears
-                // in and can never flash.
+                // in and can never flash. Recoloured like the page it patches,
+                // or a typed field would sit as a bright rectangle on an
+                // inverted sheet.
+                let mut pixels = std::mem::take(&mut frame.pixels);
+                crate::page_colors::apply(self.color_mode, self.paper_rgb(), &mut pixels);
                 let image =
-                    iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.pixels);
+                    iced::widget::image::Handle::from_rgba(frame.width, frame.height, pixels);
                 self.reader_patch_images.insert(page, image);
             }
             crate::form_flow::Landing::Regrow(reask) => {
@@ -9020,6 +9050,10 @@ impl App {
                 }
             }
         }
+        // After the washes, so the recoloured composite matches what the
+        // renderer's own committed-highlight pixels look like once they are
+        // recoloured in turn.
+        crate::page_colors::apply(self.color_mode, self.paper_rgb(), &mut pixels);
         let handle = iced::widget::image::Handle::from_rgba(frame.width, frame.height, pixels);
         let mut cache = self.wash_cache.borrow_mut();
         // A hard cap rather than an LRU: at most a handful of pages can have
@@ -10362,6 +10396,7 @@ impl App {
             fraction,
             outline_open: self.outline_rail.is_open(),
             search_open: self.search_pane.is_open(),
+            color_mode: stored_color_mode(self.color_mode),
             // Stamped by `remember_position`; zero here so `same_place`
             // against the stored front is the only comparison that matters.
             updated: 0,
@@ -10391,6 +10426,10 @@ impl App {
     /// moved is a precision the record no longer has, and because the zoom
     /// was chosen for a document that may not be this shape.
     fn find_reading_position(&mut self) {
+        // A colour mode is part of where the reader was in *one* document.
+        // The next document starts normal, or in its own remembered mode
+        // when the pending position lands.
+        self.set_color_mode(crate::page_colors::ColorMode::default());
         self.pending_position = None;
         if !self.settings.reading.remember {
             return;
@@ -10416,12 +10455,14 @@ impl App {
         let Some(position) = self.pending_position.take() else {
             return false;
         };
-        let (page, zoom, fraction, outline_open, search_open) = restored_fields(position);
+        let (page, zoom, fraction, outline_open, search_open, color_mode) =
+            restored_fields(position);
         tracing::info!(page = page + 1, "reading position restored");
         self.reader
             .restore_position(pulpit_core::page::PageIndex(page), zoom, fraction);
         self.outline_rail.jump(outline_open);
         self.search_pane.jump(search_open);
+        self.set_color_mode(page_color_mode(color_mode));
         true
     }
 
@@ -15331,6 +15372,89 @@ impl App {
     /// what the slots point at, so pinning first left the frame this event put
     /// on the projector unprotected until some later pass — and the largest
     /// unpinned entry in the cache is the first thing the next insert evicts.
+    /// The image handle for a frame, in the session's colour mode.
+    ///
+    /// Normal shares the cache's own allocation, as it always has. Any other
+    /// mode owns a recoloured copy — the cost of keeping the mode out of the
+    /// cache key: the raw frame stays cached, so cycling modes re-mints from
+    /// memory instead of re-rendering.
+    fn mode_handle(&self, frame: &pulpit_render::cache::Frame) -> iced::widget::image::Handle {
+        match self.color_mode {
+            crate::page_colors::ColorMode::Normal => iced::widget::image::Handle::from_rgba(
+                frame.width,
+                frame.height,
+                shared_pixels(&frame.pixels),
+            ),
+            mode => {
+                let mut pixels = (*frame.pixels).clone();
+                crate::page_colors::apply(mode, self.paper_rgb(), &mut pixels);
+                iced::widget::image::Handle::from_rgba(frame.width, frame.height, pixels)
+            }
+        }
+    }
+
+    /// What a page reads as before its frame arrives: the paper-white sheet
+    /// token, through the session's colour mode, so a page still rendering
+    /// never flashes a white rectangle into an inverted read.
+    fn sheet_color(&self) -> iced::Color {
+        crate::page_colors::recolor(
+            self.color_mode,
+            self.paper_rgb(),
+            crate::theme::tokens::PAGE_SHEET,
+        )
+    }
+
+    /// The configured paper colour, or the default when the setting will not
+    /// parse: a typo in the file should cost the chosen shade, not the mode.
+    fn paper_rgb(&self) -> [u8; 3] {
+        crate::settings::parse_hex_color(&self.settings.appearance.paper_color)
+            .map(|color| {
+                [color.r, color.g, color.b]
+                    .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+            })
+            .unwrap_or(crate::page_colors::DEFAULT_PAPER)
+    }
+
+    /// Change the colour mode and recolour what is already on screen.
+    ///
+    /// The cache is untouched: every resident frame keeps its rendered
+    /// pixels, and the handles are re-minted from them in place. Nothing is
+    /// removed before its replacement exists, so no window — the audience's
+    /// included — ever loses its picture to a mode change (rule 3). A handle
+    /// whose frame has since been evicted keeps its old colours: a stale
+    /// picture beats a missing one, and its replacement recolours on arrival.
+    fn set_color_mode(&mut self, mode: crate::page_colors::ColorMode) {
+        if self.color_mode == mode {
+            return;
+        }
+        self.color_mode = mode;
+        let keys: Vec<FrameKey> = self.handles.keys().copied().collect();
+        for key in keys {
+            if let Some(frame) = self.cache.get(&key) {
+                let handle = self.mode_handle(&frame);
+                self.handles.insert(key, handle);
+            }
+        }
+        // Composites are built from raw frames plus the mode, and every one
+        // of them predates the mode that now holds.
+        self.wash_cache.borrow_mut().clear();
+        // Fresh textures for every window, on the same settling tick a burst
+        // of rendered frames would get.
+        self.uploads_settle_by = Some(Instant::now() + UPLOAD_SETTLE);
+        // The chrome follows the pages: inverting darkens the whole
+        // interface, not just the paper in the middle of it — see
+        // `SystemAppearance::resolve_with_inverted_pages`.
+        self.apply_appearance();
+    }
+
+    // No toast: every page on screen just changed colour, which announces
+    // the mode better than a message naming it could.
+    fn cycle_color_mode(&mut self) -> Task<Message> {
+        let mode = self.color_mode.next();
+        self.set_color_mode(mode);
+        Task::none()
+    }
+
     fn frame_ready(&mut self, key: FrameKey, handle: iced::widget::image::Handle) {
         self.handles.insert(key, handle);
         // A picture some window will want on the GPU. Re-armed by each
@@ -17695,15 +17819,37 @@ fn reader_zoom(zoom: crate::settings::StoredZoom) -> crate::widgets::document::m
     }
 }
 
+/// The colour mode in the settings schema's vocabulary, and back — the same
+/// pairing, for the same compatibility reason, as `stored_zoom`.
+fn stored_color_mode(mode: crate::page_colors::ColorMode) -> crate::settings::StoredColorMode {
+    use crate::page_colors::ColorMode;
+    use crate::settings::StoredColorMode;
+    match mode {
+        ColorMode::Normal => StoredColorMode::Normal,
+        ColorMode::Inverted => StoredColorMode::Inverted,
+        ColorMode::Paper => StoredColorMode::Paper,
+    }
+}
+
+fn page_color_mode(mode: crate::settings::StoredColorMode) -> crate::page_colors::ColorMode {
+    use crate::page_colors::ColorMode;
+    use crate::settings::StoredColorMode;
+    match mode {
+        StoredColorMode::Normal => ColorMode::Normal,
+        StoredColorMode::Inverted => ColorMode::Inverted,
+        StoredColorMode::Paper => ColorMode::Paper,
+    }
+}
+
 /// What a restored record hands `apply_pending_position`: the page, a zoom
 /// (`None` for a page-only match — the document may not be the same shape,
-/// so no zoom is honestly still correct), the scroll fraction, and the two
-/// sidebar flags.
+/// so no zoom is honestly still correct), the scroll fraction, the two
+/// sidebar flags, and the colour mode.
 ///
-/// The sidebar flags come through unconditionally, on both arms, unlike the
-/// zoom and the fraction: whether the rail was open is a UI choice, not a
-/// coordinate into text that may have moved, so a page-only match still
-/// honours it.
+/// The sidebar flags and the colour mode come through unconditionally, on
+/// both arms, unlike the zoom and the fraction: whether the rail was open —
+/// or the page inverted — is a UI choice, not a coordinate into text that
+/// may have moved, so a page-only match still honours them.
 fn restored_fields(
     position: crate::settings::RestoredPosition,
 ) -> (
@@ -17712,6 +17858,7 @@ fn restored_fields(
     f32,
     bool,
     bool,
+    crate::settings::StoredColorMode,
 ) {
     use crate::settings::RestoredPosition;
     match position {
@@ -17721,18 +17868,21 @@ fn restored_fields(
             fraction,
             outline_open,
             search_open,
+            color_mode,
         } => (
             page,
             Some(reader_zoom(zoom)),
             fraction,
             outline_open,
             search_open,
+            color_mode,
         ),
         RestoredPosition::PageOnly {
             page,
             outline_open,
             search_open,
-        } => (page, None, 0.0, outline_open, search_open),
+            color_mode,
+        } => (page, None, 0.0, outline_open, search_open, color_mode),
     }
 }
 
@@ -17793,7 +17943,7 @@ mod image_document_tests {
 #[cfg(test)]
 mod restored_fields_tests {
     use super::restored_fields;
-    use crate::settings::{RestoredPosition, StoredZoom};
+    use crate::settings::{RestoredPosition, StoredColorMode, StoredZoom};
     use crate::widgets::document::model::Zoom;
 
     #[test]
@@ -17805,8 +17955,16 @@ mod restored_fields_tests {
                 fraction: 0.5,
                 outline_open: true,
                 search_open: true,
+                color_mode: StoredColorMode::Inverted,
             }),
-            (8, Some(Zoom::FitPage), 0.5, true, true)
+            (
+                8,
+                Some(Zoom::FitPage),
+                0.5,
+                true,
+                true,
+                StoredColorMode::Inverted
+            )
         );
     }
 
@@ -17814,14 +17972,16 @@ mod restored_fields_tests {
     fn a_page_only_match_drops_the_zoom_and_fraction_but_keeps_the_sidebar() {
         // A page-only match is what a recompiled document gets: the text
         // under the fraction moved, and the zoom was chosen for a document
-        // that may not be this shape, but the rail is neither of those.
+        // that may not be this shape, but the rail — and the colour mode —
+        // are neither of those.
         assert_eq!(
             restored_fields(RestoredPosition::PageOnly {
                 page: 8,
                 outline_open: true,
                 search_open: false,
+                color_mode: StoredColorMode::Paper,
             }),
-            (8, None, 0.0, true, false)
+            (8, None, 0.0, true, false, StoredColorMode::Paper)
         );
     }
 }

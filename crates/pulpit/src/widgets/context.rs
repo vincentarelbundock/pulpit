@@ -492,6 +492,11 @@ pub struct ReaderData<'a> {
     /// The mark being written, when one is (§8.5). Drawn on the sheet at the
     /// spot it was placed, not in a dialog over the document.
     pub composing: Option<ComposingMark>,
+    /// What a page reads as before its frame arrives: white, through the
+    /// session's colour mode (issue #17). Filled in by the application, which
+    /// owns the mode; a facet's default is plain white. Without it, a page
+    /// still rendering flashes a white sheet into an inverted read.
+    pub sheet_color: iced::Color,
 }
 
 impl ReaderData<'_> {

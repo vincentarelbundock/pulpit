@@ -4637,6 +4637,9 @@ impl ReaderSession {
             // Filled in by the application, which is where the half-written
             // mark lives: this session knows geometry, not editors.
             composing: None,
+            // Likewise the colour mode: the session knows geometry, not
+            // colours.
+            sheet_color: crate::theme::tokens::PAGE_SHEET,
         }
     }
 }

@@ -149,6 +149,7 @@ pub fn closed_reader() -> crate::widgets::context::ReaderData<'static> {
         selected: false,
         panning: false,
         composing: None,
+        sheet_color: crate::theme::tokens::PAGE_SHEET,
     }
 }
 

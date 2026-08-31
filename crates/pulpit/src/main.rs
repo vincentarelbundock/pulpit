@@ -24,6 +24,7 @@ mod latency;
 mod layout;
 mod layout_renderer;
 mod media;
+mod page_colors;
 mod panel;
 mod platform;
 mod printing;
