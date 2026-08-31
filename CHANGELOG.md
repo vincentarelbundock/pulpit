@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.13] — 2026-08-31
+
+### Added
+
+- **Invert the page colours from one key.** Pressing `i` cycles the open
+  document through three colour modes: as rendered, inverted, and "paper" —
+  white multiplied down to a warm paper tone (`appearance.paper_color` in the
+  settings file chooses the shade). The transform happens on the way to the
+  screen, so cycling is instant, nothing re-renders, and no window — the
+  audience's included — ever loses its picture to a mode change. While the
+  pages are inverted the whole interface goes dark with them: the chrome, the
+  neutral surround beside a narrow page, and the sheet a still-rendering page
+  shows, so no light grey is left shining into a dark room. Nothing about
+  the appearance preference is overwritten — switch the mode off and the
+  interface resolves exactly as before, and a system set to high contrast
+  keeps it regardless. The mode is remembered per document, beside the page
+  and zoom, and comes back when the same file is opened again. The first
+  step of issue #17.
+
+- **The menu can save and close the document.** "Save as…" runs the same
+  save every other path runs — pulpit never writes over the file it opened,
+  so the label names the copy it makes — and "Close" is new: it puts the
+  document down and returns to the start page. Closing records where you
+  were, releases the document from the render workers at once, and is a
+  clean end — the next run will not offer to restore a document nobody has
+  open.
+
+### Changed
+
+- **The hamburger menu is smaller, and Open recent unfolds under the
+  pointer.** Every command that lives on a key now lives only there, and the
+  keyboard reference advertises it; the menu keeps just the pages keys
+  cannot reach. The recent files no longer need a click: resting the pointer
+  on "Open recent…" unfolds them in place, moving off folds them back, and
+  a click still works for a touch.
+
+- **The keyboard reference reads as keycaps on a sheet.** The welcome and
+  shortcut page is one rounded surface floating on the canvas, each category
+  marked by a small icon of its own, and every binding drawn as the actual
+  caps a hand would press — a chord's keys tight together, alternative
+  bindings a clear step apart.
+
 ## [0.0.12] — 2026-08-30
 
 ### Added
