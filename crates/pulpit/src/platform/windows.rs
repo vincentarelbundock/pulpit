@@ -10,7 +10,6 @@
 //! whose layout matters sit next to the code that fills them in.
 
 use std::ffi::c_void;
-use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::{
