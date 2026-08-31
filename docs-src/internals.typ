@@ -1245,7 +1245,7 @@ plus a snapshot:
   stroke: none,
   inset: 0.55em,
   [*Contract*], [*What it owns*],
-  [`PlatformServices`], [appearance, reveal/open, sleep inhibition, directories, putting an image on the clipboard, sending a document to a printer, or to the platform's own print dialog],
+  [`PlatformServices`], [appearance, opening a URL or file, sleep inhibition, directories, putting an image on the clipboard, sending a document to a printer, or to the platform's own print dialog],
   [`WindowPolicy`], [application id, minimum window size, quit-on-last-close, clamping restored bounds back onto a live work area],
   [`InputPolicy`], [the primary modifier, how a shortcut is written, which combinations the desktop has already reserved],
   [`Capabilities`], [a snapshot of what this session can actually do],
@@ -1815,9 +1815,13 @@ arrow) still hang from the top-left corner. They are positioned by
 arithmetic, and that arithmetic knows only whether the strip is drawing the
 control, not where on the layout the presenter put it.
 
-The hamburger remains the one global command menu. It groups file, view,
-presentation, timer and help commands; live controls such as Start and Stop
-remain outside it. Its keyboard-reference command opens a presenter-only
+The hamburger remains the one global command menu, and it is kept
+deliberately small: opening a document, the ways into the layouts, settings
+and speech pages, and the keyboard reference. Every command that has a key —
+reloading, the overview, swapping displays, fullscreen, the timer, quitting —
+lives on that key and is advertised by the reference rather than by a menu
+row that duplicates it; live controls such as Start and Stop remain outside
+it too. Its keyboard-reference command opens a presenter-only
 overlay generated from the fixed keymap. The mode-neutral no-document surface
 uses compact subsets of that same model, so advertised keys cannot drift from
 input handling. Hardware aliases from presenter remotes are resolved
@@ -1857,17 +1861,19 @@ the ladder's bottom rung, apply only unmodified, and never appear in the
 reference. If this trade ever turns out wrong in rooms, the remedy is a
 setting that disables `Keymap::resolve_remote`, not per-device guessing.
 
-*Properties…* is one of its file commands, and it opens a dialog rather than a
-rail view: the rail holds per-page navigation, while what a document _is_ is
-one question about the whole file, asked once and closed. The answer is a
-`DocumentRequest::Properties` round trip made when the dialog opens rather
-than at open, since a presenter putting a deck on a projector never asks it.
+What the open document _is_ — its properties — is a section of the settings
+page rather than a rail view or a dialog of its own: the rail holds per-page
+navigation, while this is one question about the whole file, read once,
+beside the other facts about the session. The answer is a
+`DocumentRequest::Properties` round trip made when the settings page opens
+rather than at document open, since a presenter putting a deck on a projector
+never asks it.
 Every string in it is written by whoever produced the file, so it crosses the
 wire through `InfoText`, which bounds it to `MAX_INFO_TEXT_BYTES` and
 collapses its control characters and line structure — the same treatment
 `AnnotationContents` gives `/Contents`, for the same reason. A key the
 document left empty is reported as absent rather than as an empty string, so
-the dialog can leave the row out instead of drawing a blank one, and the page
+the section can leave the row out instead of drawing a blank one, and the page
 scan reports `Unmeasured` rather than claiming a uniformity it did not check.
 
 === Media Transport

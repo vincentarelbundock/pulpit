@@ -1,8 +1,8 @@
 //! The Windows desktop adapter.
 //!
 //! Appearance comes from the Personalize registry values and the accessibility
-//! system parameters; inhibition from the power-request API; opening and
-//! revealing from the shell. Anything Windows cannot do without a packaged
+//! system parameters; inhibition from the power-request API; opening from
+//! the shell. Anything Windows cannot do without a packaged
 //! app identity — a global menu — is reported as unsupported rather than
 //! faked.
 //!
@@ -10,7 +10,6 @@
 //! whose layout matters sit next to the code that fills them in.
 
 use std::ffi::c_void;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
@@ -241,23 +240,6 @@ impl PlatformServices for WindowsServices {
             MotionPreference::Full
         } else {
             MotionPreference::Reduced
-        }
-    }
-
-    fn reveal(&self, path: &Path) -> Outcome {
-        // `/select,` needs the file itself, and Explorer wants it quoted when
-        // it contains spaces.
-        match Command::new("explorer.exe")
-            .arg(format!("/select,{}", path.display()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            // Explorer exits non-zero even on success, so the spawn is the
-            // only thing worth checking.
-            Ok(_) => Outcome::Done,
-            Err(e) => Outcome::failed(e.to_string()),
         }
     }
 

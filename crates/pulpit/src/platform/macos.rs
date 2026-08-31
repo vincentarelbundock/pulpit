@@ -7,7 +7,6 @@
 //! pulpit dies mid-talk — the same ordering as the Linux adapter.
 
 use std::ffi::c_void;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
@@ -259,10 +258,6 @@ impl PlatformServices for MacosServices {
             Some(false) => MotionPreference::Full,
             None => MotionPreference::Unknown,
         }
-    }
-
-    fn reveal(&self, path: &Path) -> Outcome {
-        spawn("open", &["-R", &path.to_string_lossy()])
     }
 
     fn open(&self, target: &str) -> Outcome {

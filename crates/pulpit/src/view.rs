@@ -157,10 +157,6 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         // strip, and a popup anchored there would be clipped by its own
         // widget.
         layer(app.alarm_controls.open, || alarms_dialog(app)),
-        layer(app.about_open, about_overlay),
-        // What the open document is. A dialog, not a rail view: one question
-        // about the whole file, asked once and closed.
-        layer(app.properties_open, || document_properties_dialog(app)),
         // The timer menu is the same kind of overlay, for the same reason.
         layer(app.timer_controls.open, || timer_dialog(app)),
         // The same rule for a document: what a previous run left unsaved is
@@ -1083,7 +1079,10 @@ fn recent_menu_label(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
         .unwrap_or_else(|| path.as_os_str().to_string_lossy())
 }
 
-/// The main menu: the handful of commands that are not on the layout.
+/// The main menu, kept deliberately small: the ways into the app's few
+/// pages, and nothing that already lives on a key. Every command with a
+/// shortcut is advertised by the keyboard reference, not by a menu row that
+/// duplicates it.
 fn menu(app: &App) -> Element<'_, Message> {
     let entry = |label: &'static str, shortcut: Option<String>, message: Message| {
         let mut row = Row::new()
@@ -1198,152 +1197,23 @@ fn menu(app: &App) -> Element<'_, Message> {
         .style(theme::ambient::tool_button)
         .on_press(Message::ToggleRecentMenu);
         items = items.push(recent_toggle);
-        items = items.push(entry(
-            "Reload",
-            shortcut(Action::ReloadDocument),
-            Message::Do(Action::ReloadDocument),
-        ));
-        if app.state.document().is_some() {
-            // Beside Reload and Show in file manager: what a document *is* is
-            // a question about the file that is open, not about the view of it.
-            items = items.push(entry("Properties…", None, Message::ShowDocumentProperties));
-        }
-        if app.state.document().is_some() && app.platform.capabilities.native_dialogs {
-            items = items.push(entry("Show in file manager", None, Message::RevealDocument));
-        }
         items = items.push(heading("View"));
-        if app.state.document().is_some() {
-            items = items.push(entry(
-                "Jump to page…",
-                shortcut(Action::ShowOverview),
-                Message::Do(Action::ShowOverview),
-            ));
-        }
         items = items.push(entry(
             "Layouts…",
             shortcut(Action::ShowLayouts),
             Message::ShowLibrary,
         ));
         items = items.push(entry("Settings…", None, Message::ShowSettings));
-        items = items.push(heading("Presentation"));
-        items = items.push(entry(
-            "Swap displays",
-            shortcut(Action::SwapDisplays),
-            Message::Do(Action::SwapDisplays),
-        ));
-        items = items.push(entry(
-            fullscreen_action_label(
-                crate::layout::PrimaryViewer::of(&app.active_layout)
-                    == crate::layout::PrimaryViewer::Document,
-                app.reader_fullscreen,
-                app.coordinator.roles.audience_fullscreen,
-            ),
-            shortcut(Action::ToggleAudienceFullscreen),
-            Message::Do(Action::ToggleAudienceFullscreen),
-        ));
-        // Speech. In the menu as well as on a key, because a feature nobody
-        // knows exists is one nobody uses — and because the reader most
-        // likely to want it is the least likely to be hunting for an
-        // unlabelled keystroke. What it offers depends on what this session
-        // can actually do, which is the whole point of the tri-state.
-        {
-            use crate::platform::capabilities::Speech as Cap;
-            use pulpit_core::speech::{Scope, SpeechState};
-
-            items = items.push(heading("Read aloud"));
-            match &app.platform.capabilities.speech {
-                Cap::Unavailable { .. } => {
-                    // Not a disabled row with no explanation: the settings
-                    // page says why, and this points at it.
-                    items = items.push(entry(
-                        "Not available in this session…",
-                        None,
-                        Message::ShowSettings,
-                    ));
-                }
-                Cap::Downloadable { .. } => {
-                    items = items.push(entry("Download a voice…", None, Message::ShowSettings));
-                }
-                Cap::Ready { .. } => {
-                    let state = app.speech.state();
-                    let reading = app.speech.scope();
-                    // One row per scope, each naming what its key will do
-                    // *now* — so the menu answers "what happens if I press
-                    // this" rather than making the reader infer it from a
-                    // label that never changes.
-                    let label =
-                        |scopes: &[Scope], idle: &'static str| match (state.clone(), reading) {
-                            (SpeechState::Idle, _) => idle,
-                            (_, Some(active)) if !scopes.contains(&active) => idle,
-                            (SpeechState::Paused, _) => "Resume",
-                            _ => "Pause",
-                        };
-                    items = items.push(entry(
-                        label(&[Scope::Document], "Read the whole document"),
-                        shortcut(Action::SpeakToggle),
-                        Message::SpeakToggleScope(Scope::Document),
-                    ));
-                    // One row for the page and the selection both, because
-                    // they share one key: with text selected it reads the
-                    // selection, otherwise the page — and while either is
-                    // being read, this is the row that pauses it.
-                    items = items.push(entry(
-                        label(&[Scope::Page, Scope::Selection], "Read page or selection"),
-                        shortcut(Action::SpeakPageToggle),
-                        Message::SpeakToggleScope(Scope::Page),
-                    ));
-                    if state != SpeechState::Idle {
-                        items = items.push(entry(
-                            "Stop reading",
-                            shortcut(Action::SpeakStop),
-                            Message::SpeakStop,
-                        ));
-                    }
-                    items = items.push(entry("Speech settings…", None, Message::ShowSettings));
-                }
-            }
-        }
-
-        items = items.push(heading("Timer"));
-        // The timer has no control of its own unless a clock widget is on the
-        // layout, so its two commands are always reachable from here as well.
-        items = items.push(entry(
-            if app.state.timer().is_running() {
-                "Pause timer"
-            } else {
-                "Start timer"
-            },
-            shortcut(Action::ToggleTimer),
-            Message::Do(Action::ToggleTimer),
-        ));
-        items = items.push(entry(
-            "Reset timer",
-            shortcut(Action::ResetTimer),
-            Message::Do(Action::ResetTimer),
-        ));
-
+        // One row, because a feature nobody knows exists is one nobody uses;
+        // the settings page is where its keys, voices and availability are
+        // explained, whatever this session can do. The controls themselves
+        // live on keys.
+        items = items.push(entry("Read aloud…", None, Message::ShowSettings));
         items = items.push(heading("Help"));
         items = items.push(entry(
             "Keyboard shortcuts…",
             shortcut(Action::ShowShortcuts),
             Message::ToggleShortcuts,
-        ));
-        items = items.push(entry("Documentation", None, Message::OpenDocumentation));
-        // No "Diagnostics…" of its own: it sent `ShowSettings`, exactly as
-        // "Settings…" above does, and what it promised is a section of that
-        // page. Two entries for one destination is a menu that has to be read
-        // twice to find out they are the same place.
-        items = items.push(entry("About Pulpit", None, Message::ShowAbout));
-
-        items = items.push(
-            container(space::vertical().height(Length::Fixed(1.0)))
-                .width(Length::Fill)
-                .style(theme::ambient::separator),
-        );
-        items = items.push(entry(
-            "Exit",
-            shortcut(Action::Quit),
-            Message::Do(Action::Quit),
         ));
     }
 
@@ -1420,24 +1290,6 @@ fn shortcut_keycap(label: String) -> Element<'static, Message> {
         .padding(iced::Padding::from([2.0, gap::XS]))
         .style(theme::ambient::keycap)
         .into()
-}
-
-/// The fullscreen menu item names the state pressing it will enter.
-fn fullscreen_action_label(
-    document_viewer: bool,
-    reader_fullscreen: bool,
-    audience_fullscreen: bool,
-) -> &'static str {
-    let fullscreen = if document_viewer {
-        reader_fullscreen
-    } else {
-        audience_fullscreen
-    };
-    if fullscreen {
-        "Windowed"
-    } else {
-        "Fullscreen"
-    }
 }
 
 fn shortcut_entry<'a>(app: &'a App, action: Action) -> Element<'a, Message> {
@@ -1606,22 +1458,20 @@ fn shortcut_reference_page(app: &App, can_close: bool) -> Element<'_, Message> {
 
 /// What the open document *is*: its own description of itself.
 ///
-/// A dialog rather than a rail view. The rail holds per-page navigation and is
-/// read while moving through a document; this is one question about the whole
-/// file, asked once and closed.
+/// A section of the settings page rather than a rail view or a dialog of its
+/// own. The rail holds per-page navigation and is read while moving through a
+/// document; this is one question about the whole file, read once, beside the
+/// other facts about this session.
 ///
 /// Every string in here was written by whoever produced the file. They are
 /// drawn as text and nothing else — no markup, no links, no layout of their
 /// own — and they arrive already bounded and flattened by
 /// `pulpit_render::document::InfoText`, which is where that guarantee is made
 /// rather than here.
-fn document_properties_dialog(app: &App) -> Element<'_, Message> {
+fn document_properties_section(app: &App) -> Element<'_, Message> {
     use pulpit_render::document::PageSizes;
 
-    let dismiss = Some(Message::CloseDocumentProperties);
-    let mut body = Column::new()
-        .spacing(gap::M)
-        .push(theme::typography::title("Document properties"));
+    let mut body = Column::new().spacing(gap::M);
 
     // The file itself, which pulpit knows whether or not a worker answers.
     if let Some(path) = app.documents.active().map(|document| &document.path) {
@@ -1640,7 +1490,7 @@ fn document_properties_dialog(app: &App) -> Element<'_, Message> {
             Some(reason) => theme::typography::note(reason.clone()),
             None => theme::typography::note("Reading…"),
         });
-        return panel(body, dismiss);
+        return body.into();
     };
 
     // What the document says it is. Absent keys are left out entirely: an
@@ -1774,7 +1624,7 @@ fn document_properties_dialog(app: &App) -> Element<'_, Message> {
     }
     body = body.push(dialog_section("What pulpit will do with it", handling));
 
-    panel(body, dismiss)
+    body.into()
 }
 
 /// Whether the Origin section has anything in it, asked before the section is
@@ -1787,12 +1637,12 @@ fn made_is_empty(properties: &pulpit_render::document::DocumentProperties) -> bo
         && properties.version.is_none()
 }
 
-/// The width of the label column in the properties dialog. Fixed, so the
+/// The width of the label column in the properties section. Fixed, so the
 /// values line up into a column a reader can scan rather than being pushed
 /// around by the length of the label beside them.
 const PROPERTIES_LABEL_WIDTH: f32 = 140.0;
 
-/// One `label: value` line of the properties dialog.
+/// One `label: value` line of the properties section.
 ///
 /// The value wraps rather than being cut: a producer string is the document's
 /// own words, and half of one is worse than three lines of it.
@@ -1804,38 +1654,6 @@ fn properties_row<'a>(label: &'static str, value: String) -> Element<'a, Message
     ]
     .spacing(gap::M)
     .into()
-}
-
-fn about_overlay() -> Element<'static, Message> {
-    let card = container(
-        column![
-            theme::typography::title("Pulpit"),
-            theme::typography::body(format!("Version {}", env!("CARGO_PKG_VERSION"))),
-            theme::typography::note(
-                "A PDF presenter built for unreliable, changing display topologies.",
-            ),
-            button(theme::typography::label("Close"))
-                .style(theme::ambient::tool_button)
-                .on_press(Message::CloseAbout),
-        ]
-        .spacing(gap::M),
-    )
-    .padding(gap::L)
-    .max_width(520.0)
-    .style(theme::ambient::dialog);
-    let backdrop = mouse_area(
-        container(space::vertical())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::ambient::scrim),
-    )
-    .on_press(Message::CloseAbout);
-    let layer = container(card)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill);
-    stack![backdrop, layer].into()
 }
 
 /// A toggle that shows whether it is the current choice. Selection uses the
@@ -1992,11 +1810,26 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     ]
     .align_y(Alignment::Center);
 
+    // What used to be the About dialog, and the way into the manual: one
+    // quiet line under the title, where everyone who opens this page passes
+    // it, instead of a menu entry and a dialog of their own.
+    let about = column![
+        theme::typography::caption(format!(
+            "Pulpit {} — a PDF presenter built for unreliable, changing display topologies.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        button(theme::typography::label(DOCUMENTATION_URL).color(theme::ambient::accent()))
+            .padding(0)
+            .style(theme::ambient::tool_button)
+            .on_press(Message::OpenDocumentation),
+    ]
+    .spacing(gap::XS);
+
     // A full page, not a squashed drawer: generous rhythm and page margins.
     let mut body = Column::new()
         .spacing(gap::XL)
         .padding(gap::XXL)
-        .push(header);
+        .push(column![header, about].spacing(gap::S));
 
     // Appearance
     let appearance_count = Appearance::ALL.len();
@@ -2140,6 +1973,13 @@ fn settings_page(app: &App) -> Element<'_, Message> {
     body = body.push(section("Speech", speech_settings(app)));
 
     body = body.push(section("Signatures", signature_profiles_settings(app)));
+
+    // What the open document says it is. Only drawn while a document is
+    // open: a heading over "No document is open" would be a section about
+    // nothing.
+    if app.documents.active().is_some() {
+        body = body.push(section("Open document", document_properties_section(app)));
+    }
 
     // Diagnostics. Rebuilt at most once a second: the report is a multi-KB
     // string whose paragraph iced re-shapes whenever its content changes,
@@ -4503,14 +4343,6 @@ mod tests {
             best,
             "the two tables should be as balanced as whole groups allow"
         );
-    }
-
-    #[test]
-    fn fullscreen_menu_item_names_the_action_not_the_current_state() {
-        assert_eq!(fullscreen_action_label(true, false, false), "Fullscreen");
-        assert_eq!(fullscreen_action_label(true, true, false), "Windowed");
-        assert_eq!(fullscreen_action_label(false, false, false), "Fullscreen");
-        assert_eq!(fullscreen_action_label(false, false, true), "Windowed");
     }
 
     #[test]

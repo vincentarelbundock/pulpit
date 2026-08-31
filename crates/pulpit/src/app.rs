@@ -261,11 +261,6 @@ pub enum Message {
     CloseMenu,
     ToggleShortcuts,
     CloseShortcuts,
-    ShowAbout,
-    CloseAbout,
-    /// Open the properties dialog, asking the document what it is.
-    ShowDocumentProperties,
-    CloseDocumentProperties,
     OpenDocumentation,
     /// Start immediately with the saved display and fullscreen choices.
     StartAudience,
@@ -356,8 +351,6 @@ pub enum Message {
     DismissAllToasts,
     /// Put the diagnostics report on the clipboard.
     CopyDiagnostics,
-    /// Ask the desktop to reveal the open document.
-    RevealDocument,
     /// The pointer moved over the live current slide, in normalised slide
     /// coordinates (values outside `0..=1` are the letterbox).
     SlideCursor {
@@ -1339,15 +1332,12 @@ pub struct App {
     pub recent_menu_open: bool,
     /// Whether the live-keymap reference is covering the presenter.
     pub shortcuts_open: bool,
-    /// Whether the compact application information dialog is open.
-    pub about_open: bool,
-    /// Whether the document properties dialog is open.
-    pub properties_open: bool,
     /// What the document said about itself, once the worker has answered.
     ///
-    /// `None` while the answer is outstanding, which is what the dialog draws
-    /// as "Reading…" rather than as a document with nothing in it. Dropped
-    /// when a document is put down: the next one's properties are its own.
+    /// `None` while the answer is outstanding, which is what the settings
+    /// page's document section draws as "Reading…" rather than as a document
+    /// with nothing in it. Dropped when a document is put down: the next
+    /// one's properties are its own.
     pub document_properties: Option<Box<pulpit_render::document::DocumentProperties>>,
     /// Why the properties could not be read, when they could not.
     pub document_properties_failed: Option<String>,
@@ -2206,8 +2196,6 @@ impl App {
             menu_open: false,
             recent_menu_open: false,
             shortcuts_open: false,
-            about_open: false,
-            properties_open: false,
             document_properties: None,
             document_properties_failed: None,
             audience_start_menu_open: false,
@@ -3950,25 +3938,6 @@ impl App {
                 self.shortcuts_open = false;
                 Task::none()
             }
-            Message::ShowAbout => {
-                self.close_menu_dropdowns();
-                self.about_open = true;
-                Task::none()
-            }
-            Message::CloseAbout => {
-                self.about_open = false;
-                Task::none()
-            }
-            Message::ShowDocumentProperties => {
-                self.close_menu_dropdowns();
-                self.properties_open = true;
-                self.ask_document_properties();
-                Task::none()
-            }
-            Message::CloseDocumentProperties => {
-                self.properties_open = false;
-                Task::none()
-            }
             Message::OpenDocumentation => {
                 self.close_menu_dropdowns();
                 let outcome = self.platform.services.open(DOCUMENTATION_URL);
@@ -4064,8 +4033,12 @@ impl App {
             Message::ShowSettings => {
                 self.menu_open = false;
                 self.shortcuts_open = false;
-                self.about_open = false;
                 self.page = crate::designer::Page::Settings;
+                // The page carries the open document's properties, so the
+                // round trip starts as it opens rather than never.
+                if self.documents.active().is_some() {
+                    self.ask_document_properties();
+                }
                 Task::none()
             }
             Message::SignatureProfile(message) => self.handle_signature_profile(message),
@@ -4386,18 +4359,6 @@ impl App {
                 let report = self.diagnostics_report();
                 self.notify_done("Diagnostics copied.".to_string());
                 iced::clipboard::write(report)
-            }
-            Message::RevealDocument => {
-                self.menu_open = false;
-                let Some(path) = self.state.document().map(|document| document.path.clone()) else {
-                    self.notify("No document is open.".to_string());
-                    return Task::none();
-                };
-                let outcome = self.platform.services.reveal(&path);
-                if let Some(problem) = outcome.describe() {
-                    self.notify(problem);
-                }
-                Task::none()
             }
             Message::Designer(designer_message) => {
                 let Some(designer) = self.designer.as_mut() else {
@@ -5114,8 +5075,6 @@ impl App {
             }
             Rung::PresenterPopups => {
                 self.shortcuts_open
-                    || self.about_open
-                    || self.properties_open
                     || self.menu_open
                     || self.audience_start_menu_open
                     || self.overview
@@ -5272,8 +5231,6 @@ impl App {
             }),
             Rung::PresenterPopups => (key == Some("Escape")).then(|| {
                 self.shortcuts_open = false;
-                self.about_open = false;
-                self.properties_open = false;
                 self.menu_open = false;
                 self.audience_start_menu_open = false;
                 // Backing out of the overview returns to the slide that
@@ -7078,7 +7035,7 @@ impl App {
             for warning in &shape.info.warnings {
                 self.notify(warning.message().to_string());
             }
-            if self.properties_open {
+            if self.page == crate::designer::Page::Settings {
                 self.ask_document_properties();
             }
             self.reader_preopened = Some(shape);
@@ -7157,8 +7114,9 @@ impl App {
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
-        // Nothing will answer a properties question now, and a dialog waiting
-        // on one must say so rather than read "Reading…" for ever.
+        // Nothing will answer a properties question now, and the settings
+        // section waiting on one must say so rather than read "Reading…"
+        // for ever.
         if self.document_properties.is_none() {
             self.document_properties_failed =
                 Some("The document worker stopped, so this document cannot be read.".into());
@@ -7321,9 +7279,9 @@ impl App {
                     for warning in &info.warnings {
                         self.notify(warning.message().to_string());
                     }
-                    // A properties dialog left open across an open describes
+                    // A settings page left open across an open describes
                     // the document that is there now, not the one that was.
-                    if self.properties_open {
+                    if self.page == crate::designer::Page::Settings {
                         self.ask_document_properties();
                     }
                 }
@@ -8638,10 +8596,10 @@ impl App {
         }
     }
 
-    /// Ask the document what it is, for the properties dialog.
+    /// Ask the document what it is, for the settings page's document section.
     ///
     /// Asked once per document: the answer cannot change under a session that
-    /// only ever writes copies (A6), and reopening the dialog on a deck of
+    /// only ever writes copies (A6), and revisiting the page on a deck of
     /// three hundred pages must not walk it again. A document with no worker —
     /// one whose session was refused, or lost — is reported as unreadable
     /// rather than left showing "Reading…" for ever.

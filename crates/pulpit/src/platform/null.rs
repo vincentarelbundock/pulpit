@@ -112,13 +112,6 @@ impl PlatformServices for NullPlatform {
         self.appearance
     }
 
-    fn reveal(&self, path: &Path) -> Outcome {
-        self.record(format!("reveal {}", path.display()));
-        Outcome::Unsupported {
-            what: "Revealing a file in the file manager",
-        }
-    }
-
     fn open(&self, target: &str) -> Outcome {
         self.record(format!("open {target}"));
         Outcome::Unsupported {
@@ -170,10 +163,6 @@ mod tests {
             Outcome::Unsupported { .. }
         ));
         assert!(matches!(
-            platform.reveal(Path::new("/tmp/deck.pdf")),
-            Outcome::Unsupported { .. }
-        ));
-        assert!(matches!(
             platform.print(&crate::platform::services::PrintJob {
                 file: PathBuf::from("/tmp/deck.pdf"),
                 title: "deck".into(),
@@ -184,7 +173,7 @@ mod tests {
             Outcome::Unsupported { .. }
         ));
         // Nothing reached a printer, and the attempt is on the record.
-        assert_eq!(platform.calls().len(), 3, "every request is recorded");
+        assert_eq!(platform.calls().len(), 2, "every request is recorded");
     }
 
     #[test]

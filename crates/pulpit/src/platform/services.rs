@@ -1,7 +1,7 @@
 //! Desktop services: dialogs, opening things, printing, appearance,
 //! inhibition and where files live.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::Capabilities;
@@ -99,9 +99,6 @@ pub trait PlatformServices: Send + Sync {
     fn reduced_motion(&self) -> MotionPreference {
         MotionPreference::Unknown
     }
-
-    /// Reveal a file in the desktop's file manager.
-    fn reveal(&self, path: &Path) -> Outcome;
 
     /// Open a URL or file with the desktop's default handler.
     fn open(&self, target: &str) -> Outcome;

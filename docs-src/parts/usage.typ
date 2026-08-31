@@ -78,7 +78,7 @@ hand, answer immediately.
   where you were, which is not the same as turning back a page.
 - Where you were is remembered per document: page, zoom and side rail come
   back the next time you open that file.
-- *Properties…* in the hamburger says what the open file is: title, author,
+- The *Open document* section of Settings says what the open file is: title, author,
   subject and keywords, what produced it and when, page count and page size,
   PDF version, and whether it is encrypted. Where a document is encrypted,
   every permission it declares is listed as allowed or refused — which is

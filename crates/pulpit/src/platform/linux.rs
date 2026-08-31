@@ -4,7 +4,6 @@
 //! fallback chain, and every step reports what actually happened. This module
 //! is the only place in the workspace that knows what a D-Bus name is.
 
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use zbus::blocking::Connection;
@@ -258,16 +257,6 @@ impl PlatformServices for LinuxServices {
             }
         })
         .unwrap_or(MotionPreference::Unknown)
-    }
-
-    fn reveal(&self, path: &Path) -> Outcome {
-        // The portal's OpenURI.OpenDirectory needs a file descriptor; the
-        // documented fallback is the desktop's own opener on the parent
-        // directory, which every tested desktop honours.
-        let Some(parent) = path.parent() else {
-            return Outcome::failed("that file has no directory");
-        };
-        spawn("xdg-open", &[parent.as_os_str().to_string_lossy().as_ref()])
     }
 
     fn open(&self, target: &str) -> Outcome {
