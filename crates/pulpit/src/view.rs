@@ -1144,78 +1144,90 @@ fn menu(app: &App) -> Element<'_, Message> {
         container(theme::typography::label("pulpit").color(theme::ambient::muted()))
             .height(Length::Fixed(MENU_HEADER)),
     );
-    if app.recent_menu_open {
-        let recent_back = button(
-            container(
-                row![
-                    theme::icon::icon(theme::Icon::ArrowLeft, type_scale::LABEL),
-                    theme::typography::body("Open recent"),
-                ]
-                .spacing(gap::S)
-                .align_y(Alignment::Center),
-            )
-            .center_y(Length::Fill),
+    items = items.push(heading("File"));
+    items = items.push(entry(
+        "Open…",
+        shortcut(Action::OpenDocument),
+        Message::OpenDialog,
+    ));
+    // The recent files unfold in place under the pointer, accordion rather
+    // than drill-in: the row is on the way to everything below it, so a
+    // flyout that replaced the whole panel on hover would swap the menu out
+    // from under a hand headed for Layouts. Hover opens, leaving the group
+    // folds it back, and the press still toggles for a hand — or a touch —
+    // that expects it.
+    let recent_toggle = button(
+        container(
+            row![
+                theme::typography::body("Open recent…"),
+                space::horizontal(),
+                theme::icon::icon(
+                    if app.recent_menu_open {
+                        theme::Icon::ChevronDown
+                    } else {
+                        theme::Icon::ChevronRight
+                    },
+                    type_scale::LABEL,
+                ),
+            ]
+            .align_y(Alignment::Center),
         )
-        .width(Length::Fill)
-        .height(Length::Fixed(MENU_ROW))
-        .padding(iced::Padding::from([0.0, gap::S]))
-        .style(theme::ambient::tool_button)
-        .on_press(Message::ToggleRecentMenu);
-        items = items.push(recent_back);
+        .center_y(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(MENU_ROW))
+    .padding(iced::Padding::from([0.0, gap::S]))
+    .style(theme::ambient::tool_button)
+    .on_press(Message::ToggleRecentMenu);
+    let mut recent_group = Column::new().spacing(gap::XS).push(recent_toggle);
+    if app.recent_menu_open {
         if app.settings.recent.is_empty() {
-            items = items.push(
+            recent_group = recent_group.push(
                 container(theme::typography::note("No recent files"))
                     .height(Length::Fixed(MENU_ROW))
-                    .padding(iced::Padding::from([gap::S, gap::S])),
+                    .padding(iced::Padding::from([gap::S, gap::M])),
             );
         } else {
             for path in recent_menu_documents(&app.settings.recent) {
-                items = items.push(recent_entry(path));
+                // Indented a step, so the entries read as the row's children
+                // rather than as more of the menu.
+                recent_group =
+                    recent_group.push(container(recent_entry(path)).padding(iced::Padding {
+                        left: gap::M,
+                        ..iced::Padding::from(0.0)
+                    }));
             }
         }
-    } else {
-        items = items.push(heading("File"));
-        items = items.push(entry(
-            "Open…",
-            shortcut(Action::OpenDocument),
-            Message::OpenDialog,
-        ));
-        let recent_toggle = button(
-            container(
-                row![
-                    theme::typography::body("Open recent…"),
-                    space::horizontal(),
-                    theme::icon::icon(theme::Icon::ChevronRight, type_scale::LABEL),
-                ]
-                .align_y(Alignment::Center),
-            )
-            .center_y(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(MENU_ROW))
-        .padding(iced::Padding::from([0.0, gap::S]))
-        .style(theme::ambient::tool_button)
-        .on_press(Message::ToggleRecentMenu);
-        items = items.push(recent_toggle);
-        items = items.push(heading("View"));
-        items = items.push(entry(
-            "Layouts…",
-            shortcut(Action::ShowLayouts),
-            Message::ShowLibrary,
-        ));
-        items = items.push(entry("Settings…", None, Message::ShowSettings));
-        // One row, because a feature nobody knows exists is one nobody uses;
-        // the settings page is where its keys, voices and availability are
-        // explained, whatever this session can do. The controls themselves
-        // live on keys.
-        items = items.push(entry("Read aloud…", None, Message::ShowSettings));
-        items = items.push(heading("Help"));
-        items = items.push(entry(
-            "Keyboard shortcuts…",
-            shortcut(Action::ShowShortcuts),
-            Message::ToggleShortcuts,
-        ));
     }
+    items = items.push(
+        mouse_area(recent_group)
+            .on_enter(Message::SetRecentMenu(true))
+            .on_exit(Message::SetRecentMenu(false)),
+    );
+    if app.state.document().is_some() {
+        // "Save as…" and not "Save": pulpit never writes over the file it
+        // opened (A6), so the honest label names the copy it makes.
+        items = items.push(entry("Save as…", None, Message::SaveDocument));
+        items = items.push(entry("Close", None, Message::CloseDocument));
+    }
+    items = items.push(heading("View"));
+    items = items.push(entry(
+        "Layouts…",
+        shortcut(Action::ShowLayouts),
+        Message::ShowLibrary,
+    ));
+    items = items.push(entry("Settings…", None, Message::ShowSettings));
+    // One row, because a feature nobody knows exists is one nobody uses;
+    // the settings page is where its keys, voices and availability are
+    // explained, whatever this session can do. The controls themselves
+    // live on keys.
+    items = items.push(entry("Read aloud…", None, Message::ShowSettings));
+    items = items.push(heading("Help"));
+    items = items.push(entry(
+        "Keyboard shortcuts…",
+        shortcut(Action::ShowShortcuts),
+        Message::ToggleShortcuts,
+    ));
 
     let panel = container(
         container(items)

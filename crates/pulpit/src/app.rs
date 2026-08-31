@@ -258,6 +258,14 @@ pub enum Message {
     MenuAction(Box<Message>),
     ToggleMenu,
     ToggleRecentMenu,
+    /// The pointer arriving on (or leaving) the Open recent row: the submenu
+    /// unfolds under a hover rather than costing a click.
+    SetRecentMenu(bool),
+    /// The menu's Save. It is a Save As underneath, because pulpit never
+    /// writes over the file it opened (A6).
+    SaveDocument,
+    /// Put the open document down and return to the empty start page.
+    CloseDocument,
     CloseMenu,
     ToggleShortcuts,
     CloseShortcuts,
@@ -3925,6 +3933,12 @@ impl App {
                 Task::none()
             }
             Message::MenuAction(message) => {
+                // The boundary between "the click reached the menu" and
+                // whatever the row then does: a menu row that looks dead is
+                // one of these two failures, and the log says which.
+                let mut action = String::new();
+                write_variant_name(&mut action, &message);
+                tracing::info!(action, "menu action");
                 self.close_all_menus();
                 self.dispatch(*message)
             }
@@ -3938,6 +3952,12 @@ impl App {
                 self.recent_menu_open = self.menu_open && !self.recent_menu_open;
                 Task::none()
             }
+            Message::SetRecentMenu(open) => {
+                self.recent_menu_open = self.menu_open && open;
+                Task::none()
+            }
+            Message::SaveDocument => self.ask_where_to_save_document(),
+            Message::CloseDocument => self.close_document(),
             Message::ToggleShortcuts => {
                 self.close_menu_dropdowns();
                 self.shortcuts_open = !self.shortcuts_open;
@@ -6776,47 +6796,10 @@ impl App {
         }
     }
 
-    fn open_document(&mut self, path: PathBuf) -> Task<Message> {
-        // Where the document being put down was left. Before anything else,
-        // because everything below replaces the identity this position
-        // belongs to.
-        self.record_reading_position();
-        // A format pulpit deliberately does not read is refused *by name*,
-        // before anything is opened: "pulpit cannot read this kind of file"
-        // and "this file is damaged" are different facts, and telling a
-        // presenter the second sends them looking for a problem that does not
-        // exist (§61.1, §61.2, §61.4).
-        if let Some(message) = pulpit_render::unsupported_format(&path) {
-            self.notify_error(
-                format!("pulpit cannot open {}", path.display()),
-                Some(message.to_string()),
-            );
-            return Task::none();
-        }
-        // An image document's source is the *directory* (§40.1) or the comic
-        // archive that replaces it (§54.1), and an image file resolves to the
-        // directory it is in (§40.2). Everything below — the manager, the
-        // watcher, the workers — is then handed that path and treats it
-        // exactly as it treats a PDF.
-        let resolved = pulpit_render::images::resolve_source(&path);
-        let path = match resolved.as_ref() {
-            Some(resolved) => resolved.path().to_path_buf(),
-            None => path,
-        };
-        self.image_pages = resolved.map(crate::doc::ImageDocumentState::new);
-        let mut documents = DocumentManager::new(
-            path.clone(),
-            ReloadPolicy {
-                debounce: Duration::from_millis(self.settings.rendering.watch_debounce_ms),
-                ..ReloadPolicy::default()
-            },
-        );
-        // The workers still hold the document we are replacing, so the new
-        // one has to be numbered after it, and the old one is let go once the
-        // new one has actually taken over.
-        documents.continue_ids_after(&self.documents);
-        self.retired_document = self.documents.active().map(|info| info.id);
-        self.documents = documents;
+    /// The teardown shared by replacing the document and closing it: forget
+    /// everything that belongs to the document being put down. What comes
+    /// next — a successor, or the empty start page — is the caller's half.
+    fn put_down_document(&mut self) {
         self.watcher = None;
         self.file_wakeup = None;
         self.document_serial += 1;
@@ -6824,7 +6807,8 @@ impl App {
         self.reader_preopened = None;
         self.pending_document_layout = None;
         // A fresh document starts with no signing question answered yet;
-        // discovery below decides whether one needs asking (§31.3, A9).
+        // discovery on the open path decides whether one needs asking
+        // (§31.3, A9).
         self.append_only = None;
         self.pending_append_only_offer = false;
         self.signing = None;
@@ -6866,6 +6850,111 @@ impl App {
         self.document_properties = None;
         self.document_properties_failed = None;
         self.forget_per_document_edit_state();
+    }
+
+    /// Put the open document down and return to the empty start page.
+    ///
+    /// The same teardown replacing a document performs, without a successor.
+    /// The workers are told to drop it now rather than when a new document's
+    /// first frame arrives, and its pictures go with it: the fallback in
+    /// `audience_frame` showing slide three of a closed deck on the empty
+    /// start page would be that fallback doing its job far too well.
+    ///
+    /// Unsaved annotations are lost here, by the same rule as `quit`: they
+    /// were never written to a file, and closing is the user saying so. The
+    /// journal and the session snapshot go too — a deliberate close is a
+    /// clean end, and the next run must not offer to restore a document
+    /// nobody has open (§11.1).
+    fn close_document(&mut self) -> Task<Message> {
+        if self.state.document().is_none() && !self.reader.is_open() {
+            return Task::none();
+        }
+        // Where the reader was, before the identity the record belongs to
+        // goes.
+        self.record_reading_position();
+        if let Some(active) = self.documents.active() {
+            let retired = active.id;
+            self.links.retain(|(document, _), _| *document != retired.0);
+            if let Some(supervisor) = self.supervisor.as_mut() {
+                supervisor.close(retired.0);
+            }
+        }
+        self.retired_document = None;
+        let mut documents = DocumentManager::new(
+            PathBuf::new(),
+            ReloadPolicy {
+                debounce: Duration::from_millis(self.settings.rendering.watch_debounce_ms),
+                ..ReloadPolicy::default()
+            },
+        );
+        // The next open must be numbered after the document the workers were
+        // just told to drop, exactly as a replacement would be.
+        documents.continue_ids_after(&self.documents);
+        self.documents = documents;
+        self.image_pages = None;
+        self.put_down_document();
+        self.reader_recovery = None;
+        self.pending_reader_recovery = None;
+        crate::reader_journal::Journal::discard(&Self::journal_path());
+        self.session.clear();
+        self.last_session = None;
+        self.session_fingerprint = None;
+        self.state = PresentationState::default();
+        self.cache.clear();
+        for evicted in self.cache.take_evicted() {
+            self.handles.remove(&evicted);
+        }
+        self.last_audience = None;
+        self.last_presenter = None;
+        self.last_reader = None;
+        // The colour mode belonged to the document too, and the chrome
+        // follows it back (issue #17).
+        self.set_color_mode(crate::page_colors::ColorMode::default());
+        Task::none()
+    }
+
+    fn open_document(&mut self, path: PathBuf) -> Task<Message> {
+        // Where the document being put down was left. Before anything else,
+        // because everything below replaces the identity this position
+        // belongs to.
+        self.record_reading_position();
+        // A format pulpit deliberately does not read is refused *by name*,
+        // before anything is opened: "pulpit cannot read this kind of file"
+        // and "this file is damaged" are different facts, and telling a
+        // presenter the second sends them looking for a problem that does not
+        // exist (§61.1, §61.2, §61.4).
+        if let Some(message) = pulpit_render::unsupported_format(&path) {
+            self.notify_error(
+                format!("pulpit cannot open {}", path.display()),
+                Some(message.to_string()),
+            );
+            return Task::none();
+        }
+        // An image document's source is the *directory* (§40.1) or the comic
+        // archive that replaces it (§54.1), and an image file resolves to the
+        // directory it is in (§40.2). Everything below — the manager, the
+        // watcher, the workers — is then handed that path and treats it
+        // exactly as it treats a PDF.
+        let resolved = pulpit_render::images::resolve_source(&path);
+        let path = match resolved.as_ref() {
+            Some(resolved) => resolved.path().to_path_buf(),
+            None => path,
+        };
+        self.image_pages = resolved.map(crate::doc::ImageDocumentState::new);
+        let mut documents = DocumentManager::new(
+            path.clone(),
+            ReloadPolicy {
+                debounce: Duration::from_millis(self.settings.rendering.watch_debounce_ms),
+                ..ReloadPolicy::default()
+            },
+        );
+        // The workers still hold the document we are replacing, so the new
+        // one has to be numbered after it, and the old one is let go once the
+        // new one has actually taken over.
+        documents.continue_ids_after(&self.documents);
+        self.retired_document = self.documents.active().map(|info| info.id);
+        self.documents = documents;
+        self.put_down_document();
 
         // A PDF without a deliberate per-file choice always opens for
         // reading. Do this at the open boundary rather than after the reader
