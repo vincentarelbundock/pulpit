@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.14] — 2026-08-31
+
+### Added
+
+- **The clip itself is now a control.** A click on the video or animation on
+  the presenter's slide toggles play and pause, and a horizontal drag on a
+  clip scrubs it — the same commands the Media Transport widget sends, so
+  the two never disagree. A GIF can be clicked but not scrubbed (it has no
+  playhead), a jittery click still counts as a click, and a drag on content
+  that cannot scrub means "never mind" rather than starting something. The
+  gesture is interpreted on the presenter's side and reaches the runtime as
+  explicit transport commands, so clicking a video no longer hands it the
+  keyboard, and both runtimes behave identically.
+
+- **Project media across the whole slide.** A double-click on the clip — or
+  the transport widget's new ⛶ button — throws the video or animation
+  across the entire slide area, letterboxed on black, on the audience and
+  presenter screens together. Escape puts it back, and so does moving to
+  another slide; returning later shows the slide as authored. Playback never
+  restarts and never loses its place: the projection only draws the same
+  frames larger.
+
 ## [0.0.13] — 2026-08-31
 
 ### Added

@@ -14,22 +14,22 @@ members = [
 default-members = ["crates/pulpit"]
 
 [workspace.package]
-version = "0.0.13"
+version = "0.0.14"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vincentarelbundock/pulpit"
 
 [workspace.dependencies]
-pulpit-core = { path = "crates/pulpit-core", version = "0.0.13" }
-pulpit-display = { path = "crates/pulpit-display", version = "0.0.13", default-features = false }
+pulpit-core = { path = "crates/pulpit-core", version = "0.0.14" }
+pulpit-display = { path = "crates/pulpit-display", version = "0.0.14", default-features = false }
 # Default features on purpose: `chromium-runtime` is the fallback every media
 # kind can be played by — libmpv covers plain media far more cheaply but not
 # interactive overlays — so a dependant that quietly opted out would ship an
 # application whose media silently never plays, which happened once already,
 # from the other end.
-pulpit-media = { path = "crates/pulpit-media", version = "0.0.13" }
-pulpit-render = { path = "crates/pulpit-render", version = "0.0.13", default-features = false }
+pulpit-media = { path = "crates/pulpit-media", version = "0.0.14" }
+pulpit-render = { path = "crates/pulpit-render", version = "0.0.14", default-features = false }
 
 bincode = { version = "1.3", default-features = false }
 iced = "0.14"
