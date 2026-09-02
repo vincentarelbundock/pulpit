@@ -320,6 +320,37 @@ pub fn list_source(source: &PageSource) -> Result<PageTable, ListError> {
     }
 }
 
+/// Every page's pixel dimensions, in one pass over the source (§80.4).
+///
+/// A directory answers per file; an archive is walked **once** (§54.5),
+/// because reading its entries one at a time is quadratic in the page count
+/// on the path that runs before the first frame appears. This was two
+/// near-identical copies of the same match on [`PageSource`] —
+/// `ImageBackend::measure_pages` and `images/document.rs`'s free `measure`
+/// — that had already drifted on what an unmeasurable *first* page means.
+/// `None` for a page that will not decode, undecided here: that choice is
+/// each caller's, and the two callers do not agree — one takes it as "answer
+/// with nothing", the other as "inherit the previous page's shape".
+pub(crate) fn measure_pages(table: &PageTable) -> Vec<Option<(u32, u32)>> {
+    match table.source() {
+        PageSource::Archive { path, kind } => {
+            let measured = crate::images::archive::measure_entries(path, *kind);
+            table
+                .entries()
+                .iter()
+                .map(|entry| measured.get(&entry.name).copied())
+                .collect()
+        }
+        PageSource::Directory(_) => (0..table.len())
+            .map(|page| {
+                table
+                    .locate(page)
+                    .and_then(|at| crate::images::decode::dimensions_at(&at).ok())
+            })
+            .collect(),
+    }
+}
+
 /// The count and digest of a directory, **without** the §40.5 cap.
 ///
 /// For the stability probe alone. A directory over the cap is still a
