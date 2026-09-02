@@ -37,45 +37,26 @@ impl Bounds {
     }
 }
 
-/// Lifecycle and geometry rules that differ by platform.
-pub trait WindowPolicy: Send + Sync {
-    /// Reverse-DNS application identity, used for desktop integration.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    fn application_id(&self) -> &'static str;
-
-    /// Smallest window in which the presenter view still works.
-    fn minimum_size(&self) -> (f32, f32);
-
-    /// Does closing the last window quit the application?
-    ///
-    /// macOS keeps the process alive; Windows and Linux do not.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    fn quit_on_last_window_closed(&self) -> bool;
-
-    /// Bring restored bounds back into a usable work area.
-    fn clamp_to_work_area(&self, bounds: Bounds, work_areas: &[Bounds]) -> Bounds {
-        clamp_to_work_area(bounds, work_areas, self.minimum_size())
-    }
-}
-
-/// The portable rules.
+/// Lifecycle and geometry rules for the presenter windows.
+///
+/// One portable ruleset for every platform rather than a boxed trait with a
+/// single implementation: `Platform::detect` built the same value on every
+/// `cfg` arm regardless of which one ran, so the indirection bought nothing.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DesktopWindowPolicy;
+pub struct WindowPolicy;
 
-impl WindowPolicy for DesktopWindowPolicy {
-    fn application_id(&self) -> &'static str {
-        "com.example.pulpit"
-    }
-
-    fn minimum_size(&self) -> (f32, f32) {
+impl WindowPolicy {
+    /// Smallest window in which the presenter view still works.
+    pub fn minimum_size(&self) -> (f32, f32) {
         // The compact bands and drawers keep every action reachable at this
         // width. Height still reserves enough room for a full control target
         // above or below the working surface.
         (480.0, 600.0)
     }
 
-    fn quit_on_last_window_closed(&self) -> bool {
-        !cfg!(target_os = "macos")
+    /// Bring restored bounds back into a usable work area.
+    pub fn clamp_to_work_area(&self, bounds: Bounds, work_areas: &[Bounds]) -> Bounds {
+        clamp_to_work_area(bounds, work_areas, self.minimum_size())
     }
 }
 
@@ -116,19 +97,19 @@ mod tests {
 
     #[test]
     fn a_window_on_a_live_display_is_left_alone() {
-        let policy = DesktopWindowPolicy;
+        let policy = WindowPolicy;
         let bounds = Bounds::new(100.0, 80.0, 1280.0, 800.0);
         assert_eq!(policy.clamp_to_work_area(bounds, &[laptop()]), bounds);
     }
 
     #[test]
     fn the_desktop_policy_allows_a_narrow_working_window() {
-        assert_eq!(DesktopWindowPolicy.minimum_size(), (480.0, 600.0));
+        assert_eq!(WindowPolicy.minimum_size(), (480.0, 600.0));
     }
 
     #[test]
     fn a_window_restored_onto_a_vanished_display_comes_back() {
-        let policy = DesktopWindowPolicy;
+        let policy = WindowPolicy;
         // Saved while a projector was to the right; the projector is gone.
         let stranded = Bounds::new(3000.0, 200.0, 1280.0, 800.0);
         let clamped = policy.clamp_to_work_area(stranded, &[laptop()]);
@@ -164,15 +145,5 @@ mod tests {
     fn with_no_displays_reported_nothing_is_moved() {
         let bounds = Bounds::new(10.0, 10.0, 800.0, 600.0);
         assert_eq!(clamp_to_work_area(bounds, &[], (720.0, 480.0)), bounds);
-    }
-
-    #[test]
-    fn lifecycle_follows_the_platform() {
-        let policy = DesktopWindowPolicy;
-        assert_eq!(
-            policy.quit_on_last_window_closed(),
-            !cfg!(target_os = "macos")
-        );
-        assert!(policy.application_id().contains('.'));
     }
 }
