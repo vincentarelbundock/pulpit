@@ -536,6 +536,13 @@ pub struct AlarmControls {
     /// this cue asking again, not a new one, and it must neither be saved nor
     /// appear in the list as something the presenter set.
     pub snoozed: Option<Alarm>,
+    /// The `at` of the alarm currently ringing or snoozed, from `alarms`,
+    /// tracked across any number of snoozes (§77.9). `ringing.at` and
+    /// `snoozed.at` both move — to the moment it went off, and to the
+    /// pushed-out time — so neither can be compared against `alarms`
+    /// directly. `remove` uses this to take a cue down, ringing or snoozed,
+    /// when the presenter deletes the alarm it came from.
+    cue_origin: Option<u32>,
 }
 
 impl Default for AlarmControls {
@@ -549,6 +556,7 @@ impl Default for AlarmControls {
             ringing: None,
             ringing_since: None,
             snoozed: None,
+            cue_origin: None,
         }
     }
 }
@@ -627,7 +635,14 @@ impl AlarmControls {
     /// popup would offer no way to be rid of it.
     pub fn remove(&mut self, at: u32) {
         self.alarms.retain(|alarm| alarm.at != at);
-        if self.ringing.as_ref().is_some_and(|alarm| alarm.at == at) {
+        // §77.9: whether the cue is ringing or snoozed, `cue_origin` names
+        // the alarm it descends from, so deleting that alarm takes the cue
+        // down too — otherwise a snoozed cue outlives the alarm it was
+        // asking on behalf of. `ringing.at` is checked too, for a cue that
+        // is ringing fresh, straight from `alarms`, where it equals `at`.
+        if self.ringing.as_ref().is_some_and(|alarm| alarm.at == at) || self.cue_origin == Some(at)
+        {
+            self.snoozed = None;
             self.dismiss();
         }
     }
@@ -647,6 +662,7 @@ impl AlarmControls {
         let mut struck = crossed(previous, now, &self.alarms)
             .last()
             .map(|alarm| (*alarm).clone());
+        let mut origin = struck.as_ref().map(|alarm| alarm.at);
 
         // A snoozed cue asking again wins over one that merely came due in
         // the same window: it is the one already waiting on an answer.
@@ -654,12 +670,26 @@ impl AlarmControls {
             if !crossed(previous, now, std::slice::from_ref(&snoozed)).is_empty() {
                 self.snoozed = None;
                 struck = Some(snoozed);
+                // Not the snoozed alarm's own `at`, which is the pushed-out
+                // time: the alarm it still descends from.
+                origin = self.cue_origin;
+            } else if falls_in_window(previous, now, snoozed.at) {
+                // `crossed` declined to report this crossing because the gap
+                // since the last tick is long enough to be a suspended
+                // machine, not because the cue is not due. Announcing it now
+                // would be exactly the late, out-of-context alert
+                // `STALE_AFTER_SECONDS` exists to avoid, but leaving it
+                // snoozed forever is worse: it goes stale and never asks
+                // again, or answers for, anything. Drop it silently.
+                self.snoozed = None;
+                self.cue_origin = None;
             }
         }
 
         if let Some(alarm) = struck {
             self.ringing = Some(alarm);
             self.ringing_since = Some(at);
+            self.cue_origin = origin;
         }
     }
 
@@ -672,6 +702,8 @@ impl AlarmControls {
         if let Some(alarm) = self.ringing.take() {
             self.ringing_since = None;
             self.snoozed = Some(Alarm::new(now + self.snooze_minutes * 60, alarm.label));
+            // `cue_origin` already names the alarm this ringing cue
+            // descended from, set when it started ringing; a snooze keeps it.
         }
     }
 
@@ -679,6 +711,7 @@ impl AlarmControls {
     pub fn dismiss(&mut self) {
         self.ringing = None;
         self.ringing_since = None;
+        self.cue_origin = None;
     }
 
     /// How strong the alert tint is now, or `None` when nothing is ringing.
@@ -697,6 +730,19 @@ impl AlarmControls {
             .iter()
             .find(|alarm| alarm.at >= now)
             .or_else(|| self.alarms.first())
+    }
+}
+
+/// Whether `at` falls in `(previous, now]`, ignoring how large that window
+/// is. The crossing half of [`crossed`], without the staleness cutoff, for
+/// callers (`AlarmControls::strike`) that need to know a cue is due even
+/// across a gap long enough that `crossed` itself declines to announce it.
+fn falls_in_window(previous: u32, now: u32, at: u32) -> bool {
+    let (previous, now, at) = (previous % 86_400, now % 86_400, at % 86_400);
+    if now >= previous {
+        at > previous && at <= now
+    } else {
+        at > previous || at <= now
     }
 }
 
@@ -1197,6 +1243,52 @@ mod tests {
             controls.snoozed.as_ref().unwrap().label.as_deref(),
             Some("handoff"),
             "a cue you put off is still the cue it was"
+        );
+    }
+
+    #[test]
+    fn removing_the_alarm_a_snoozed_cue_came_from_clears_the_snooze() {
+        // §77.9: `snoozed.at` has already moved to the pushed-out time, so
+        // `remove` must track the cue's origin, not compare against
+        // `snoozed.at`, to take it down when the presenter deletes the
+        // alarm it was standing in for.
+        let now = at(9, 00);
+        let mut controls = AlarmControls::new(vec![Alarm::new(now, None)]);
+        controls.strike(now - 1, now, std::time::Instant::now());
+        controls.snooze(now);
+        assert!(controls.snoozed.is_some());
+
+        controls.remove(now);
+        assert!(
+            controls.snoozed.is_none(),
+            "a snoozed cue outlives the alarm's deletion otherwise"
+        );
+    }
+
+    #[test]
+    fn a_stale_snoozed_cue_is_dropped_rather_than_left_snoozed_forever() {
+        // §77.9: `crossed` refuses to report a crossing across a gap long
+        // enough to be a suspended machine, which otherwise left a snoozed
+        // cue snoozed forever — never re-rung, never cleared. `strike` must
+        // still drop it once its time has passed, however it got there.
+        let now = at(9, 00);
+        let mut controls = AlarmControls::new(vec![Alarm::new(now, None)]);
+        controls.strike(now - 1, now, std::time::Instant::now());
+        controls.snooze(now);
+        let snoozed_at = controls.snoozed.as_ref().unwrap().at;
+        assert!(controls.snoozed.is_some());
+
+        // Resume long after the snoozed cue was due: `crossed` suppresses
+        // the crossing entirely because the gap exceeds STALE_AFTER_SECONDS.
+        let resumed = snoozed_at + STALE_AFTER_SECONDS + 3_600;
+        controls.strike(snoozed_at - 1, resumed, std::time::Instant::now());
+        assert!(
+            controls.snoozed.is_none(),
+            "a stale snooze is dropped, not left waiting forever"
+        );
+        assert!(
+            controls.ringing.is_none(),
+            "dropped silently, not re-announced late and out of context"
         );
     }
 
