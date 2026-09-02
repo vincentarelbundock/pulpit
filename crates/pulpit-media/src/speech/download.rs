@@ -20,6 +20,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -71,6 +72,19 @@ impl Cancel {
 /// enough that cancellation and progress feel immediate.
 const CHUNK: usize = 64 * 1024;
 
+/// How long a single socket read may block. Left unset, ureq waits on a read
+/// forever, so a network that goes silent mid-download — a dropped Wi-Fi
+/// association on a conference network, a proxy that stops forwarding —
+/// parks this thread past the cancel button rather than surfacing as the
+/// ordinary failure it is.
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How far actual bytes may run past what the catalog declared before the
+/// download is refused outright, rather than trusted to eventually stop.
+/// A `Content-Length` mismatch of a few kilobytes is ordinary; nothing this
+/// crate downloads legitimately overruns its pinned size by megabytes.
+const OVERRUN_SLACK_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Fetch one file, verify it against `sha256`, and put it at `destination`.
 ///
 /// Reports progress through `observe`, which is called from this thread.
@@ -90,13 +104,18 @@ fn fetch(
     // an interrupted download can never be mistaken for an installed one.
     let partial = destination.with_extension("part");
 
-    let response = ureq::get(url)
+    let agent = ureq::AgentBuilder::new().timeout_read(READ_TIMEOUT).build();
+    let response = agent
+        .get(url)
         .call()
         .map_err(|e| SpeechError::failed(format!("fetching {url}: {e}")))?;
     let total = response
         .header("content-length")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(expected_bytes);
+    let ceiling = expected_bytes
+        .max(total)
+        .saturating_add(OVERRUN_SLACK_BYTES);
 
     let mut reader = response.into_reader();
     let mut file = std::fs::File::create(&partial)
@@ -117,13 +136,21 @@ fn fetch(
         if read == 0 {
             break;
         }
+        done += read as u64;
+        if done > ceiling {
+            drop(file);
+            let _ = std::fs::remove_file(&partial);
+            return Err(SpeechError::failed(format!(
+                "{} sent more than {ceiling} bytes, past its declared size; refused",
+                name_of(destination)
+            )));
+        }
         // Hashed on the way past rather than by re-reading the finished file:
         // a re-read would hash whatever is on disk *now*, which is not
         // necessarily what arrived.
         hasher.update(&buffer[..read]);
         file.write_all(&buffer[..read])
             .map_err(|e| SpeechError::failed(format!("writing {}: {e}", partial.display())))?;
-        done += read as u64;
         observe(Progress::Advanced { done, total });
     }
     file.flush()
@@ -468,20 +495,121 @@ mod tests {
         assert!(safe_join(root, Path::new("a/../../b")).is_err());
     }
 
+    /// Serve one HTTP/1.1 response with `body` over a fresh loopback
+    /// listener, then stop. Returns the URL to fetch it from.
+    ///
+    /// A real socket rather than an in-memory stand-in: `fetch` is only
+    /// worth testing against the thing it actually does, which is drive
+    /// `ureq` over a connection. `Connection: close` and reading the request
+    /// to completion before replying keep this honest HTTP/1.1, so `ureq`
+    /// does not spend its own timeout budget guessing at a malformed server.
+    fn serve_once(body: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                // Drain the request up to the blank line so the client's
+                // write is not left waiting on a peer that stopped reading.
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut stream = reader.into_inner();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        format!("http://127.0.0.1:{port}/voice.onnx")
+    }
+
     #[test]
     fn a_file_that_fails_its_pin_is_discarded_and_reported() {
-        // Served from a local file URL would need a server; instead the
-        // property that matters is asserted directly: a wrong hash leaves no
-        // file under the final name, so nothing downstream can pick it up.
+        // A real download, over a real socket, of bytes that do not hash to
+        // the pin the catalog carries — the wrong-hash path had no test that
+        // ever called `fetch`, so a regression there could not have been
+        // caught before it shipped to a stranger's laptop.
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("voice.onnx");
         let partial = destination.with_extension("part");
-        std::fs::write(&partial, b"not the right bytes").unwrap();
-        // The real code removes the partial; assert the invariant the rest of
-        // the crate relies on.
-        let _ = std::fs::remove_file(&partial);
+        let url = serve_once(b"not the right bytes");
+
+        let error = fetch(
+            &url,
+            // sha256 of "not the right bytes" is not this.
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            20,
+            &destination,
+            &Cancel::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SpeechError::Failed(_)),
+            "a pin mismatch is a failure, got {error:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a file that fails its pin must not appear under its final name"
+        );
+        assert!(!partial.exists(), "the partial download must be removed");
+    }
+
+    #[test]
+    fn a_download_that_overruns_its_declared_size_is_refused() {
+        // `Content-Length` and the catalog's pinned size agree on 5 bytes;
+        // the server sends far more. Without a ceiling this would only stop
+        // when the connection ends, having written an unbounded amount to
+        // disk in the meantime.
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("voice.onnx");
+        let body: Vec<u8> = vec![b'a'; (OVERRUN_SLACK_BYTES + 1024) as usize];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut stream = reader.into_inner();
+                // A lying `Content-Length` of 5: the ceiling is derived from
+                // `expected_bytes.max(total)`, so this proves the check is
+                // not merely trusting whatever the header claims.
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/voice.onnx");
+
+        let error = fetch(
+            &url,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            5,
+            &destination,
+            &Cancel::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(error, SpeechError::Failed(_)), "got {error:?}");
         assert!(!destination.exists());
-        assert!(!partial.exists());
+        assert!(!destination.with_extension("part").exists());
     }
 
     #[test]

@@ -104,8 +104,6 @@ pub struct SurfaceRing {
     map: Mmap,
     slots: u32,
     slot_bytes: u64,
-    /// Slots currently held by the application, by slot index.
-    held: Vec<bool>,
 }
 
 impl SurfaceRing {
@@ -133,7 +131,6 @@ impl SurfaceRing {
             map,
             slots,
             slot_bytes,
-            held: vec![false; slots as usize],
         })
     }
 
@@ -161,22 +158,6 @@ impl SurfaceRing {
         self.map
             .get(start..end)
             .ok_or_else(|| ProtocolError::Malformed("slot read past the mapping".into()))
-    }
-
-    pub fn hold(&mut self, slot: SurfaceSlot) {
-        if let Some(held) = self.held.get_mut(slot.0 as usize) {
-            *held = true;
-        }
-    }
-
-    pub fn release(&mut self, slot: SurfaceSlot) {
-        if let Some(held) = self.held.get_mut(slot.0 as usize) {
-            *held = false;
-        }
-    }
-
-    pub fn is_held(&self, slot: SurfaceSlot) -> bool {
-        self.held.get(slot.0 as usize).copied().unwrap_or(false)
     }
 }
 
@@ -302,13 +283,12 @@ mod tests {
     #[test]
     fn a_ring_round_trips_a_frame_through_shared_memory() {
         let name = unique("roundtrip");
-        let mut ring = SurfaceRing::create(&name, 3, 64).unwrap();
+        let ring = SurfaceRing::create(&name, 3, 64).unwrap();
         let mut attached = AttachedRing::attach(&name, 3, 64).unwrap();
 
         let pixels = vec![0xABu8; 64];
         let slot = attached.write_frame(&pixels, 1).unwrap().unwrap();
         assert_eq!(ring.read_slot(slot, 64).unwrap(), &pixels[..]);
-        ring.release(slot);
     }
 
     #[test]
