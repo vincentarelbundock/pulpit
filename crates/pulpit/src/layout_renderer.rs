@@ -11,13 +11,34 @@
 use iced::widget::{container, opaque, space, Column, Row, Stack};
 use iced::{Element, Length, Padding};
 
-use crate::layout::{Direction, Layout, Node};
+use crate::layout::{Direction, Layout, Node, NodeId};
 use crate::theme;
 use crate::widgets::context::Context;
 use crate::widgets::event::WidgetEvent;
 use crate::widgets::registry;
 use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::Widget;
+
+/// Decorations laid over the live traversal while editing — selection,
+/// drop zones, and grabbable dividers in place of the presenter's static
+/// gutter line.
+///
+/// The designer used to walk the tree a second time to draw the canvas,
+/// which is how it came to disagree with this module on `hug_extent`,
+/// `gap` and `collapse_empty` (§80.10): the editor showed a shape the
+/// presenter would not have rendered. `Editing` instead hooks the one
+/// traversal, so the geometry is never a second opinion.
+pub struct Editing<'a, Message> {
+    /// Wrap a cell's fully-drawn content — widget, padding, background and
+    /// all — with whatever editing draws over or around it (selection,
+    /// drop zones, the pointer that arms a drag or a click).
+    pub cell: Box<dyn Fn(NodeId, Element<'a, Message>) -> Element<'a, Message> + 'a>,
+    /// Replace the static gutter between two children with a grabbable
+    /// divider. `index` is the child before the gap, in the same sense as
+    /// [`crate::layout::Divider::index`] (and so of `Designer::member`):
+    /// the model the divider drag already resizes by.
+    pub divider: Box<dyn Fn(NodeId, usize, Direction) -> Element<'a, Message> + 'a>,
+}
 
 /// Draw a whole layout.
 pub fn layout<'a, Message: Clone + 'static>(
@@ -26,7 +47,18 @@ pub fn layout<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'a, Message> {
-    node(&layout.root, context, compose, on_event, false)
+    node(&layout.root, context, compose, on_event, false, None)
+}
+
+/// Draw a whole layout with editing decorations hooked into the traversal
+/// (§80.10) — the designer canvas's entry point.
+pub fn layout_editing<'a, Message: Clone + 'static>(
+    layout: &Layout,
+    context: &Context<'_>,
+    on_event: fn(WidgetEvent) -> Message,
+    editing: &Editing<'a, Message>,
+) -> Element<'a, Message> {
+    node(&layout.root, context, None, on_event, false, Some(editing))
 }
 
 /// Put a transient side panel beside a working surface.
@@ -105,6 +137,7 @@ fn node<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
     inside_outline_rail: bool,
+    editing: Option<&Editing<'a, Message>>,
 ) -> Element<'a, Message> {
     match node {
         Node::Leaf(cell) => {
@@ -128,14 +161,18 @@ fn node<'a, Message: Clone + 'static>(
             // Every widget sits in the middle of its cell, both ways.
             // Anything that wants the whole cell still takes it: filling
             // content is unaffected by an alignment it never uses.
-            container(content)
+            let cell_element: Element<'a, Message> = container(content)
                 .padding(Padding::from(cell.padding))
                 .align_x(iced::Alignment::Center)
                 .align_y(iced::Alignment::Center)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(theme::ambient::cell_style(cell.background, false, false))
-                .into()
+                .into();
+            match editing {
+                Some(editing) => (editing.cell)(cell.id, cell_element),
+                None => cell_element,
+            }
         }
         Node::Split(split) => {
             // Only structural emptiness removes a child. A pane the reveal
@@ -171,17 +208,30 @@ fn node<'a, Message: Clone + 'static>(
             let horizontal = split.direction == Direction::Horizontal;
             let mut content = Vec::with_capacity(visible.len() * 2);
             let mut previous_closed = false;
+            let mut previous_index: Option<usize> = None;
             for (position, index) in visible.into_iter().enumerate() {
                 let reveal = pane_reveal(&split.children[index], context, inside_outline_rail);
                 let closed = reveal <= f32::EPSILON;
                 if position > 0 {
-                    content.push(split_separator(
-                        split.direction,
-                        split.gap,
-                        !closed && !previous_closed,
-                    ));
+                    let drawn = !closed && !previous_closed;
+                    // `previous_index` is the child before this gap, in the
+                    // same sense as `Divider::index` — set, since `position
+                    // > 0`, on the iteration before this one.
+                    let left = previous_index.expect("a prior visible child");
+                    content.push(match editing {
+                        // A pane collapsed by the outline-rail reveal
+                        // animation is not something the editor's own
+                        // dividers ever see live, but stay consistent with
+                        // the presenter and draw nothing grabbable beside
+                        // one rather than a divider with nothing to divide.
+                        Some(editing) if drawn => {
+                            (editing.divider)(split.id, left, split.direction)
+                        }
+                        _ => split_separator(split.direction, split.gap, drawn),
+                    });
                 }
                 previous_closed = closed;
+                previous_index = Some(index);
                 let extent = if closed {
                     Length::Fixed(0.0)
                 } else {
@@ -205,6 +255,7 @@ fn node<'a, Message: Clone + 'static>(
                         compose,
                         on_event,
                         inside_outline_rail,
+                        editing,
                     ))
                     .width(width)
                     .height(height)
@@ -258,6 +309,7 @@ fn pane<'a, Message: Clone + 'static>(
     compose: Option<&'a iced::widget::text_editor::Content>,
     on_event: fn(WidgetEvent) -> Message,
     inside_outline_rail: bool,
+    editing: Option<&Editing<'a, Message>>,
 ) -> Element<'a, Message> {
     if closed {
         return space::horizontal().width(Length::Fixed(0.0)).into();
@@ -268,6 +320,7 @@ fn pane<'a, Message: Clone + 'static>(
         compose,
         on_event,
         inside_outline_rail || is_outline_rail(child),
+        editing,
     )
 }
 
@@ -294,18 +347,8 @@ fn revealed(full_extent: f32, reveal: f32) -> f32 {
 /// In the built-in Reader this includes Search, so collapsing means the whole
 /// sidebar disappears rather than leaving its lower half behind.
 fn is_outline_rail(node: &Node) -> bool {
-    contains(node, crate::widgets::WidgetKind::DocumentOutline)
-        && !contains(node, crate::widgets::WidgetKind::DocumentPage)
-}
-
-fn contains(node: &Node, kind: crate::widgets::WidgetKind) -> bool {
-    match node {
-        Node::Leaf(cell) => cell
-            .widget
-            .as_ref()
-            .is_some_and(|widget| widget.kind() == kind),
-        Node::Split(split) => split.children.iter().any(|child| contains(child, kind)),
-    }
+    node.contains_kind(crate::widgets::WidgetKind::DocumentOutline)
+        && !node.contains_kind(crate::widgets::WidgetKind::DocumentPage)
 }
 
 /// One muted line between adjacent cells, centred in the space reserved for
@@ -450,6 +493,72 @@ mod tests {
         }
     }
 
+    /// §80.10: the designer canvas used to walk the tree a second time,
+    /// computing its own portions from `sizes` alone — no `hug_extent`, no
+    /// `gap`, no `collapse_empty`. `layout_editing` instead hooks the one
+    /// traversal `layout` uses, so a tree with a hugging cell, a non-default
+    /// gap and a collapsed empty cell MUST produce the same shape — the same
+    /// visible children and the same gaps between them — through either
+    /// entry point.
+    #[test]
+    fn editing_and_presenting_agree_on_hug_extent_gap_and_collapsed_cells() {
+        use crate::layout::tree::{Cell, CellExtent, CellSizing, EmptyBehavior, Split};
+        use crate::widgets::Widget;
+        use iced::advanced::widget::Tree;
+
+        let hugging = {
+            let mut cell = Cell::with_widget(NodeId(1), Widget::new(WidgetKind::SlideCounter));
+            cell.sizing = CellSizing {
+                horizontal: CellExtent::Hug,
+                vertical: CellExtent::Fill,
+            };
+            cell
+        };
+        let flexible = Cell::with_widget(NodeId(2), Widget::new(WidgetKind::CurrentSlide));
+        let collapsed = {
+            let mut cell = Cell::new(NodeId(3));
+            cell.empty_behavior = EmptyBehavior::Collapse;
+            cell
+        };
+        let root = Node::Split(Split {
+            id: NodeId(0),
+            name: None,
+            direction: Direction::Horizontal,
+            children: vec![
+                Node::Leaf(hugging),
+                Node::Leaf(flexible),
+                Node::Leaf(collapsed),
+            ],
+            sizes: vec![0.2, 0.6, 0.2],
+            gap: 17.0,
+            min_child: 0.05,
+        });
+        let layout = Layout::from_parts(
+            crate::layout::LayoutId("agreement".into()),
+            "Agreement".into(),
+            crate::layout::Origin::Custom,
+            crate::layout::AspectRatio::SixteenNine,
+            root,
+        );
+
+        let context = context(Mode::Editing);
+        let presented: iced::Element<'_, ()> = self::layout(&layout, &context, None, |_| ());
+        let editing = Editing {
+            cell: Box::new(|_id, content| content),
+            divider: Box::new(|_split, _index, _direction| {
+                space::horizontal().width(Length::Fixed(1.0)).into()
+            }),
+        };
+        let edited: iced::Element<'_, ()> =
+            self::layout_editing(&layout, &context, |_| (), &editing);
+
+        assert_eq!(
+            Tree::new(&presented).children.len(),
+            Tree::new(&edited).children.len(),
+            "the same children and gaps appear either way"
+        );
+    }
+
     #[test]
     fn the_reader_collapses_its_outline_rail() {
         let layout =
@@ -460,8 +569,8 @@ mod tests {
             .expect("the reader body is split");
         let rail = &body.children[0];
         assert!(is_outline_rail(rail));
-        assert!(contains(rail, WidgetKind::DocumentOutline));
-        assert!(!contains(rail, WidgetKind::Search));
+        assert!(rail.contains_kind(WidgetKind::DocumentOutline));
+        assert!(!rail.contains_kind(WidgetKind::Search));
 
         let mut context = context(Mode::Live);
         context.reader.outline_reveal = 0.0;
@@ -497,7 +606,8 @@ mod tests {
             let mut context = context(Mode::Live);
             context.reader.outline_reveal = reveal;
             context.search_reveal = 0.0;
-            let element: iced::Element<'_, ()> = self::node(&body, &context, None, |_| (), false);
+            let element: iced::Element<'_, ()> =
+                self::node(&body, &context, None, |_| (), false, None);
             let tree = Tree::new(&element);
             // The row's own children: every pane and every gutter between
             // them, however little of the window they are taking.

@@ -2062,6 +2062,10 @@ impl App {
             system_appearance.fell_back(preference),
             &settings.appearance.colors,
         );
+        // `ThemeState` is no longer `Copy` (§82.1: it now caches a built
+        // `iced::Theme`), so `resolved` is read here, before `theme` moves
+        // into the struct literal below.
+        let resolved = theme.resolved;
 
         let mut diagnostics = DiagnosticsBundle::new(platform_description());
         for line in platform.capabilities.report() {
@@ -2243,7 +2247,7 @@ impl App {
             // to a window that is already up.
             outline_rail: crate::disclosure::Disclosure::closed(),
             search_pane: crate::disclosure::Disclosure::closed(),
-            editing_colors: match theme.resolved {
+            editing_colors: match resolved {
                 crate::platform::appearance::Resolved::Light => crate::settings::ColorScheme::Light,
                 crate::platform::appearance::Resolved::Dark
                 | crate::platform::appearance::Resolved::HighContrast => {
@@ -2532,7 +2536,10 @@ impl App {
     }
 
     pub fn theme(&self, _window: window::Id) -> iced::Theme {
-        crate::theme::iced_theme(self.theme.palette)
+        // §82.1: built once, in `ThemeState::new`, whenever settings or
+        // appearance actually change; every redraw of every window just
+        // clones it instead of paying `iced::Theme::custom` again.
+        self.theme.iced.clone()
     }
 
     /// Is anything timed locally that deserves the fast tick? Worker and file
@@ -5231,14 +5238,14 @@ impl App {
         }));
 
         // The full capability snapshot, over the conservative one the first
-        // frame was built from — this is the bus-answering version. The UTC
-        // offset rides on the same thread: it is primed by spawning `date`,
-        // which was being paid before the window existed.
+        // frame was built from — this is the bus-answering version.
+        // (§76.13: the UTC offset used to be primed here too, by spawning
+        // `date` on this same thread; `crate::view::seconds_of_day` now
+        // reads `chrono::Local` directly and needs no priming.)
         let services = self.platform.services.clone();
         tasks.push(Task::future(async move {
             let (sender, receiver) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
-                crate::view::prime_local_offset();
                 let _ = sender.send(services.capabilities());
             });
             match receiver.await {

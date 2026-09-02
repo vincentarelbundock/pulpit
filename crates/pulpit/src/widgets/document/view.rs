@@ -1417,11 +1417,7 @@ fn compose_layer<'a, Message: Clone + 'static>(
         controls = controls.push(
             button(text("Typst").size(theme::type_scale::LABEL))
                 .padding(theme::space::XS)
-                .style(if typst {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                })
+                .style(theme::ambient::toggle_button(typst))
                 .on_press(on_event(WidgetEvent::Read(ReadCommand::ComposeAsTypst(
                     !typst,
                 )))),
@@ -1471,12 +1467,8 @@ fn crop_control<Message: Clone + 'static>(
         theme::Icon::Crop,
         theme::type_scale::HEADING,
     ))
-    .padding(Padding::from([4.0, 8.0]))
-    .style(if crop.is_on() {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    });
+    .padding(theme::controls::TOOLBAR_BUTTON)
+    .style(theme::ambient::toggle_button(crop.is_on()));
     let control = if live {
         control.on_press(send(ReadCommand::ArmCrop(!crop.is_on())))
     } else {
@@ -1513,12 +1505,8 @@ fn crop_control<Message: Clone + 'static>(
                     command: ReadCommand|
          -> Element<'static, Message> {
             let mut control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
-                .padding(Padding::from([4.0, 8.0]))
-                .style(if selected {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
+                .padding(theme::controls::TOOLBAR_BUTTON)
+                .style(theme::ambient::toggle_button(selected));
             if live {
                 control = control.on_press(send(command));
             }
@@ -1740,7 +1728,7 @@ fn navigation_button<Message: Clone + 'static>(
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
-        .padding(Padding::from([4.0, 8.0]))
+        .padding(theme::controls::TOOLBAR_BUTTON)
         .style(theme::ambient::tool_button);
     let control = if enabled {
         control.on_press(on_event(WidgetEvent::Read(command)))
@@ -1771,12 +1759,8 @@ fn overflow_trigger<Message: Clone + 'static>(
         theme::Icon::Ellipsis,
         theme::type_scale::HEADING,
     ))
-    .padding(Padding::from([4.0, 8.0]))
-    .style(if open {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    })
+    .padding(theme::controls::TOOLBAR_BUTTON)
+    .style(theme::ambient::toggle_button(open))
     .on_press_maybe(press)
     .into()
 }
@@ -1817,7 +1801,7 @@ fn navigation_overflow_menu<Message: Clone + 'static>(
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .padding(Padding::from([4.0, theme::space::S]))
+        .padding(theme::controls::TOOLBAR_BUTTON)
         .style(theme::ambient::tool_button);
         if state.live {
             control.on_press(on_event(WidgetEvent::Read(command)))
@@ -2294,11 +2278,7 @@ pub fn sidebar_tabs<Message: Clone + 'static>(
         // the same visual scale as the title naming the selected section.
         let mut control = button(theme::icon::icon(icon, theme::type_scale::TITLE))
             .padding(theme::space::XS)
-            .style(if selected {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
+            .style(theme::ambient::toggle_button(selected));
         if live && !selected {
             control = control.on_press(on_event(WidgetEvent::Panel(command)));
         }
@@ -2831,12 +2811,8 @@ fn document_command_button<Message: Clone + 'static>(
     on_event: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let control = button(theme::icon::icon(icon, theme::type_scale::HEADING))
-        .padding(Padding::from([4.0, 8.0]))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .padding(theme::controls::TOOLBAR_BUTTON)
+        .style(theme::ambient::toggle_button(selected));
     let control = if enabled {
         control.on_press(on_event(WidgetEvent::Read(command)))
     } else {
@@ -2852,12 +2828,8 @@ fn document_tool_control<Message: Clone + 'static>(
 ) -> Element<'static, Message> {
     let selected = state.tool == Some(tool);
     let mut control = button(document_tool_glyph(tool, state, theme::type_scale::HEADING))
-        .padding(Padding::from([4.0, 8.0]))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .padding(theme::controls::TOOLBAR_BUTTON)
+        .style(theme::ambient::toggle_button(selected));
     if state.live {
         control = control.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
     }
@@ -3000,12 +2972,8 @@ fn document_tools_overflow_menu<Message: Clone + 'static>(
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .padding(Padding::from([4.0, theme::space::S]))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .padding(theme::controls::TOOLBAR_BUTTON)
+        .style(theme::ambient::toggle_button(selected));
         if state.live {
             arm = arm.on_press(on_event(WidgetEvent::Read(ReadCommand::Arm(Some(tool)))));
         }
@@ -3066,7 +3034,7 @@ fn document_tools_overflow_menu<Message: Clone + 'static>(
             .spacing(theme::space::S),
         )
         .width(Length::Fill)
-        .padding(Padding::from([4.0, theme::space::S]))
+        .padding(theme::controls::TOOLBAR_BUTTON)
         .style(theme::ambient::tool_button);
         if state.live && enabled {
             control = control.on_press(on_event(WidgetEvent::Read(command)));

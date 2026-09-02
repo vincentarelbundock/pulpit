@@ -22,7 +22,7 @@ pub enum PrimaryViewer {
 
 impl PrimaryViewer {
     pub fn of(layout: &Layout) -> PrimaryViewer {
-        if layout.widgets().iter().any(|widget| {
+        if layout.widgets_iter().any(|widget| {
             widget
                 .kind()
                 .has_capability(WidgetCapability::ShowsDocument)
@@ -300,6 +300,17 @@ impl Layout {
 
     pub fn widgets(&self) -> Vec<&Widget> {
         self.root.widgets()
+    }
+
+    /// Every widget, without allocating a `Vec` first (§82.1). See
+    /// [`crate::layout::tree::Node::widgets_iter`].
+    pub fn widgets_iter(&self) -> crate::layout::tree::WidgetsIter<'_> {
+        self.root.widgets_iter()
+    }
+
+    /// Is any widget of `kind` placed in this layout? No allocation at all.
+    pub fn contains_kind(&self, kind: crate::widgets::WidgetKind) -> bool {
+        self.root.contains_kind(kind)
     }
 
     pub fn is_canonical(&self) -> bool {

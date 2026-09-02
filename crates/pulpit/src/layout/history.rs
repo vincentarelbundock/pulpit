@@ -42,7 +42,11 @@ impl<T: Clone + PartialEq> History<T> {
         &self.present
     }
 
-    #[allow(dead_code)] // unreached, including by its own tests
+    /// Mutate the current state directly, recording no undo step. For state
+    /// that rides along on the type being undone (an id or a ratio stamped
+    /// by saving, §77.9's `Designer::write`) but is not itself something the
+    /// presenter edited — and, per §82.5, for a caller batching many small
+    /// mutations into one eventual `commit`.
     pub fn current_mut(&mut self) -> &mut T {
         &mut self.present
     }
@@ -67,6 +71,23 @@ impl<T: Clone + PartialEq> History<T> {
             self.future.clear();
         }
         result
+    }
+
+    /// Record `before` as the past state for a change already made in place
+    /// through [`Self::current_mut`], as one undo step.
+    ///
+    /// §82.5: a drag samples many times a second, and pushing an entry per
+    /// sample (`edit`'s job) makes a 200px drag 200 undo steps and 200
+    /// re-validations. The caller instead snapshots once at the start of the
+    /// drag with `current().clone()`, mutates through `current_mut` on every
+    /// intermediate step with nothing recorded, and calls this once at the
+    /// end so the whole gesture undoes in one step back to `before`.
+    pub fn commit_snapshot(&mut self, before: T) {
+        if before == self.present {
+            return;
+        }
+        self.past.push(before);
+        self.future.clear();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -198,6 +219,32 @@ mod tests {
             history.has_unsaved_changes(),
             "now it differs from the saved copy"
         );
+    }
+
+    #[test]
+    fn commit_snapshot_records_one_entry_for_changes_already_made_in_place() {
+        let mut history = History::new(1);
+        let before = *history.current();
+        *history.current_mut() = 2;
+        *history.current_mut() = 3;
+        *history.current_mut() = 4;
+        assert!(!history.can_undo(), "no entry recorded yet");
+
+        history.commit_snapshot(before);
+        assert_eq!(*history.current(), 4);
+        assert!(history.can_undo());
+
+        history.undo();
+        assert_eq!(*history.current(), before, "one undo returns to the start");
+        assert!(!history.can_undo(), "the whole gesture was one entry");
+    }
+
+    #[test]
+    fn commit_snapshot_records_nothing_when_current_mut_changed_nothing() {
+        let mut history = History::new(1);
+        let before = *history.current();
+        history.commit_snapshot(before);
+        assert!(!history.can_undo(), "a no-op gesture is not an undo step");
     }
 
     #[test]

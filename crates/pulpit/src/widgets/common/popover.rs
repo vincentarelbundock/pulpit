@@ -65,7 +65,15 @@ impl<'a, Message> Popover<'a, Message> {
 }
 
 impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_, Message> {
-    forward_to_child!(content: size, size_hint, layout, mouse_interaction, operate);
+    forward_to_child!(
+        content: size,
+        size_hint,
+        layout,
+        mouse_interaction,
+        operate,
+        update,
+        draw
+    );
 
     fn children(&self) -> Vec<widget::Tree> {
         match &self.popup {
@@ -81,50 +89,6 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Popover<'_
             }
             None => tree.diff_children(&[self.content.as_widget()]),
         }
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut widget::Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
-    }
-
-    fn draw(
-        &self,
-        tree: &widget::Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
     }
 
     fn overlay<'a>(

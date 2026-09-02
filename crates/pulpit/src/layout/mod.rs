@@ -28,6 +28,6 @@ pub use history::History;
 pub use model::{AspectRatio, Change, Layout, LayoutId, OnMount, Origin, PrimaryViewer, Side};
 pub use store::LayoutStore;
 pub use tree::{
-    Cell, CellBackground, Direction, Divider, EmptyBehavior, Frame, Node, NodeId, UnavailableWidget,
+    CellBackground, Direction, Divider, EmptyBehavior, Frame, Node, NodeId, UnavailableWidget,
 };
 pub use validate::{validate, Issue, Severity};

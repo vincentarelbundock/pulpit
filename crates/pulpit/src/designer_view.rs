@@ -129,11 +129,7 @@ fn layout_card<'a>(
     actions = actions.push(
         button(text(if is_active { "In use" } else { "Use" }).size(type_scale::LABEL))
             .padding(gap::XS)
-            .style(if is_active {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            })
+            .style(theme::ambient::toggle_button(is_active))
             .on_press(Message::UseLayout(layout.id.clone())),
     );
     actions = actions.push(
@@ -199,19 +195,28 @@ fn layout_card<'a>(
 /// the deck shape the layout was designed at: the bars a card shows are the
 /// bars that layout will produce.
 fn thumbnail(layout: &Layout) -> Element<'_, Message> {
-    layout_thumbnail(&layout.root, layout.design_ratio, 120.0)
+    layout_thumbnail(
+        std::borrow::Cow::Borrowed(&layout.root),
+        layout.design_ratio,
+        120.0,
+    )
 }
 
 /// A layout drawn to scale at `height`, slide bounds and letterboxing
 /// included.
+///
+/// `root` borrows when the caller already holds the layout for at least as
+/// long as the returned element (`thumbnail`'s library cards, backed by the
+/// store); `recommendation_preview` hands in an owned, cloned tree instead,
+/// since a `built_in_layouts()` result does not live that long.
 fn layout_thumbnail<'a>(
-    root: &Node,
+    root: std::borrow::Cow<'a, Node>,
     slide_ratio: AspectRatio,
     height: f32,
 ) -> Element<'a, Message> {
     container(
         canvas(Sketch {
-            root: root.clone(),
+            root,
             slide_ratio,
             palette: theme::ambient::palette(),
         })
@@ -231,34 +236,47 @@ fn layout_thumbnail<'a>(
 ///
 /// Every decision — which rectangle, which widget, where the slide lands —
 /// is made by the model at the size the canvas reports; this only paints.
-/// The tree is cloned because a thumbnail may be drawn for a layout that is
-/// not being held anywhere, such as a recommended built-in.
-struct Sketch {
-    root: Node,
+///
+/// §82.4: borrows the tree, `Cow`-fashion, rather than always cloning it —
+/// a library page draws several of these per pass, all backed by layouts
+/// the store already holds for at least as long as the element lives.
+/// `recommendation_preview`'s built-in-lookup result does not live that
+/// long, so it still owns its copy. `State` is a `canvas::Cache`, so a
+/// redraw that changes nothing about this card (most of them: hovering
+/// another card, scrolling the list) returns the cached geometry without
+/// walking the tree or painting again.
+struct Sketch<'a> {
+    root: std::borrow::Cow<'a, Node>,
     slide_ratio: AspectRatio,
     palette: Palette,
 }
 
-impl<Message> canvas::Program<Message> for Sketch {
-    type State = ();
+impl<Message> canvas::Program<Message> for Sketch<'_> {
+    type State = canvas::Cache;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let model = Thumbnail::of(&self.root, bounds.width, bounds.height, self.slide_ratio);
-        for cell in &model.cells {
-            paint_cell(&mut frame, self.palette, cell);
-        }
-        for divider in &model.dividers {
-            paint_divider(&mut frame, self.palette, divider);
-        }
-        vec![frame.into_geometry()]
+        let geometry = state.draw(renderer, bounds.size(), |frame| {
+            let model = Thumbnail::of(
+                self.root.as_ref(),
+                bounds.width,
+                bounds.height,
+                self.slide_ratio,
+            );
+            for cell in &model.cells {
+                paint_cell(frame, self.palette, cell);
+            }
+            for divider in &model.dividers {
+                paint_divider(frame, self.palette, divider);
+            }
+        });
+        vec![geometry]
     }
 }
 
@@ -731,11 +749,7 @@ fn widget_card<'a>(designer: &'a Designer, kind: WidgetKind, placed: bool) -> El
     )
     .padding(iced::Padding::from([6.0, 8.0]))
     .width(Length::Fill)
-    .style(if dragging {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    });
+    .style(theme::ambient::toggle_button(dragging));
 
     // A card that is already placed cannot be dragged.
     let card: Element<'a, Message> = if placed || !designer.is_editable() {
@@ -763,7 +777,13 @@ fn canvas_region<'a>(
     context: &crate::widgets::Context<'_>,
 ) -> Element<'a, Message> {
     let ratio = designer.canvas_ratio.ratio();
-    let inner = canvas_node(designer, context, &designer.layout().root);
+    let editing = canvas_editing(designer);
+    let inner = crate::layout_renderer::layout_editing(
+        designer.layout(),
+        context,
+        |_| Message::Ignore,
+        &editing,
+    );
 
     let framed = container(inner)
         .width(Length::Fill)
@@ -822,11 +842,7 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
         ratios = ratios.push(
             button(text(ratio.label()).size(type_scale::CAPTION))
                 .padding(gap::XS)
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                })
+                .style(theme::ambient::toggle_button(chosen))
                 .on_press(msg(Msg::SetSlideRatio(ratio))),
         );
     }
@@ -849,16 +865,14 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     // Ranked, labelled, and inert until pressed: the arithmetic can say which
     // built-in fits a 4:3 deck best, but it cannot know that the rail on the
     // right is where the presenter keeps their notes.
-    let built_ins = crate::layout::builtin::built_in_layouts();
+    //
+    // §82.4: `Recommendation` carries the layout's id, so listing and
+    // selecting one no longer needs `built_in_layouts()` rebuilt and
+    // searched by name on every pass — only fetching the actual `Layout` to
+    // preview, below, still does, and only when something is previewed.
     let mut suggestions = Row::new().spacing(gap::S).align_y(Alignment::Center);
     suggestions = suggestions.push(theme::typography::caption("Built-ins for this deck"));
     for recommendation in designer.recommendations().into_iter().take(3) {
-        let Some(layout) = built_ins
-            .iter()
-            .find(|layout| layout.name == recommendation.layout)
-        else {
-            continue;
-        };
         suggestions = suggestions.push(tooltip(
             button(
                 text(format!(
@@ -868,14 +882,10 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
                 .size(type_scale::CAPTION),
             )
             .padding(gap::XS)
-            .style(
-                if designer.previewed_recommendation.as_ref() == Some(&layout.id) {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                },
-            )
-            .on_press(msg(Msg::PreviewRecommendation(layout.id.clone()))),
+            .style(theme::ambient::toggle_button(
+                designer.previewed_recommendation.as_ref() == Some(&recommendation.id),
+            ))
+            .on_press(msg(Msg::PreviewRecommendation(recommendation.id.clone()))),
             container(
                 text("Show this layout. Nothing changes until you use it.")
                     .size(type_scale::CAPTION),
@@ -887,11 +897,15 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     }
     panel = panel.push(suggestions.wrap());
 
-    if let Some(previewed) = designer
-        .previewed_recommendation
-        .as_ref()
-        .and_then(|id| built_ins.iter().find(|layout| &layout.id == id))
-    {
+    // Bound at function scope, not inside the `if let` below: `recommendation_preview`'s
+    // element now borrows `previewed` directly (§82.4), so it must outlive
+    // the `container(panel)` built from it.
+    let previewed = designer.previewed_recommendation.as_ref().and_then(|id| {
+        crate::layout::builtin::built_in_layouts()
+            .into_iter()
+            .find(|layout| &layout.id == id)
+    });
+    if let Some(previewed) = &previewed {
         panel = panel.push(recommendation_preview(designer, previewed));
     }
 
@@ -910,8 +924,17 @@ fn recommendation_preview<'a>(designer: &Designer, layout: &Layout) -> Element<'
 
     container(
         row![
-            container(layout_thumbnail(&layout.root, designer.slide_ratio, 90.0))
-                .width(Length::Fixed(170.0)),
+            // `layout` is a `built_in_layouts()` result the caller owns only
+            // for this call — shorter-lived than this element — so its tree
+            // is cloned here rather than borrowed, exactly as before §82.4;
+            // the clone this module actually draws several of, every pass,
+            // is the library grid's, which `thumbnail` below now avoids.
+            container(layout_thumbnail(
+                std::borrow::Cow::Owned(layout.root.clone()),
+                designer.slide_ratio,
+                90.0
+            ))
+            .width(Length::Fixed(170.0)),
             column![
                 text(layout.name.clone()).size(type_scale::BODY),
                 theme::typography::caption(format!(
@@ -941,59 +964,101 @@ fn recommendation_preview<'a>(designer: &Designer, layout: &Layout) -> Element<'
     .into()
 }
 
-fn canvas_node<'a>(
-    designer: &'a Designer,
-    context: &crate::widgets::Context<'_>,
-    node: &'a Node,
-) -> Element<'a, Message> {
-    match node {
-        Node::Leaf(cell) => canvas_cell(designer, context, cell),
-        Node::Split(split) => {
-            let portion = |index: usize| (split.sizes[index] * 1000.0).max(1.0) as u16;
-            let selected_divider = designer.selected_divider;
-            let mut children: Vec<Element<'a, Message>> = Vec::new();
-
-            for (index, child) in split.children.iter().enumerate() {
-                children.push(
-                    container(canvas_node(designer, context, child))
-                        .width(match split.direction {
-                            Direction::Horizontal => Length::FillPortion(portion(index)),
-                            Direction::Vertical => Length::Fill,
-                        })
-                        .height(match split.direction {
-                            Direction::Horizontal => Length::Fill,
-                            Direction::Vertical => Length::FillPortion(portion(index)),
-                        })
-                        .into(),
-                );
-                if index + 1 < split.children.len() {
-                    children.push(divider_handle(
-                        split.id,
-                        index,
-                        split.direction,
-                        selected_divider == Some((split.id, index)),
-                        designer
-                            .dragging_divider
-                            .as_ref()
-                            .is_some_and(|drag| drag.holds(split.id, index)),
-                    ));
-                }
-            }
-
-            match split.direction {
-                Direction::Horizontal => Row::with_children(children)
-                    .spacing(2)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-                Direction::Vertical => Column::with_children(children)
-                    .spacing(2)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-            }
-        }
+/// The editing decorations hooked into [`crate::layout_renderer::node`]'s one
+/// traversal — selection, drop zones and grabbable dividers — so the canvas
+/// draws the same shape the presenter would (§80.10). A second traversal
+/// here, computing its own portions from `sizes` alone, is exactly how the
+/// canvas used to disagree with the presenter on `hug_extent`, `gap` and
+/// `collapse_empty`.
+fn canvas_editing(designer: &Designer) -> crate::layout_renderer::Editing<'_, Message> {
+    crate::layout_renderer::Editing {
+        cell: Box::new(move |id, content| canvas_cell_decoration(designer, id, content)),
+        divider: Box::new(move |split, index, direction| {
+            divider_handle(
+                split,
+                index,
+                direction,
+                designer.selected_divider == Some((split, index)),
+                designer
+                    .dragging_divider
+                    .as_ref()
+                    .is_some_and(|drag| drag.holds(split, index)),
+            )
+        }),
     }
+}
+
+/// What editing lays over a cell the shared renderer already drew in full —
+/// widget, padding, background and all: the slide's letterboxing bars, the
+/// drop zones while something is being dragged, the selection outline, and
+/// the pointer that arms a click, a drag or a delete.
+fn canvas_cell_decoration<'a>(
+    designer: &'a Designer,
+    id: NodeId,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let Some(cell) = designer.layout().cell(id) else {
+        return content;
+    };
+    let selected = designer.selected == Some(id);
+    let highlighted = designer.hovered_cell == Some(id) && designer.dragging.is_some();
+
+    // A pane holding a slide shows where the slide actually lands and the
+    // space it cannot use. The bars are not a property of the pane but of the
+    // deck being previewed, which is why they are drawn here rather than
+    // being something the pane could be styled into.
+    let holds_slide = cell
+        .widget
+        .as_ref()
+        .is_some_and(|widget| widget.kind().family() == Family::Slides);
+    let content: Element<'a, Message> = if holds_slide {
+        stack![
+            content,
+            canvas(SlideBounds {
+                slide_ratio: designer.slide_ratio,
+                palette: theme::ambient::palette(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .into()
+    } else {
+        content
+    };
+
+    let content: Element<'a, Message> = if designer.dragging.is_some() {
+        stack![content, drop_zones(designer, id)].into()
+    } else {
+        content
+    };
+
+    // Layered over the cell the shared renderer already painted at rest —
+    // same fill, so only the selection border (drawn at this container's own
+    // edge, `theme::cell_style`'s only difference from the resting style)
+    // shows through.
+    let styled = container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::ambient::cell_style(
+            cell.background,
+            selected,
+            highlighted,
+        ));
+
+    // Right-click removes, in the same two steps as the toolbar cross: the
+    // widget first, then the pane. Deleting is the action people reach for
+    // most while laying a screen out, and walking to a panel for it every
+    // time is a chore. One press, one message: attaching `on_press` twice
+    // only kept the last one, which is why pressing a filled pane began a
+    // drag and never selected it.
+    let mut area = mouse_area(styled)
+        .on_press(msg(Msg::PressCell(id)))
+        .on_right_press(msg(Msg::RequestDelete(id)))
+        .on_enter(msg(Msg::Hover(id)));
+    if designer.dragging.is_some() {
+        area = area.on_release(msg(Msg::Drop(id)));
+    }
+    area.into()
 }
 
 /// A draggable gutter. Hovering brightens it; dragging resizes the two
@@ -1045,81 +1110,6 @@ fn divider_handle<'a>(
         .on_release(msg(Msg::DividerReleased))
         .on_double_click(msg(Msg::Equalize(split)))
         .into()
-}
-
-fn canvas_cell<'a>(
-    designer: &'a Designer,
-    context: &crate::widgets::Context<'_>,
-    cell: &'a crate::layout::Cell,
-) -> Element<'a, Message> {
-    let selected = designer.selected == Some(cell.id);
-    let highlighted = designer.hovered_cell == Some(cell.id) && designer.dragging.is_some();
-
-    // The widget draws itself, exactly as it will on the night. A grey box
-    // with its name in it tells you nothing about whether the arrangement
-    // works, which is the only question the editor exists to answer.
-    let inner: Element<'a, Message> = match &cell.widget {
-        Some(widget) => crate::layout_renderer::widget(widget, context, None, |_| Message::Ignore),
-        None => container(theme::typography::note("Drop a widget here"))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(theme::ambient::empty_cell)
-            .into(),
-    };
-
-    // A pane holding a slide shows where the slide actually lands and the
-    // space it cannot use. The bars are not a property of the pane but of the
-    // deck being previewed, which is why they are drawn here rather than
-    // being something the pane could be styled into.
-    let holds_slide = cell
-        .widget
-        .as_ref()
-        .is_some_and(|widget| widget.kind().family() == Family::Slides);
-    let inner: Element<'a, Message> = if holds_slide {
-        stack![
-            inner,
-            canvas(SlideBounds {
-                slide_ratio: designer.slide_ratio,
-                palette: theme::ambient::palette(),
-            })
-            .width(Length::Fill)
-            .height(Length::Fill),
-        ]
-        .into()
-    } else {
-        inner
-    };
-
-    let content: Element<'a, Message> = if designer.dragging.is_some() {
-        stack![inner, drop_zones(designer, cell.id)].into()
-    } else {
-        inner
-    };
-
-    let styled = container(content)
-        .padding(Padding::from(cell.padding.min(12.0)))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::ambient::cell_style(
-            cell.background,
-            selected,
-            highlighted,
-        ));
-
-    // Right-click removes, in the same two steps as the toolbar cross: the
-    // widget first, then the pane. Deleting is the action people reach for
-    // most while laying a screen out, and walking to a panel for it every
-    // time is a chore. One press, one message: attaching `on_press` twice
-    // only kept the last one, which is why pressing a filled pane began a
-    // drag and never selected it.
-    let mut area = mouse_area(styled)
-        .on_press(msg(Msg::PressCell(cell.id)))
-        .on_right_press(msg(Msg::RequestDelete(cell.id)))
-        .on_enter(msg(Msg::Hover(cell.id)));
-    if designer.dragging.is_some() {
-        area = area.on_release(msg(Msg::Drop(cell.id)));
-    }
-    area.into()
 }
 
 /// The four ways to add a pane beside the selected one.
@@ -1320,11 +1310,7 @@ fn dialog<'a>(designer: &'a Designer) -> Option<Element<'a, Message>> {
 fn dialog_button<'a>(label: &'a str, message: Msg, primary: bool) -> Element<'a, Message> {
     button(theme::typography::label(label))
         .padding(gap::S)
-        .style(if primary {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        })
+        .style(theme::ambient::toggle_button(primary))
         .on_press(msg(message))
         .into()
 }

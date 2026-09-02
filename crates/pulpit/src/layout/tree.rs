@@ -12,6 +12,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::widgets::{Widget, WidgetKind};
 
+/// A depth-first, lazy walk over every widget in a subtree — the traversal
+/// [`Node::widgets_iter`] returns.
+///
+/// A `Vec<&Node>` work stack rather than one entry per widget: the stack
+/// never holds more nodes than the tree is wide plus deep, so it stays small
+/// and, unlike `widgets()`, this never has to finish the whole tree before
+/// the first item — or before an `.any()`/`.find()` that stops early — is
+/// available.
+pub struct WidgetsIter<'a> {
+    stack: Vec<&'a Node>,
+}
+
+impl<'a> Iterator for WidgetsIter<'a> {
+    type Item = &'a Widget;
+
+    fn next(&mut self) -> Option<&'a Widget> {
+        while let Some(node) = self.stack.pop() {
+            match node {
+                Node::Leaf(cell) => {
+                    if let Some(widget) = &cell.widget {
+                        return Some(widget);
+                    }
+                }
+                Node::Split(split) => {
+                    // Pushed in reverse so `pop` still visits children in
+                    // reading order, matching `cells()`/`widgets()`.
+                    self.stack.extend(split.children.iter().rev());
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Stable identifier for a node within one layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
@@ -414,6 +448,28 @@ impl Node {
             .collect()
     }
 
+    /// Every widget in this subtree, without collecting `cells()` and then
+    /// `widgets()` into two `Vec`s first (§82.1). Prefer this for a query
+    /// that can short-circuit (`.any()`, `.find()`) or that only needs to
+    /// iterate once — `PrimaryViewer::of` is called about eight times a
+    /// frame.
+    pub fn widgets_iter(&self) -> WidgetsIter<'_> {
+        WidgetsIter { stack: vec![self] }
+    }
+
+    /// Is any widget in this subtree of `kind`? Pure recursion, no
+    /// allocation at all — for a caller that only ever needs the answer,
+    /// not the widgets.
+    pub fn contains_kind(&self, kind: WidgetKind) -> bool {
+        match self {
+            Node::Leaf(cell) => cell
+                .widget
+                .as_ref()
+                .is_some_and(|widget| widget.kind() == kind),
+            Node::Split(split) => split.children.iter().any(|child| child.contains_kind(kind)),
+        }
+    }
+
     pub fn find(&self, id: NodeId) -> Option<&Node> {
         if self.id() == id {
             return Some(self);
@@ -610,7 +666,8 @@ fn layout_node(
     let flexible_total: f32 = visible
         .iter()
         .zip(fixed.iter())
-        .filter_map(|(index, extent)| extent.is_none().then_some(split.sizes[*index]))
+        .filter(|(_, extent)| extent.is_none())
+        .map(|(index, _)| split.sizes.get(*index).copied().unwrap_or(0.0))
         .sum();
     let flexible_span = (usable - fixed_total).max(0.0);
 
@@ -622,7 +679,7 @@ fn layout_node(
     for (position, index) in visible.iter().enumerate() {
         let length = fixed[position].unwrap_or_else(|| {
             if flexible_total > 0.0 {
-                flexible_span * split.sizes[*index] / flexible_total
+                flexible_span * split.sizes.get(*index).copied().unwrap_or(0.0) / flexible_total
             } else {
                 0.0
             }
@@ -702,6 +759,44 @@ mod tests {
             gap: 8.0,
             min_child: 0.05,
         })
+    }
+
+    #[test]
+    fn widgets_iter_visits_the_same_widgets_as_widgets_in_the_same_order() {
+        // §82.1: `widgets_iter` replaces `cells().into_iter().filter_map(..)`
+        // for a caller that does not need a `Vec`; it must not silently
+        // drop or reorder anything `widgets()` finds.
+        let mut a = Cell::new(NodeId(1));
+        a.widget = Some(crate::widgets::Widget::new(WidgetKind::CurrentSlide));
+        let b = Cell::new(NodeId(2)); // empty, no widget
+        let mut c = Cell::new(NodeId(3));
+        c.widget = Some(crate::widgets::Widget::new(WidgetKind::SpeakerNotes));
+        let root = split(
+            0,
+            Direction::Horizontal,
+            vec![Node::Leaf(a), Node::Leaf(b), Node::Leaf(c)],
+        );
+
+        let eager: Vec<WidgetKind> = root.widgets().iter().map(|w| w.kind()).collect();
+        let lazy: Vec<WidgetKind> = root.widgets_iter().map(|w| w.kind()).collect();
+        assert_eq!(eager, lazy);
+        assert_eq!(
+            eager,
+            vec![WidgetKind::CurrentSlide, WidgetKind::SpeakerNotes]
+        );
+    }
+
+    #[test]
+    fn contains_kind_finds_a_widget_anywhere_in_the_subtree() {
+        let mut leaf_with_widget = Cell::new(NodeId(2));
+        leaf_with_widget.widget = Some(crate::widgets::Widget::new(WidgetKind::SpeakerNotes));
+        let root = split(
+            0,
+            Direction::Horizontal,
+            vec![leaf(1), Node::Leaf(leaf_with_widget)],
+        );
+        assert!(root.contains_kind(WidgetKind::SpeakerNotes));
+        assert!(!root.contains_kind(WidgetKind::Timer));
     }
 
     #[test]

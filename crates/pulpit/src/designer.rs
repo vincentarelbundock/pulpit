@@ -98,6 +98,9 @@ pub struct DividerDrag {
     /// Pointer position at the last step, in canvas coordinates.
     pub from: Point,
     pub whole_line: bool,
+    /// The layout as it was before the drag, for one undo entry covering the
+    /// whole gesture (§82.5).
+    pub snapshot: Layout,
 }
 
 impl DividerDrag {
@@ -262,6 +265,18 @@ impl Designer {
         self.revalidate();
     }
 
+    /// Mutate the layout in place with no undo entry and no revalidation.
+    ///
+    /// For a caller that will itself snapshot the before-state once and
+    /// commit and revalidate once when a multi-step gesture ends (§82.5's
+    /// divider drag): read-only layouts still refuse.
+    fn edit_in_place(&mut self, action: impl FnOnce(&mut Layout)) {
+        if !self.is_editable() {
+            return;
+        }
+        action(self.history.current_mut());
+    }
+
     pub fn revalidate(&mut self) {
         let area = self.design_area();
         self.issues = crate::layout::validate(self.layout(), area);
@@ -319,12 +334,12 @@ impl Designer {
             }
         }
         let area = self.design_area();
-        let candidates: Vec<(String, Vec<crate::layout::Frame>)> =
+        let candidates: Vec<(LayoutId, String, Vec<crate::layout::Frame>)> =
             crate::layout::builtin::built_in_layouts()
                 .into_iter()
                 .map(|layout| {
                     let cells = crate::layout::thumbnail::slide_cells(&layout.root, area);
-                    (layout.name, cells)
+                    (layout.id, layout.name, cells)
                 })
                 .collect();
         let recommendations =
@@ -697,6 +712,7 @@ impl Designer {
             members,
             from: at,
             whole_line,
+            snapshot: self.layout().clone(),
         });
         self.select_divider(split, index);
     }
@@ -842,8 +858,10 @@ impl Designer {
             member.free += delta;
             let (split_id, index, free) = (member.split, member.index, member.free);
             // A line moves as one: each divider snaps to the same rules, and
-            // they were flush to begin with, so they stay flush.
-            self.edit(|layout| {
+            // they were flush to begin with, so they stay flush. §82.5: no
+            // undo entry and no revalidation per sample — `end_divider_drag`
+            // does both once for the whole gesture.
+            self.edit_in_place(|layout| {
                 let _ = layout.resize_divider_to(split_id, index, free, snap);
             });
             moved_any = true;
@@ -854,12 +872,16 @@ impl Designer {
                 members,
                 from: at,
                 whole_line: drag.whole_line,
+                snapshot: drag.snapshot,
             });
         }
     }
 
     pub fn end_divider_drag(&mut self) {
-        self.dragging_divider = None;
+        if let Some(drag) = self.dragging_divider.take() {
+            self.history.commit_snapshot(drag.snapshot);
+            self.revalidate();
+        }
     }
 
     /// Keyboard resizing: 1% per step, 5% with shift.
@@ -979,10 +1001,16 @@ impl Designer {
         layout.design_ratio = self.canvas_ratio;
         match store.save(&layout) {
             Ok(id) => {
-                self.history.edit(|current| {
-                    current.id = id.clone();
-                    current.design_ratio = layout.design_ratio;
-                });
+                // §77.9: `id` and `design_ratio` are stamped on the layout by
+                // saving, not something the presenter edited, so they must
+                // not become an undo step. `History::edit` would push one:
+                // an Undo right after the first save would revert `id` to
+                // its pre-save value, and the *next* save would write under
+                // that old id, forking the layout on disk. `current_mut`
+                // mutates in place with no entry recorded.
+                let current = self.history.current_mut();
+                current.id = id.clone();
+                current.design_ratio = layout.design_ratio;
                 self.history.mark_saved();
                 let warnings = self.issues.len();
                 self.status = Some(if warnings == 0 {
@@ -1505,6 +1533,43 @@ mod tests {
     }
 
     #[test]
+    fn undo_after_the_first_save_does_not_fork_the_layout_on_disk() {
+        // §77.9: `id` used to be stamped through `History::edit`, so an Undo
+        // right after the first save reverted it, and the next save wrote
+        // under the reverted (pre-save) id, forking one layout into two
+        // files. `id` and `design_ratio` MUST ride outside the undo stack.
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = LayoutStore::load(directory.path());
+        // Named from creation, and saved under that same name, so the
+        // history holds only the widget placement below — not a rename —
+        // and `undo` cannot be confused with undoing the rename itself.
+        let mut designer = Designer::create("Conference");
+        let ids = cells(&designer);
+        designer.place(ids[0], WidgetKind::CurrentSlide);
+
+        let first_id = designer
+            .save_named(&mut store, "Conference".into())
+            .expect("first save succeeds");
+        assert_eq!(store.custom().len(), 1);
+
+        designer.undo();
+        designer.place(ids[0], WidgetKind::SpeakerNotes);
+        let second_id = designer
+            .save(&mut store, false)
+            .expect("second save succeeds");
+
+        assert_eq!(
+            second_id, first_id,
+            "the layout keeps the id it was saved under"
+        );
+        assert_eq!(
+            store.custom().len(),
+            1,
+            "a second save is the same file, not a fork"
+        );
+    }
+
+    #[test]
     fn dragging_a_divider_tracks_the_pointer_in_canvas_coordinates() {
         let mut designer = designer_with_two_cells();
         designer.canvas_size = iced::Size::new(800.0, 450.0);
@@ -1521,6 +1586,44 @@ mod tests {
         assert!(
             (after - (before + 0.25)).abs() < 0.02,
             "expected roughly +25%, got {before} → {after}"
+        );
+    }
+
+    #[test]
+    fn a_divider_drag_of_many_moves_is_one_undo_entry() {
+        // §82.5: `drag_divider_to` used to run `History::edit` (clone the
+        // whole layout, push, revalidate) on every intermediate step, so a
+        // long drag was as many undo entries — and as many revalidations —
+        // as it had samples. The whole gesture MUST undo in one step.
+        let mut designer = designer_with_two_cells();
+        designer.canvas_size = iced::Size::new(800.0, 450.0);
+        designer.snap = false;
+        let split = designer.layout().root.id();
+        let before = designer.layout().clone();
+        let depth_before = designer.history.depth();
+
+        designer.start_divider_drag(split, 0, Point::new(400.0, 200.0));
+        for x in (401..=600).step_by(1) {
+            designer.drag_divider_to(Point::new(x as f32, 200.0));
+        }
+        assert_eq!(
+            designer.history.depth(),
+            depth_before,
+            "no undo entry is recorded mid-drag"
+        );
+        designer.end_divider_drag();
+
+        assert_eq!(
+            designer.history.depth(),
+            depth_before + 1,
+            "the whole drag is exactly one undo entry"
+        );
+        assert_ne!(designer.layout(), &before, "the divider really did move");
+        designer.undo();
+        assert_eq!(
+            designer.layout(),
+            &before,
+            "undo returns to exactly where the drag started"
         );
     }
 

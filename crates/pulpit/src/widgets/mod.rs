@@ -39,10 +39,6 @@ pub use event::WidgetEvent;
 pub use navigation::model::ButtonsOptions;
 pub use notes::model::NotesOptions;
 #[allow(unused_imports)] // see widgets::patch
-// `WidgetId`, `WidgetRegistration` and `registration` are Phase 3's public
-// surface (persistence by stable id); reachable today via `widgets::registry`
-// and via `WidgetKind::id`/`WidgetKind::from_id`, not yet re-exported at the
-// crate boundary because nothing outside this module needs them yet.
 pub use slides::model::SlideOptions;
 pub use timing::model::{Alarm, AlarmControls, ClockOptions, TimerControls, TimerOptions};
 
@@ -234,41 +230,41 @@ impl WidgetKind {
         }
     }
 
-    // The metadata below is the registry's, not a second copy of it. The
-    // registry itself resolves to the catalog's `WidgetDefinition`, so this
-    // is one hop further from the same single source of truth.
+    // The metadata below is the catalog's, not a second copy of it (§81:
+    // it used to hop through the registry's own `WidgetRegistration`
+    // first, a table holding exactly the same per-kind facts).
 
     pub fn label(self) -> &'static str {
-        registry::registration(self).label()
+        catalog::definition(self).label
     }
 
     #[allow(dead_code)] // reached by its tests, not by the application
     pub fn short_label(self) -> &'static str {
-        registry::registration(self).short_label()
+        catalog::definition(self).short_label
     }
 
     pub fn tooltip(self) -> &'static str {
-        registry::registration(self).tooltip()
+        catalog::definition(self).tooltip
     }
 
     pub fn group(self) -> WidgetGroup {
-        registry::registration(self).group()
+        catalog::definition(self).group
     }
 
     pub fn parts(self) -> &'static [WidgetKind] {
-        registry::registration(self).parts()
+        catalog::definition(self).parts
     }
 
     pub fn multi_instance(self) -> bool {
-        registry::registration(self).multi_instance()
+        catalog::definition(self).multi_instance()
     }
 
     pub fn placement(self) -> catalog::PlacementPolicy {
-        registry::registration(self).placement()
+        catalog::definition(self).placement
     }
 
     pub fn minimum_size(self) -> (f32, f32) {
-        registry::registration(self).minimum_size()
+        catalog::definition(self).minimum_size
     }
 
     /// The width a *hugging* cell hands this kind: what its full run wants,
@@ -286,31 +282,25 @@ impl WidgetKind {
     }
 
     /// This kind's own declared capabilities, not counting any compound
-    /// parts. Almost always what [`WidgetKind::capabilities`] should be
-    /// called instead — this exists for the table itself and its tests.
+    /// parts.
     pub fn own_capabilities(self) -> &'static [WidgetCapability] {
-        registry::registration(self).capabilities()
+        catalog::definition(self).capabilities
     }
 
-    /// The capabilities this kind offers, including whatever its compound
-    /// parts offer — the same "counts as" mechanism [`WidgetKind::occupies`]
-    /// uses, so a strip that shows the current slide answers a
-    /// current-slide question the same way the plain widget does.
-    pub fn capabilities(self) -> Vec<WidgetCapability> {
-        let mut capabilities = Vec::new();
-        for kind in self.occupies() {
-            for capability in kind.own_capabilities() {
-                if !capabilities.contains(capability) {
-                    capabilities.push(*capability);
-                }
-            }
-        }
-        capabilities
-    }
-
-    /// Does this kind (or something it occupies) have this capability?
+    /// Does this kind (or something it occupies) have this capability? —
+    /// the same "counts as" mechanism [`WidgetKind::occupies`] uses, so a
+    /// strip that shows the current slide answers a current-slide question
+    /// the same way the plain widget does.
+    ///
+    /// §82.1: this used to build a whole deduplicated `Vec` of every
+    /// capability this kind and its parts have — which itself built
+    /// `occupies()`'s `Vec` first — for what is only ever a yes/no
+    /// question, called from `PrimaryViewer::of` on `layout::validate`'s
+    /// hot path. `occupies_iter` walks the same kinds with no allocation
+    /// and `.any` stops at the first match.
     pub fn has_capability(self, capability: WidgetCapability) -> bool {
-        self.capabilities().contains(&capability)
+        self.occupies_iter()
+            .any(|kind| kind.own_capabilities().contains(&capability))
     }
 
     /// Used by the catalog tests and by anything asking whether a kind
@@ -325,6 +315,12 @@ impl WidgetKind {
         let mut kinds = vec![self];
         kinds.extend_from_slice(self.parts());
         kinds
+    }
+
+    /// Same as [`Self::occupies`], without allocating: `parts()` is already
+    /// a `&'static` slice.
+    pub fn occupies_iter(self) -> impl Iterator<Item = WidgetKind> {
+        std::iter::once(self).chain(self.parts().iter().copied())
     }
 }
 
@@ -820,6 +816,70 @@ macro_rules! forward_to_child {
                     operation,
                 );
             });
+        }
+    };
+    (@one $field:ident, update) => {
+        fn update(
+            &mut self,
+            tree: &mut widget::Tree,
+            event: &Event,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            renderer: &iced::Renderer,
+            clipboard: &mut dyn Clipboard,
+            shell: &mut Shell<'_, Message>,
+            viewport: &Rectangle,
+        ) {
+            self.$field.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
+    };
+    (@one $field:ident, draw) => {
+        fn draw(
+            &self,
+            tree: &widget::Tree,
+            renderer: &mut iced::Renderer,
+            theme: &iced::Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+        ) {
+            self.$field.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        }
+    };
+    (@one $field:ident, overlay) => {
+        fn overlay<'a>(
+            &'a mut self,
+            tree: &'a mut widget::Tree,
+            layout: Layout<'a>,
+            renderer: &iced::Renderer,
+            viewport: &Rectangle,
+            translation: iced::Vector,
+        ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
+            self.$field.as_widget_mut().overlay(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                viewport,
+                translation,
+            )
         }
     };
 }

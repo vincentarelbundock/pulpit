@@ -5,7 +5,7 @@
 //! not open a projector window.
 
 use iced::widget::{button, container, row, text, Row};
-use iced::{Alignment, Element, Length, Padding};
+use iced::{Alignment, Element, Length};
 
 use crate::theme;
 use crate::theme::type_scale;
@@ -44,7 +44,7 @@ fn menu_button<Message: Clone + 'static>(
     // the document controls beside it. Give it their glyph size and inset so
     // it does not make the whole row taller or look stranded in a large box.
     let mut control = button(theme::icon::icon(glyph, theme::type_scale::HEADING))
-        .padding(Padding::from([4.0, 8.0]))
+        .padding(theme::controls::TOOLBAR_BUTTON)
         .style(theme::controls::selectable(palette, open));
     if mode.interactive() {
         control = control.on_press(on(WidgetEvent::Chrome(ChromeCommand::ToggleMenu)));

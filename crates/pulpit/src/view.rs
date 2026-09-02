@@ -287,6 +287,16 @@ fn audience(app: &App) -> Element<'_, Message> {
 // -------------------------------------------------------------- presenter
 
 fn presenter(app: &App) -> Element<'_, Message> {
+    // Empty startup is its own mode-neutral surface, checked first (§82.1)
+    // rather than after building the whole layout body only to throw it
+    // away: it must not mount a Reader or Presenter layout, and opening a
+    // document starts in the Reader unless that exact file carries an
+    // explicit remembered choice, so with none open there is no active
+    // layout to walk, no sidebar to compute and no toolbar to draw.
+    if app.state.document().is_none() {
+        return layered(app, shortcut_reference_page(app, false));
+    }
+
     let frame = |slide: usize, kind: FrameKind, max_width: u32| {
         app.frame_for_width(slide, kind, max_width)
             .map(|picture| picture.handle)
@@ -321,9 +331,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
     }
     let has_outline_panel = app
         .active_layout
-        .widgets()
-        .iter()
-        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+        .contains_kind(crate::widgets::WidgetKind::DocumentOutline);
     let compact_sidebar = has_outline_panel && app.compact_document_sidebar();
     let sidebar_reveal = context.reader.outline_reveal.max(context.search_reveal);
     if compact_sidebar {
@@ -376,19 +384,19 @@ fn presenter(app: &App) -> Element<'_, Message> {
             app.search_reveal(),
         )
     };
-    let mut page: Element<'_, Message> = match presenter_toolbar(app) {
+    let page: Element<'_, Message> = match presenter_toolbar(app) {
         Some(toolbar) => column![toolbar, body].into(),
         None => body,
     };
 
-    // Empty startup is its own mode-neutral surface. It must not mount a
-    // Reader or Presenter layout: opening a document starts in the Reader
-    // unless that exact file carries an explicit remembered choice.
-    if app.state.document().is_none() {
-        page = shortcut_reference_page(app, false);
-    }
+    layered(app, page)
+}
 
-    page = stack![
+/// The overlays every presenter surface carries, whether or not a document
+/// is open: the menu, the audience-start menu, the scrub layer and the
+/// overview.
+fn layered<'a>(app: &'a App, page: Element<'a, Message>) -> Element<'a, Message> {
+    stack![
         page,
         layer(app.menu_open, || menu(app)),
         layer(app.audience_start_menu_open, || audience_start_menu(app)),
@@ -400,8 +408,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
         scrub_layer(app),
         layer(app.overview, || overview(app)),
     ]
-    .into();
-    page
+    .into()
 }
 
 /// Search is a transient rail beside the working surface.
@@ -764,11 +771,7 @@ fn thumbnail_cell<'a>(
     // The filled cell is the one Return would pick; the accented number is
     // the page the audience is looking at. They are the same cell until the
     // arrow keys move away from it.
-    .style(if selected {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    })
+    .style(theme::ambient::toggle_button(selected))
     .on_press(Message::GoToFromOverview(slide))
     .into()
 }
@@ -877,9 +880,7 @@ fn document_surface_fingerprint(app: &App) -> u64 {
     };
     let has_outline_panel = app
         .active_layout
-        .widgets()
-        .iter()
-        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+        .contains_kind(crate::widgets::WidgetKind::DocumentOutline);
     // Mirrors `presenter_toolbar`'s own "is there anything to show" check,
     // without building the strip: the fingerprint only needs to know whether
     // its presence would change, not what is in it.
@@ -2358,6 +2359,16 @@ fn download_panel<'a>(
 }
 
 /// Voices by language: installed first, one language expanded at a time.
+/// Where speech voices are stored, cached: `Directories::detect()` walks
+/// environment overrides and platform conventions, which a resolved path is
+/// not going to change mid-session, so §82.4 has `voice_library` — redrawn
+/// on every frame the Settings panel is open — stop paying for it while
+/// Settings is open.
+fn speech_data_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::platform::Directories::detect().data)
+}
+
 fn voice_library(app: &App) -> Element<'_, Message> {
     let groups = crate::speech::browsable(app.speech.catalog(), app.speech.store());
     let busy = app
@@ -2452,7 +2463,7 @@ fn voice_library(app: &App) -> Element<'_, Message> {
             "Voices are downloaded once and kept in {}. Each is checked \
              against a published checksum before it is used, and discarded if \
              it does not match.",
-            crate::speech::store_location(&crate::platform::Directories::detect().data).display()
+            crate::speech::store_location(speech_data_dir()).display()
         )),
         container(
             scrollable(list)
@@ -3150,11 +3161,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
             theme::ambient::muted()
         }))
         .padding(gap::S)
-        .style(if chosen {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .style(theme::ambient::toggle_button(chosen));
         if ambiguous {
             control = control.on_press(Message::Alarm(AlarmCommand::SetAfternoon(afternoon)));
         }
@@ -3349,11 +3356,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
         let chosen = controls.count_down == count_down;
         button(theme::typography::label(label))
             .padding(gap::S)
-            .style(if chosen {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            })
+            .style(theme::ambient::toggle_button(chosen))
             .on_press(Message::Timer(TimerCommand::SetCountDown(count_down)))
     };
     let step = |label: &'static str, delta: i32| {
@@ -3576,11 +3579,7 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
             pages = pages.push(
                 button(theme::typography::label(choice.label()))
                     .padding(gap::S)
-                    .style(if chosen {
-                        theme::ambient::selected_button
-                    } else {
-                        theme::ambient::tool_button
-                    })
+                    .style(theme::ambient::toggle_button(chosen))
                     .on_press(Message::Print(crate::app::PrintMsg::ChoosePages(choice))),
             );
         }
@@ -3601,11 +3600,7 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
         marks = marks.push(
             button(theme::typography::label(kind.label()))
                 .padding(gap::S)
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                })
+                .style(theme::ambient::toggle_button(chosen))
                 .on_press(Message::Print(crate::app::PrintMsg::ChooseMarks(kind))),
         );
     }
@@ -4291,42 +4286,19 @@ fn editor_page(app: &App) -> Element<'_, Message> {
 }
 
 /// Seconds since local midnight, for the clock widget.
+///
+/// §76.13: this used to cache a UTC offset primed once from a `date +%z`
+/// subprocess, which is a shell builtin (so it fails outright) on Windows,
+/// and which never refreshed across a DST change during a session.
+/// `chrono::Local` reads the platform timezone database directly and
+/// re-derives the offset on every call, so both problems are gone at the
+/// same time. This is still a view module reading a clock — the right home
+/// for the read is `App`, which already threads other timestamps into the
+/// view; hoisting it there is deferred to a later phase and is not part of
+/// this fix.
 pub fn seconds_of_day() -> u32 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    ((now as i64 + local_offset_seconds()).rem_euclid(86_400)) as u32
-}
-
-/// Offset from UTC in seconds, primed once from `date +%z`. Falls back to
-/// UTC until then, which is honest rather than wrong by an unknown amount.
-fn local_offset_seconds() -> i64 {
-    OFFSET.get().copied().unwrap_or(0)
-}
-
-static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-
-/// Spawn `date +%z` and cache what it says. Called from a startup helper
-/// thread, deliberately not from the first clock widget to draw: priming is
-/// a `PATH` walk and a subprocess, which is nothing the first frame — or the
-/// event loop at all — should be paying for.
-pub fn prime_local_offset() {
-    let _ = OFFSET.get_or_init(|| {
-        std::process::Command::new("date")
-            .arg("+%z")
-            .output()
-            .ok()
-            .and_then(|output| {
-                let text = String::from_utf8(output.stdout).ok()?;
-                let text = text.trim();
-                let sign = if text.starts_with('-') { -1 } else { 1 };
-                let hours: i64 = text.get(1..3)?.parse().ok()?;
-                let minutes: i64 = text.get(3..5)?.parse().ok()?;
-                Some(sign * (hours * 3600 + minutes * 60))
-            })
-            .unwrap_or(0)
-    });
+    use chrono::Timelike;
+    chrono::Local::now().num_seconds_from_midnight()
 }
 
 #[cfg(test)]

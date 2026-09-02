@@ -459,7 +459,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Messa
     //
     // `every_hand_written_wrapper_forwards_widget_operations` below fails if
     // `operate` ever leaves this list.
-    forward_to_child!(surface: children, diff, size, size_hint, layout, operate);
+    forward_to_child!(surface: children, diff, size, size_hint, layout, operate, overlay);
 
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<Grab>()
@@ -631,22 +631,5 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Thumbed<'_, Messa
             },
             colour,
         );
-    }
-
-    fn overlay<'a>(
-        &'a mut self,
-        tree: &'a mut widget::Tree,
-        layout: Layout<'a>,
-        renderer: &iced::Renderer,
-        viewport: &Rectangle,
-        translation: iced::Vector,
-    ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
-        self.surface.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
     }
 }

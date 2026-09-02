@@ -86,11 +86,7 @@ pub fn pane<Message: Clone + 'static>(
     let toggle = |label: &'static str, on: bool, command: FindCommand| {
         let mut control = button(text(label).size(theme::type_scale::LABEL))
             .padding(theme::space::XS)
-            .style(if on {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
+            .style(theme::ambient::toggle_button(on));
         if live {
             control = control.on_press(on_event(WidgetEvent::Find(command)));
         }

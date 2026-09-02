@@ -23,8 +23,8 @@
 
 use crate::layout::model::Layout;
 use crate::layout::tree::{Direction, Node};
+use crate::widgets::catalog;
 use crate::widgets::plan::PageRef;
-use crate::widgets::registry;
 
 /// Widths are quantised to this many pixels.
 ///
@@ -129,12 +129,12 @@ pub fn slide_widths(layout: &Layout, window: (f32, f32), scale: f32, aspect: f32
 /// `Role::Current`, `NextSlide`/`PreviousSlide` get `Role::Neighbour`, and
 /// `PreviousCurrentNext` was special-cased with its own strip fractions
 /// baked in here. That match is gone: every placed widget now declares its
-/// frame needs through [`crate::widgets::registry::registration`]'s `plan`
-/// hook (see [`crate::widgets::plan`]), and this walk only asks for the
-/// plan and translates its [`PageRef`]s to the [`Role`] the rest of this
-/// module already understood. A widget that shows the current slide as part
-/// of some future compound panel needs only to declare it in its own
-/// registration — nothing here has to learn a new kind.
+/// frame needs through [`crate::widgets::catalog::WidgetDefinition::plan`]
+/// (see [`crate::widgets::plan`]), and this walk only asks for the plan and
+/// translates its [`PageRef`]s to the [`Role`] the rest of this module
+/// already understood. A widget that shows the current slide as part of some
+/// future compound panel needs only to declare it in its own catalog entry
+/// — nothing here has to learn a new kind.
 fn walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
     match node {
         Node::Split(split) => {
@@ -150,7 +150,7 @@ fn walk(node: &Node, width: f32, height: f32, found: &mut Vec<(Role, f32)>) {
             let Some(widget) = cell.widget.as_ref() else {
                 return;
             };
-            let plan = registry::registration(widget.kind()).plan(widget, width);
+            let plan = (catalog::definition(widget.kind()).plan)(widget, width);
             for need in plan.frames {
                 let role = match need.page {
                     PageRef::Current => Role::Current,

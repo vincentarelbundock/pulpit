@@ -13,10 +13,10 @@
 //! dependency that is no longer here.
 
 use iced::widget::{button, container};
-use iced::{Background, Border, Color, Shadow, Theme, Vector};
+use iced::{Background, Border, Color, Padding, Shadow, Theme, Vector};
 
 use super::tokens::mix;
-use super::Palette;
+use super::{space, Palette};
 
 /// Material's own measurements, kept as tokens rather than scattered numbers.
 pub const BUTTON_HEIGHT: f32 = 40.0;
@@ -24,6 +24,16 @@ pub const MENU_ITEM_HEIGHT: f32 = 48.0;
 /// A dialog is this wide and no wider, and holds its content this far in.
 pub const DIALOG_MAX_WIDTH: f32 = 560.0;
 pub const DIALOG_PADDING: f32 = 24.0;
+
+/// A toolbar button or menu row's inset: tight top and bottom, room on the
+/// sides for the label. Written out as `Padding::from([4.0, 8.0])` at 15+
+/// call sites (§80.10) before this named it once.
+pub const TOOLBAR_BUTTON: Padding = Padding {
+    top: 4.0,
+    right: space::S,
+    bottom: 4.0,
+    left: space::S,
+};
 
 /// Corner radii. `FULL` is a pill: any radius past half the height rounds to
 /// the same shape, and Material says so with a number far larger than any

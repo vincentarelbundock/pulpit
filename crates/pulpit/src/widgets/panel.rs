@@ -10,7 +10,7 @@ use iced::advanced::widget::{self, Widget};
 use crate::widgets::forward_to_child;
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::keyboard::{Key, Modifiers};
-use iced::{Element, Event, Length, Rectangle, Size, Vector};
+use iced::{Element, Event, Length, Rectangle, Size};
 
 pub fn on_key<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
@@ -30,7 +30,17 @@ struct KeyScope<'a, Message> {
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for KeyScope<'_, Message> {
-    forward_to_child!(content: children, diff, size, size_hint, layout, mouse_interaction, operate);
+    forward_to_child!(
+        content: children,
+        diff,
+        size,
+        size_hint,
+        layout,
+        mouse_interaction,
+        operate,
+        draw,
+        overlay
+    );
 
     fn update(
         &mut self,
@@ -60,43 +70,5 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for KeyScope<'_, Mess
             shell,
             viewport,
         );
-    }
-
-    fn draw(
-        &self,
-        tree: &widget::Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
-    }
-
-    fn overlay<'a>(
-        &'a mut self,
-        tree: &'a mut widget::Tree,
-        layout: Layout<'a>,
-        renderer: &iced::Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
     }
 }

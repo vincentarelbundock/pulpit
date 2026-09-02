@@ -10,7 +10,7 @@
 //! choosing a layout on the presenter's behalf. Recommending is allowed;
 //! selecting is not.
 
-use crate::layout::model::AspectRatio;
+use crate::layout::model::{AspectRatio, LayoutId};
 use crate::layout::tree::Frame;
 #[cfg(test)]
 use crate::layout::tree::Placement;
@@ -183,6 +183,11 @@ impl SpaceReport {
 /// Selection stays entirely explicit: this ranks, it never applies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recommendation {
+    /// Carried alongside the name (§82.4) so a caller that only needs to
+    /// show and select a recommendation never has to rebuild
+    /// `built_in_layouts()` and search it by name to get back to the
+    /// layout it is about.
+    pub id: LayoutId,
     pub layout: String,
     pub wasted_fraction: f32,
     pub reason: String,
@@ -190,20 +195,21 @@ pub struct Recommendation {
 
 /// Rank candidate layouts by how little slide-pane space they waste.
 ///
-/// `candidates` pairs a layout name with the slide cells it produces at the
-/// screen being measured. Ties keep their input order, so the list is stable
-/// and a presenter's own layout is never reshuffled underneath them.
+/// `candidates` pairs a layout id and name with the slide cells it produces
+/// at the screen being measured. Ties keep their input order, so the list is
+/// stable and a presenter's own layout is never reshuffled underneath them.
 pub fn recommend(
     screen: Frame,
     slide_ratio: f32,
-    candidates: &[(String, Vec<Frame>)],
+    candidates: &[(LayoutId, String, Vec<Frame>)],
 ) -> Vec<Recommendation> {
     let mut ranked: Vec<Recommendation> = candidates
         .iter()
-        .map(|(name, cells)| {
+        .map(|(id, name, cells)| {
             let report = SpaceReport::measure(screen, slide_ratio, cells);
             let wasted = report.wasted_fraction();
             Recommendation {
+                id: id.clone(),
                 layout: name.clone(),
                 wasted_fraction: wasted,
                 reason: if wasted <= 0.01 {
@@ -332,11 +338,20 @@ mod tests {
     #[test]
     fn recommendations_are_ranked_by_wasted_space_and_never_applied() {
         let candidates = vec![
-            ("square panes".to_string(), vec![cell(900.0, 900.0)]),
-            ("wide pane".to_string(), vec![cell(1600.0, 900.0)]),
+            (
+                LayoutId("square".into()),
+                "square panes".to_string(),
+                vec![cell(900.0, 900.0)],
+            ),
+            (
+                LayoutId("wide".into()),
+                "wide pane".to_string(),
+                vec![cell(1600.0, 900.0)],
+            ),
         ];
         let ranked = recommend(cell(1600.0, 900.0), WIDE, &candidates);
         assert_eq!(ranked[0].layout, "wide pane");
+        assert_eq!(ranked[0].id, LayoutId("wide".into()));
         assert!(ranked[0].wasted_fraction < ranked[1].wasted_fraction);
         assert!(ranked[0].reason.contains("fills"));
         assert!(ranked[1].reason.contains('%'));
@@ -345,8 +360,16 @@ mod tests {
     #[test]
     fn equally_good_candidates_keep_their_input_order() {
         let candidates = vec![
-            ("first".to_string(), vec![cell(1600.0, 900.0)]),
-            ("second".to_string(), vec![cell(800.0, 450.0)]),
+            (
+                LayoutId("first".into()),
+                "first".to_string(),
+                vec![cell(1600.0, 900.0)],
+            ),
+            (
+                LayoutId("second".into()),
+                "second".to_string(),
+                vec![cell(800.0, 450.0)],
+            ),
         ];
         let ranked = recommend(cell(1600.0, 900.0), WIDE, &candidates);
         assert_eq!(ranked[0].layout, "first");

@@ -75,13 +75,37 @@ impl LayoutFile {
     /// An imported layout is always custom, even when exported from a
     /// built-in.
     pub fn into_layout(self) -> Layout {
+        let mut root = self.root;
+        // §77.9: `Widget::sanitise`'s own doc says "construction, patching
+        // and import all go through this" — import did not. A file saved by
+        // an older build, or hand-edited, can carry a widget config this
+        // build no longer allows (an out-of-range value, a style field that
+        // is no longer the presenter's to set); every other path that places
+        // a widget sanitises it, and import should too.
+        sanitise_widgets(&mut root);
         Layout::from_parts(
             LayoutId::from_name(&self.name),
             self.name,
             Origin::Custom,
             self.design_ratio,
-            self.root,
+            root,
         )
+    }
+}
+
+/// Sanitise every placed widget in the tree, recursively.
+fn sanitise_widgets(node: &mut Node) {
+    match node {
+        Node::Leaf(cell) => {
+            if let Some(widget) = &mut cell.widget {
+                widget.sanitise();
+            }
+        }
+        Node::Split(split) => {
+            for child in &mut split.children {
+                sanitise_widgets(child);
+            }
+        }
     }
 }
 
@@ -107,10 +131,16 @@ pub fn export_to_string(layout: &Layout) -> Result<String, StoreError> {
 pub fn import_from_string(text: &str) -> Result<(Layout, Vec<Issue>), StoreError> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| StoreError::Parse(e.to_string()))?;
+    // §77.9: `as u32` truncates, so a `format_version` past `u32::MAX` (a
+    // corrupt or hostile file, not one this or any past build ever wrote)
+    // would wrap around to a small number and be read as an old, migratable
+    // format instead of refused. Saturate to `u32::MAX` instead, which is
+    // always greater than `FORMAT_VERSION` and so always a `FutureFormat`.
     let found = value
         .get("format_version")
         .and_then(|version| version.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|version| u32::try_from(version).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     if found > FORMAT_VERSION {
         return Err(StoreError::FutureFormat {
             found,
@@ -293,6 +323,23 @@ fn normalise_for_export(node: &mut serde_json::Value) -> Result<(), StoreError> 
     each_child(object, normalise_for_export)
 }
 
+/// `wanted`, or a numeric-suffixed variant of it that appears nowhere in
+/// `taken`. Shared by [`LayoutStore::load`], which must not let one file's
+/// stem shadow another id already claimed, and [`LayoutStore::unique_id`].
+fn unique_id_among<'a>(wanted: LayoutId, taken: impl Iterator<Item = &'a LayoutId>) -> LayoutId {
+    let taken: Vec<&LayoutId> = taken.collect();
+    if !taken.contains(&&wanted) {
+        return wanted;
+    }
+    for suffix in 2..1000 {
+        let candidate = LayoutId(format!("{}-{suffix}", wanted.0));
+        if !taken.contains(&&candidate) {
+            return candidate;
+        }
+    }
+    LayoutId(format!("{}-{}", wanted.0, taken.len() + 1))
+}
+
 /// The layout library: the two built-ins plus the user's own.
 #[derive(Debug, Clone)]
 pub struct LayoutStore {
@@ -305,7 +352,8 @@ impl LayoutStore {
     /// Load custom layouts from `directory`, creating nothing.
     pub fn load(directory: impl Into<PathBuf>) -> LayoutStore {
         let directory = directory.into();
-        let mut custom = Vec::new();
+        let built_in = built_in_layouts();
+        let mut custom: Vec<Layout> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -319,7 +367,17 @@ impl LayoutStore {
                     Ok(mut layout) => {
                         // The file name is the identity on disk.
                         if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                            layout.id = LayoutId(stem.to_string());
+                            let id = LayoutId(stem.to_string());
+                            // §77.9: a file whose stem collides with a
+                            // built-in id, or with a custom layout already
+                            // loaded from another file in this same pass,
+                            // used to overwrite or be shadowed by it
+                            // silently — the id is otherwise assumed unique.
+                            // Re-slug rather than lose or hide a file.
+                            layout.id = unique_id_among(
+                                id,
+                                built_in.iter().chain(custom.iter()).map(|l| &l.id),
+                            );
                         }
                         custom.push(layout);
                     }
@@ -332,7 +390,7 @@ impl LayoutStore {
         custom.sort_by_key(|layout| layout.name.to_lowercase());
         LayoutStore {
             directory,
-            built_in: built_in_layouts(),
+            built_in,
             custom,
         }
     }
@@ -378,16 +436,7 @@ impl LayoutStore {
     }
 
     fn unique_id(&self, wanted: LayoutId) -> LayoutId {
-        if self.get(&wanted).is_none() {
-            return wanted;
-        }
-        for suffix in 2..1000 {
-            let candidate = LayoutId(format!("{}-{suffix}", wanted.0));
-            if self.get(&candidate).is_none() {
-                return candidate;
-            }
-        }
-        LayoutId(format!("{}-{}", wanted.0, self.all().count() + 1))
+        unique_id_among(wanted, self.all().map(|layout| &layout.id))
     }
 
     fn path_for(&self, id: &LayoutId) -> PathBuf {
@@ -493,7 +542,16 @@ impl LayoutStore {
             .iter()
             .position(|layout| &layout.id == id)
             .ok_or_else(|| StoreError::NoSuchLayout(id.clone()))?;
-        let _ = std::fs::remove_file(self.path_for(id));
+        // §77.9: the file already being gone is fine — deleting is still
+        // done — but any other failure (permissions, a read-only mount, a
+        // full or vanished disk) MUST be reported rather than silently
+        // removing the layout from memory while it is still on disk, where
+        // it would reappear on the next `load`.
+        if let Err(e) = std::fs::remove_file(self.path_for(id)) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(StoreError::Io(e));
+            }
+        }
         self.custom.remove(position);
         Ok(())
     }
@@ -573,6 +631,44 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_edited_file_with_mismatched_sizes_loads_as_invalid_without_panicking() {
+        // §76.12: a `sizes` array shorter than `children` used to reach
+        // `layout.compute` inside `validate` and panic on the out-of-bounds
+        // index. `LayoutStore::load` MUST just skip the file.
+        let (directory, _store) = store();
+        let broken_root = crate::layout::tree::Node::Split(crate::layout::tree::Split {
+            id: crate::layout::tree::NodeId(1),
+            name: None,
+            direction: Direction::Horizontal,
+            children: vec![
+                crate::layout::tree::Node::Leaf(crate::layout::tree::Cell::new(
+                    crate::layout::tree::NodeId(2),
+                )),
+                crate::layout::tree::Node::Leaf(crate::layout::tree::Cell::new(
+                    crate::layout::tree::NodeId(3),
+                )),
+            ],
+            sizes: vec![1.0],
+            gap: 8.0,
+            min_child: 0.05,
+        });
+        let file = LayoutFile {
+            format_version: FORMAT_VERSION,
+            name: "Broken".to_string(),
+            design_ratio: AspectRatio::default(),
+            root: broken_root,
+        };
+        let text = serde_json::to_string_pretty(&file).unwrap();
+        std::fs::write(directory.path().join("broken.json"), text).unwrap();
+
+        let reloaded = LayoutStore::load(directory.path());
+        assert!(
+            reloaded.custom().is_empty(),
+            "the malformed file is skipped, not loaded"
+        );
+    }
+
+    #[test]
     fn built_in_layouts_cannot_be_overwritten_renamed_or_deleted() {
         let (_directory, mut store) = store();
         let id = LayoutId("presenter-default".into());
@@ -627,6 +723,55 @@ mod tests {
         store.delete(&id).unwrap();
         assert!(store.get(&id).is_none());
         assert!(!directory.path().join(format!("{}.json", id.0)).exists());
+    }
+
+    #[test]
+    fn import_sanitises_every_placed_widget() {
+        // §77.9: `Widget::sanitise`'s doc says import goes through it;
+        // `into_layout` did not call it. Build a layout carrying an
+        // out-of-range value the ordinary editing API would never produce
+        // (placement already sanitises), export it as raw text, and confirm
+        // import brings it back into range rather than trusting the file.
+        let mut layout = Layout::empty("Overtimed");
+        let root = layout.root.id();
+        layout
+            .set_widget(root, Widget::new(WidgetKind::Timer))
+            .unwrap();
+        if let crate::widgets::WidgetConfig::Timer(options) = layout
+            .root
+            .cell_mut(root)
+            .unwrap()
+            .widget
+            .as_mut()
+            .unwrap()
+            .config_mut()
+        {
+            options.warning_minutes = crate::widgets::timing::model::MAX_WARNING_MINUTES + 1_000;
+        }
+        let text = export_to_string(&layout).unwrap();
+        assert!(
+            text.contains(
+                &(crate::widgets::timing::model::MAX_WARNING_MINUTES + 1_000).to_string()
+            ),
+            "the out-of-range value really is on the wire: {text}"
+        );
+
+        let (imported, _issues) = import_from_string(&text).unwrap();
+        let crate::widgets::WidgetConfig::Timer(options) = imported
+            .cell(root)
+            .unwrap()
+            .widget
+            .as_ref()
+            .unwrap()
+            .config()
+        else {
+            panic!("still a timer");
+        };
+        assert_eq!(
+            options.warning_minutes,
+            crate::widgets::timing::model::MAX_WARNING_MINUTES,
+            "import clamps it back into range"
+        );
     }
 
     #[test]
@@ -862,6 +1007,44 @@ mod tests {
         let ids = layout.root.ids();
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
+    }
+
+    #[test]
+    fn a_custom_file_whose_stem_collides_with_a_built_in_is_re_slugged() {
+        // §77.9: a file's stem becomes its id verbatim; one named after a
+        // built-in used to shadow it (or be shadowed by it) rather than
+        // being kept under a distinct id.
+        let (directory, store) = store();
+        let text = store.export(&LayoutId("presenter-default".into())).unwrap();
+        std::fs::write(directory.path().join("presenter-default.json"), text).unwrap();
+
+        let reloaded = LayoutStore::load(directory.path());
+        assert_eq!(reloaded.built_in().len(), 2, "the built-in is untouched");
+        assert_eq!(reloaded.custom().len(), 1, "the file is still loaded");
+        let loaded = &reloaded.custom()[0];
+        assert_ne!(
+            loaded.id,
+            LayoutId("presenter-default".into()),
+            "re-slugged rather than colliding with the built-in"
+        );
+        assert_eq!(loaded.origin, Origin::Custom);
+    }
+
+    #[test]
+    fn unique_id_among_re_slugs_past_every_id_already_taken() {
+        // The unit `LayoutStore::load` and `unique_id` both share: a file
+        // cannot literally collide with another file's stem on one
+        // filesystem, but it can collide with a built-in id, or (renamed
+        // between loads, or hand-copied) with another custom file's stem, so
+        // the helper itself MUST skip every id already in use, not just the
+        // first.
+        let taken = [
+            LayoutId("clash".into()),
+            LayoutId("clash-2".into()),
+            LayoutId("clash-3".into()),
+        ];
+        let reslugged = unique_id_among(LayoutId("clash".into()), taken.iter());
+        assert_eq!(reslugged, LayoutId("clash-4".into()));
     }
 }
 
