@@ -54,7 +54,7 @@ impl AnnotationHit {
             return self
                 .path
                 .windows(2)
-                .any(|pair| distance_to_segment(point, pair[0], pair[1]) <= slack)
+                .any(|pair| point.distance_to_segment(pair[0], pair[1]) <= slack)
                 // A one-point stroke is a dot with no segment to measure.
                 || self.path.iter().any(|p| p.distance_to(point) <= slack);
         }
@@ -154,17 +154,6 @@ pub fn enclosed(candidates: &[AnnotationHit], band: PageRect) -> Vec<&Annotation
         .iter()
         .filter(|candidate| candidate.editable && band.contains_rect(&candidate.bounds))
         .collect()
-}
-
-fn distance_to_segment(point: PagePoint, start: PagePoint, end: PagePoint) -> f32 {
-    let (dx, dy) = (end.x - start.x, end.y - start.y);
-    let length_squared = dx * dx + dy * dy;
-    if length_squared <= f32::EPSILON {
-        return point.distance_to(start);
-    }
-    let t =
-        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
-    point.distance_to(PagePoint::new(start.x + t * dx, start.y + t * dy))
 }
 
 #[cfg(test)]
