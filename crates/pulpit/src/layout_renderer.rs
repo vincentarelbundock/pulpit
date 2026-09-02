@@ -347,18 +347,8 @@ fn revealed(full_extent: f32, reveal: f32) -> f32 {
 /// In the built-in Reader this includes Search, so collapsing means the whole
 /// sidebar disappears rather than leaving its lower half behind.
 fn is_outline_rail(node: &Node) -> bool {
-    contains(node, crate::widgets::WidgetKind::DocumentOutline)
-        && !contains(node, crate::widgets::WidgetKind::DocumentPage)
-}
-
-fn contains(node: &Node, kind: crate::widgets::WidgetKind) -> bool {
-    match node {
-        Node::Leaf(cell) => cell
-            .widget
-            .as_ref()
-            .is_some_and(|widget| widget.kind() == kind),
-        Node::Split(split) => split.children.iter().any(|child| contains(child, kind)),
-    }
+    node.contains_kind(crate::widgets::WidgetKind::DocumentOutline)
+        && !node.contains_kind(crate::widgets::WidgetKind::DocumentPage)
 }
 
 /// One muted line between adjacent cells, centred in the space reserved for
@@ -579,8 +569,8 @@ mod tests {
             .expect("the reader body is split");
         let rail = &body.children[0];
         assert!(is_outline_rail(rail));
-        assert!(contains(rail, WidgetKind::DocumentOutline));
-        assert!(!contains(rail, WidgetKind::Search));
+        assert!(rail.contains_kind(WidgetKind::DocumentOutline));
+        assert!(!rail.contains_kind(WidgetKind::Search));
 
         let mut context = context(Mode::Live);
         context.reader.outline_reveal = 0.0;

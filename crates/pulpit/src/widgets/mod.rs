@@ -282,31 +282,25 @@ impl WidgetKind {
     }
 
     /// This kind's own declared capabilities, not counting any compound
-    /// parts. Almost always what [`WidgetKind::capabilities`] should be
-    /// called instead — this exists for the table itself and its tests.
+    /// parts.
     pub fn own_capabilities(self) -> &'static [WidgetCapability] {
         catalog::definition(self).capabilities
     }
 
-    /// The capabilities this kind offers, including whatever its compound
-    /// parts offer — the same "counts as" mechanism [`WidgetKind::occupies`]
-    /// uses, so a strip that shows the current slide answers a
-    /// current-slide question the same way the plain widget does.
-    pub fn capabilities(self) -> Vec<WidgetCapability> {
-        let mut capabilities = Vec::new();
-        for kind in self.occupies() {
-            for capability in kind.own_capabilities() {
-                if !capabilities.contains(capability) {
-                    capabilities.push(*capability);
-                }
-            }
-        }
-        capabilities
-    }
-
-    /// Does this kind (or something it occupies) have this capability?
+    /// Does this kind (or something it occupies) have this capability? —
+    /// the same "counts as" mechanism [`WidgetKind::occupies`] uses, so a
+    /// strip that shows the current slide answers a current-slide question
+    /// the same way the plain widget does.
+    ///
+    /// §82.1: this used to build a whole deduplicated `Vec` of every
+    /// capability this kind and its parts have — which itself built
+    /// `occupies()`'s `Vec` first — for what is only ever a yes/no
+    /// question, called from `PrimaryViewer::of` on `layout::validate`'s
+    /// hot path. `occupies_iter` walks the same kinds with no allocation
+    /// and `.any` stops at the first match.
     pub fn has_capability(self, capability: WidgetCapability) -> bool {
-        self.capabilities().contains(&capability)
+        self.occupies_iter()
+            .any(|kind| kind.own_capabilities().contains(&capability))
     }
 
     /// Used by the catalog tests and by anything asking whether a kind
@@ -321,6 +315,12 @@ impl WidgetKind {
         let mut kinds = vec![self];
         kinds.extend_from_slice(self.parts());
         kinds
+    }
+
+    /// Same as [`Self::occupies`], without allocating: `parts()` is already
+    /// a `&'static` slice.
+    pub fn occupies_iter(self) -> impl Iterator<Item = WidgetKind> {
+        std::iter::once(self).chain(self.parts().iter().copied())
     }
 }
 

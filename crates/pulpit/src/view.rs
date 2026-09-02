@@ -287,6 +287,16 @@ fn audience(app: &App) -> Element<'_, Message> {
 // -------------------------------------------------------------- presenter
 
 fn presenter(app: &App) -> Element<'_, Message> {
+    // Empty startup is its own mode-neutral surface, checked first (§82.1)
+    // rather than after building the whole layout body only to throw it
+    // away: it must not mount a Reader or Presenter layout, and opening a
+    // document starts in the Reader unless that exact file carries an
+    // explicit remembered choice, so with none open there is no active
+    // layout to walk, no sidebar to compute and no toolbar to draw.
+    if app.state.document().is_none() {
+        return layered(app, shortcut_reference_page(app, false));
+    }
+
     let frame = |slide: usize, kind: FrameKind, max_width: u32| {
         app.frame_for_width(slide, kind, max_width)
             .map(|picture| picture.handle)
@@ -321,9 +331,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
     }
     let has_outline_panel = app
         .active_layout
-        .widgets()
-        .iter()
-        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+        .contains_kind(crate::widgets::WidgetKind::DocumentOutline);
     let compact_sidebar = has_outline_panel && app.compact_document_sidebar();
     let sidebar_reveal = context.reader.outline_reveal.max(context.search_reveal);
     if compact_sidebar {
@@ -376,19 +384,19 @@ fn presenter(app: &App) -> Element<'_, Message> {
             app.search_reveal(),
         )
     };
-    let mut page: Element<'_, Message> = match presenter_toolbar(app) {
+    let page: Element<'_, Message> = match presenter_toolbar(app) {
         Some(toolbar) => column![toolbar, body].into(),
         None => body,
     };
 
-    // Empty startup is its own mode-neutral surface. It must not mount a
-    // Reader or Presenter layout: opening a document starts in the Reader
-    // unless that exact file carries an explicit remembered choice.
-    if app.state.document().is_none() {
-        page = shortcut_reference_page(app, false);
-    }
+    layered(app, page)
+}
 
-    page = stack![
+/// The overlays every presenter surface carries, whether or not a document
+/// is open: the menu, the audience-start menu, the scrub layer and the
+/// overview.
+fn layered<'a>(app: &'a App, page: Element<'a, Message>) -> Element<'a, Message> {
+    stack![
         page,
         layer(app.menu_open, || menu(app)),
         layer(app.audience_start_menu_open, || audience_start_menu(app)),
@@ -400,8 +408,7 @@ fn presenter(app: &App) -> Element<'_, Message> {
         scrub_layer(app),
         layer(app.overview, || overview(app)),
     ]
-    .into();
-    page
+    .into()
 }
 
 /// Search is a transient rail beside the working surface.
@@ -873,9 +880,7 @@ fn document_surface_fingerprint(app: &App) -> u64 {
     };
     let has_outline_panel = app
         .active_layout
-        .widgets()
-        .iter()
-        .any(|widget| widget.kind() == crate::widgets::WidgetKind::DocumentOutline);
+        .contains_kind(crate::widgets::WidgetKind::DocumentOutline);
     // Mirrors `presenter_toolbar`'s own "is there anything to show" check,
     // without building the strip: the fingerprint only needs to know whether
     // its presence would change, not what is in it.

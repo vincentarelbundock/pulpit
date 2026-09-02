@@ -23,12 +23,22 @@ use crate::platform::appearance::Resolved;
 pub use tokens::{font, radius, space, target, type_scale, ColorRole, Palette};
 
 /// The palette in use, plus how it was chosen.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// §82.1: `iced` is the `iced::Theme` built from `palette`, once, here —
+/// not `Copy` (`iced::Theme` is not), so this type no longer is either.
+/// `App::theme()` used to rebuild it with `iced_theme(self.theme.palette)`
+/// on every redraw of every window, allocating the theme's name and
+/// regenerating its ~30 derived colours each time; it now clones the
+/// already-built value, and only a settings or appearance change (the sole
+/// place a `ThemeState` is constructed) pays for building it again.
+#[derive(Debug, Clone)]
 pub struct ThemeState {
     pub palette: Palette,
     pub resolved: Resolved,
     /// True when the system preference could not be read and Dark was used.
     pub fell_back: bool,
+    /// Built once from `palette`; see the struct's doc comment.
+    pub iced: Theme,
 }
 
 impl Default for ThemeState {
@@ -37,6 +47,7 @@ impl Default for ThemeState {
             palette: tokens::DARK,
             resolved: Resolved::Dark,
             fell_back: false,
+            iced: iced_theme(tokens::DARK),
         }
     }
 }
@@ -56,6 +67,7 @@ impl ThemeState {
             palette,
             resolved,
             fell_back,
+            iced: iced_theme(palette),
         }
     }
 }
@@ -874,6 +886,19 @@ mod tests {
             &crate::settings::ColorSettings::default(),
         );
         assert_eq!(light.palette, tokens::LIGHT);
+    }
+
+    #[test]
+    fn the_iced_theme_is_built_once_from_the_palette_it_carries() {
+        // §82.1: `ThemeState::iced` is what `App::theme()` now clones every
+        // redraw instead of rebuilding; it must actually match the palette
+        // this state was constructed with, not some other one.
+        let state = ThemeState::new(
+            SystemAppearance::Light.resolve(Appearance::System),
+            false,
+            &crate::settings::ColorSettings::default(),
+        );
+        assert_eq!(state.iced, iced_theme(state.palette));
     }
 
     #[test]

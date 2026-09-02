@@ -1991,6 +1991,10 @@ impl App {
             system_appearance.fell_back(preference),
             &settings.appearance.colors,
         );
+        // `ThemeState` is no longer `Copy` (§82.1: it now caches a built
+        // `iced::Theme`), so `resolved` is read here, before `theme` moves
+        // into the struct literal below.
+        let resolved = theme.resolved;
 
         let mut diagnostics = DiagnosticsBundle::new(platform_description());
         for line in platform.capabilities.report() {
@@ -2173,7 +2177,7 @@ impl App {
             // to a window that is already up.
             outline_rail: crate::disclosure::Disclosure::closed(),
             search_pane: crate::disclosure::Disclosure::closed(),
-            editing_colors: match theme.resolved {
+            editing_colors: match resolved {
                 crate::platform::appearance::Resolved::Light => crate::settings::ColorScheme::Light,
                 crate::platform::appearance::Resolved::Dark
                 | crate::platform::appearance::Resolved::HighContrast => {
@@ -2465,7 +2469,10 @@ impl App {
     }
 
     pub fn theme(&self, _window: window::Id) -> iced::Theme {
-        crate::theme::iced_theme(self.theme.palette)
+        // §82.1: built once, in `ThemeState::new`, whenever settings or
+        // appearance actually change; every redraw of every window just
+        // clones it instead of paying `iced::Theme::custom` again.
+        self.theme.iced.clone()
     }
 
     /// Is anything timed locally that deserves the fast tick? Worker and file
