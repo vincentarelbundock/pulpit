@@ -235,6 +235,7 @@ fn a_form_whose_script_reaches_out_is_warned_about_when_it_opens() {
                 .contains(&DocumentWarning::ScriptReachesOut),
             "a form that only does arithmetic must not be accused of phoning home"
         );
+        drop(quiet);
 
         let path = std::env::temp_dir().join("pulpit-form-js-reaching.pdf");
         std::fs::write(&path, reaching_form()).expect("the fixture is written");
@@ -299,6 +300,7 @@ fn a_form_button_that_carries_an_action_is_warned_about_when_it_opens() {
             CompatibilityLevel::NativeWithLimitations,
             "a form with a button that does not work is not fully native"
         );
+        drop(document);
 
         // And a form with no such button is not accused of having one.
         let quiet = fixture("calculate");

@@ -150,6 +150,16 @@ fn list_zip(path: &Path) -> Result<Vec<ImageEntry>, ListError> {
         if !is_image_entry(&name) {
             continue;
         }
+        // Refused the moment the count is exceeded, not after the whole
+        // listing — an archive naming millions of tiny entries would
+        // otherwise pay to build a vector [`check_bounds`] was only ever
+        // going to reject (§77.8).
+        if entries.len() >= MAX_ENTRIES {
+            return Err(ListError::TooManyImages {
+                path: path.display().to_string(),
+                count: entries.len() + 1,
+            });
+        }
         entries.push(ImageEntry {
             name: OsString::from(name),
             // The declared uncompressed size. Bounded here so a bomb is
@@ -180,6 +190,15 @@ fn list_tar(path: &Path) -> Result<Vec<ImageEntry>, ListError> {
             if !is_image_entry(&name) {
                 continue;
             }
+            // Refused inside the loop, for the same reason `list_zip` is
+            // (§77.8): a tar naming an unbounded run of tiny entries must not
+            // be walked to the end before the count is even checked.
+            if entries.len() >= MAX_ENTRIES {
+                return Err(ListError::TooManyImages {
+                    path: path.display().to_string(),
+                    count: entries.len() + 1,
+                });
+            }
             entries.push(ImageEntry {
                 name: OsString::from(name),
                 len: entry.header().size().unwrap_or(0),
@@ -205,9 +224,9 @@ pub fn measure_entries(
     kind: ArchiveKind,
 ) -> std::collections::HashMap<OsString, (u32, u32)> {
     let mut measured = std::collections::HashMap::new();
-    let mut record = |name: String, bytes: &[u8]| {
+    let mut record = |name: String, source: &mut dyn Read| {
         let label = format!("{}!{name}", path.display());
-        if let Ok(size) = crate::images::decode::dimensions_of(bytes, &label) {
+        if let Some(size) = measure_prefixed(source, &label) {
             measured.insert(OsString::from(name), size);
         }
     };
@@ -223,9 +242,7 @@ pub fn measure_entries(
                         if entry.is_dir() || !is_image_entry(&name) {
                             continue;
                         }
-                        if let Ok(bytes) = read_bounded(&mut entry) {
-                            record(name, &bytes);
-                        }
+                        record(name, &mut entry);
                     }
                 }
             }
@@ -246,15 +263,52 @@ pub fn measure_entries(
                     if !is_image_entry(&name) {
                         continue;
                     }
-                    if let Ok(bytes) = read_bounded(&mut entry) {
-                        record(name, &bytes);
-                    }
+                    record(name, &mut entry);
                 }
                 Ok(())
             });
         }
     }
     measured
+}
+
+/// How much of an entry to read before deciding a header parse needs more.
+///
+/// Every format `dimensions_of` reads its header from — PNG, JPEG, GIF, WebP,
+/// TIFF — puts its dimensions within the first few kilobytes; this is well
+/// past all of them with room for a JPEG carrying a large EXIF blob ahead of
+/// its `SOF` marker.
+const MEASURE_PREFIX_BYTES: u64 = 64 * 1024;
+
+/// The size `dimensions_of` finds, reading as little of `source` as decoding
+/// the header takes (§82.7).
+///
+/// A 400-page comic full of multi-megabyte pages used to inflate every one of
+/// them *in full* just to read a header a few dozen bytes into it — up to
+/// [`MAX_ENTRY_BYTES`] each, and this runs once per page before the first
+/// frame appears. The prefix is tried first and is all a well-formed image
+/// ever costs; the full (still bounded) read only happens for whatever fails
+/// to parse from it, which is rare and no worse than what this replaces.
+fn measure_prefixed(source: &mut dyn Read, label: &str) -> Option<(u32, u32)> {
+    let mut prefix = Vec::new();
+    source
+        .take(MEASURE_PREFIX_BYTES)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    if let Ok(size) = crate::images::decode::dimensions_of(&prefix, label) {
+        return Some(size);
+    }
+    // The header did not fit in — or was not found within — the prefix.
+    // Whatever remains of the entry still has to obey the same expansion
+    // bound the rest of this module holds every entry to.
+    let remaining = MAX_ENTRY_BYTES.saturating_sub(prefix.len() as u64);
+    let mut rest = Vec::new();
+    source.take(remaining + 1).read_to_end(&mut rest).ok()?;
+    if rest.len() as u64 > remaining {
+        return None;
+    }
+    prefix.extend(rest);
+    crate::images::decode::dimensions_of(&prefix, label).ok()
 }
 
 /// Read one archive entry into memory, bounded (§54.4, §54.5).
@@ -428,6 +482,35 @@ mod tests {
         builder.finish().unwrap();
     }
 
+    /// Like [`write_cbz`], but each entry is empty rather than a decoded PNG —
+    /// for the tests that only care about how many entries an archive names,
+    /// where thousands of real images would just be thousands of slow
+    /// encodes.
+    fn write_cbz_empty(path: &Path, names: &[&str]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for name in names {
+            writer.start_file(*name, options).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    /// [`write_cbz_empty`]'s tar counterpart.
+    fn write_cbt_empty(path: &Path, names: &[&str]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        for name in names {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &[][..]).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+
     fn names(entries: &[ImageEntry]) -> Vec<String> {
         entries
             .iter()
@@ -447,6 +530,42 @@ mod tests {
         let mut listed = names(&entries);
         listed.sort();
         assert_eq!(listed, ["cover.jpeg", "page-01.png"]);
+    }
+
+    /// §82.7: `measure_entries` used to inflate every page in full — up to
+    /// [`MAX_ENTRY_BYTES`] — just to read a header a few dozen bytes in. This
+    /// checks the replacement gets the right answer for an ordinary page
+    /// (found within the 64 KiB prefix) and does not panic, hang or read past
+    /// the bound for an entry that never parses as an image at all — the
+    /// fallback path taken when the prefix's header does not decode.
+    #[test]
+    fn measuring_entries_finds_real_sizes_and_survives_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            writer.start_file("page-01.png", options).unwrap();
+            writer.write_all(&png(40, 30)).unwrap();
+            // Named like an image, but never decodes as one — the fallback
+            // path (prefix parse fails, full read attempted) must return
+            // `None` rather than panic, and must not try to read forever.
+            writer.start_file("page-02.png", options).unwrap();
+            writer.write_all(&[0xFFu8; 1024]).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let measured = measure_entries(&path, ArchiveKind::Zip);
+        assert_eq!(
+            measured.get(std::ffi::OsStr::new("page-01.png")),
+            Some(&(40, 30))
+        );
+        assert!(
+            !measured.contains_key(std::ffi::OsStr::new("page-02.png")),
+            "an entry that never decodes must be simply absent, not a panic"
+        );
     }
 
     #[test]
@@ -567,6 +686,34 @@ mod tests {
             Err(ListError::TooManyImages { count, .. }) if count == MAX_ENTRIES + 1
         ));
         assert!(check_bounds(Path::new("/comics/ok.cbz"), &entries[..MAX_ENTRIES]).is_ok());
+    }
+
+    /// §77.8: `list_zip`/`list_tar` used to build the *whole* listing before
+    /// `check_bounds` ever saw it, so an archive naming more entries than
+    /// `MAX_ENTRIES` paid the cost of that listing before being refused.
+    /// This proves the refusal now happens inside the listing loop itself, on
+    /// real archives rather than a hand-built `Vec<ImageEntry>`.
+    #[test]
+    fn a_real_archive_naming_too_many_pages_is_refused_while_listing() {
+        let names: Vec<String> = (0..MAX_ENTRIES + 1)
+            .map(|index| format!("page-{index:05}.png"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("huge.cbz");
+        write_cbz_empty(&zip_path, &refs);
+        assert!(matches!(
+            list_archive(&zip_path, ArchiveKind::Zip),
+            Err(ListError::TooManyImages { count, .. }) if count == MAX_ENTRIES + 1
+        ));
+
+        let tar_path = dir.path().join("huge.cbt");
+        write_cbt_empty(&tar_path, &refs);
+        assert!(matches!(
+            list_archive(&tar_path, ArchiveKind::Tar),
+            Err(ListError::TooManyImages { count, .. }) if count == MAX_ENTRIES + 1
+        ));
     }
 
     #[test]

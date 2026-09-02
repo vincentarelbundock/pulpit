@@ -340,21 +340,14 @@ impl<'a> PdfiumDocument<'a> {
             let scanned = self
                 .backend
                 .on_page(self.document, page, |handle| {
-                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
-                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-                        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-                        if annotation.is_null() {
-                            continue;
+                    Ok(on_widgets(bindings, handle, |annotation, _index| {
+                        if field_script_reaches_out(bindings, form, annotation, &REACHES_OUT) {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
                         }
-                        let reaches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
-                            == FPDF_ANNOT_WIDGET
-                            && field_script_reaches_out(bindings, form, annotation, &REACHES_OUT);
-                        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                        if reaches {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
+                    })
+                    .is_some())
                 })
                 .unwrap_or(false);
             found |= scanned;
@@ -633,15 +626,15 @@ impl<'a> PdfiumDocument<'a> {
                 Ok(())
             }
             // Not being edited: any view will do, and PDFium needs telling
-            // about this one before it will draw fields into it.
+            // about this one before it will draw fields into it — exactly
+            // what the render pool's own fallback does for the same reason
+            // (§80.2).
             None => self
                 .backend
                 .on_page(self.document, page.get(), |handle| {
-                    unsafe { bindings.FORM_OnAfterLoadPage(handle, form) };
-                    crate::pdf::pdfium::draw_form_fields(
+                    crate::pdf::pdfium::composite_form_fields(
                         bindings, form, handle, rgba, width, height, region, full_size,
                     );
-                    unsafe { bindings.FORM_OnBeforeClosePage(handle, form) };
                     Ok(())
                 })
                 .map_err(to_document_error),
@@ -749,29 +742,20 @@ impl<'a> PdfiumDocument<'a> {
             let collected = self
                 .backend
                 .on_page(self.document, page, |handle| {
-                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
                     let mut found = Vec::new();
-                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-                        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-                        if annotation.is_null() {
-                            continue;
+                    on_widgets(bindings, handle, |annotation, _index| {
+                        if let Some(field) = read_named_form_field(
+                            bindings,
+                            form,
+                            annotation,
+                            PageIndex(page),
+                            &geometry,
+                            wanted,
+                        ) {
+                            found.push(field);
                         }
-                        let widget = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
-                            == FPDF_ANNOT_WIDGET;
-                        if widget {
-                            if let Some(field) = read_named_form_field(
-                                bindings,
-                                form,
-                                annotation,
-                                PageIndex(page),
-                                &geometry,
-                                wanted,
-                            ) {
-                                found.push(field);
-                            }
-                        }
-                        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                    }
+                        std::ops::ControlFlow::<()>::Continue(())
+                    });
                     Ok(found)
                 })
                 .map_err(to_document_error)?;
@@ -826,31 +810,21 @@ impl<'a> PdfiumDocument<'a> {
         let geometry = self.measure(page).ok()?;
         self.backend
             .on_page(self.document, page.get(), |handle| {
-                let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
-                for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-                    let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-                    if annotation.is_null() {
-                        continue;
-                    }
-                    let field = (unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
-                        == FPDF_ANNOT_WIDGET)
-                        .then(|| {
-                            read_named_form_field(
-                                bindings,
-                                form,
-                                annotation,
-                                page,
-                                &geometry,
-                                Some(name),
-                            )
-                        })
-                        .flatten();
-                    unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                    if field.is_some() {
-                        return Ok(field);
-                    }
-                }
-                Ok(None)
+                Ok(on_widgets(
+                    bindings,
+                    handle,
+                    |annotation, _index| match read_named_form_field(
+                        bindings,
+                        form,
+                        annotation,
+                        page,
+                        &geometry,
+                        Some(name),
+                    ) {
+                        Some(field) => std::ops::ControlFlow::Break(field),
+                        None => std::ops::ControlFlow::Continue(()),
+                    },
+                ))
             })
             .ok()
             .flatten()
@@ -899,17 +873,9 @@ impl<'a> PdfiumDocument<'a> {
         let form = self.form_handle()?;
         let bindings = self.backend.bindings();
         let geometry = self.measure(page).ok()?;
-        let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
         let mut found = None;
-        for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-            let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-            if annotation.is_null() {
-                continue;
-            }
-            let takes_it = (unsafe { bindings.FPDFAnnot_GetSubtype(annotation) }
-                == FPDF_ANNOT_WIDGET)
-                .then(|| read_form_field(bindings, form, annotation, page, &geometry))
-                .flatten()
+        on_widgets(bindings, handle, |annotation, index| {
+            let takes_it = read_form_field(bindings, form, annotation, page, &geometry)
                 .is_some_and(|field| {
                     application_draws_the_list(&field)
                         && field
@@ -917,11 +883,15 @@ impl<'a> PdfiumDocument<'a> {
                             .iter()
                             .any(|widget| widget.page == page && widget.bounds.contains(point))
                 });
-            unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+            // The *last* match wins, not the first: a widget drawn over
+            // another is the one a press lands on, and `/Annots` order is
+            // paint order. So every widget is walked, not just walked until
+            // one takes it.
             if takes_it {
                 found = Some(index);
             }
-        }
+            std::ops::ControlFlow::<()>::Continue(())
+        });
         found
     }
 
@@ -944,23 +914,19 @@ impl<'a> PdfiumDocument<'a> {
         let handle = self.open_form_page(page)?;
         let bindings = self.backend.bindings();
         let geometry = self.measure(page)?;
-        let mut focused = false;
-        let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
-        for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-            let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
-            if annotation.is_null() {
-                continue;
-            }
-            let matches = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) } == FPDF_ANNOT_WIDGET
-                && read_named_form_field(bindings, form, annotation, page, &geometry, Some(name))
+        let focused = on_widgets(bindings, handle, |annotation, _index| {
+            let matches =
+                read_named_form_field(bindings, form, annotation, page, &geometry, Some(name))
                     .is_some();
             if matches {
-                focused = unsafe { bindings.FORM_SetFocusedAnnot(form, annotation) } != 0;
-                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-                break;
+                std::ops::ControlFlow::Break(
+                    unsafe { bindings.FORM_SetFocusedAnnot(form, annotation) } != 0,
+                )
+            } else {
+                std::ops::ControlFlow::Continue(())
             }
-            unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
-        }
+        })
+        .unwrap_or(false);
         if !focused {
             return Err(DocumentError::Backend(format!(
                 "the field {name} could not be focused"
@@ -1157,30 +1123,6 @@ impl<'a> PdfiumDocument<'a> {
 
     pub fn backend_document(&self) -> BackendDocumentId {
         self.document
-    }
-
-    /// Close the open document.
-    ///
-    /// The binding outlives it: PDFium is bound once per process, so closing
-    /// a file and opening another is a document lifetime, not a library one.
-    /// Taking `&mut PdfiumBackend` is what proves nothing else is still
-    /// reading this document when it goes.
-    pub fn close(mut self, backend: &mut PdfiumBackend) {
-        // The form environment first, and in this order: PDFium holds the
-        // address of the environment's callback struct for as long as the
-        // handle lives, so exiting the environment is what makes it safe for
-        // the box to be dropped when `self` goes.
-        self.release_form_page();
-        self.release_text_page();
-        if let Some(form) = self.form.take() {
-            unsafe {
-                backend
-                    .bindings()
-                    .FPDFDOC_ExitFormFillEnvironment(form.handle)
-            };
-            drop(form.environment);
-        }
-        backend.close(self.document);
     }
 
     /// What pulpit can tell the user about this document before they start
@@ -1447,20 +1389,14 @@ impl<'a> PdfiumDocument<'a> {
                     if text_page.is_null() {
                         return Ok(Vec::new());
                     }
-                    let hits = crate::pdf::search::hits_from_pdfium_matches(
+                    let hits = crate::pdf::search::hits_on_loaded_page(
+                        bindings,
+                        text_page,
+                        &geometry,
                         PageIndex(page),
                         &text,
                         &found,
-                        |start, length| {
-                            crate::pdf::search::quads_of(
-                                bindings,
-                                text_page,
-                                &geometry,
-                                start,
-                                length,
-                                limits::MAX_QUADS_PER_HIT,
-                            )
-                        },
+                        limits::MAX_QUADS_PER_HIT,
                     );
                     unsafe { bindings.FPDFText_ClosePage(text_page) };
                     Ok(hits)
@@ -1491,20 +1427,14 @@ impl<'a> PdfiumDocument<'a> {
                 }
                 let text = crate::pdf::search::PageText::extract(bindings, text_page);
                 let found = text.matches(query, limits::MAX_HITS_PER_SEARCH);
-                let hits = crate::pdf::search::hits_from_pdfium_matches(
+                let hits = crate::pdf::search::hits_on_loaded_page(
+                    bindings,
+                    text_page,
+                    &geometry,
                     PageIndex(page),
                     &text,
                     &found,
-                    |start, length| {
-                        crate::pdf::search::quads_of(
-                            bindings,
-                            text_page,
-                            &geometry,
-                            start,
-                            length,
-                            limits::MAX_QUADS_PER_HIT,
-                        )
-                    },
+                    limits::MAX_QUADS_PER_HIT,
                 );
                 unsafe { bindings.FPDFText_ClosePage(text_page) };
                 Ok((hits, text, geometry))
@@ -1543,6 +1473,56 @@ impl<'a> PdfiumDocument<'a> {
                 Ok(collected)
             })
             .map_err(to_document_error)
+    }
+
+    /// Open the page `index` sits on and hand `f` that one annotation
+    /// directly — no walk of anything else on the page (§82.6, §80.2).
+    ///
+    /// The lower half of [`Self::with_annotation`], split out so a caller
+    /// that already knows `(page, index)` from its own [`Self::locate`] —
+    /// [`Self::delete`], chiefly — is not made to call it again just to get
+    /// back to the annotation it already found.
+    fn on_annotation_at<T>(
+        &self,
+        page: PageIndex,
+        index: usize,
+        f: impl FnOnce(FPDF_ANNOTATION) -> T,
+    ) -> Result<T> {
+        let bindings = self.backend.bindings();
+        self.backend
+            .on_page(self.document, page.get(), |handle| {
+                let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index as i32) };
+                if annotation.is_null() {
+                    return Err(PdfError::Render("the annotation went away".into()));
+                }
+                let value = f(annotation);
+                unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+                Ok(value)
+            })
+            .map_err(to_document_error)
+    }
+
+    /// Locate `id`, load its page, and hand `f` that one annotation with its
+    /// page, `/Annots` index and geometry — no walk of the rest of the page,
+    /// and no second visit for whatever `f` needs read off it (§82.6).
+    ///
+    /// Before this existed, `annotation` found `id`'s page and index with
+    /// [`Self::locate`] and then re-summarised *every* annotation on the
+    /// page just to pick the one it already knew the index of; `before_image`
+    /// called `annotation` (paying that cost again) and then walked the page
+    /// a second time for the appearance stream. An eraser sweep is one
+    /// `delete` per stroke, so that was two full-page walks in PDFium string
+    /// reads for every mark erased, on every page a sweep crossed.
+    fn with_annotation<T>(
+        &self,
+        id: &AnnotationId,
+        f: impl FnOnce(FPDF_ANNOTATION, PageIndex, usize, &PageGeometry) -> T,
+    ) -> Result<T> {
+        let (page, index) = self.locate(id)?;
+        let geometry = self.geometry_of(page)?;
+        self.on_annotation_at(page, index, |annotation| {
+            f(annotation, page, index, &geometry)
+        })
     }
 
     /// Find an annotation by identity, returning the page and index it sits
@@ -2075,13 +2055,6 @@ impl<'a> PdfiumDocument<'a> {
         stream.push_str("Q\n");
 
         let rc = unsafe { bindings.FPDFAnnot_SetAP_str(annotation, APPEARANCE_NORMAL, &stream) };
-        let back = unsafe {
-            bindings.FPDFAnnot_GetAP(annotation, APPEARANCE_NORMAL, std::ptr::null_mut(), 0)
-        };
-        eprintln!(
-            "DEBUG setap rc={rc} readback_len={back} stream_len={}",
-            stream.len()
-        );
         if rc == 0 {
             return Err(DocumentError::Backend(
                 "PDFium refused the note's appearance".into(),
@@ -2632,6 +2605,31 @@ impl<'a> PdfiumDocument<'a> {
     }
 }
 
+impl Drop for PdfiumDocument<'_> {
+    /// Release everything this document holds open in PDFium before the
+    /// backend closes the underlying `FPDF_DOCUMENT` (§76.10).
+    ///
+    /// The form environment first, and in this order: PDFium holds the
+    /// address of the environment's callback struct for as long as the
+    /// handle lives, so exiting the environment is what makes it safe for the
+    /// box to be dropped as `self` goes. `PdfiumBackend` outlives every
+    /// document it opened (the `'a` borrow), so its own `Drop` closes the
+    /// `FPDF_DOCUMENT` afterwards — this only has to undo what this struct,
+    /// not the backend, holds open.
+    fn drop(&mut self) {
+        self.release_form_page();
+        self.release_text_page();
+        if let Some(form) = self.form.take() {
+            unsafe {
+                self.backend
+                    .bindings()
+                    .FPDFDOC_ExitFormFillEnvironment(form.handle)
+            };
+            drop(form.environment);
+        }
+    }
+}
+
 /// What a text field's format script makes of its value.
 ///
 /// PDF has no field type for "date". Acrobat's format categories are entries
@@ -2805,6 +2803,43 @@ fn quoted_argument(script: &str, name: &str) -> Option<String> {
     (!pattern.is_empty() && pattern.len() <= 64).then(|| pattern.to_owned())
 }
 
+/// Walk `handle`'s `/Widget` annotations in `/Annots` order, running `f` on
+/// each and closing it whether or not `f` matched (§80.2).
+///
+/// Six near-identical loops — "count the annotations, fetch each, check its
+/// subtype, close it" — used to be hand-written across this file, and they
+/// did not all want the same thing done with a match: one wants the first,
+/// one wants the last, one collects every field on the page, one wants a
+/// page-wide "did anything match" folded into a scan of every page. `f`
+/// returning [`ControlFlow::Break`] stops the walk early and becomes this
+/// function's answer; returning `Continue` keeps it going, which is what a
+/// collector or a "last match wins" caller wants — the result they care
+/// about lives in whatever `f` closed over, not in this function's return.
+fn on_widgets<T>(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_PAGE,
+    mut f: impl FnMut(pdfium_render::prelude::FPDF_ANNOTATION, i32) -> std::ops::ControlFlow<T>,
+) -> Option<T> {
+    let count = unsafe { bindings.FPDFPage_GetAnnotCount(handle) }.max(0);
+    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
+        let annotation = unsafe { bindings.FPDFPage_GetAnnot(handle, index) };
+        if annotation.is_null() {
+            continue;
+        }
+        let is_widget = unsafe { bindings.FPDFAnnot_GetSubtype(annotation) } == FPDF_ANNOT_WIDGET;
+        let outcome = if is_widget {
+            f(annotation, index)
+        } else {
+            std::ops::ControlFlow::Continue(())
+        };
+        unsafe { bindings.FPDFPage_CloseAnnot(annotation) };
+        if let std::ops::ControlFlow::Break(value) = outcome {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// One of a field's four `/AA` scripts, as text.
 fn additional_action_script(
     bindings: &dyn PdfiumLibraryBindings,
@@ -2855,38 +2890,10 @@ fn field_script_reaches_out(
 ) -> bool {
     /// `FPDF_ANNOT_AACTION_*`, from `fpdf_annot.h`.
     const EVENTS: [i32; 4] = [12, 13, 14, 15];
-    for event in EVENTS {
-        let length = unsafe {
-            bindings.FPDFAnnot_GetFormAdditionalActionJavaScript(
-                form,
-                annotation,
-                event,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        // 2 is the null terminator alone: no script for this event.
-        if length <= 2 || length as usize > limits::MAX_METADATA_BYTES {
-            continue;
-        }
-        let mut buffer = vec![0u16; length as usize / 2];
-        unsafe {
-            bindings.FPDFAnnot_GetFormAdditionalActionJavaScript(
-                form,
-                annotation,
-                event,
-                buffer.as_mut_ptr().cast(),
-                length,
-            )
-        };
-        let script: String = String::from_utf16_lossy(&buffer)
-            .trim_end_matches('\0')
-            .to_owned();
-        if reaches_out.iter().any(|name| script.contains(name)) {
-            return true;
-        }
-    }
-    false
+    EVENTS.into_iter().any(|event| {
+        additional_action_script(bindings, form, annotation, event)
+            .is_some_and(|script| reaches_out.iter().any(|name| script.contains(name)))
+    })
 }
 
 /// Whether a document carries a cryptographic signature — including the
@@ -3592,21 +3599,10 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn annotation(&self, id: &AnnotationId) -> Result<AnnotationSummary> {
-        let (page, index) = self.locate(id)?;
-        let summaries = self.annotations(page)?;
-        summaries
-            .into_iter()
-            .nth(index)
-            .filter(|summary| summary.id == *id)
-            // The index is an `/Annots` index and the summary list skips form
-            // widgets, so the two can disagree; the name is the identity.
-            .or_else(|| {
-                self.annotations(page)
-                    .ok()?
-                    .into_iter()
-                    .find(|summary| summary.id == *id)
-            })
-            .ok_or_else(|| DocumentError::NoSuchAnnotation(id.clone()))
+        self.with_annotation(id, |annotation, page, index, geometry| {
+            self.summarise(index, annotation, page, geometry)
+        })?
+        .ok_or_else(|| DocumentError::NoSuchAnnotation(id.clone()))
     }
 
     fn create(&mut self, id: &AnnotationId, draft: &AnnotationDraft) -> Result<AnnotationSummary> {
@@ -3657,9 +3653,7 @@ impl DocumentBackend for PdfiumDocument<'_> {
                 // Content generation is what commits the new annotation's
                 // appearance into the page; without it the mark is in
                 // `/Annots` and invisible.
-                if std::env::var("PULPIT_DEBUG_NOGEN").is_err() {
-                    unsafe { bindings.FPDFPage_GenerateContent(handle) };
-                }
+                unsafe { bindings.FPDFPage_GenerateContent(handle) };
                 Ok(())
             })
             .map_err(to_document_error)?;
@@ -3722,8 +3716,22 @@ impl DocumentBackend for PdfiumDocument<'_> {
     fn delete(&mut self, id: &AnnotationId) -> Result<AnnotationBeforeImage> {
         self.release_text_page();
         self.forget_page_text();
-        let before = self.before_image(id)?;
+        // `locate` once, and the before-image capture below reuses it
+        // directly through `on_annotation_at` instead of calling `locate`
+        // again through `before_image` (§82.6).
         let (page, index) = self.locate(id)?;
+        let geometry = self.geometry_of(page)?;
+        let before = self.on_annotation_at(page, index, |annotation| {
+            let draft = self
+                .summarise(index, annotation, page, &geometry)
+                .and_then(|summary| summary.to_draft());
+            let preserved = capture_appearance(self.backend.bindings(), annotation);
+            AnnotationBeforeImage {
+                page,
+                draft,
+                preserved,
+            }
+        })?;
         let bindings = self.backend.bindings();
         let document = self.document;
         self.backend
@@ -3757,29 +3765,24 @@ impl DocumentBackend for PdfiumDocument<'_> {
     }
 
     fn before_image(&self, id: &AnnotationId) -> Result<AnnotationBeforeImage> {
-        let (page, _) = self.locate(id)?;
-        let summary = self.annotation(id)?;
-        let geometry = self.geometry_of(page)?;
-        let _ = geometry;
-        // The same conversion the editor uses to build a replacement, so an
-        // undo puts back exactly what a replace would have written.
-        let draft = summary.to_draft();
-        // The appearance stream is the entry that decides how the mark looks
-        // elsewhere, so it is the one worth carrying even though the general
-        // dictionary cannot be walked (see the module note).
-        let preserved = self
-            .on_annotations(page, |_, annotation, _| {
-                let name = self.string_value(annotation, "NM")?;
-                (AnnotationId::imported(&name).as_ref() == Some(id))
-                    .then(|| capture_appearance(self.backend.bindings(), annotation))
-            })?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        Ok(AnnotationBeforeImage {
-            page,
-            draft,
-            preserved,
+        // One page load, one annotation fetched by its known index — not
+        // `annotation(id)`'s summary of the whole page followed by a second
+        // walk for the appearance stream (§82.6).
+        self.with_annotation(id, |annotation, page, index, geometry| {
+            // The same conversion the editor uses to build a replacement, so
+            // an undo puts back exactly what a replace would have written.
+            let draft = self
+                .summarise(index, annotation, page, geometry)
+                .and_then(|summary| summary.to_draft());
+            // The appearance stream is the entry that decides how the mark
+            // looks elsewhere, so it is the one worth carrying even though
+            // the general dictionary cannot be walked (see the module note).
+            let preserved = capture_appearance(self.backend.bindings(), annotation);
+            AnnotationBeforeImage {
+                page,
+                draft,
+                preserved,
+            }
         })
     }
 
@@ -4094,28 +4097,19 @@ impl DocumentBackend for PdfiumDocument<'_> {
                     // Find the widget by name and hand it to PDFium to focus.
                     // A click cannot do this when widgets overlap, which is
                     // exactly when the navigation list is the only way in.
-                    let count = bindings.FPDFPage_GetAnnotCount(handle).max(0);
-                    for index in 0..count.min(limits::MAX_ANNOTATIONS_PER_PAGE as i32) {
-                        let annotation = bindings.FPDFPage_GetAnnot(handle, index);
-                        if annotation.is_null() {
-                            continue;
-                        }
-                        let matches = bindings.FPDFAnnot_GetSubtype(annotation)
-                            == FPDF_ANNOT_WIDGET
-                            && form_string(bindings, |buffer, length| {
-                                bindings
-                                    .FPDFAnnot_GetFormFieldName(form, annotation, buffer, length)
-                            })
-                            .as_deref()
-                                == Some(name.as_str());
+                    on_widgets(bindings, handle, |annotation, _index| {
+                        let matches = form_string(bindings, |buffer, length| {
+                            bindings.FPDFAnnot_GetFormFieldName(form, annotation, buffer, length)
+                        })
+                        .as_deref()
+                            == Some(name.as_str());
                         if matches {
                             bindings.FORM_SetFocusedAnnot(form, annotation);
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
                         }
-                        bindings.FPDFPage_CloseAnnot(annotation);
-                        if matches {
-                            break;
-                        }
-                    }
+                    });
                 }
                 // The clipboard trio. All three are PDFium's own entry points
                 // into the selection it made, which is the only place the

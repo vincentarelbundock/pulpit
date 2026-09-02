@@ -6,8 +6,7 @@
 //! is nothing honest to map them onto. The UI reflects that rather than
 //! offering controls that refuse when pressed (§48.3).
 
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 
 use pulpit_core::annotate::{AnnotationDraft, AnnotationId};
 use pulpit_core::notes::Region;
@@ -19,21 +18,29 @@ use crate::document::model::{
 };
 use crate::document::unsupported_pdf_semantics;
 use crate::document::{DocumentBackend, DocumentError, Result};
-use crate::images::decode::{self, DecodedCache, DecodedKey};
-use crate::images::table::{list_source, resolve_source, PageSource, PageTable};
+use crate::images::backend::ImageBackend;
+use crate::pdf::{BackendDocumentId, NeverCancel, PdfBackend, RenderRequest};
 
 /// One open image document — a folder or a comic archive — for the document
 /// worker.
+///
+/// Wraps [`ImageBackend`] the way [`crate::djvu::document::DjvuDocument`]
+/// wraps [`crate::djvu::backend::DjvuBackend`] (§80.4): rendering and its
+/// decoded-page cache are the backend's, not reimplemented here a second
+/// time with its own `Mutex<DecodedCache>`.
 pub struct ImageDocument {
-    table: PageTable,
+    backend: ImageBackend,
+    handle: BackendDocumentId,
     info: OpenDocumentInfo,
     /// Every page's geometry, measured once at open.
     ///
-    /// The reader asks for geometries in runs as it lays the column out, and
-    /// answering each from the source would re-walk an archive per page. One
+    /// Kept here rather than asked of the backend per page: the reader asks
+    /// for geometries in runs as it lays the column out, and an archive
+    /// source answers per file only by re-walking the whole archive
+    /// (`ImageBackend::page_size` is a single-page probe, not a cache) — one
     /// pass at open is the same total work, done once.
     geometry: Vec<PageGeometry>,
-    cache: Mutex<DecodedCache>,
+    path: PathBuf,
 }
 
 /// Why an operation that only a PDF can answer was refused, in the words the
@@ -45,21 +52,20 @@ fn unsupported(what: &str) -> DocumentError {
 impl ImageDocument {
     /// Open `source` as an image document. A file resolves to its parent
     /// directory (§40.2) and a comic archive is the document itself (§54.1),
-    /// exactly as the renderer's backend does.
+    /// exactly as the renderer's backend does — the same backend, here,
+    /// since this document *is* one held open for editing rather than for
+    /// the render pool.
     pub fn open(source: &Path) -> Result<ImageDocument> {
         // §61.2 and §61.4: a format pulpit does not read is named, not
         // reported as a damaged archive.
         if let Some(message) = crate::formats::unsupported_format(source) {
             return Err(DocumentError::UnsupportedFormat(message.to_string()));
         }
-        let resolved = resolve_source(source).ok_or_else(|| {
-            DocumentError::Backend(format!(
-                "{} is not a directory, a comic archive or a supported image",
-                source.display()
-            ))
-        })?;
-        let table =
-            list_source(&resolved.source).map_err(|e| DocumentError::Backend(e.to_string()))?;
+        let mut backend = ImageBackend::new();
+        let handle = backend
+            .open(source)
+            .map_err(|e| DocumentError::Backend(e.to_string()))?;
+        let table = backend.table(handle).expect("just opened").clone();
         let geometry = measure(&table);
         Ok(ImageDocument {
             info: OpenDocumentInfo {
@@ -70,52 +76,29 @@ impl ImageDocument {
                 first_page: geometry.first().copied().unwrap_or_default(),
                 has_form: false,
             },
-            table,
+            path: table.path().to_path_buf(),
+            backend,
+            handle,
             geometry,
-            cache: Mutex::new(DecodedCache::default()),
         })
-    }
-
-    pub fn table(&self) -> &PageTable {
-        &self.table
     }
 
     /// The document's own path: the folder, or the archive file.
     pub fn path(&self) -> &Path {
-        self.table.path()
+        &self.path
     }
 }
 
 /// Every page's geometry, in one pass over the source.
-fn measure(table: &PageTable) -> Vec<PageGeometry> {
-    let sizes: Vec<Option<PageGeometry>> = match table.source() {
-        PageSource::Archive { path, kind } => {
-            let measured = crate::images::archive::measure_entries(path, *kind);
-            table
-                .entries()
-                .iter()
-                .map(|entry| {
-                    measured
-                        .get(&entry.name)
-                        .map(|(width, height)| PageGeometry::upright(*width as f32, *height as f32))
-                })
-                .collect()
-        }
-        PageSource::Directory(_) => (0..table.len())
-            .map(|page| {
-                table
-                    .locate(page)
-                    .and_then(|at| decode::dimensions_at(&at).ok())
-                    .map(|(width, height)| PageGeometry::upright(width as f32, height as f32))
-            })
-            .collect(),
-    };
+fn measure(table: &crate::images::table::PageTable) -> Vec<PageGeometry> {
+    let sizes = crate::images::table::measure_pages(table);
     // A page that will not decode keeps its place and takes a plausible
     // shape, so the column lays out and the failure shows up where it
     // belongs — in that page's own render (§49).
     let mut geometry: Vec<PageGeometry> = Vec::with_capacity(sizes.len());
     for size in sizes {
         let resolved = size
+            .map(|(width, height)| PageGeometry::upright(width as f32, height as f32))
             .or_else(|| geometry.first().copied())
             .unwrap_or_default();
         geometry.push(resolved);
@@ -144,49 +127,28 @@ impl DocumentBackend for ImageDocument {
         region: Region,
         width: u32,
         height: u32,
-        _full_size: Option<(u32, u32)>,
+        full_size: Option<(u32, u32)>,
         rgba: &mut [u8],
     ) -> Result<()> {
-        let entry = self
-            .table
-            .entries()
-            .get(page.get())
-            .ok_or(DocumentError::NoSuchPage {
-                page: page.get(),
-                count: self.table.len(),
-            })?;
-        let key = DecodedKey {
-            document: 0,
+        let request = RenderRequest {
+            document: self.handle,
             page: page.get(),
-            len: entry.len,
-            modified: entry.modified,
+            region,
+            width,
+            height,
+            // An image has no annotation model to draw over it either way;
+            // set the way `DjvuDocument` sets it so the two non-PDF readers
+            // do not differ for a reason nobody can find later.
+            with_annotations: true,
+            full_size,
         };
-        let cached = self.cache.lock().ok().and_then(|mut cache| cache.get(&key));
-        let image = match cached {
-            Some(image) => image,
-            None => {
-                let at = self
-                    .table
-                    .locate(page.get())
-                    .ok_or(DocumentError::NoSuchPage {
-                        page: page.get(),
-                        count: self.table.len(),
-                    })?;
-                let decoded = std::sync::Arc::new(
-                    decode::decode_at(&at).map_err(|e| DocumentError::Backend(e.to_string()))?,
-                );
-                if let Ok(mut cache) = self.cache.lock() {
-                    cache.insert(key, std::sync::Arc::clone(&decoded));
-                }
-                decoded
-            }
-        };
-        decode::scale_into(&image, region, width, height, rgba)
+        self.backend
+            .render_into(&request, rgba, &NeverCancel)
             .map_err(|e| DocumentError::Backend(e.to_string()))
     }
 
     fn source(&self) -> Option<&Path> {
-        Some(self.table.path())
+        Some(&self.path)
     }
 
     // Everything below is a PDF semantic. `Unsupported` rather than an empty

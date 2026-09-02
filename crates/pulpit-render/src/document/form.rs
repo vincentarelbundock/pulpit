@@ -150,6 +150,25 @@ impl DirtyRect {
         (self.right - self.left).abs() <= f64::EPSILON
             || (self.top - self.bottom).abs() <= f64::EPSILON
     }
+
+    /// This rectangle with `left <= right` and `bottom <= top`.
+    ///
+    /// [`Self::union`] assumes that orientation — it takes the *smaller* of
+    /// the two lefts and the *larger* of the two rights, and likewise for
+    /// top/bottom — which is only the cover of both rectangles when both
+    /// already agree on which corner is which. [`is_empty`](Self::is_empty)
+    /// is deliberately winding-agnostic because PDFium hands the four numbers
+    /// over in whatever order the widget's rectangle happened to be written
+    /// in the file (§77.8), so callers normalise here before ever calling
+    /// `union` rather than trusting the order they arrived in.
+    pub fn normalised(self) -> DirtyRect {
+        DirtyRect {
+            left: self.left.min(self.right),
+            right: self.left.max(self.right),
+            top: self.top.max(self.bottom),
+            bottom: self.top.min(self.bottom),
+        }
+    }
 }
 
 /// PDFium's `IPDF_JSPLATFORM`, mirrored.
@@ -568,7 +587,8 @@ unsafe extern "C" fn invalidate(
                 top,
                 right,
                 bottom,
-            };
+            }
+            .normalised();
             if rect.is_empty() {
                 return;
             }
@@ -1063,6 +1083,29 @@ mod tests {
     }
 
     #[test]
+    fn unions_orientation_bug_is_fixed_by_normalising_first() {
+        // §77.8: `union` takes the smaller of the two lefts and the larger of
+        // the two rights (and likewise top/bottom), which is only the *cover*
+        // of both rectangles when they already agree on which corner is
+        // which. Two rectangles reported with opposite windings — exactly
+        // what PDFium hands over, per the file's own comment above — used to
+        // combine into the *gap* between them instead.
+        let upright = rect(0.0, 100.0, 10.0, 0.0); // left<=right, top>=bottom
+        let upside_down = rect(90.0, 0.0, 100.0, 100.0); // top<=bottom, this time
+        let combined = upright.normalised().union(upside_down.normalised());
+        assert_eq!(
+            combined,
+            rect(0.0, 100.0, 100.0, 0.0),
+            "must be the cover of both"
+        );
+        // Both orders give the same answer.
+        assert_eq!(
+            upside_down.normalised().union(upright.normalised()),
+            combined
+        );
+    }
+
+    #[test]
     fn a_storm_of_invalidations_collapses_into_one_redraw() {
         // A8: a document that invalidates in a loop must not turn one
         // keystroke into unbounded drawing.
@@ -1075,6 +1118,41 @@ mod tests {
         let dirty = environment.take_dirty();
         assert_eq!(dirty.len(), 1, "the storm did not collapse");
         assert!(!dirty[0].is_empty());
+    }
+
+    #[test]
+    fn a_storm_of_mixed_winding_invalidations_still_covers_all_of_them() {
+        // §77.8: `invalidate` now normalises every rectangle before it is
+        // pushed, so the fold in `take_dirty` — which is where a hostile
+        // stream of invalidations is forced through `union` — combines
+        // rectangles PDFium handed over in whatever order into their real
+        // cover, whichever of the two windings each one arrived in.
+        let mut environment = FormEnvironment::new();
+        let this = as_pdfium_would(&mut environment);
+        for step in 0..(limits::MAX_DIRTY_RECTS * 8) {
+            let at = step as f64;
+            if step % 2 == 0 {
+                unsafe { invalidate(this, std::ptr::null_mut(), at, at + 2.0, at + 1.0, at) };
+            } else {
+                // The winding `an_upside_down_invalidation_is_still_a_redraw`
+                // exercises on its own: `top`/`bottom` swapped this time.
+                unsafe { invalidate(this, std::ptr::null_mut(), at, at, at + 1.0, at + 2.0) };
+            }
+        }
+        let dirty = environment.take_dirty();
+        assert_eq!(dirty.len(), 1, "the storm did not collapse");
+        let combined = dirty[0];
+        assert!(!combined.is_empty());
+        // `invalidate` itself bounds what it queues to `MAX_DIRTY_RECTS * 4`
+        // entries, so only the first that many of these 128 calls landed —
+        // the cover this checks is of *those*, not of the whole storm. What
+        // matters for §77.8 is that it is the cover, not the gap a broken
+        // `union` would leave.
+        let last = (limits::MAX_DIRTY_RECTS * 4 - 1) as f64;
+        assert_eq!(combined.left.min(combined.right), 0.0);
+        assert_eq!(combined.right.max(combined.left), last + 1.0);
+        assert_eq!(combined.top.max(combined.bottom), last + 2.0);
+        assert_eq!(combined.bottom.min(combined.top), 0.0);
     }
 
     #[test]

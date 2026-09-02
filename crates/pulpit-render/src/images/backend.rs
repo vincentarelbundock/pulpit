@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use pulpit_core::PageSize;
 
 use crate::images::decode::{self, DecodedCache, DecodedKey, ImageFailure};
-use crate::images::table::{list_source, resolve_source, PageSource, PageTable};
+use crate::images::table::{list_source, resolve_source, PageTable};
 use crate::pdf::{
     BackendDocumentId, CancelSignal, DocumentMetadata, PdfBackend, PdfError, RenderRequest,
     RenderedPage, Result,
@@ -70,31 +70,14 @@ impl ImageBackend {
             width: width as f32,
             height: height as f32,
         };
-        let measured: Vec<Option<PageSize>> = match table.source() {
-            PageSource::Archive { path, kind } => {
-                let sizes = crate::images::archive::measure_entries(path, *kind);
-                table
-                    .entries()
-                    .iter()
-                    .map(|entry| sizes.get(&entry.name).copied().map(of))
-                    .collect()
-            }
-            PageSource::Directory(_) => (0..table.len())
-                .map(|page| {
-                    table
-                        .locate(page)
-                        .and_then(|at| decode::dimensions_at(&at).ok())
-                        .map(of)
-                })
-                .collect(),
-        };
+        let measured = crate::images::table::measure_pages(table);
         // A page that could not be measured takes the first page's size
         // rather than truncating the vector, exactly as `collect_page_sizes`
         // does: a hole in the middle would silently turn every later page's
         // lookup into a fallback.
         let mut sizes: Vec<PageSize> = Vec::with_capacity(measured.len());
         for size in measured {
-            match size.or_else(|| sizes.first().copied()) {
+            match size.map(of).or_else(|| sizes.first().copied()) {
                 Some(size) => sizes.push(size),
                 // The first page itself is unmeasurable: there is nothing to
                 // fall back to, and the caller reads an empty vector as

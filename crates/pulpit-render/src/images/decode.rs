@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use image::imageops::FilterType;
-use image::RgbaImage;
+use image::{GenericImageView, RgbaImage};
 use pulpit_core::notes::Region;
 
 /// The largest input either dimension may have before pulpit refuses to
@@ -355,27 +355,51 @@ pub fn scale_into(
             reason: format!("target holds {} bytes, needs {needed}", target.len()),
         });
     }
-    let source = crop(image, region);
-    let scaled = if source.width() == width && source.height() == height {
-        source
+    // §82.7: a whole-page render at the page's own pixel size — the common
+    // case, and the only shape a target too small for the frame ever refuses
+    // above — used to clone the decoded image to "crop" it to itself and
+    // then copy that clone into `target`: two full-frame copies for a no-op.
+    // The decoded buffer already *is* the answer here, so it is copied
+    // straight out of `image` with neither clone nor resample.
+    if region == Region::FULL && image.width() == width && image.height() == height {
+        target[..needed].copy_from_slice(image.as_raw());
+        return Ok(());
+    }
+    // CatmullRom rather than Lanczos3: a projected photograph shows the
+    // ringing Lanczos puts on hard edges, and the difference in sharpness at
+    // presentation sizes is not visible from a seat.
+    if region == Region::FULL {
+        // No crop at all: resample straight from the borrowed source, rather
+        // than cloning it first only to resample the clone.
+        let scaled = image::imageops::resize(image, width, height, FilterType::CatmullRom);
+        target[..needed].copy_from_slice(scaled.as_raw());
+        return Ok(());
+    }
+    // A real crop borrows a view rather than allocating a copy just to throw
+    // it at the resampler (or, when no resampling is even needed below, just
+    // to throw it away): `crop_imm` costs nothing until something is done
+    // with what it names.
+    let cropped = crop_view(image, region);
+    if cropped.width() == width && cropped.height() == height {
+        // The one case where the crop *is* the whole answer: materialising
+        // it is unavoidable here, because a `SubImage` is not contiguous and
+        // `target` needs contiguous bytes, but it is exactly one copy rather
+        // than the resample path's would-be copy of a copy.
+        let materialized = cropped.to_image();
+        target[..needed].copy_from_slice(materialized.as_raw());
     } else {
-        // CatmullRom rather than Lanczos3: a projected photograph shows the
-        // ringing Lanczos puts on hard edges, and the difference in sharpness
-        // at presentation sizes is not visible from a seat.
-        image::imageops::resize(&source, width, height, FilterType::CatmullRom)
-    };
-    target[..needed].copy_from_slice(scaled.as_raw());
+        let scaled =
+            image::imageops::resize(cropped.inner(), width, height, FilterType::CatmullRom);
+        target[..needed].copy_from_slice(scaled.as_raw());
+    }
     Ok(())
 }
 
-/// The sub-image `region` names, in pixels.
+/// A borrowed view of the part of `image` that `region` names, in pixels.
 ///
 /// Rounded outwards to at least one pixel: a crop that rounded to zero would
 /// panic in the resampler rather than draw a very small piece of the page.
-fn crop(image: &RgbaImage, region: Region) -> RgbaImage {
-    if region == Region::FULL {
-        return image.clone();
-    }
+fn crop_view(image: &RgbaImage, region: Region) -> image::SubImage<&RgbaImage> {
     let (full_width, full_height) = (image.width(), image.height());
     let x = ((region.x * full_width as f32).round() as i64).clamp(0, full_width as i64 - 1) as u32;
     let y =
@@ -384,7 +408,7 @@ fn crop(image: &RgbaImage, region: Region) -> RgbaImage {
         as u32;
     let h = ((region.height * full_height as f32).round() as i64).clamp(1, (full_height - y) as i64)
         as u32;
-    image::imageops::crop_imm(image, x, y, w, h).to_image()
+    image::imageops::crop_imm(image, x, y, w, h)
 }
 
 #[cfg(test)]
@@ -465,6 +489,20 @@ mod tests {
         let mut target = vec![0u8; 2 * 2 * 4];
         scale_into(&source, Region::FULL, 2, 2, &mut target).unwrap();
         assert_eq!(&target[..4], &[1, 2, 3, 255]);
+    }
+
+    /// §82.7: a whole-page render at the page's own size is the no-crop,
+    /// no-resample path — the one that used to clone the decoded image to
+    /// "crop" it to itself before copying that clone out. Every pixel,
+    /// not just the first, must still be the byte-for-byte source.
+    #[test]
+    fn a_full_region_at_native_size_copies_the_source_buffer_exactly() {
+        let mut source = RgbaImage::from_pixel(3, 2, image::Rgba([0, 0, 0, 0]));
+        source.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        source.put_pixel(2, 1, image::Rgba([9, 8, 7, 255]));
+        let mut target = vec![0xAAu8; 3 * 2 * 4];
+        scale_into(&source, Region::FULL, 3, 2, &mut target).unwrap();
+        assert_eq!(target, source.as_raw().as_slice());
     }
 
     #[test]
