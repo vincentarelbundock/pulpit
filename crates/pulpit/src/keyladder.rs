@@ -67,6 +67,14 @@ pub enum Rung {
     /// A save under review. Escape declines: writing no file leaves
     /// everything as it was.
     PendingSaveReview,
+    /// The Sign flow's own dialog — profile, passphrase, confirm, busy —
+    /// distinct from [`Rung::PendingSaveReview`], which is the save-review
+    /// step the flow can pass through on its way and already declines it
+    /// (§77.6). With no rung here, every key that is not a shortcut the
+    /// dialog itself handles fell through to the keymap: Ctrl+O opened a
+    /// file picker over a sign dialog that was still open. Escape cancels,
+    /// which §33 says is always safe because nothing has been written yet.
+    SignDialog,
     /// A cue going off. Escape acknowledges it — hands are not always on
     /// the mouse — and the ringing outranks the popup that configured it.
     AlarmRinging,
@@ -119,7 +127,7 @@ pub enum Rung {
 impl Rung {
     /// Every rung, for the exhaustiveness check. Order is meaningless here;
     /// [`LADDER`] is the order.
-    pub const ALL: [Rung; 22] = [
+    pub const ALL: [Rung; 23] = [
         Rung::AnnotationTyping,
         Rung::ComposingMark,
         Rung::HeldMarks,
@@ -128,6 +136,7 @@ impl Rung {
         Rung::ConfirmResetColors,
         Rung::PendingFormGoto,
         Rung::PendingSaveReview,
+        Rung::SignDialog,
         Rung::AlarmRinging,
         Rung::TimerOvertime,
         Rung::AlarmPopup,
@@ -147,7 +156,7 @@ impl Rung {
 
 /// The order itself. Top to bottom; first active rung to consume the key
 /// wins.
-pub const LADDER: [Rung; 22] = [
+pub const LADDER: [Rung; 23] = [
     // Typing surfaces first: while characters are being written, letters
     // are letters.
     Rung::AnnotationTyping,
@@ -165,6 +174,7 @@ pub const LADDER: [Rung; 22] = [
     Rung::ConfirmResetColors,
     Rung::PendingFormGoto,
     Rung::PendingSaveReview,
+    Rung::SignDialog,
     Rung::AlarmRinging,
     Rung::TimerOvertime,
     Rung::AlarmPopup,
@@ -260,6 +270,13 @@ mod tests {
         // takes the first Escape.
         assert!(position(Rung::AlarmRinging) < position(Rung::AlarmPopup));
         assert!(position(Rung::TimerOvertime) < position(Rung::TimerPopup));
+    }
+
+    #[test]
+    fn the_sign_dialog_outranks_the_keymap_so_ctrl_o_cannot_reach_through_it() {
+        // §77.6: with no rung for the Sign dialog, Ctrl+O fell through to
+        // the keymap and opened a file picker over an open sign flow.
+        assert!(position(Rung::SignDialog) < position(Rung::Keymap));
     }
 
     #[test]
