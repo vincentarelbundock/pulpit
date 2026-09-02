@@ -199,20 +199,24 @@ pub fn stored_summary(summary: pulpit_render::sign::CredentialSummary) -> Stored
         subject: summary.subject,
         issuer: summary.issuer,
         serial: summary.serial,
-        not_before: summary.not_before,
-        not_after: summary.not_after,
+        // Settings stores the validity bounds as display text — the same
+        // shape the Sign flow's own caption uses — rather than the unix
+        // seconds `CredentialSummary` now carries, so it is formatted once,
+        // here, on the way in.
+        not_before: crate::signing::format_validity_bound(summary.not_before),
+        not_after: crate::signing::format_validity_bound(summary.not_after),
         sha256_fingerprint: summary.sha256_fingerprint,
         key_algorithm: summary.key_algorithm,
         key_bits: summary.key_bits,
     }
 }
 
+/// The `CN=` component of `subject`. See
+/// [`crate::signing::subject_common_name`], which does the same best-effort
+/// split — kept in one place after the two drifted into identical bodies
+/// under different names (§80.8).
 pub fn common_name(subject: &str) -> &str {
-    subject
-        .split(',')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix("CN="))
-        .unwrap_or(subject)
+    crate::signing::subject_common_name(subject)
 }
 
 impl StoredSignatureContent {

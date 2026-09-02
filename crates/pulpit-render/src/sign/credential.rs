@@ -98,8 +98,12 @@ pub struct CredentialSummary {
     pub subject: String,
     pub issuer: String,
     pub serial: String,
-    pub not_before: String,
-    pub not_after: String,
+    /// Unix seconds — see [`crate::verify::cms_check::CertificateSummary`],
+    /// which carries the same fields the same way; this one used to be a
+    /// formatted string that every caller had to re-parse, and a parse
+    /// failure there read as "valid".
+    pub not_before: i64,
+    pub not_after: i64,
     pub sha256_fingerprint: String,
     pub key_algorithm: String,
     pub key_bits: Option<usize>,
@@ -428,13 +432,15 @@ impl Credential {
                 .tbs_certificate
                 .validity
                 .not_before
-                .to_string(),
+                .to_unix_duration()
+                .as_secs() as i64,
             not_after: self
                 .signer_certificate
                 .tbs_certificate
                 .validity
                 .not_after
-                .to_string(),
+                .to_unix_duration()
+                .as_secs() as i64,
             sha256_fingerprint: fingerprint,
             key_algorithm: self.public_key_info.key_type_name().to_string(),
             key_bits: self.public_key_info.bits(),

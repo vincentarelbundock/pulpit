@@ -4123,7 +4123,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 theme::typography::body(crate::signing::subject_common_name(&summary.subject)),
                 theme::typography::caption(format!(
                     "Valid {} — {}",
-                    summary.not_before, summary.not_after
+                    crate::signing::format_validity_bound(summary.not_before),
+                    crate::signing::format_validity_bound(summary.not_after)
                 )),
                 theme::typography::caption(format!("SHA-256 {}", summary.sha256_fingerprint)),
                 theme::typography::caption(crate::signing::IDENTITY_DISCLOSURE),
