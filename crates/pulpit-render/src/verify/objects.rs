@@ -715,11 +715,17 @@ impl XrefIndex {
     }
 }
 
-struct XrefSection {
-    entries: Vec<(u32, XrefEntry)>,
-    trailer: Dict,
-    prev: Option<u64>,
-    xref_stm: Option<u64>,
+pub(super) struct XrefSection {
+    pub(super) entries: Vec<(u32, XrefEntry)>,
+    pub(super) trailer: Dict,
+    pub(super) prev: Option<u64>,
+    pub(super) xref_stm: Option<u64>,
+    /// The absolute file offset past this section's own container: past the
+    /// classic trailer dictionary's closing `>>`, or past the cross-reference
+    /// stream object's `endobj`. Compared against a signature's coverage end
+    /// by `classify_coverage` — see the caller in `verify::mod` for why this
+    /// must be an absolute offset and not one relative to the section start.
+    pub(super) end: u64,
 }
 
 /// Find the offset the file's last `startxref` names.
@@ -748,22 +754,22 @@ fn parse_xref_section(bytes: &[u8], offset: u64, budget: &mut DecodeBudget) -> R
     }
 }
 
-/// Return the object numbers defined by exactly one cross-reference section.
+/// Parse exactly one cross-reference section: its entries, trailer, `/Prev`,
+/// `/XRefStm` and container end.
 ///
 /// Revision accounting needs the membership of each section independently,
 /// rather than the merged newest-wins index built by [`XrefIndex`]. Keeping
 /// that accounting on this parser also means xref streams are decoded with
-/// the same filter support and resource bounds as ordinary object resolution.
+/// the same filter support and resource bounds as ordinary object resolution,
+/// and that the container end — needed to compare a signature's coverage
+/// against a revision's true extent — comes from the one real parser rather
+/// than a second, token-searching one that can disagree with it.
 pub(super) fn xref_section_object_numbers(
     bytes: &[u8],
     offset: u64,
     budget: &mut DecodeBudget,
-) -> Result<std::collections::HashSet<u32>> {
-    Ok(parse_xref_section(bytes, offset, budget)?
-        .entries
-        .into_iter()
-        .map(|(number, _)| number)
-        .collect())
+) -> Result<XrefSection> {
+    parse_xref_section(bytes, offset, budget)
 }
 
 fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
@@ -829,6 +835,12 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
         PdfValue::Dict(d) => d,
         _ => Dict::new(),
     };
+    // `lex.pos` lands exactly past the trailer dictionary's own closing `>>`:
+    // `parse_dict_or_stream` breaks out of its loop the instant it consumes
+    // that byte pair, so nested dictionaries — an inline `/Info`, or one
+    // planted for the purpose — cannot end the scan early the way a
+    // depth-tracking token search could get wrong.
+    let end = lex.pos as u64;
     let prev = trailer
         .get("Prev")
         .and_then(|v| v.as_i64())
@@ -842,6 +854,7 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
         trailer,
         prev,
         xref_stm,
+        end,
     })
 }
 
@@ -859,7 +872,7 @@ fn parse_xref_stream_section(
     budget: &mut DecodeBudget,
 ) -> Result<XrefSection> {
     let mut lex = Lexer::new(bytes, pos);
-    let (_num, _gen, value, _end) = lex.parse_indirect_object()?;
+    let (_num, _gen, value, end) = lex.parse_indirect_object()?;
     let PdfValue::Stream {
         ref dict,
         body_start,
@@ -1044,6 +1057,7 @@ fn parse_xref_stream_section(
         trailer: dict.clone(),
         prev,
         xref_stm: None,
+        end: end as u64,
     })
 }
 

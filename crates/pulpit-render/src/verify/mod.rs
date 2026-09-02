@@ -38,7 +38,7 @@
 //!   (`a_classic_files_coverage_is_classified_against_its_real_container_end`)
 //!
 //! * **A nested dictionary in a trailer no longer truncates the scan.** Both
-//!   this module's `parse_xref_extent` and `pdfwrite::IncrementalWriter::open`
+//!   both `objects::xref_section_object_numbers` and `pdfwrite::IncrementalWriter::open`
 //!   count dictionary depth, so `/Root`, `/Size`, `/ID` and `/XRefStm` written
 //!   after an inline `/Info` are seen. `open` therefore now *succeeds* on
 //!   documents it used to open with an empty trailer — and hybrid files it
@@ -216,16 +216,26 @@ impl RevisionMap {
                 return Err(VerifyError::TruncatedFile(current_startxref));
             }
 
-            // Parse xref and detect hybrid
-            let (xref_start, xref_end, has_hybrid) = parse_xref_extent(bytes, current_startxref)?;
+            // Parse the whole cross-reference section once: its entries,
+            // its own container end, and its `/Prev`/`/XRefStm` in one pass
+            // through the real parser, rather than a second token search for
+            // the extent and a third for `/Prev` that could each read the
+            // trailer differently than this one does.
+            let section =
+                objects::xref_section_object_numbers(bytes, current_startxref, &mut budget)?;
 
-            if has_hybrid {
+            if section.xref_stm.is_some() {
                 return Err(VerifyError::HybridXrefNotSupported);
             }
 
-            // Parse xref entries to get object numbers
-            let obj_numbers =
-                objects::xref_section_object_numbers(bytes, current_startxref, &mut budget)?;
+            let xref_start = current_startxref;
+            let xref_end = section.end;
+            let obj_numbers = section
+                .entries
+                .into_iter()
+                .map(|(number, _)| number)
+                .collect();
+            let prev = section.prev;
 
             let rev_info = RevisionInfo {
                 startxref: current_startxref,
@@ -254,7 +264,7 @@ impl RevisionMap {
             // newer and dropped out of the coverage comparison. Order is now
             // `chain_position`, which is the chain itself. See
             // `RevisionInfo::chain_position`.
-            if let Some(prev_startxref) = find_prev(bytes, current_startxref)? {
+            if let Some(prev_startxref) = prev {
                 current_startxref = prev_startxref;
                 chain_position += 1;
             } else {
@@ -310,235 +320,6 @@ fn find_startxref(bytes: &[u8]) -> Result<u64> {
         return Err(VerifyError::FileTooSmall);
     }
     crate::pdfwrite::find_startxref_offset(bytes).ok_or(VerifyError::StartxrefNotFound)
-}
-
-/// Parse xref extent: find where the xref section starts and ends.
-/// Returns (xref_start, xref_end, has_xref_stm), as **absolute file offsets**.
-///
-/// `xref_end` is what §28.2 means by where a revision's cross-reference
-/// container ends: past the classic `trailer` dictionary, or past the `endobj`
-/// of a cross-reference stream. It is compared against a signature's coverage
-/// end, so an offset that is relative to `startxref` rather than to the file
-/// silently under-reports and lets a signature that does not cover its own
-/// cross-reference data pass as if it did.
-fn parse_xref_extent(bytes: &[u8], startxref: u64) -> Result<(u64, u64, bool)> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(VerifyError::TruncatedFile(startxref));
-    }
-
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Check if classic xref table or xref stream
-    let first_token = tokenizer
-        .next_token()
-        .map_err(|_| VerifyError::XrefParseError("failed to read first token".to_string()))?;
-
-    if first_token.as_deref() == Some(b"xref") {
-        // Classic xref table: scan forward until "trailer"
-        let mut found_trailer = false;
-        let mut trailer_start = 0;
-
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            let pos = tokenizer.position();
-            if token == b"trailer" {
-                found_trailer = true;
-                trailer_start = pos;
-                break;
-            }
-        }
-
-        if !found_trailer {
-            return Err(VerifyError::XrefParseError(
-                "trailer keyword not found".to_string(),
-            ));
-        }
-
-        // Scan the trailer dictionary for /XRefStm and its own closing `>>`.
-        //
-        // Depth matters, and stopping at the first `>>` was a hole in two
-        // directions at once: a nested dictionary — an inline `/Info`, or one
-        // planted for the purpose — truncated `xref_end` to somewhere inside
-        // the trailer, and it hid every key that followed. `/XRefStm` among
-        // them, so a hybrid file was read as plain classic and slipped past
-        // the refusal below, while `ObjectResolver` went on following the
-        // `/XRefStm` it could still see. Two halves of verification reading
-        // different documents is the divergence this exists to prevent.
-        let mut has_xref_stm = false;
-        let mut dict_end = None;
-        let mut dict_depth = 0i32;
-
-        tokenizer.seek(trailer_start);
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"<<" {
-                dict_depth += 1;
-            } else if token == b">>" {
-                dict_depth -= 1;
-                if dict_depth <= 0 {
-                    dict_end = Some(tokenizer.position());
-                    break;
-                }
-            } else if token == b"/XRefStm" && dict_depth == 1 {
-                // Only at the trailer's own level: a `/XRefStm` inside some
-                // nested dictionary is not the hybrid marker of §7.5.8.4.
-                has_xref_stm = true;
-            }
-        }
-
-        let Some(dict_end) = dict_end else {
-            return Err(VerifyError::XrefParseError(
-                "the classic cross-reference table's trailer dictionary is never closed"
-                    .to_string(),
-            ));
-        };
-
-        let xref_start = xref_pos as u64;
-        let xref_end = (xref_pos + dict_end) as u64;
-        if xref_end <= xref_start {
-            return Err(VerifyError::XrefParseError(
-                "the classic cross-reference table's container has no extent".to_string(),
-            ));
-        }
-
-        Ok((xref_start, xref_end, has_xref_stm))
-    } else {
-        // A cross-reference stream: `obj_num gen obj << … >> stream … endobj`.
-        //
-        // The scan must stop at the dictionary's closing `>>`. Past it lies
-        // the stream body, which is compressed binary — tokenising it yields
-        // whatever `<<` and `>>` byte pairs the deflate output happens to
-        // contain, and a run to end-of-file therefore reported a container
-        // end somewhere in the middle of a later revision. `/XRefStm` is a
-        // classic-trailer key. `/XRefStm` is still looked for *inside* the
-        // dictionary: this branch is also reached when `startxref` does not
-        // point at a cross-reference section at all, and the trailer of a
-        // hybrid file may then be the dictionary that gets scanned. Refusing
-        // such a file is right; misreading it is not.
-        let mut dict_depth = 0i32;
-        let mut dict_end = None;
-        let mut has_xref_stm = false;
-
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"<<" {
-                dict_depth += 1;
-            } else if token == b">>" {
-                dict_depth -= 1;
-                if dict_depth == 0 {
-                    dict_end = Some(tokenizer.position());
-                    break;
-                }
-            } else if token == b"/XRefStm" {
-                has_xref_stm = true;
-            }
-        }
-
-        let Some(dict_end) = dict_end else {
-            return Err(VerifyError::XrefParseError(
-                "the cross-reference stream's dictionary is never closed".to_string(),
-            ));
-        };
-
-        // The container is the whole indirect object, so its end is past
-        // `endobj` — and finding that `endobj` is the lexer's job, not a byte
-        // search's. Searching for the literal `endobj` from the dictionary's
-        // end runs *through* the stream body, which is attacker-controlled: an
-        // `endobj` planted in it moved the container end backwards, and a
-        // signature that stops short of its own cross-reference stream then
-        // classified as EntireRevision. `parse_indirect_object` steps over the
-        // body by its declared and validated extent, so the end it reports is
-        // the real one.
-        //
-        // This branch is also reached when `startxref` does not point at an
-        // indirect object at all; a parse that fails then falls back to the
-        // dictionary's end, which is the most that can honestly be claimed.
-        let xref_start = xref_pos as u64;
-        let dict_end_abs = xref_pos + dict_end;
-        let mut lexer = objects::Lexer::new(bytes, xref_pos);
-        let xref_end = match lexer.parse_indirect_object() {
-            Ok((_, _, _, end)) if end >= dict_end_abs => end as u64,
-            _ => dict_end_abs as u64,
-        };
-        if xref_end <= xref_start {
-            return Err(VerifyError::XrefParseError(
-                "the cross-reference stream's container has no extent".to_string(),
-            ));
-        }
-
-        Ok((xref_start, xref_end, has_xref_stm))
-    }
-}
-
-/// Find the /Prev value in the trailer dictionary at the given startxref offset.
-fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(VerifyError::TruncatedFile(startxref));
-    }
-
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Skip to "trailer" keyword if classic xref
-    let first_token = tokenizer
-        .next_token()
-        .map_err(|_| VerifyError::XrefParseError("failed to read first token".to_string()))?;
-
-    if first_token.as_deref() == Some(b"xref") {
-        // Classic xref: scan for trailer
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"trailer" {
-                break;
-            }
-        }
-    }
-
-    // Parse the trailer dictionary for /Prev.
-    //
-    // Depth is tracked for two separate reasons, and only one of them used to
-    // be honoured. Exiting on the trailer's *own* `>>` rather than the first
-    // one keeps a nested dictionary from truncating the scan. Matching `/Prev`
-    // only at depth 1 keeps a nested one from being mistaken for the
-    // trailer's: `/Info << /Prev 999 >> /Prev 100` is a trailer whose previous
-    // revision is at 100, and reading 999 out of it walks a different chain
-    // than `ObjectResolver` does, which parses the trailer into a dictionary
-    // and can only see the top-level key.
-    //
-    // That divergence is the one the `/XRefStm` scan above exists to prevent,
-    // reached by another door — and it fails in the dangerous direction. A
-    // revision missing from the map cannot be one that `classify_coverage`
-    // finds extending past a signature, so losing revisions can only *raise*
-    // how completely a signature appears to cover the file.
-    let mut key: Option<String> = None;
-    let mut dict_depth: i32 = 0;
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        // Track nesting depth for << and >>
-        if token == b"<<" {
-            dict_depth += 1;
-        } else if token == b">>" {
-            dict_depth = dict_depth.saturating_sub(1);
-            // Only break when we exit the trailer dictionary (depth becomes 0)
-            if dict_depth == 0 {
-                break;
-            }
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                if k == "Prev" && dict_depth == 1 {
-                    if let Ok(num_str) = std::str::from_utf8(&token) {
-                        if let Ok(num) = num_str.parse::<u64>() {
-                            return Ok(Some(num));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 /// Result of structural verification for a single signature.
@@ -1571,7 +1352,12 @@ mod tests {
 
     #[test]
     fn test_hybrid_xref_refused() {
-        let pdf = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n60\n%%EOF";
+        // `startxref` names the real offset of the `xref` keyword (43): the
+        // old token-search parser tolerated a bogus offset here by scanning
+        // forward for `<<`/`>>`/`/XRefStm` through whatever bytes it landed
+        // on, which is exactly the leniency §78 removes. The real lexer
+        // requires the offset to name a genuine cross-reference section.
+        let pdf = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n43\n%%EOF";
 
         let result = RevisionMap::build(pdf);
         assert!(matches!(result, Err(VerifyError::HybridXrefNotSupported)));
@@ -2435,7 +2221,7 @@ mod tests {
     /// The test above pins that nesting does not *truncate* the scan. This
     /// pins the other half: the scan must not pick a key up out of the nested
     /// dictionary either. `ObjectResolver` parses the trailer into a real
-    /// dictionary and can only ever see the top-level key, so a `find_prev`
+    /// dictionary and can only ever see the top-level key, so a `/Prev` reader
     /// that reads the nested one walks a different revision chain than the
     /// rest of verification does — and it fails in the dangerous direction,
     /// because a revision missing from the map cannot be one the classifier
@@ -2466,8 +2252,11 @@ mod tests {
         pdf.extend_from_slice(format!("{second}\n").as_bytes());
         pdf.extend_from_slice(b"%%EOF");
 
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(&pdf, second as u64, &mut budget)
+            .expect("the trailer parses");
         assert_eq!(
-            find_prev(&pdf, second as u64).expect("the trailer parses"),
+            section.prev,
             Some(first as u64),
             "the trailer's own /Prev is the one at depth 1, not the one in /Info"
         );
@@ -2483,7 +2272,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // `parse_xref_extent` against real bytes.
+    // `objects::xref_section_object_numbers` against real bytes.
     //
     // Every `classify_coverage` test above hand-builds a `RevisionInfo`, so
     // nothing pinned the offsets the classifier is actually fed. These do.
@@ -2509,11 +2298,12 @@ mod tests {
     fn a_classic_tables_container_end_is_an_absolute_file_offset() {
         let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
         let startxref = find_startxref(&pdf).expect("the fixture has a startxref");
-        let (xref_start, xref_end, hybrid) =
-            parse_xref_extent(&pdf, startxref).expect("the classic table parses");
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(&pdf, startxref, &mut budget)
+            .expect("the classic table parses");
+        let (xref_end, hybrid) = (section.end, section.xref_stm.is_some());
 
         assert!(!hybrid);
-        assert_eq!(xref_start, startxref, "the container starts at startxref");
 
         // The trailer's closing `>>` is the last one before `startxref`.
         let startxref_at = pdf
@@ -2637,8 +2427,10 @@ mod tests {
             .expect("the object closes");
         assert!(planted < real, "the decoy must precede the real `endobj`");
 
-        let (_start, xref_end, _hybrid) =
-            parse_xref_extent(&pdf, xref_at as u64).expect("the cross-reference stream parses");
+        let mut budget = objects::DecodeBudget::new();
+        let xref_end = objects::xref_section_object_numbers(&pdf, xref_at as u64, &mut budget)
+            .expect("the cross-reference stream parses")
+            .end;
         assert_eq!(
             xref_end,
             (real + b"endobj".len()) as u64,
@@ -2709,8 +2501,10 @@ mod tests {
             .unwrap()
             .replace(" /XRefStm 9", "");
         let plain = plain.as_bytes();
-        let (_start, xref_end, hybrid) =
-            parse_xref_extent(plain, xref_at as u64).expect("the classic table parses");
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(plain, xref_at as u64, &mut budget)
+            .expect("the classic table parses");
+        let (xref_end, hybrid) = (section.end, section.xref_stm.is_some());
         assert!(!hybrid);
         let nested_close = plain
             .windows(2)
