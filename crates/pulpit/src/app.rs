@@ -178,6 +178,15 @@ pub enum Message {
     /// The Sign dialog (SPEC-signing.md §31.1); grouped the way `Timer` and
     /// `Read` already group their own popups' messages.
     Sign(crate::signing::SignMsg),
+    /// §82.8: `sign_open_destination_picker`'s read of the source and its two
+    /// preflight parses have finished, off the event loop. Not folded into
+    /// `SignMsg` (defined outside this file's ownership for this pass) —
+    /// this is `App`'s own message, the way `BookmarkAdded` and the rest of
+    /// `App::deferred`'s payloads are.
+    SignCandidatesReady(
+        std::sync::Arc<pulpit_render::sign::Credential>,
+        SignTargetCandidates,
+    ),
     /// The reader accepted or declined the append-only offer (§31.3, A9).
     AcceptAppendOnly,
     EditAnyway,
@@ -1932,7 +1941,8 @@ fn non_empty(value: &str) -> Option<String> {
 /// §31.3 countersign disclosure gates on the latter, not on the shape of
 /// whichever target ends up chosen (an existing empty field is now also
 /// offered on unsigned documents, so the two are no longer equivalent).
-struct SignTargetCandidates {
+#[derive(Debug, Clone)]
+pub(crate) struct SignTargetCandidates {
     candidates: Vec<crate::signing::TargetChoice>,
     countersigning: bool,
 }
@@ -2568,8 +2578,10 @@ impl App {
 
     /// Drain speech events and download progress.
     fn poll_speech(&mut self) {
-        let settings = self.settings.speech.clone();
-        let outgoing = self.speech.poll(&settings);
+        // §82.4: a disjoint field borrow, not a clone — `self.speech` and
+        // `self.settings.speech` are different fields, and this runs on
+        // every tick.
+        let outgoing = self.speech.poll(&self.settings.speech);
         if !outgoing.is_empty() {
             self.apply_speech(outgoing);
         }
@@ -2638,8 +2650,9 @@ impl App {
                             } else {
                                 "this document has no text layer to read"
                             };
-                            let settings = self.settings.speech.clone();
-                            let stopped = self.speech.cannot_speak(reason.into(), &settings);
+                            let stopped = self
+                                .speech
+                                .cannot_speak(reason.into(), &self.settings.speech);
                             for action in stopped {
                                 if let Outgoing::Toast(message) = action {
                                     self.toasts.push(Intent::Info, message, None, self.now);
@@ -2664,8 +2677,7 @@ impl App {
                         .map(|document| document.pdf_pages)
                         .unwrap_or_else(|| self.state.slide_count());
                     if page.get() >= pages {
-                        let settings = self.settings.speech.clone();
-                        let finished = self.speech.no_such_page(page, &settings);
+                        let finished = self.speech.no_such_page(page, &self.settings.speech);
                         // One level deep only: `no_such_page` ends the
                         // reading, and an ended reading asks for nothing more.
                         for action in finished {
@@ -3792,6 +3804,9 @@ impl App {
                 Task::none()
             }
             Message::Sign(msg) => self.handle_sign(msg),
+            Message::SignCandidatesReady(credential, candidates) => {
+                self.sign_open_destination_picker_with(credential, candidates)
+            }
             Message::Print(msg) => self.handle_print(msg),
             Message::AcceptAppendOnly => {
                 self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
@@ -4318,7 +4333,6 @@ impl App {
             }
             // ---- Speech (issue #20) ----
             Message::SpeakToggleScope(scope) => {
-                let settings = self.settings.speech.clone();
                 let page = self.speech_page();
                 // The page's key narrows to the selection when one is held
                 // (issue #9): the selection is lit up on the page, so the key
@@ -4330,21 +4344,21 @@ impl App {
                     _ => None,
                 };
                 let outgoing = match selected {
-                    Some(text) => self.speech.toggle_selection(text, page, &settings),
-                    None => self.speech.toggle(scope, page, &settings),
+                    Some(text) => self
+                        .speech
+                        .toggle_selection(text, page, &self.settings.speech),
+                    None => self.speech.toggle(scope, page, &self.settings.speech),
                 };
                 self.apply_speech(outgoing);
                 Task::none()
             }
             Message::SpeakStop => {
-                let settings = self.settings.speech.clone();
-                let outgoing = self.speech.stop(&settings);
+                let outgoing = self.speech.stop(&self.settings.speech);
                 self.apply_speech(outgoing);
                 Task::none()
             }
             Message::SpeakSkip(direction) => {
-                let settings = self.settings.speech.clone();
-                let outgoing = self.speech.skip(direction, &settings);
+                let outgoing = self.speech.skip(direction, &self.settings.speech);
                 self.apply_speech(outgoing);
                 Task::none()
             }
@@ -4359,8 +4373,7 @@ impl App {
             }
             Message::SetSpeechVoice(id) => {
                 self.settings.speech.voice = Some(id);
-                let settings = self.settings.speech.clone();
-                self.speech.reprobe(&settings);
+                self.speech.reprobe(&self.settings.speech);
                 self.refresh_speech_capability();
                 self.persist();
                 Task::none()
@@ -4370,8 +4383,7 @@ impl App {
                     Some(tag) => pulpit_core::speech::LanguageSetting::Explicit(tag),
                     None => pulpit_core::speech::LanguageSetting::Auto,
                 };
-                let settings = self.settings.speech.clone();
-                self.speech.reprobe(&settings);
+                self.speech.reprobe(&self.settings.speech);
                 self.persist();
                 Task::none()
             }
@@ -4389,18 +4401,16 @@ impl App {
                 Task::none()
             }
             Message::RemoveVoice(id) => {
-                let mut settings = self.settings.speech.clone();
-                let outgoing = self.speech.remove_voice(&id, &mut settings);
-                self.settings.speech = settings;
+                let outgoing = self.speech.remove_voice(&id, &mut self.settings.speech);
                 self.apply_speech(outgoing);
                 self.refresh_speech_capability();
                 self.persist();
                 Task::none()
             }
             Message::AnswerVoicePrompt(download) => {
-                let mut settings = self.settings.speech.clone();
-                let outgoing = self.speech.answer_prompt(download, &mut settings);
-                self.settings.speech = settings;
+                let outgoing = self
+                    .speech
+                    .answer_prompt(download, &mut self.settings.speech);
                 self.apply_speech(outgoing);
                 self.persist();
                 Task::none()
@@ -7012,8 +7022,7 @@ impl App {
         // Speech was reading the document being put down; nothing about that
         // reading — the utterance, the language, a refusal, a pending
         // download prompt — carries over to the next one.
-        let speech_settings = self.settings.speech.clone();
-        self.speech.document_changed(&speech_settings);
+        self.speech.document_changed(&self.settings.speech);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -7399,8 +7408,7 @@ impl App {
         // A dead worker can never answer the page-text request speech is
         // waiting on; ending the reading now beats leaving it in
         // `AwaitingText` for ever.
-        let speech_settings = self.settings.speech.clone();
-        self.speech.document_changed(&speech_settings);
+        self.speech.document_changed(&self.settings.speech);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -7835,14 +7843,13 @@ impl App {
                     self.reader.set_fields(fields);
                 }
                 crate::reader_link::Told::PageText { page, text } => {
-                    let mut settings = self.settings.speech.clone();
-                    let outgoing = self.speech.text_arrived(page, text, &mut settings);
-                    self.settings.speech = settings;
+                    let outgoing = self
+                        .speech
+                        .text_arrived(page, text, &mut self.settings.speech);
                     self.apply_speech(outgoing);
                 }
                 crate::reader_link::Told::CannotSpeak { reason } => {
-                    let settings = self.settings.speech.clone();
-                    let outgoing = self.speech.cannot_speak(reason, &settings);
+                    let outgoing = self.speech.cannot_speak(reason, &self.settings.speech);
                     self.apply_speech(outgoing);
                 }
                 crate::reader_link::Told::Selection { result, finalising } => {
@@ -11990,15 +11997,19 @@ impl App {
         self.sign_open_destination_picker(credential)
     }
 
-    /// Decide what will be signed and how it will look, then ask the one
-    /// question that is genuinely the reader's: where to put the copy.
+    /// Decide what will be signed, once what preflight reports on the source
+    /// is known: the destination picker, or a refusal.
     ///
     /// The target and the appearance are settled *before* the picker opens,
     /// so a document with nothing to sign into is refused while there is
     /// still nothing to take back — never after a file name has been chosen.
-    fn sign_open_destination_picker(
+    /// Split from `sign_open_destination_picker` by §82.8: this is the half
+    /// that needs `&mut self`, run once the read and the preflight parses —
+    /// which do not — have already happened off the event loop.
+    fn sign_open_destination_picker_with(
         &mut self,
         credential: std::sync::Arc<pulpit_render::sign::Credential>,
+        candidates: SignTargetCandidates,
     ) -> Task<Message> {
         use crate::signing::{SignMsg, SigningFlow};
 
@@ -12006,7 +12017,7 @@ impl App {
             self.refuse_signing("There is no document open to sign.".to_string());
             return Task::none();
         };
-        let options = match self.sign_prepare_options() {
+        let options = match self.sign_prepare_options(candidates) {
             Ok(options) => options,
             Err(detail) => {
                 self.refuse_signing(detail);
@@ -12027,6 +12038,29 @@ impl App {
         })
     }
 
+    /// Decide what will be signed and how it will look, then ask the one
+    /// question that is genuinely the reader's: where to put the copy.
+    ///
+    /// §82.8: reading the whole source and running two preflight parses used
+    /// to happen synchronously, inside the message handler that reaches
+    /// this. That work is `Self::sign_target_candidates`, run here in a
+    /// `Task::perform` step; the answer comes back as
+    /// `SignMsg::CandidatesReady`, which finishes the job in
+    /// `sign_open_destination_picker_with`.
+    fn sign_open_destination_picker(
+        &mut self,
+        credential: std::sync::Arc<pulpit_render::sign::Credential>,
+    ) -> Task<Message> {
+        let Some((path, signed_at_open)) = self.signing_source_state() else {
+            self.refuse_signing("There is no document open to sign.".to_string());
+            return Task::none();
+        };
+        Task::perform(
+            Self::sign_target_candidates(path, signed_at_open),
+            move |candidates| Message::SignCandidatesReady(credential, candidates),
+        )
+    }
+
     /// What this signature will land on, and what mark it will leave —
     /// derived from the click, from preflight, and from the profile, with
     /// nothing left to ask.
@@ -12034,7 +12068,10 @@ impl App {
     /// The click wins outright or fails outright: a field the reader pointed
     /// at that preflight cannot offer is refused by name, never replaced with
     /// a preset corner of some other page.
-    fn sign_prepare_options(&self) -> Result<crate::signing::SigningOptions, String> {
+    fn sign_prepare_options(
+        &self,
+        candidates: SignTargetCandidates,
+    ) -> Result<crate::signing::SigningOptions, String> {
         use crate::signing::{
             pick_signing_target, prefill_missed_line, SigningOptions, TargetPick,
         };
@@ -12042,7 +12079,7 @@ impl App {
         let SignTargetCandidates {
             candidates,
             countersigning,
-        } = self.sign_target_candidates();
+        } = candidates;
         let target = match pick_signing_target(&candidates, self.signing_prefill_field.as_deref()) {
             TargetPick::Selected(choice) => choice,
             TargetPick::Missed { clicked } => return Err(prefill_missed_line(&clicked)),
@@ -12255,19 +12292,33 @@ impl App {
     /// several empty fields reports `AmbiguousSignatureField`, whose
     /// `candidates` all come back here for the Options step's target picker
     /// to offer, rather than silently picking the first one.
-    fn sign_target_candidates(&self) -> SignTargetCandidates {
-        use crate::signing::{AppendOnlyMode, TargetChoice};
-        use pulpit_render::verify::preflight::{preflight_certify, preflight_sign};
-
+    /// Everything `sign_target_candidates` needs from `self` before the read
+    /// and the preflight parses, which §82.8 moves off the event loop: a
+    /// full-length `std::fs::read` plus two preflight passes over the file
+    /// were running synchronously inside a message handler.
+    fn signing_source_state(&self) -> Option<(PathBuf, bool)> {
+        use crate::signing::AppendOnlyMode;
+        let path = self.signing_source_path()?;
         let signed_at_open = matches!(
             self.append_only,
             Some(AppendOnlyMode::AppendOnly) | Some(AppendOnlyMode::EditAnyway)
         );
-        // The source could not be read to preflight: this function is `&self`
-        // and has no way to tell the user why, so it degrades silently to
-        // the best guess `append_only` supports. The engine restates the
-        // real failure (unreadable file, encrypted document, …) at Sign
-        // time, when there is a place to show it.
+        Some((path, signed_at_open))
+    }
+
+    /// Read the source and run preflight, off the event loop (§82.8): a
+    /// `Task::perform` step feeds the answer back as
+    /// `SignMsg::CandidatesReady`. Free of `self` so it can run inside the
+    /// `async move` block Iced's executor drives independently.
+    async fn sign_target_candidates(path: PathBuf, signed_at_open: bool) -> SignTargetCandidates {
+        use crate::signing::TargetChoice;
+        use pulpit_render::verify::preflight::{preflight_certify, preflight_sign};
+
+        // The source could not be read to preflight: there is no way to tell
+        // the user why from here, so this degrades silently to the best
+        // guess `append_only` supports. The engine restates the real failure
+        // (unreadable file, encrypted document, …) at Sign time, when there
+        // is a place to show it.
         let unreadable_fallback = if signed_at_open {
             SignTargetCandidates {
                 candidates: Vec::new(),
@@ -12278,9 +12329,6 @@ impl App {
                 candidates: vec![TargetChoice::NewField],
                 countersigning: false,
             }
-        };
-        let Some(path) = self.signing_source_path() else {
-            return unreadable_fallback;
         };
         let Ok(bytes) = std::fs::read(&path) else {
             return unreadable_fallback;
