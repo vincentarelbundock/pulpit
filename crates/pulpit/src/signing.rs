@@ -424,6 +424,24 @@ pub enum PlacementPosition {
 // `StoredSignaturePosition` carries its own names. Nothing in the Sign flow
 // shows this choice, because nothing in it asks for it.
 
+/// `StoredSignaturePosition` is Settings' own persisted enum — it carries
+/// `serde` attributes this crate's Sign-flow types deliberately do not — so
+/// the two cannot be one type without teaching Settings about placement or
+/// this module about serialisation. A `From` impl is the whole of the
+/// mapping between them instead of a `match` copied out at every call site
+/// (§80.8).
+impl From<crate::settings::StoredSignaturePosition> for PlacementPosition {
+    fn from(position: crate::settings::StoredSignaturePosition) -> Self {
+        match position {
+            crate::settings::StoredSignaturePosition::TopLeft => PlacementPosition::TopLeft,
+            crate::settings::StoredSignaturePosition::TopRight => PlacementPosition::TopRight,
+            crate::settings::StoredSignaturePosition::BottomLeft => PlacementPosition::BottomLeft,
+            crate::settings::StoredSignaturePosition::BottomRight => PlacementPosition::BottomRight,
+            crate::settings::StoredSignaturePosition::Center => PlacementPosition::Center,
+        }
+    }
+}
+
 /// A signature box size, in points, before margin clamping in
 /// [`Placement::rect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +457,18 @@ impl PlacementSize {
             PlacementSize::Small => (150.0, 50.0),
             PlacementSize::Medium => (200.0, 70.0),
             PlacementSize::Large => (260.0, 90.0),
+        }
+    }
+}
+
+/// See [`PlacementPosition`]'s `From` impl: the same reason `PlacementSize`
+/// is not `StoredSignatureSize` (§80.8).
+impl From<crate::settings::StoredSignatureSize> for PlacementSize {
+    fn from(size: crate::settings::StoredSignatureSize) -> Self {
+        match size {
+            crate::settings::StoredSignatureSize::Small => PlacementSize::Small,
+            crate::settings::StoredSignatureSize::Medium => PlacementSize::Medium,
+            crate::settings::StoredSignatureSize::Large => PlacementSize::Large,
         }
     }
 }
@@ -544,21 +574,28 @@ pub fn subject_common_name(subject: &str) -> &str {
         .unwrap_or(subject)
 }
 
-/// §25.5's default text template, verbatim, split across the two lines
-/// `AppearanceContent::Text` draws:
+/// §25.5's default text template's two lines, verbatim:
 ///
 /// ```text
 /// Digitally signed by %(signer)s.
 /// Timestamp: %(ts)s.
 /// ```
 ///
-/// No ink is composited (`AppearanceContent::InkAndText` is not built here)
-/// — see this module's top-level doc comment for why.
-pub fn text_appearance_content(
-    signer_cn: &str,
-    signing_time_label: &str,
-) -> pulpit_render::sign::AppearanceContent {
-    pulpit_render::sign::AppearanceContent::Text {
+/// A plain struct rather than `AppearanceContent::Text` itself: the same two
+/// lines also go into `AppearanceContent::InkAndText` when a profile draws
+/// ink over them, and a struct lets both callers destructure it directly
+/// instead of one of them pattern-matching a `Text` it must then insist
+/// cannot be anything else.
+pub struct TextAppearance {
+    pub signer_name: String,
+    pub time_label: String,
+}
+
+/// Build §25.5's default text template's two lines for `signer_cn` and
+/// `signing_time_label`. See [`TextAppearance`] for why this is not
+/// `AppearanceContent` directly.
+pub fn text_appearance_content(signer_cn: &str, signing_time_label: &str) -> TextAppearance {
+    TextAppearance {
         signer_name: format!("Digitally signed by {signer_cn}."),
         time_label: format!("Timestamp: {signing_time_label}."),
     }
@@ -640,18 +677,8 @@ pub fn apply_profile_defaults(
     }
     options.set_visible(true, context);
     let preset = Placement {
-        position: match appearance.position {
-            crate::settings::StoredSignaturePosition::TopLeft => PlacementPosition::TopLeft,
-            crate::settings::StoredSignaturePosition::TopRight => PlacementPosition::TopRight,
-            crate::settings::StoredSignaturePosition::BottomLeft => PlacementPosition::BottomLeft,
-            crate::settings::StoredSignaturePosition::BottomRight => PlacementPosition::BottomRight,
-            crate::settings::StoredSignaturePosition::Center => PlacementPosition::Center,
-        },
-        size: match appearance.size {
-            crate::settings::StoredSignatureSize::Small => PlacementSize::Small,
-            crate::settings::StoredSignatureSize::Medium => PlacementSize::Medium,
-            crate::settings::StoredSignatureSize::Large => PlacementSize::Large,
-        },
+        position: appearance.position.into(),
+        size: appearance.size.into(),
     };
     if let Some(AppearancePlan::Preset { placement, .. }) = options.placement.as_mut() {
         *placement = preset;
@@ -668,7 +695,16 @@ pub fn appearance_for_profile(
     geometry: &PageGeometry,
 ) -> Option<pulpit_render::sign::SignAppearance> {
     let plan = options.placement.as_ref()?;
-    let text = || text_appearance_content(signer_cn, signing_time_label);
+    let text = || {
+        let TextAppearance {
+            signer_name,
+            time_label,
+        } = text_appearance_content(signer_cn, signing_time_label);
+        pulpit_render::sign::AppearanceContent::Text {
+            signer_name,
+            time_label,
+        }
+    };
     let content = match profile {
         None => text(),
         Some(appearance) => {
@@ -691,13 +727,10 @@ pub fn appearance_for_profile(
                 }
                 crate::settings::StoredSignatureContent::Text => text(),
                 crate::settings::StoredSignatureContent::InkAndText => {
-                    let pulpit_render::sign::AppearanceContent::Text {
+                    let TextAppearance {
                         signer_name,
                         time_label,
-                    } = text()
-                    else {
-                        unreachable!("text appearance constructor returned non-text content")
-                    };
+                    } = text_appearance_content(signer_cn, signing_time_label);
                     pulpit_render::sign::AppearanceContent::InkAndText {
                         strokes,
                         stroke_width: f64::from(appearance.stroke_width),
@@ -828,12 +861,13 @@ pub struct CredentialInfo {
 
 impl CredentialInfo {
     pub fn from_summary(summary: CredentialSummary, now_unix: i64) -> Self {
-        let expired = parse_unix_ish(&summary.not_after)
-            .map(|not_after| not_after < now_unix)
-            .unwrap_or(false);
-        let not_yet_valid = parse_unix_ish(&summary.not_before)
-            .map(|not_before| not_before > now_unix)
-            .unwrap_or(false);
+        // `CredentialSummary`'s validity fields are unix seconds
+        // (`pulpit-render::verify::CertificateSummary` carries the same
+        // fields the same way), so there is nothing here to parse and
+        // nothing that can fail closed as "valid" the way a re-parsed
+        // formatted string used to.
+        let expired = summary.not_after < now_unix;
+        let not_yet_valid = summary.not_before > now_unix;
         CredentialInfo {
             summary,
             expired,
@@ -848,15 +882,23 @@ impl CredentialInfo {
     }
 }
 
-/// [`CredentialSummary`]'s validity fields are formatted strings (RFC 3339 or
-/// similar), not unix seconds; `pulpit-render` does not expose a parsed
-/// variant. Best-effort: an unparseable value is treated as "cannot tell",
-/// which is the same as not warning — the Review step still shows the
-/// raw string either way, so nothing is hidden.
-fn parse_unix_ish(value: &str) -> Option<i64> {
-    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+/// A validity bound for display, from the unix seconds
+/// [`CredentialSummary`] carries.
+///
+/// The one place this crate turns a certificate timestamp into text: the
+/// type stays `i64` everywhere else, including in transit from
+/// `pulpit-render`, so nothing between here and there can silently swallow a
+/// parse failure. A timestamp outside what `time` can represent is shown as
+/// the raw number rather than nothing — this is a diagnostic caption, not a
+/// value anything reads back.
+pub fn format_validity_bound(unix_seconds: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(unix_seconds)
         .ok()
-        .map(|dt| dt.unix_timestamp())
+        .and_then(|at| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| unix_seconds.to_string())
 }
 
 /// One step of the Sign flow (§31.1).
@@ -962,16 +1004,15 @@ pub struct SignOutcome {
 
 // --- §20.2 three-state copy -------------------------------------------------
 
-/// The three states §20.2 requires, named so a caller cannot accidentally
-/// collapse "broken" and "ink mark" into "not signed".
+/// The two states §20.2 requires for a cryptographic signature, named so a
+/// caller cannot accidentally collapse "broken" into "not signed". A third
+/// state, a drawn appearance with no cryptography behind it, is not here: no
+/// caller in `pulpit` has ever constructed it — the annotation surface it
+/// would belong to (`SPEC-document.md`'s ink/stamp tools) is outside this
+/// task's scope — so it stood as dead code under `#[allow(dead_code)]`
+/// rather than as a state anything reaches (§81).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureLine {
-    /// A drawn appearance with no cryptography behind it. Not yet wired to
-    /// a caller: the annotation surface this state belongs to
-    /// (`SPEC-document.md`'s ink/stamp tools) is outside this task's scope,
-    /// which is why nothing in `pulpit` constructs this variant today.
-    #[allow(dead_code)]
-    InkMark,
     /// Intact, valid CMS whose identity pulpit has not corroborated.
     SignedIdentityNotVerified {
         signer: String,
@@ -986,7 +1027,6 @@ impl SignatureLine {
     /// more confident than the weakest component").
     pub fn summary_text(&self) -> String {
         match self {
-            SignatureLine::InkMark => "handwritten mark".to_string(),
             SignatureLine::SignedIdentityNotVerified {
                 signer,
                 sha256_fingerprint,
@@ -1131,6 +1171,23 @@ pub fn plain_text_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `CredentialSummary` with nothing but a validity window worth
+    /// naming, for the tests that are only about expiry. One helper rather
+    /// than three near-identical literals, which is what let the three drift
+    /// on everything but the two fields each test actually varies.
+    fn test_credential_summary(not_before: i64, not_after: i64) -> CredentialSummary {
+        CredentialSummary {
+            subject: "CN=Test".into(),
+            issuer: "CN=Test CA".into(),
+            serial: "01".into(),
+            not_before,
+            not_after,
+            sha256_fingerprint: "aa:bb".into(),
+            key_algorithm: "RSA".into(),
+            key_bits: Some(2048),
+        }
+    }
 
     #[test]
     fn disclosure_strings_are_the_spec_text() {
@@ -1319,16 +1376,7 @@ mod tests {
     /// blocks Sign until the override is pressed, now on the one dialog.
     #[test]
     fn the_review_step_will_not_sign_an_expired_credential_without_the_override() {
-        let summary = CredentialSummary {
-            subject: "CN=Test".into(),
-            issuer: "CN=Test CA".into(),
-            serial: "01".into(),
-            not_before: "2000-01-01T00:00:00Z".into(),
-            not_after: "2001-01-01T00:00:00Z".into(),
-            sha256_fingerprint: "aa:bb".into(),
-            key_algorithm: "RSA".into(),
-            key_bits: Some(2048),
-        };
+        let summary = test_credential_summary(946_684_800, 978_307_200);
         let mut info = CredentialInfo::from_summary(summary, 1_700_000_000);
         let options = SigningOptions {
             target: Some(TargetChoice::NewField),
@@ -1353,16 +1401,7 @@ mod tests {
 
     #[test]
     fn expired_credential_may_not_proceed_without_override() {
-        let summary = CredentialSummary {
-            subject: "CN=Test".into(),
-            issuer: "CN=Test CA".into(),
-            serial: "01".into(),
-            not_before: "2000-01-01T00:00:00Z".into(),
-            not_after: "2001-01-01T00:00:00Z".into(),
-            sha256_fingerprint: "aa:bb".into(),
-            key_algorithm: "RSA".into(),
-            key_bits: Some(2048),
-        };
+        let summary = test_credential_summary(946_684_800, 978_307_200);
         let now = 1_700_000_000; // long after 2001
         let mut info = CredentialInfo::from_summary(summary, now);
         assert!(info.expired);
@@ -1374,16 +1413,7 @@ mod tests {
 
     #[test]
     fn not_yet_valid_credential_is_told_apart_from_expired() {
-        let summary = CredentialSummary {
-            subject: "CN=Test".into(),
-            issuer: "CN=Test CA".into(),
-            serial: "01".into(),
-            not_before: "2999-01-01T00:00:00Z".into(),
-            not_after: "3000-01-01T00:00:00Z".into(),
-            sha256_fingerprint: "aa:bb".into(),
-            key_algorithm: "RSA".into(),
-            key_bits: Some(2048),
-        };
+        let summary = test_credential_summary(32_472_144_000, 32_503_680_000);
         let info = CredentialInfo::from_summary(summary, 1_700_000_000);
         assert!(!info.expired);
         assert!(info.not_yet_valid);
@@ -1393,7 +1423,6 @@ mod tests {
     #[test]
     fn signature_line_never_says_verified_or_trusted() {
         for line in [
-            SignatureLine::InkMark,
             SignatureLine::SignedIdentityNotVerified {
                 signer: "Jane Doe".into(),
                 sha256_fingerprint: "de:ad:be:ef".into(),
@@ -1413,11 +1442,6 @@ mod tests {
                 assert!(lower.contains("not verified"), "{text:?}");
             }
         }
-    }
-
-    #[test]
-    fn ink_mark_is_never_called_signed() {
-        assert_eq!(SignatureLine::InkMark.summary_text(), "handwritten mark");
     }
 
     #[test]
@@ -1866,17 +1890,9 @@ mod tests {
 
     #[test]
     fn text_appearance_content_matches_section_25_5_verbatim() {
-        use pulpit_render::sign::AppearanceContent;
         let content = text_appearance_content("Jane Doe", "2026-08-16T00:00:00Z");
-        let AppearanceContent::Text {
-            signer_name,
-            time_label,
-        } = content
-        else {
-            panic!("expected Text content");
-        };
-        assert_eq!(signer_name, "Digitally signed by Jane Doe.");
-        assert_eq!(time_label, "Timestamp: 2026-08-16T00:00:00Z.");
+        assert_eq!(content.signer_name, "Digitally signed by Jane Doe.");
+        assert_eq!(content.time_label, "Timestamp: 2026-08-16T00:00:00Z.");
     }
 
     #[test]

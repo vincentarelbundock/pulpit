@@ -1203,6 +1203,18 @@ impl FormField {
     pub fn is_reachable(&self) -> bool {
         self.is_editable() && !self.hidden
     }
+
+    /// Does the document ask for this field and hold nothing in it (§6.4)?
+    ///
+    /// Reachable, not merely editable: a required field the document hides is
+    /// one nobody can fill, and listing it before a save would be asking the
+    /// reader to go and type into something that is not on the page. Kept
+    /// here, once, rather than as parallel rules at each caller — a reader
+    /// session's live check and a save's after-the-fact one had already
+    /// drifted on exactly this point.
+    pub fn is_unfilled_required(&self) -> bool {
+        self.required && self.is_reachable() && self.value.is_empty() && self.selected.is_empty()
+    }
 }
 
 /// How a text selection was asked for (§6.3).
@@ -1667,6 +1679,59 @@ mod tests {
             "a signature field is not filled by the form editor"
         );
         assert!(!FieldKind::PushButton.is_fillable());
+    }
+
+    /// A required text field, empty, nothing else marked — the base case the
+    /// test below flips one bit on at a time.
+    fn unfilled_required_field() -> FormField {
+        FormField {
+            name: "signer-name".into(),
+            kind: FieldKind::Text,
+            value: String::new(),
+            read_only: false,
+            format: FieldFormat::Plain,
+            options: Vec::new(),
+            allows_custom_value: false,
+            multiple_selection: false,
+            required: true,
+            password: false,
+            file_select: false,
+            rich_text: false,
+            truncated: false,
+            hidden: false,
+            selected: Vec::new(),
+            widgets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn is_unfilled_required_is_the_one_rule_both_callers_share() {
+        // The rule this covers used to be written twice — once for the live
+        // reader session, once for the after-save report — and had drifted
+        // to disagree on a hidden field. Now there is one function, and this
+        // is its test: every caller that agrees with it agrees with each
+        // other for free.
+        assert!(unfilled_required_field().is_unfilled_required());
+
+        let mut filled = unfilled_required_field();
+        filled.value = "Ada".into();
+        assert!(!filled.is_unfilled_required());
+
+        let mut not_required = unfilled_required_field();
+        not_required.required = false;
+        assert!(!not_required.is_unfilled_required());
+
+        // Reachable, not merely editable: a required field the document
+        // hides is one nobody can fill, and must not be reported as
+        // something to go and type into.
+        let mut hidden = unfilled_required_field();
+        hidden.hidden = true;
+        assert!(!hidden.is_unfilled_required());
+
+        let mut chosen = unfilled_required_field();
+        chosen.kind = FieldKind::ListBox;
+        chosen.selected = vec![1];
+        assert!(!chosen.is_unfilled_required());
     }
 
     #[test]
