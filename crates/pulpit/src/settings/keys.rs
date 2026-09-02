@@ -257,77 +257,101 @@ pub const QUICK_START_ACTIONS: [Action; 7] = [
 #[allow(dead_code)] // reached by its tests, not by the application
 pub const PRESENTING_ACTIONS: [Action; 2] = [Action::Blank, Action::ToggleTimer];
 
-impl Action {
-    /// Every action, so a keymap can be checked against the whole set.
-    ///
-    /// This list is hand-maintained rather than derived from the enum, so it
-    /// can drift from it silently: the five speech actions (issue #20)
-    /// shipped without ever being added here, which meant
-    /// `Keymap::restore_missing_defaults` could never hand a settings file
-    /// saved before speech existed its speech keys back, and the tests that
-    /// walk `ALL` — including the one meant to catch exactly this — were
-    /// quietly not checking them at all. Keep this in the same order as the
-    /// enum declaration, so a visual diff against it is enough to catch the
-    /// next omission.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    pub const ALL: [Action; 55] = [
-        Action::Next,
-        Action::Previous,
-        Action::First,
-        Action::Last,
-        Action::ToggleAutoadvance,
-        Action::PreviewNext,
-        Action::PreviewPrevious,
-        Action::CommitPreview,
-        Action::CancelPreview,
-        Action::Blank,
-        Action::ToggleTimer,
-        Action::ResetTimer,
-        Action::SpeakToggle,
-        Action::SpeakPageToggle,
-        Action::SpeakStop,
-        Action::SpeakNextSentence,
-        Action::SpeakPreviousSentence,
-        Action::SwapDisplays,
-        Action::ToggleAudienceFullscreen,
-        Action::OpenDocument,
-        Action::ReloadDocument,
-        Action::Print,
-        Action::ShowOverview,
-        Action::CycleLayout,
-        Action::ShowLayouts,
-        Action::ShowShortcuts,
-        Action::AnnotateSelect,
-        Action::AnnotateInk,
-        Action::AnnotateHighlighter,
-        Action::AnnotateText,
-        Action::AnnotateNote,
-        Action::AnnotateEraser,
-        Action::AnnotatePointer,
-        Action::AnnotateSelectText,
-        Action::CopySelection,
-        Action::UndoAnnotation,
-        Action::RedoAnnotation,
-        Action::ClearAnnotations,
-        Action::ToggleAnnotationAudience,
-        Action::FocusNextLink,
-        Action::FocusPreviousLink,
-        Action::ToggleReader,
-        Action::ToggleOutline,
-        Action::FocusSearch,
-        Action::FindNext,
-        Action::FindPrevious,
-        Action::ZoomIn,
-        Action::ZoomOut,
-        Action::ZoomReset,
-        Action::FitPage,
-        Action::FitWidth,
-        Action::RotateReader,
-        Action::ToggleDualPage,
-        Action::CycleColorMode,
-        Action::Quit,
-    ];
+/// Build [`Action::ALL`] from one list of variant names, and — in the same
+/// expansion — an exhaustive `match` over [`Action`] naming that same list.
+///
+/// The list this replaced was hand-copied from the enum and could silently
+/// drift from it: the five speech actions (issue #20) shipped without ever
+/// being added to it, and the tests that walked `ALL` to catch exactly that
+/// were quietly not checking them at all. A `match` with no wildcard arm
+/// stops compiling the moment a variant exists that it does not name, so
+/// deriving the array from the same names the match requires makes "a
+/// variant was added" and "the array does not yet know about it" the same
+/// event: a compile error, not a silent gap.
+macro_rules! exhaustive_actions {
+    ($($variant:ident),+ $(,)?) => {
+        impl Action {
+            /// Every action, so a keymap can be checked against the whole set.
+            #[allow(dead_code)] // reached by its tests, not by the application
+            pub const ALL: [Action; exhaustive_actions!(@count $($variant),+)] =
+                [$(Action::$variant),+];
+        }
 
+        /// Exists only to be exhaustive: never called, but a variant added to
+        /// [`Action`] without a matching name in [`exhaustive_actions!`]
+        /// fails to compile here, in the same match that built `ALL`.
+        #[allow(dead_code)]
+        const fn assert_every_action_is_listed(action: Action) {
+            match action {
+                $(Action::$variant => {})+
+            }
+        }
+    };
+    (@count $($variant:ident),+) => {
+        [$(exhaustive_actions!(@one $variant)),+].len()
+    };
+    (@one $variant:ident) => { () };
+}
+
+exhaustive_actions!(
+    Next,
+    Previous,
+    First,
+    Last,
+    ToggleAutoadvance,
+    PreviewNext,
+    PreviewPrevious,
+    CommitPreview,
+    CancelPreview,
+    Blank,
+    ToggleTimer,
+    ResetTimer,
+    SpeakToggle,
+    SpeakPageToggle,
+    SpeakStop,
+    SpeakNextSentence,
+    SpeakPreviousSentence,
+    SwapDisplays,
+    ToggleAudienceFullscreen,
+    OpenDocument,
+    ReloadDocument,
+    Print,
+    ShowOverview,
+    CycleLayout,
+    ShowLayouts,
+    ShowShortcuts,
+    AnnotateSelect,
+    AnnotateInk,
+    AnnotateHighlighter,
+    AnnotateText,
+    AnnotateNote,
+    AnnotateEraser,
+    AnnotatePointer,
+    AnnotateSelectText,
+    CopySelection,
+    UndoAnnotation,
+    RedoAnnotation,
+    ClearAnnotations,
+    ToggleAnnotationAudience,
+    FocusNextLink,
+    FocusPreviousLink,
+    ToggleReader,
+    ToggleOutline,
+    FocusSearch,
+    FindNext,
+    FindPrevious,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    FitPage,
+    FitWidth,
+    RotateReader,
+    ToggleDualPage,
+    CycleColorMode,
+    Quit,
+);
+
+impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Action::Next => "Next page",
@@ -555,117 +579,22 @@ impl KeyBinding {
             }
         }
     }
-
-    /// Fold a legacy `"Shift…"` / `"Ctrl…"` name prefix into the modifiers.
-    ///
-    /// A keymap written before modifiers were data spells redo as
-    /// `{"kind":"named","key":"ShiftZ"}`. Left alone it would never match
-    /// again, because the toolkit reports `Z` and the shift flag separately.
-    fn normalized(self) -> Self {
-        let KeyBinding::Named { key, mut mods } = self else {
-            return self;
-        };
-        let mut rest = key.as_str();
-        // Longest first, so "Shift" is not mistaken inside another name, and
-        // repeated so "CtrlShiftZ" folds both.
-        loop {
-            let stripped = ["Ctrl", "Control", "Shift", "Alt"]
-                .iter()
-                .find_map(|prefix| rest.strip_prefix(prefix).map(|rest| (*prefix, rest)));
-            // A bare modifier name is a key in its own right, not a prefix.
-            match stripped {
-                Some((prefix, tail)) if !tail.is_empty() => {
-                    match prefix {
-                        // The legacy spelling predates the macOS split, so
-                        // it can only have meant the primary modifier.
-                        "Ctrl" | "Control" => mods.primary = true,
-                        "Shift" => mods.shift = true,
-                        _ => mods.alt = true,
-                    }
-                    rest = tail;
-                }
-                _ => break,
-            }
-        }
-        KeyBinding::Named {
-            key: rest.to_string(),
-            mods,
-        }
-    }
 }
 
+/// The presenter's key bindings.
+///
+/// `Settings.keymap` is `#[serde(skip)]` — shortcut customisation is
+/// intentionally unavailable until the interaction and migration design is
+/// ready to support it well — so this is always [`Keymap::default`] in the
+/// running application. A prior version of this type still carried a full
+/// migration layer for loading an old stored keymap from disk (folding a
+/// legacy `"ShiftZ"` key spelling into modifiers, dropping retired action
+/// names, repairing two defaults that had shipped broken); none of it could
+/// ever run with the field skipped, so it was deleted rather than kept
+/// exercising a path the application does not take.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "KeymapWire")]
 pub struct Keymap {
     pub bindings: Vec<(KeyBinding, Action)>,
-}
-
-/// The stored shape, so every binding is normalised on the way in and a
-/// keymap written against the old `"ShiftZ"` spelling keeps working.
-#[derive(Deserialize)]
-struct KeymapWire {
-    bindings: Vec<(KeyBinding, StoredAction)>,
-}
-
-/// An action name as it was stored, which may name an action that no longer
-/// exists — `blank-white` and `blank-alternate` are the retired second
-/// blanking key. A keymap is a presenter's own file: one stale name in it
-/// costs that binding, never the whole file.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum StoredAction {
-    Known(Action),
-    #[allow(dead_code)] // unreached, including by its own tests
-    Retired(String),
-}
-
-impl From<KeymapWire> for Keymap {
-    fn from(wire: KeymapWire) -> Self {
-        let mut bindings: Vec<_> = wire
-            .bindings
-            .into_iter()
-            .filter_map(|(binding, action)| match action {
-                StoredAction::Known(action) => Some((binding.normalized(), action)),
-                StoredAction::Retired(_) => None,
-            })
-            // Retired bindings go from stored keymaps too, or existing users
-            // would keep a key that fresh installs stopped advertising.
-            // Preview stepping is controlled by the scrubber rather than the
-            // fixed keymap; reading and presenting are reached by cycling
-            // layouts, which is the same act named once instead of twice.
-            .filter(|(_, action)| {
-                !matches!(
-                    action,
-                    Action::PreviewNext
-                        | Action::PreviewPrevious
-                        | Action::CommitPreview
-                        | Action::CancelPreview
-                        | Action::ToggleReader
-                )
-            })
-            .collect();
-
-        // These were shipped as defaults but could not do what their labels
-        // promised: Iced reports the slash character as "/", not "slash",
-        // while Ctrl+F is the conventional way to find. Move the old
-        // fullscreen default to the bare `f` documented by the launcher and
-        // carry existing keymaps forward with the corrected bindings.
-        for (binding, action) in &mut bindings {
-            if *action == Action::FocusSearch && *binding == KeyBinding::named("slash") {
-                *binding = KeyBinding::named("/");
-            }
-            if *action == Action::ToggleAudienceFullscreen
-                && *binding == KeyBinding::named_with("f", Mods::primary())
-            {
-                *binding = KeyBinding::named("f");
-            }
-        }
-        let ctrl_f = KeyBinding::named_with("f", Mods::primary());
-        if !bindings.iter().any(|(binding, _)| *binding == ctrl_f) {
-            bindings.push((ctrl_f, Action::FocusSearch));
-        }
-        Keymap { bindings }
-    }
 }
 
 impl Default for Keymap {
@@ -896,50 +825,6 @@ impl Keymap {
             }
         }
         None
-    }
-
-    #[allow(dead_code)] // reached by its tests, not by the application
-    pub fn bind(&mut self, binding: KeyBinding, action: Action) {
-        self.bindings.retain(|(existing, _)| existing != &binding);
-        self.bindings.push((binding, action));
-    }
-
-    #[allow(dead_code)] // reached by its tests, not by the application
-    pub fn unbind(&mut self, binding: &KeyBinding) {
-        self.bindings.retain(|(existing, _)| existing != binding);
-    }
-
-    /// Give any action with no key at all its default one.
-    ///
-    /// The keymap is stored in full, so a settings file written before an
-    /// action existed pins the old list and the new default never appears —
-    /// which is how a shortcut can be in the source, in the documentation and
-    /// in the menu, and still do nothing on the machine of anyone who has
-    /// ever saved a setting.
-    ///
-    /// Only actions with *nothing* bound are touched, and the key is only
-    /// taken if it is still free, so a deliberate remapping is never undone
-    /// and a borrowed key is never stolen back.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    pub fn restore_missing_defaults(&mut self) {
-        let defaults = Keymap::default();
-        for action in Action::ALL {
-            if self.bindings.iter().any(|(_, bound)| *bound == action) {
-                continue;
-            }
-            for (binding, default_action) in &defaults.bindings {
-                if *default_action != action {
-                    continue;
-                }
-                let taken = self
-                    .bindings
-                    .iter()
-                    .any(|(existing, _)| existing == binding);
-                if !taken {
-                    self.bindings.push((binding.clone(), action));
-                }
-            }
-        }
     }
 
     /// Actions deliberately left unbound by default.
@@ -1251,11 +1136,13 @@ mod tests {
             keymap.display_binding(Action::ShowOverview),
             Some(&KeyBinding::named("o"))
         );
-        keymap.unbind(&KeyBinding::named("o"));
-        keymap.bind(
+        keymap
+            .bindings
+            .retain(|(binding, _)| *binding != KeyBinding::named("o"));
+        keymap.bindings.push((
             KeyBinding::named_with("m", Mods::primary()),
             Action::ShowOverview,
-        );
+        ));
         assert_eq!(
             keymap.display_binding(Action::ShowOverview),
             Some(&KeyBinding::named_with("m", Mods::primary()))
@@ -1393,30 +1280,15 @@ mod tests {
     fn unidentified_keys_fall_back_to_scancodes() {
         let mut keymap = Keymap::default();
         assert_eq!(keymap.resolve(None, Some(191)), None);
-        keymap.bind(KeyBinding::scancode(191), Action::Next);
+        keymap
+            .bindings
+            .push((KeyBinding::scancode(191), Action::Next));
         assert_eq!(keymap.resolve(None, Some(191)), Some(Action::Next));
         assert_eq!(
             keymap.resolve(Some("Right"), Some(191)),
             Some(Action::Next),
             "a named key still resolves when a scancode is also present"
         );
-    }
-
-    #[test]
-    fn rebinding_replaces_rather_than_duplicates() {
-        let mut keymap = Keymap::default();
-        keymap.bind(KeyBinding::named("Right"), Action::Previous);
-        assert_eq!(keymap.resolve(Some("Right"), None), Some(Action::Previous));
-        assert_eq!(
-            keymap
-                .bindings
-                .iter()
-                .filter(|(b, _)| *b == KeyBinding::named("Right"))
-                .count(),
-            1
-        );
-        keymap.unbind(&KeyBinding::named("Right"));
-        assert_eq!(keymap.resolve(Some("Right"), None), None);
     }
 
     #[test]
@@ -1544,8 +1416,7 @@ mod tests {
         // macOS, where the reservation and the binding agree in meaning; the
         // desktop delivering the press to us anyway is the app quitting,
         // which is what the key says.)
-        use crate::platform::input::InputPolicy;
-        let input = crate::platform::input::DesktopInput;
+        let input = crate::platform::input::InputPolicy;
         let keymap = Keymap::default();
         for (binding, action) in &keymap.bindings {
             if *action == Action::Quit {
@@ -1731,133 +1602,5 @@ mod tests {
             None
         );
         assert_eq!(Keymap::default().resolve(None, Some(191)), None);
-    }
-}
-
-#[cfg(test)]
-mod migration_tests {
-    use super::*;
-
-    #[test]
-    fn a_legacy_shift_prefixed_name_loads_as_a_modifier() {
-        // Written by any version before modifiers were data. Left as a name,
-        // it would never match again: the toolkit reports "Z" and the shift
-        // flag separately.
-        let stored = r#"{"bindings":[[{"kind":"named","key":"CtrlShiftZ"},"redo-annotation"]]}"#;
-        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_eq!(
-            keymap.bindings[0].0,
-            KeyBinding::named_with("Z", Mods::primary_shift())
-        );
-        assert_eq!(
-            keymap.resolve_with_mods(Some("Z"), Mods::primary_shift(), None),
-            Some(Action::RedoAnnotation)
-        );
-    }
-
-    #[test]
-    fn retired_preview_bindings_are_removed_from_stored_keymaps() {
-        let stored = r#"{"bindings":[[{"kind":"named","key":"Tab"},"preview-next"],[{"kind":"named","key":"ShiftTab"},"preview-previous"],[{"kind":"named","key":"Enter"},"commit-preview"],[{"kind":"named","key":"Escape"},"cancel-preview"],[{"kind":"named","key":"b"},"blank"]]}"#;
-        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_eq!(keymap.resolve(Some("b"), None), Some(Action::Blank));
-        for action in [
-            Action::PreviewNext,
-            Action::PreviewPrevious,
-            Action::CommitPreview,
-            Action::CancelPreview,
-        ] {
-            assert!(keymap.keys_for(action).is_empty(), "{action:?}");
-        }
-    }
-
-    #[test]
-    fn a_plain_legacy_binding_is_unchanged() {
-        let stored = r#"{"bindings":[[{"kind":"named","key":"b"},"blank"]]}"#;
-        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_eq!(keymap.bindings[0].0, KeyBinding::named("b"));
-        assert_eq!(keymap.resolve(Some("b"), None), Some(Action::Blank));
-    }
-
-    #[test]
-    fn a_bare_modifier_name_is_a_key_not_a_prefix() {
-        let stored = r#"{"bindings":[[{"kind":"named","key":"Shift"},"blank"]]}"#;
-        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_eq!(keymap.bindings[0].0, KeyBinding::named("Shift"));
-    }
-
-    #[test]
-    fn a_round_trip_through_json_keeps_the_modifiers() {
-        let keymap = Keymap::default();
-        let text = serde_json::to_string(&keymap).expect("should write");
-        let back: Keymap = serde_json::from_str(&text).expect("should load");
-        assert_eq!(back, keymap);
-    }
-
-    #[test]
-    fn shipped_search_and_fullscreen_defaults_are_repaired() {
-        let stored = r#"{"bindings":[[{"kind":"named","key":"slash"},"focus-search"],[{"kind":"named","key":"f","mods":{"ctrl":true}},"toggle-audience-fullscreen"]]}"#;
-        let keymap: Keymap = serde_json::from_str(stored).expect("should load");
-        assert_search_and_fullscreen_defaults(&keymap);
-    }
-}
-
-#[cfg(test)]
-mod default_repair_tests {
-    use super::*;
-
-    #[test]
-    fn an_action_the_stored_file_never_heard_of_gets_its_default_key() {
-        // Exactly the situation on any machine that saved a setting before
-        // the overview existed: the whole keymap is on disk, without it.
-        let mut stored = Keymap::default();
-        stored
-            .bindings
-            .retain(|(_, action)| *action != Action::ShowOverview);
-        assert_eq!(stored.resolve(Some("o"), None), None);
-
-        stored.restore_missing_defaults();
-        assert_eq!(stored.resolve(Some("o"), None), Some(Action::ShowOverview));
-    }
-
-    #[test]
-    fn a_deliberate_remapping_survives_the_repair() {
-        let mut stored = Keymap::default();
-        stored
-            .bindings
-            .retain(|(_, action)| *action != Action::ShowOverview);
-        // The presenter has put the overview on their remote's blue button
-        // and uses "o" for something else.
-        stored.bind(KeyBinding::scancode(191), Action::ShowOverview);
-        stored.bind(KeyBinding::named("o"), Action::ToggleAnnotationAudience);
-
-        stored.restore_missing_defaults();
-
-        assert_eq!(
-            stored.resolve(None, Some(191)),
-            Some(Action::ShowOverview),
-            "their binding stands"
-        );
-        assert_eq!(
-            stored.resolve(Some("o"), None),
-            Some(Action::ToggleAnnotationAudience),
-            "and the default does not steal a key they have used"
-        );
-    }
-
-    #[test]
-    fn every_action_has_a_default_key_unless_it_is_deliberately_unbound() {
-        // The repair can only give back what the defaults offer, so an action
-        // with no default would be unreachable on a fresh install too. Link
-        // focus is the deliberate exception, and naming it here is what keeps
-        // the rule strict for everything else.
-        let defaults = Keymap::default();
-        for action in Action::ALL {
-            let bound = defaults.bindings.iter().any(|(_, bound)| *bound == action);
-            assert_eq!(
-                bound,
-                !Keymap::UNBOUND_BY_DEFAULT.contains(&action),
-                "{action:?} disagrees with the unbound-by-default list"
-            );
-        }
     }
 }

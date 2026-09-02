@@ -1713,20 +1713,6 @@ mod tests {
     }
 
     #[test]
-    fn a_keymap_stored_before_the_setting_existed_keeps_working() {
-        use crate::settings::keys::{Action, Keymap};
-        // `b` used to mean "blank black" outright. Loading that keymap must
-        // give the presenter the blank key, not an unbound `b`. `w` named the
-        // second blanking key, which no longer exists: that binding goes, and
-        // the file still loads.
-        let older = r#"{"bindings":[[{"kind":"named","key":"b"},"blank-black"],
-                                    [{"kind":"named","key":"w"},"blank-white"]]}"#;
-        let keymap: Keymap = serde_json::from_str(older).expect("should load");
-        assert_eq!(keymap.resolve(Some("b"), None), Some(Action::Blank));
-        assert_eq!(keymap.resolve(Some("w"), None), None);
-    }
-
-    #[test]
     fn the_blank_color_round_trips_through_settings() {
         let settings = DisplaySettings {
             blank_color: BlankColor::White,
