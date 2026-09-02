@@ -197,7 +197,7 @@ impl PresentationState {
     }
 
     pub fn first_page_size(&self) -> Option<PageSize> {
-        self.document.as_ref().and_then(|d| d.first_page_size)
+        self.document.as_ref().and_then(|d| d.first_page_size())
     }
 
     /// Image shown on the audience display right now (`None` while blanked or
