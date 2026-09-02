@@ -9314,7 +9314,7 @@ impl App {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         for wash in washes {
-            for quad in &wash.quads {
+            for quad in wash.quads.iter() {
                 let bounds = quad.bounds();
                 for value in [bounds.left, bounds.top, bounds.right, bounds.bottom] {
                     value.to_bits().hash(&mut hasher);
@@ -9346,7 +9346,7 @@ impl App {
             // 8.8 fixed point per channel; 256 is "leave the pixel alone".
             let factor = [wash.color.0, wash.color.1, wash.color.2]
                 .map(|c| ((1.0 - alpha * (1.0 - c.clamp(0.0, 1.0))) * 256.0).round() as u32);
-            for quad in &wash.quads {
+            for quad in wash.quads.iter() {
                 let bounds = quad.bounds();
                 let x0 = ((bounds.left * scale_x).floor().max(0.0)) as usize;
                 let y0 = ((bounds.top * scale_y).floor().max(0.0)) as usize;

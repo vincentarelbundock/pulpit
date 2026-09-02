@@ -15,6 +15,8 @@
 //! * it is never painted over a frame that already contains the same mark,
 //!   because by then the gesture is gone.
 
+use std::rc::Rc;
+
 use iced::mouse;
 use iced::widget::canvas as canvas_widget;
 use iced::widget::canvas::{self, Path, Stroke};
@@ -23,12 +25,18 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use pulpit_core::page::{PagePoint, PageRect};
 
 /// The open gesture, ready to draw over one sheet.
+///
+/// `points` and `quads` are `Rc<[T]>`: this is rebuilt every layout pass
+/// while a stroke is retained awaiting a frame (§82.2), and a stroke can
+/// carry thousands of points. Sharing the slice rather than owning a `Vec`
+/// lets `Clone` — which every redraw performs at least once — bump a
+/// reference count instead of copying the points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GesturePreview {
     /// The stroke's points, in canonical page space (A4).
-    pub points: Vec<PagePoint>,
+    pub points: Rc<[PagePoint]>,
     /// The text runs a selection has resolved to so far, also canonical.
-    pub quads: Vec<pulpit_core::page::PageQuad>,
+    pub quads: Rc<[pulpit_core::page::PageQuad]>,
     /// Which mark those runs will become: a wash over them, a rule under
     /// them, or a rule through them.
     ///
@@ -156,7 +164,7 @@ pub fn marquee_layer<'a, Message: 'a>(
 /// Deliberately quiet: the muted role and the smallest type, so a form with
 /// twenty signature lines still reads as a form and not as an error report.
 pub fn dead_field_layer<'a, Message: 'a>(
-    fields: Vec<crate::widgets::context::DeadField>,
+    fields: Rc<[crate::widgets::context::DeadField]>,
     muted: Color,
     canonical: (f32, f32),
     origin: (f32, f32),
@@ -185,7 +193,7 @@ pub fn dead_field_layer<'a, Message: 'a>(
 const BADGE_TEXT: f32 = 9.0;
 
 struct DeadFieldPainter<Message> {
-    fields: Vec<crate::widgets::context::DeadField>,
+    fields: Rc<[crate::widgets::context::DeadField]>,
     muted: Color,
     canonical: (f32, f32),
     /// As [`SelectionPainter::origin`].
@@ -299,7 +307,7 @@ impl<Message> canvas::Program<Message> for DeadFieldPainter<Message> {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        for field in &self.fields {
+        for field in self.fields.iter() {
             let (top_left, size) = self.field_rect(field);
             // A hairline round the widget and a light wash inside: enough to
             // say "this box is not the same as the ones you can type in",
@@ -501,7 +509,7 @@ impl<Message> canvas::Program<Message> for Painter {
         // pointer came up now: the whole run for a wash, and a rule across it
         // for an underline or a strikeout. Previewing all three as blocks
         // would show the reader a highlight and then commit a line.
-        for quad in &self.preview.quads {
+        for quad in self.preview.quads.iter() {
             let bounds = quad.bounds();
             let height = bounds.height() * scale_y;
             match self.preview.markup.rule_at() {
@@ -564,8 +572,8 @@ mod tests {
     #[test]
     fn a_preview_with_nothing_in_it_draws_nothing() {
         let empty = GesturePreview {
-            points: Vec::new(),
-            quads: Vec::new(),
+            points: Rc::from([]),
+            quads: Rc::from([]),
             markup: pulpit_core::annotation::MarkupKind::Highlight,
             color: (1.0, 0.0, 0.0),
             opacity: 1.0,
@@ -574,7 +582,7 @@ mod tests {
         assert!(empty.is_empty());
 
         let dot = GesturePreview {
-            points: vec![PagePoint::new(10.0, 10.0)],
+            points: Rc::from([PagePoint::new(10.0, 10.0)]),
             ..empty.clone()
         };
         assert!(!dot.is_empty(), "a dot is a mark somebody meant to make");
