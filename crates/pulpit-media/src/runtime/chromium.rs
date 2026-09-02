@@ -360,19 +360,19 @@ impl CdpPipe {
                 // After dup2-ing, explicitly clear CLOEXEC. Note: dup2(old, new)
                 // only clears CLOEXEC when old != new; when they are equal it is
                 // a no-op and the flag is untouched, so we must clear it explicitly.
-                if libc_dup2(child_read, 3) < 0 {
+                if libc::dup2(child_read, 3) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 if child_read == 3 {
                     // dup2 was a no-op, clear CLOEXEC manually.
-                    libc_fcntl(3, F_SETFD, 0);
+                    libc::fcntl(3, libc::F_SETFD, 0);
                 }
-                if libc_dup2(child_write, 4) < 0 {
+                if libc::dup2(child_write, 4) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 if child_write == 4 {
                     // dup2 was a no-op, clear CLOEXEC manually.
-                    libc_fcntl(4, F_SETFD, 0);
+                    libc::fcntl(4, libc::F_SETFD, 0);
                 }
                 Ok(())
             });
@@ -393,9 +393,9 @@ impl CdpPipe {
         // read with nothing to read waits for ever and the worker can neither
         // time out nor go back and serve a command.
         unsafe {
-            let flags = libc_fcntl(read_fd, F_GETFL, 0);
+            let flags = libc::fcntl(read_fd, libc::F_GETFL, 0);
             if flags >= 0 {
-                libc_fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
+                libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
         let reader = BufReader::new(unsafe { std::fs::File::from_raw_fd(read_fd) });
@@ -635,10 +635,10 @@ fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError>
     #[cfg(target_os = "linux")]
     // SAFETY: `fds` is a two-element array, which is what pipe2(2) writes.
     // O_CLOEXEC prevents the fds from leaking into child processes.
-    let result = unsafe { libc_pipe2(fds.as_mut_ptr(), O_CLOEXEC) };
+    let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     #[cfg(not(target_os = "linux"))]
     // SAFETY: `fds` is a two-element array, which is what pipe(2) writes.
-    let result = unsafe { libc_pipe(fds.as_mut_ptr()) };
+    let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if result != 0 {
         return Err(MediaError::new(
             MediaErrorKind::LaunchFailed,
@@ -655,13 +655,13 @@ fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError>
     #[cfg(not(target_os = "linux"))]
     for fd in fds {
         // SAFETY: `fd` is one of the descriptors pipe(2) just handed back.
-        if unsafe { libc_fcntl(fd, F_SETFD, FD_CLOEXEC) } == -1 {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
             let error = std::io::Error::last_os_error();
             // SAFETY: both descriptors are open and owned here, and nothing
             // else has been handed a copy yet.
             unsafe {
-                libc_close(fds[0]);
-                libc_close(fds[1]);
+                libc::close(fds[0]);
+                libc::close(fds[1]);
             }
             return Err(MediaError::new(
                 MediaErrorKind::LaunchFailed,
@@ -670,44 +670,6 @@ fn os_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), MediaError>
         }
     }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
-
-// The libc calls this adapter needs, declared directly so the crate does
-// not take a dependency for them.
-/// `fcntl` constants from `fcntl.h`.
-#[cfg(unix)]
-const F_GETFL: i32 = 3;
-#[cfg(unix)]
-const F_SETFL: i32 = 4;
-#[cfg(unix)]
-const F_SETFD: i32 = 2;
-#[cfg(all(unix, not(target_os = "linux")))]
-const FD_CLOEXEC: i32 = 1;
-// `O_NONBLOCK` is one of the values that genuinely differs between Linux and
-// the BSDs, macOS among them. Taking the wrong platform's number is silent
-// rather than loud: `fcntl` accepts it and sets some other flag.
-#[cfg(all(unix, target_os = "linux"))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(all(unix, not(target_os = "linux")))]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(target_os = "linux")]
-const O_CLOEXEC: i32 = 0o2000000;
-
-#[cfg(unix)]
-extern "C" {
-    #[cfg(target_os = "linux")]
-    #[link_name = "pipe2"]
-    fn libc_pipe2(fds: *mut i32, flags: i32) -> i32;
-    #[cfg(not(target_os = "linux"))]
-    #[link_name = "pipe"]
-    fn libc_pipe(fds: *mut i32) -> i32;
-    #[cfg(not(target_os = "linux"))]
-    #[link_name = "close"]
-    fn libc_close(fd: i32) -> i32;
-    #[link_name = "fcntl"]
-    fn libc_fcntl(fd: i32, command: i32, argument: i32) -> i32;
-    #[link_name = "dup2"]
-    fn libc_dup2(old: i32, new: i32) -> i32;
 }
 
 /// Serve a staged bundle from loopback on an unguessable path.

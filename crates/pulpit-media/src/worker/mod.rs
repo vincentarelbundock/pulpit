@@ -123,23 +123,14 @@ pub fn wait_for_input<R: std::io::Read>(
     if !reader.buffer().is_empty() {
         return true;
     }
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-    extern "C" {
-        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-    }
-    let mut descriptor = PollFd {
+    let mut descriptor = libc::pollfd {
         fd: std::io::stdin().as_raw_fd(),
-        events: 0x001,
+        events: libc::POLLIN,
         revents: 0,
     };
     // SAFETY: one initialised pollfd is passed with a length of one.
     unsafe {
-        poll(
+        libc::poll(
             &mut descriptor,
             1,
             timeout.as_millis().min(i32::MAX as u128) as i32,
