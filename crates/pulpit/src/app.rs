@@ -3390,10 +3390,9 @@ impl App {
                     && self.watcher.as_ref().is_some_and(DocumentWatcher::drain)
                 {
                     let actions = self.documents.on_file_event(self.now);
-                    self.run_document_actions(actions)
-                } else {
-                    Task::none()
+                    self.run_document_actions(actions);
                 }
+                Task::none()
             }
             Message::TopologySnapshot(snapshot) => {
                 if snapshot.same_topology(&self.coordinator.snapshot) {
@@ -4009,7 +4008,7 @@ impl App {
                 if crate::layout::PrimaryViewer::of(&self.active_layout)
                     == crate::layout::PrimaryViewer::Document
                 {
-                    let page = self.page_showing(slide);
+                    let page = self.page_of_slide(slide);
                     return self
                         .on_read_command(crate::widgets::event::ReadCommand::GoToPage(page));
                 }
@@ -5777,7 +5776,8 @@ impl App {
             Action::ReloadDocument => {
                 let now = self.now;
                 let actions = self.documents.open_initial(now);
-                self.run_document_actions(actions)
+                self.run_document_actions(actions);
+                Task::none()
             }
             Action::ShowOverview => self.dispatch(Message::ToggleOverview),
             Action::CycleLayout => self.cycle_layout(),
@@ -6232,10 +6232,10 @@ impl App {
         if self.settings.rendering.watch_document {
             if self.watcher.as_ref().is_some_and(|watcher| watcher.drain()) {
                 let actions = self.documents.on_file_event(now);
-                tasks.push(self.run_document_actions(actions));
+                self.run_document_actions(actions);
             }
             let actions = self.documents.tick(now, &RealFileProbe);
-            tasks.push(self.run_document_actions(actions));
+            self.run_document_actions(actions);
         }
 
         // 3. A pending reconciliation (a new frame, a role change).
@@ -6433,7 +6433,7 @@ impl App {
                         "the folder changed while it was being opened".into(),
                         self.now,
                     );
-                    let _ = self.run_document_actions(actions);
+                    self.run_document_actions(actions);
                     return;
                 }
                 let mut info = DocumentInfo::new(
@@ -6511,7 +6511,7 @@ impl App {
                     self.state.apply(Nav::SetNotesMapping(mapping), self.now);
                 }
                 let actions = self.documents.on_candidate_opened(info, self.now);
-                let _ = self.run_document_actions(actions);
+                self.run_document_actions(actions);
             }
             RenderEvent::OpenFailed { document, reason } => {
                 let actions = self.documents.on_candidate_failed(
@@ -6519,7 +6519,7 @@ impl App {
                     reason,
                     self.now,
                 );
-                let _ = self.run_document_actions(actions);
+                self.run_document_actions(actions);
             }
             // The link annotations on a page, kept until the document is
             // replaced. A press on the current slide is hit-tested against
@@ -6737,18 +6737,6 @@ impl App {
                     self.frame_ready(key, handle);
                 }
                 self.pin_visible();
-
-                // The candidate document's first frame is what promotes it.
-                if let Some(active) = self.documents.active() {
-                    if active.id.0 != job.document {
-                        let info = DocumentInfo::new(
-                            pulpit_core::DocumentId(job.document),
-                            self.documents.path(),
-                            active.pdf_pages,
-                        );
-                        let _ = info;
-                    }
-                }
                 self.mark_audience_frame();
                 self.remember_audience_frame();
             }
@@ -6809,7 +6797,12 @@ impl App {
         }
     }
 
-    fn run_document_actions(&mut self, actions: Vec<DocAction>) -> Task<Message> {
+    /// §79.5: every `DocAction` is handled by mutation or by queuing a
+    /// `Message` — none of them hands back a `Task` of its own — so this
+    /// always returned `Task::none()`, and every caller either discarded the
+    /// result or batched a no-op alongside a real task. Returns nothing now;
+    /// callers that used to batch its output just no longer do.
+    fn run_document_actions(&mut self, actions: Vec<DocAction>) {
         // Actions an action produced, run after this batch rather than in the
         // middle of it: an image directory that has changed under a candidate
         // fails that candidate, and the remaining actions in the batch are
@@ -6967,10 +6960,8 @@ impl App {
                 }
             }
         }
-        if deferred.is_empty() {
-            Task::none()
-        } else {
-            self.run_document_actions(deferred)
+        if !deferred.is_empty() {
+            self.run_document_actions(deferred);
         }
     }
 
@@ -7147,7 +7138,8 @@ impl App {
 
         let preparation = self.prepare_document_task(path.clone(), self.document_serial);
         let actions = self.documents.open_initial(self.now);
-        Task::batch([self.run_document_actions(actions), preparation])
+        self.run_document_actions(actions);
+        preparation
     }
 
     fn prepare_document_task(&mut self, path: PathBuf, serial: u64) -> Task<Message> {
@@ -7964,14 +7956,14 @@ impl App {
                     if let Some(journal) = self.reader_journal.as_mut() {
                         journal.finish();
                     }
-                    if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
-                        self.signing_source = Some(saved.path.clone());
-                        // Resuming needs to open a file picker, and a picker
-                        // is a `Task` this reader pump has no way to return
-                        // (§79.1).
-                        self.deferred
-                            .push(Message::Sign(crate::signing::SignMsg::ResumeAfterSave));
-                    }
+                    // §79.5: a `SavingFirst` sign flow's own save always
+                    // writes to `self.signing_temp` — `signing_scratch_destination`
+                    // is the only way to reach this save with `self.signing`
+                    // at `SavingFirst`, and it always sets `signing_temp` to
+                    // the path being saved to — so a save that reaches this
+                    // point already took the `signing_temp` branch above and
+                    // `continue`d. `self.signing` cannot still be
+                    // `SavingFirst` here; a second check for it was dead.
                 }
                 crate::reader_link::Told::EditFailed { message, fatal } => {
                     // This answered one mutation, and only that one: the queue
@@ -9496,21 +9488,34 @@ impl App {
             return Task::none();
         };
         let value = picker.time.format(&picker.pattern, self.date_language);
+        self.commit_picker_value(picker.field.clone(), value)
+    }
+
+    /// A date or a time chosen from a picker, committed as an ordinary field
+    /// edit: the same `SetField` an undo uses, so it goes through PDFium's
+    /// own editor, gets the field's format script run over it, and lands in
+    /// the shared undo history like any other change (§9.1). pulpit chooses
+    /// the *text*; PDFium still decides what it looks like in the field.
+    ///
+    /// §79.5: `PickDate` and `commit_focused_time` built this transaction by
+    /// hand, identically but for the field and the formatted value.
+    ///
+    /// The engine kills the focus as it takes the value — `SetField` runs
+    /// through PDFium's own editor, which force-kills the focus and lets the
+    /// form page go — and the answer comes back as an `Applied`, which
+    /// carries no `FormEventResult` and so refreshes nothing. Said here
+    /// rather than plumbed through a form-event reply: a commit is a document
+    /// mutation, and turning it into a form event to get a focus report back
+    /// would be a second editing path for one value (§9.1).
+    fn commit_picker_value(&mut self, field: String, value: String) -> Task<Message> {
         let transaction = pulpit_render::document::DocumentTransaction::one(
             pulpit_render::document::DocumentCommand::SetField {
-                name: picker.field.clone(),
+                name: field,
                 value,
                 // A date and a time are single values; nothing to select.
                 selected: Vec::new(),
             },
         );
-        // The engine kills the focus as it takes the value — `SetField` runs
-        // through PDFium's own editor, which force-kills the focus and lets
-        // the form page go — and the answer comes back as an `Applied`, which
-        // carries no `FormEventResult` and so refreshes nothing. Said here
-        // rather than plumbed through a form-event reply: a commit is a
-        // document mutation, and turning it into a form event to get a focus
-        // report back would be a second editing path for one value (§9.1).
         self.reader.form_focus_dropped();
         self.commit_to_document(transaction);
         Task::none()
@@ -9959,25 +9964,7 @@ impl App {
                     AppliedKind::Undo
                 };
                 let epoch = self.reader.history_epoch();
-                self.reader_pending.push_back(PendingEdit {
-                    kind,
-                    names: None,
-                    transaction: None,
-                    // Not knowable until the answer says what came back.
-                    urgency: crate::reader::RasterUrgency::Deferred,
-                    reversal: Some((epoch, Box::new(operation.clone()))),
-                });
-                if let Some(link) = self.reader_link.as_mut() {
-                    link.ask(crate::reader_link::Ask::Undo {
-                        expected_revision: expected,
-                        operation,
-                    });
-                } else {
-                    self.reader_pending.pop_back();
-                    // Nothing will answer, so the operation goes back where it
-                    // came from rather than being dropped on the floor.
-                    self.reader.restore_operation(kind, epoch, operation);
-                }
+                self.send_undo(kind, epoch, operation, expected);
                 Task::none()
             }
             ReadCommand::GoToField { page, name } => {
@@ -10122,32 +10109,11 @@ impl App {
                 unfocus()
             }
             ReadCommand::PickDate(date) => {
-                // A chosen day becomes an ordinary field edit: the same
-                // `SetField` an undo uses, so it goes through PDFium's own
-                // editor, gets the field's format script run over it, and
-                // lands in the shared undo history like any other change
-                // (§9.1). pulpit chooses the *text*; PDFium still decides what
-                // it looks like in the field.
                 let Some(picker) = self.reader.date_picker() else {
                     return Task::none();
                 };
                 let value = date.format(&picker.pattern, self.date_language);
-                let transaction = pulpit_render::document::DocumentTransaction::one(
-                    pulpit_render::document::DocumentCommand::SetField {
-                        name: picker.field.clone(),
-                        value,
-                        // A date and a time are single values; nothing to select.
-                        selected: Vec::new(),
-                    },
-                );
-                // The calendar comes down and the caret goes with it, for the
-                // reason spelled out in
-                // `commit_focused_time`: the engine force-kills the focus as
-                // it takes the value, and the `Applied` that answers carries
-                // no focus report to say so.
-                self.reader.form_focus_dropped();
-                self.commit_to_document(transaction);
-                Task::none()
+                self.commit_picker_value(picker.field.clone(), value)
             }
             ReadCommand::PickTime => self.commit_focused_time(),
             ReadCommand::PickOption(index) => {
@@ -10194,15 +10160,7 @@ impl App {
                 let Some(found) = self.reader.selected_editable() else {
                     return Task::none();
                 };
-                self.begin_composing(ComposingMark {
-                    page: found.page,
-                    at: found.at,
-                    tool: found.tool,
-                    text: found.text,
-                    typst: found.typst,
-                    editing: Some(found.id),
-                    font_size: found.font_size,
-                })
+                self.compose_found(found)
             }
             ReadCommand::PageDoubleClicked => {
                 // Whatever the armed tool is: opening what a mark says is not
@@ -10213,15 +10171,7 @@ impl App {
                 let Some(found) = self.reader.text_under_cursor() else {
                     return Task::none();
                 };
-                self.begin_composing(ComposingMark {
-                    page: found.page,
-                    at: found.at,
-                    tool: found.tool,
-                    text: found.text,
-                    typst: found.typst,
-                    editing: Some(found.id),
-                    font_size: found.font_size,
-                })
+                self.compose_found(found)
             }
             ReadCommand::PageReleased => {
                 // The release commits on the newest answer, so take up
@@ -10453,6 +10403,22 @@ impl App {
         }
     }
 
+    /// A mark found on the page — under a double-click, or already selected —
+    /// opened for editing. §79.5: `EditSelected` and `PageDoubleClicked` both
+    /// built the same [`ComposingMark`] from an [`crate::reader::EditableText`]
+    /// by hand; this is the one place that mapping happens now.
+    fn compose_found(&mut self, found: crate::reader::EditableText) -> Task<Message> {
+        self.begin_composing(ComposingMark {
+            page: found.page,
+            at: found.at,
+            tool: found.tool,
+            text: found.text,
+            typst: found.typst,
+            editing: Some(found.id),
+            font_size: found.font_size,
+        })
+    }
+
     /// Open the editor on a mark, new or being rewritten (§8.5).
     ///
     /// The buffer is rebuilt from the mark's text rather than cleared, so
@@ -10591,33 +10557,10 @@ impl App {
                 crate::reader_journal::JournalEntry::Reversed { operation, .. } => {
                     // Replayed as an undo, which is what it was. The revision
                     // it expects is whatever the replay has reached, not the
-                    // one it had in the run that recorded it.
+                    // one it had in the run that recorded it. `u64::MAX` is
+                    // not a stack epoch this replay owns; see `send_undo`.
                     let expected = self.expected_revision();
-                    self.reader_pending.push_back(PendingEdit {
-                        kind: AppliedKind::Undo,
-                        names: None,
-                        transaction: None,
-                        urgency: crate::reader::RasterUrgency::Deferred,
-                        // Not a stack epoch this replay owns — `u64::MAX`
-                        // never matches `history_epoch`, so a refusal's
-                        // `restore_operation` is a no-op rather than pushing
-                        // onto a stack replay does not read. The operation
-                        // itself is kept so a re-crash journals what was
-                        // actually sent (§76.2), not the worker's inverse of
-                        // it.
-                        reversal: Some((u64::MAX, operation.clone())),
-                    });
-                    match self.reader_link.as_mut() {
-                        Some(link) => {
-                            link.ask(crate::reader_link::Ask::Undo {
-                                expected_revision: expected,
-                                operation: *operation,
-                            });
-                        }
-                        None => {
-                            self.reader_pending.pop_back();
-                        }
-                    }
+                    self.send_undo(AppliedKind::Undo, u64::MAX, *operation, expected);
                 }
             }
         }
@@ -13111,7 +13054,7 @@ impl App {
         let task = if self.uses_document_viewer() {
             let page = match place {
                 pulpit_core::Place::Page(page) => pulpit_core::PageIndex(page),
-                pulpit_core::Place::Slide(slide) => self.page_showing(slide),
+                pulpit_core::Place::Slide(slide) => self.page_of_slide(slide),
             };
             self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(page))
         } else {
@@ -13346,10 +13289,15 @@ impl App {
 
     /// Which PDF page a given slide shows.
     ///
-    /// The inverse of `slide_showing`, and asked of the mapping for the same
-    /// reason: under a paired deck the grid's index and the reader's page are
-    /// not the same number.
-    fn page_showing(&self, slide: usize) -> pulpit_core::PageIndex {
+    /// The inverse of [`App::slide_of_page`], and asked of the mapping for
+    /// the same reason: under a paired deck the grid's index and the reader's
+    /// page are not the same number.
+    ///
+    /// §79.5: this, `showing_page`'s own tail (`page_of_slide` of the
+    /// committed slide) and `slide_showing` (`slide_of_page` with a fallback)
+    /// were four spellings of two lookups, two of them re-walking every slide
+    /// with `find` where `slide_showing` alone needed to.
+    fn page_of_slide(&self, slide: usize) -> pulpit_core::PageIndex {
         let pdf_pages = self
             .state
             .document()
@@ -13364,12 +13312,27 @@ impl App {
         pulpit_core::PageIndex(page)
     }
 
-    /// Which slide shows a given PDF page.
+    /// Which slide shows a given PDF page, if the current notes mapping shows
+    /// it at all.
     ///
     /// A search hit is a fact about a page; the presenter moves in slides, and
     /// under a paired notes mapping those are not the same number. Resolved by
     /// asking the mapping in force rather than by arithmetic on it, so a
     /// swapped or split deck lands on the slide the reader meant.
+    fn slide_of_page(&self, page: usize) -> Option<usize> {
+        let pdf_pages = self
+            .state
+            .document()
+            .map(|document| document.pdf_pages)
+            .unwrap_or(0);
+        let mapping = self.state.mapping();
+        (0..self.state.slide_count()).find(|slide| {
+            mapping
+                .audience_source(*slide, pdf_pages)
+                .is_some_and(|source| source.pdf_page == page)
+        })
+    }
+
     /// The physical page in front of the presenter, in whichever mode is up.
     ///
     /// The inverse of [`App::slide_showing`]: a deck slide is a page of the
@@ -13378,35 +13341,14 @@ impl App {
         if self.uses_document_viewer() {
             return self.reader.controls().page;
         }
-        let pdf_pages = self
-            .state
-            .document()
-            .map(|document| document.pdf_pages)
-            .unwrap_or(0);
-        let slide = self.state.committed();
-        let page = self
-            .state
-            .mapping()
-            .audience_source(slide, pdf_pages)
-            .map(|source| source.pdf_page)
-            .unwrap_or(slide);
-        pulpit_core::page::PageIndex(page)
+        self.page_of_slide(self.state.committed())
     }
 
+    /// A page with no slide under the current mapping is its own slide
+    /// index: the fallback every caller but [`App::slide_of_page`] itself
+    /// wants.
     fn slide_showing(&self, page: usize) -> usize {
-        let pdf_pages = self
-            .state
-            .document()
-            .map(|document| document.pdf_pages)
-            .unwrap_or(0);
-        let mapping = self.state.mapping();
-        (0..self.state.slide_count())
-            .find(|slide| {
-                mapping
-                    .audience_source(*slide, pdf_pages)
-                    .is_some_and(|source| source.pdf_page == page)
-            })
-            .unwrap_or(page)
+        self.slide_of_page(page).unwrap_or(page)
     }
 
     /// Ask for the next chunk of page text, if a search is running and the
@@ -14252,6 +14194,43 @@ impl App {
             revision = revision.next();
         }
         revision
+    }
+
+    /// Send one undo operation to the document worker and record that it is
+    /// pending. §79.5: the interactive Undo/Redo arm and journal replay
+    /// (`restore_reader_edits`) built the same `PendingEdit` by hand.
+    ///
+    /// `epoch` is the stack slot to put `operation` back on if it is refused
+    /// or never answered (see `Reader::restore_operation`) — the epoch
+    /// `Reader::history_epoch` reports for an interactive undo/redo, or
+    /// `u64::MAX` for replay, which owns no stack slot: `restore_operation`
+    /// is then a no-op rather than pushing onto a stack replay does not read.
+    fn send_undo(
+        &mut self,
+        kind: AppliedKind,
+        epoch: u64,
+        operation: pulpit_render::document::DocumentUndo,
+        expected: pulpit_render::document::DocumentRevision,
+    ) {
+        self.reader_pending.push_back(PendingEdit {
+            kind,
+            names: None,
+            transaction: None,
+            // Not knowable until the answer says what came back.
+            urgency: crate::reader::RasterUrgency::Deferred,
+            reversal: Some((epoch, Box::new(operation.clone()))),
+        });
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::Undo {
+                expected_revision: expected,
+                operation,
+            });
+        } else {
+            self.reader_pending.pop_back();
+            // Nothing will answer, so the operation goes back where it came
+            // from rather than being dropped on the floor.
+            self.reader.restore_operation(kind, epoch, operation);
+        }
     }
 
     /// Post one atomic user action to the document worker.
@@ -15742,7 +15721,7 @@ impl App {
     /// Act on one link, however it was chosen.
     fn follow(&mut self, link: pulpit_core::PageLink) -> Task<Message> {
         match link.target {
-            pulpit_core::LinkTarget::Page { page, zoom } => match self.slide_for_page(page) {
+            pulpit_core::LinkTarget::Page { page, zoom } => match self.slide_of_page(page) {
                 Some(slide) => {
                     // Navigate first — that clears any zoom in force — then
                     // apply the destination's own `/FitR` view, if any.
@@ -15774,18 +15753,6 @@ impl App {
                 Task::none()
             }
         }
-    }
-
-    /// The slide whose audience content is this physical PDF page, if the
-    /// current notes mapping shows it at all.
-    fn slide_for_page(&self, page: usize) -> Option<usize> {
-        let pages = self.state.pdf_pages();
-        (0..self.state.slide_count()).find(|slide| {
-            self.state
-                .mapping()
-                .audience_source(*slide, pages)
-                .is_some_and(|source| source.pdf_page == page)
-        })
     }
 
     fn take_pending(&mut self, id: RequestId) -> Option<FrameKey> {
