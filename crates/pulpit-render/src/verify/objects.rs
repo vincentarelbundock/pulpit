@@ -85,12 +85,12 @@ pub const MAX_XREF_DECODED_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// Threaded rather than global: a budget that outlived a call would make the
 /// second verification of the same document behave differently from the first.
-pub(super) struct DecodeBudget {
+pub(crate) struct DecodeBudget {
     remaining: usize,
 }
 
 impl DecodeBudget {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         DecodeBudget {
             remaining: MAX_XREF_DECODED_BYTES,
         }
@@ -715,17 +715,29 @@ impl XrefIndex {
     }
 }
 
-pub(super) struct XrefSection {
-    pub(super) entries: Vec<(u32, XrefEntry)>,
-    pub(super) trailer: Dict,
-    pub(super) prev: Option<u64>,
-    pub(super) xref_stm: Option<u64>,
+pub(crate) struct XrefSection {
+    pub(crate) entries: Vec<(u32, XrefEntry)>,
+    pub(crate) trailer: Dict,
+    pub(crate) prev: Option<u64>,
+    pub(crate) xref_stm: Option<u64>,
     /// The absolute file offset past this section's own container: past the
     /// classic trailer dictionary's closing `>>`, or past the cross-reference
     /// stream object's `endobj`. Compared against a signature's coverage end
     /// by `classify_coverage` — see the caller in `verify::mod` for why this
     /// must be an absolute offset and not one relative to the section start.
-    pub(super) end: u64,
+    pub(crate) end: u64,
+    /// Whether this section is a classic `xref` table or a cross-reference
+    /// stream — decided once, here, by the same dispatch that parsed it,
+    /// rather than by a second, independent classic-vs-stream probe at the
+    /// same offset that could disagree with this one.
+    pub(crate) kind: XrefSectionKind,
+}
+
+/// Which of the two cross-reference container shapes a section is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum XrefSectionKind {
+    Table,
+    Stream,
 }
 
 /// Find the offset the file's last `startxref` names.
@@ -764,7 +776,7 @@ fn parse_xref_section(bytes: &[u8], offset: u64, budget: &mut DecodeBudget) -> R
 /// and that the container end — needed to compare a signature's coverage
 /// against a revision's true extent — comes from the one real parser rather
 /// than a second, token-searching one that can disagree with it.
-pub(super) fn xref_section_object_numbers(
+pub(crate) fn xref_section_object_numbers(
     bytes: &[u8],
     offset: u64,
     budget: &mut DecodeBudget,
@@ -855,6 +867,7 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
         prev,
         xref_stm,
         end,
+        kind: XrefSectionKind::Table,
     })
 }
 
@@ -1058,6 +1071,7 @@ fn parse_xref_stream_section(
         prev,
         xref_stm: None,
         end: end as u64,
+        kind: XrefSectionKind::Stream,
     })
 }
 
