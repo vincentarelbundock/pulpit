@@ -269,7 +269,11 @@ mod tests {
             std::fs::write(path, b"region").unwrap();
         }
         let long_ago = std::time::SystemTime::now() - (STALE_REGION_AGE * 2);
-        std::fs::File::open(&old)
+        // Windows's `SetFileTime` needs a writable handle; a read-only one
+        // from `File::open` is refused with `ERROR_ACCESS_DENIED`.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
             .unwrap()
             .set_modified(long_ago)
             .unwrap();
