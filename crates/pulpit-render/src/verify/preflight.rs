@@ -19,7 +19,7 @@
 //! This module provides specialized READ-side checks on an opened document.
 //! The sign module must not depend on preflight, and preflight must not depend on sign.
 
-use super::{find_catalog_ref_with, find_fields_array_with, MdpPerm, ObjectResolver};
+use super::{find_catalog_ref_with, find_field_tree_with, FieldEntry, MdpPerm, ObjectResolver};
 use crate::pdfwrite::PdfTokenizer;
 use thiserror::Error;
 
@@ -107,38 +107,49 @@ pub struct PreflightOk {
 
 pub type Result<T> = std::result::Result<T, PreflightRefusal>;
 
-/// Build the resolver both preflight passes read through, and with it the
-/// AcroForm `/Fields` array — refusing up front if the document is encrypted
-/// (no pass may proceed on an encrypted document) or if the catalog or the
-/// fields array cannot be found. Both callers need exactly this, in exactly
-/// this order, before they diverge into their own checks.
-fn resolver_and_fields(bytes: &[u8]) -> Result<(ObjectResolver<'_>, Vec<(u32, u16)>)> {
-    // One resolver for the whole pass; see `definition` above.
-    let resolver = ObjectResolver::new(bytes);
+/// The whole `/AcroForm` field tree both preflight passes read through —
+/// refusing up front if the document is encrypted (no pass may proceed on
+/// an encrypted document) or if the catalog cannot be found. Both callers
+/// need exactly this, in exactly this order, before they diverge into their
+/// own checks.
+///
+/// §76.6: this used to discard `find_field_tree_with`'s inheritance-resolved
+/// [`FieldEntry`] and keep only object numbers, so a hierarchical field whose
+/// `/FT` lives on an ancestor was invisible here even though
+/// `verify::discover_signatures` saw it fine. Keeping the resolved entries
+/// lets `extract_field_info` build `FieldInfo` from them directly instead of
+/// re-tokenising each node in isolation.
+fn fields_with(resolver: &ObjectResolver<'_>, bytes: &[u8]) -> Result<Vec<FieldEntry>> {
     if resolver.is_encrypted() {
         return Err(PreflightRefusal::EncryptedDocument);
     }
 
-    let catalog_ref = find_catalog_ref_with(&resolver, bytes)
+    let catalog_ref = find_catalog_ref_with(resolver, bytes)
         .map_err(|e| PreflightRefusal::InvalidState(format!("Failed to find catalog: {}", e)))?;
 
-    let fields_array = find_fields_array_with(&resolver, catalog_ref).map_err(|e| {
-        PreflightRefusal::InvalidState(format!("Failed to find fields array: {}", e))
-    })?;
-
-    Ok((resolver, fields_array))
+    find_field_tree_with(resolver, catalog_ref)
+        .map_err(|e| PreflightRefusal::InvalidState(format!("Failed to find fields array: {}", e)))
 }
 
 /// Check 1: Certifying requires an unsigned document.
 /// If any /Sig field with a non-null /V exists, refuse with CertificationNotAllowed.
 pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
-    let (resolver, fields_array) = resolver_and_fields(bytes)?;
+    preflight_certify_with(&ObjectResolver::new(bytes), bytes)
+}
+
+/// [`preflight_certify`], against a resolver the caller already built.
+///
+/// §78.3: signing rebuilt a resolver — decoding the whole cross-reference
+/// chain again — for roughly ten separate reads per pass; this is one of
+/// them. `sign_document_file_inner` now builds one and passes it down.
+pub fn preflight_certify_with(resolver: &ObjectResolver<'_>, bytes: &[u8]) -> Result<()> {
+    let field_entries = fields_with(resolver, bytes)?;
 
     let mut signed_count = 0;
-    for field_ref in fields_array {
+    for entry in &field_entries {
         // Fail closed: an entry that cannot be parsed might be a signature,
         // and certification requires proof that there is none.
-        if let Some(field_info) = extract_field_info(&resolver, field_ref)? {
+        if let Some(field_info) = extract_field_info(resolver, entry)? {
             if field_info.field_type == "Sig" && field_info.has_signature {
                 signed_count += 1;
             }
@@ -159,32 +170,39 @@ pub fn preflight_certify(bytes: &[u8]) -> Result<()> {
 /// - Checks that the target field is not locked by prior signature FieldMDP transforms.
 /// - Returns the target field name and whether seed value dict exists.
 pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<PreflightOk> {
+    preflight_sign_with(&ObjectResolver::new(bytes), bytes, target_field)
+}
+
+/// [`preflight_sign`], against a resolver the caller already built. See
+/// [`preflight_certify_with`].
+pub fn preflight_sign_with(
+    resolver: &ObjectResolver<'_>,
+    bytes: &[u8],
+    target_field: Option<&str>,
+) -> Result<PreflightOk> {
     // Refuse up front. Without this the run still fails safe — the §32 gate
     // cannot re-read the candidate, so nothing is promoted — but only after
     // writing one, and it reports "cannot re-read" rather than naming the
     // actual reason.
-    let (resolver, fields_array) = resolver_and_fields(bytes)?;
+    let field_entries = fields_with(resolver, bytes)?;
 
     // Collect all field infos
     let mut field_infos = Vec::new();
-    for field_ref in fields_array {
+    for entry in &field_entries {
         // Fail closed: an unparsable entry may be the prior signature whose
         // FieldMDP locks the target, so it must not be dropped.
-        if let Some(info) = extract_field_info(&resolver, field_ref)? {
-            field_infos.push((field_ref.0, info));
+        if let Some(info) = extract_field_info(resolver, entry)? {
+            field_infos.push(info);
         }
     }
 
     // Check 2: Read Root /Perms /DocMDP level
-    check_prior_docmdp(&resolver, bytes)?;
+    check_prior_docmdp(resolver, bytes)?;
 
     // If target_field is None, auto-detect empty signature field
     let target_field_name = if let Some(target) = target_field {
         // Verify that the named field exists
-        if !field_infos
-            .iter()
-            .any(|(_, info)| info.field_name == target)
-        {
+        if !field_infos.iter().any(|info| info.field_name == target) {
             return Err(PreflightRefusal::NoSuchField {
                 field: target.to_string(),
             });
@@ -194,8 +212,8 @@ pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<Prefli
         // Auto-detect: find empty /Sig fields
         let empty_sig_fields: Vec<String> = field_infos
             .iter()
-            .filter(|(_, info)| info.field_type == "Sig" && !info.has_signature)
-            .map(|(_, info)| info.field_name.clone())
+            .filter(|info| info.field_type == "Sig" && !info.has_signature)
+            .map(|info| info.field_name.clone())
             .collect();
 
         match empty_sig_fields.len() {
@@ -212,8 +230,8 @@ pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<Prefli
     // Get the field info for target
     let target_info = field_infos
         .iter()
-        .find(|(_, info)| info.field_name == target_field_name)
-        .map(|(_, info)| info.clone())
+        .find(|info| info.field_name == target_field_name)
+        .cloned()
         .ok_or_else(|| PreflightRefusal::NoSuchField {
             field: target_field_name.clone(),
         })?;
@@ -234,7 +252,7 @@ pub fn preflight_sign(bytes: &[u8], target_field: Option<&str>) -> Result<Prefli
     }
 
     // Check 3: For each existing signature, check if its FieldMDP locks this field
-    check_field_mdp_locks(&resolver, &target_field_name, &field_infos)?;
+    check_field_mdp_locks(resolver, &target_field_name, &field_infos)?;
 
     // Check for /SV seed value dictionary (warning, not refusal)
     let seed_value_ignored = target_info.has_seed_value;
@@ -252,11 +270,25 @@ struct FieldInfo {
     field_type: String,
     has_signature: bool,
     has_seed_value: bool,
+    /// The signature dictionary `/V` points at, inherited like everything
+    /// else `FieldEntry` resolves. `check_field_mdp_locks` reads a signed
+    /// field's `/Reference` array through this rather than re-deriving it.
+    value_ref: Option<(u32, u16)>,
 }
 
-/// Extract field type, name, signature presence, and /SV presence.
+/// Build `FieldInfo` from a [`FieldEntry`] the tree walk already resolved
+/// with inheritance.
 ///
-/// Everything this sees was reached from the AcroForm `/Fields` array, so by
+/// §76.6: this used to re-tokenise each field's own dictionary in isolation,
+/// which meant a `/Sig` whose `/FT` lived on a parent node (a legitimate,
+/// hierarchical field) had no `/FT` of its own and was read as "not a field"
+/// — invisible to `preflight_certify` and to the FieldMDP lock check below,
+/// while `verify::discover_signatures` (which does walk the tree with
+/// inheritance) saw it correctly. `field_type`, the qualified name and `/V`
+/// now come straight from `entry`; the one thing `FieldEntry` does not carry
+/// is `/SV`, so that alone still needs a read through the resolver.
+///
+/// Everything this sees was reached from the AcroForm field tree, so by
 /// construction it is a form field. It may nevertheless carry `/Type /Annot
 /// /Subtype /Widget`: merging the field dictionary with its single widget
 /// annotation is permitted by §12.7.3.1 and is what Acrobat writes for
@@ -268,122 +300,50 @@ struct FieldInfo {
 /// `/FT`, and a node with no `/FT` returns `None`.
 fn extract_field_info(
     resolver: &ObjectResolver<'_>,
-    field_ref: (u32, u16),
+    entry: &FieldEntry,
 ) -> Result<Option<FieldInfo>> {
-    let field_obj_definition = definition(resolver, field_ref.0).map_err(|e| {
-        undetermined(
-            &format!("form field object {} could not be read", field_ref.0),
-            e,
-        )
-    })?;
-    let field_obj_slice = field_obj_definition.as_slice();
-    if field_obj_slice.is_empty() {
-        return Ok(None);
-    }
+    // Resolved once, for two reasons: `/SV` is not inheritance-resolved by
+    // `FieldEntry`, so it still needs a direct read; and its `Err` is also
+    // how a node the tree walk could not read at all (a dangling reference,
+    // a decode failure) is told apart from a node that resolved fine but
+    // carries no `/FT` of its own or inherited — an ordinary widget-only
+    // annotation, not a field. `FieldEntry::field_type` is `None` in both
+    // cases, but only the first is "undetermined": the walk pushes a stub
+    // entry rather than dropping a node precisely because it might be the
+    // signature whose `/FT` this build could not read, and §25.4 requires
+    // failing closed on that, not skipping it.
+    let resolved = resolver.resolve(entry.obj.0);
 
-    let mut tokenizer = PdfTokenizer::new(field_obj_slice);
-    let mut field_type = String::new();
-    let mut field_name = String::new();
-    let mut has_signature = false;
-    let mut has_seed_value = false;
-
-    let mut key: Option<String> = None;
-
-    while let Some(token) = tokenizer
-        .next_token()
-        .map_err(|e| tokenizer_failed(&format!("form field object {}", field_ref.0), e))?
-    {
-        if token == b"endobj" {
-            break;
+    let Some(field_type) = entry.field_type.clone() else {
+        if let Err(e) = resolved {
+            return Err(undetermined(
+                &format!("form field object {} could not be read", entry.obj.0),
+                e,
+            ));
         }
-
-        // Matched on bytes throughout. A UTF-16BE `/T` is not valid UTF-8,
-        // and a pass that skipped such a token also failed to consume its
-        // key, so the following key was eaten as this one's value and `/V`
-        // went unseen — a signed field read as unsigned.
-        if key.is_none() && token.starts_with(b"/") {
-            key = Some(String::from_utf8_lossy(&token[1..]).into_owned());
-        } else if let Some(k) = key.take() {
-            match k.as_str() {
-                "FT" => {
-                    if let Some(ft_name) = token.strip_prefix(b"/".as_slice()) {
-                        field_type = String::from_utf8_lossy(ft_name).into_owned();
-                    }
-                }
-                "T" => {
-                    if let Some(name_val) = super::parse_pdf_string(&token) {
-                        field_name = name_val;
-                    }
-                }
-                "V" => {
-                    // Any non-null /V means the field is signed
-                    if token != b"null" {
-                        has_signature = true;
-                    }
-                }
-                // Seed value dictionary
-                "SV" if token == b"<<" => {
-                    has_seed_value = true;
-                    // Skip the seed value dictionary, tracking depth so
-                    // that a nested dictionary cannot end it early.
-                    let mut sv_depth = 1usize;
-                    while sv_depth > 0 {
-                        match tokenizer.next_token().map_err(|e| {
-                            tokenizer_failed(&format!("/SV dictionary of field {}", field_ref.0), e)
-                        })? {
-                            Some(t) if t == b"<<" => sv_depth += 1,
-                            Some(t) if t == b">>" => sv_depth -= 1,
-                            Some(t) if t == b"endobj" => {
-                                return Err(PreflightRefusal::Unsupported(format!(
-                                    "field {} has an unterminated /SV dictionary; \
-                                     could not determine whether it is locked",
-                                    field_ref.0
-                                )))
-                            }
-                            Some(_) => {}
-                            // A truncated object: refuse rather than
-                            // treat the field as readable.
-                            None => {
-                                return Err(PreflightRefusal::Unsupported(format!(
-                                    "field {} has an unterminated /SV dictionary; \
-                                     could not determine whether it is locked",
-                                    field_ref.0
-                                )))
-                            }
-                        }
-                    }
-                }
-                // A `/SV` written as an indirect reference — `/SV 9 0 R` — is
-                // just as much a seed value dictionary as an inline one, and
-                // the inline-only arm above left `has_seed_value` false for
-                // it. That is a check that fails *open*: the caller is told
-                // the field carries no seed value when it does. The reference
-                // is not followed, because the warning does not depend on what
-                // the dictionary contains, only that there is one.
-                "SV" if std::str::from_utf8(&token)
-                    .ok()
-                    .is_some_and(|t| t.parse::<u32>().is_ok()) =>
-                {
-                    has_seed_value = true;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if field_type.is_empty() {
         return Ok(None);
-    }
+    };
+
+    let field_name = entry
+        .qualified_name
+        .clone()
+        .unwrap_or_else(|| format!("Field_{}", entry.obj.0));
+    let has_signature = entry.value_ref.is_some();
+
+    // `/SV` only ever produces a warning, never a refusal, so a read failure
+    // here (distinct from the one above: this node's `/FT` did resolve)
+    // defaults to "not ignored" rather than blocking the field.
+    let has_seed_value = resolved
+        .ok()
+        .and_then(|(value, _)| value.as_dict().cloned())
+        .is_some_and(|dict| resolver.dict_get(&dict, "SV").is_some());
 
     Ok(Some(FieldInfo {
-        field_name: if field_name.is_empty() {
-            format!("Field_{}", field_ref.0)
-        } else {
-            field_name
-        },
+        field_name,
         field_type,
         has_signature,
         has_seed_value,
+        value_ref: entry.value_ref,
     }))
 }
 
@@ -638,22 +598,41 @@ fn extract_docmdp_p_level(
 }
 
 /// Check that no prior signature's FieldMDP locks the target field (Check 3).
+///
+/// §76.6: `target_field` and `locked_by` are now the same fully qualified
+/// names `find_field_tree_with` builds — ancestors' `/T` joined with `.` —
+/// which is also how a `/Reference` array's `/Fields` names its targets. A
+/// per-node name (the previous behaviour) never matched a qualified lock:
+/// a `/Include`/`/Exclude` array naming `form.sig2` could not match a target
+/// resolved only as `sig2`.
 fn check_field_mdp_locks(
     resolver: &ObjectResolver<'_>,
     target_field: &str,
-    field_infos: &[(u32, FieldInfo)],
+    field_infos: &[FieldInfo],
 ) -> Result<()> {
     // Collect all signed fields (existing signatures)
     let signed_fields: Vec<_> = field_infos
         .iter()
-        .filter(|(_, info)| info.field_type == "Sig" && info.has_signature)
+        .filter(|info| info.field_type == "Sig" && info.has_signature)
         .collect();
 
-    for (field_obj_num, field_info) in signed_fields {
-        // Extract FieldMDP locks from this signature. A failure to read the
+    for field_info in signed_fields {
+        // `has_signature` is true, so a missing `/V` — even an inherited one
+        // — means the transform cannot be read: refuse rather than treat
+        // this field as unlocked.
+        let Some((sig_dict_num, _gen)) = field_info.value_ref else {
+            return Err(PreflightRefusal::InvalidState(format!(
+                "signature field '{}' appears signed but carries no /V; could not determine \
+                 whether it locks other fields",
+                field_info.field_name
+            )));
+        };
+
+        // Extract every FieldMDP lock from this signature's /Reference
+        // array — it may carry more than one alongside a DocMDP entry — and
+        // check the target against each on its own. A failure to read the
         // transform is not "no lock": it is "unknown", and unknown blocks.
-        if let Some((locked_fields, action)) = extract_field_mdp_locks(resolver, *field_obj_num)? {
-            // Check if target field is locked by this signature
+        for (locked_fields, action) in extract_field_mdp_locks(resolver, sig_dict_num)? {
             if is_field_locked(&locked_fields, action, target_field) {
                 return Err(PreflightRefusal::FieldLockedByPriorSignature {
                     field: target_field.to_string(),
@@ -673,45 +652,18 @@ enum FieldMdpAction {
     Exclude,
 }
 
-/// Extract FieldMDP lock information from a signature field's /Reference array.
-/// Returns (locked_field_names, action) if FieldMDP exists.
+/// Extract every FieldMDP lock a signature dictionary's /Reference array
+/// carries.
+///
+/// §77.9 / §12.8.1 Table 253: `/Reference` is an array of *signature
+/// reference dictionaries* — a document with a DocMDP-certifying signature
+/// and an independent FieldMDP lock in the same `/Reference` array is
+/// ordinary, not malformed. Each element is now parsed and evaluated on its
+/// own, returning every FieldMDP lock found rather than just one.
 fn extract_field_mdp_locks(
     resolver: &ObjectResolver<'_>,
-    field_obj_num: u32,
-) -> Result<Option<(Vec<String>, FieldMdpAction)>> {
-    let context = "a signed signature field";
-    let field_obj_definition = definition(resolver, field_obj_num).map_err(|e| {
-        undetermined(
-            &format!("signature field object {field_obj_num} could not be read"),
-            e,
-        )
-    })?;
-    let field_obj_slice = field_obj_definition.as_slice();
-    if field_obj_slice.is_empty() {
-        return Ok(None);
-    }
-
-    // Get the /V reference (signature dictionary). The caller only asks about
-    // fields it has already established are signed, so a /V that cannot be
-    // resolved means the transform cannot be read: refuse.
-    let mut tokenizer = PdfTokenizer::new(field_obj_slice);
-    let sig_dict_num = match find_dict_value(&mut tokenizer, "V", context)? {
-        Some(DictValue::Reference(num)) => num,
-        Some(other) => {
-            return Err(PreflightRefusal::Unsupported(format!(
-                "signature field object {field_obj_num} has a /V that is not an indirect \
-                 reference ({}); could not determine whether it locks other fields",
-                other.describe()
-            )))
-        }
-        None => {
-            return Err(PreflightRefusal::InvalidState(format!(
-                "signature field object {field_obj_num} appears signed but carries no /V; \
-                 could not determine whether it locks other fields"
-            )))
-        }
-    };
-
+    sig_dict_num: u32,
+) -> Result<Vec<(Vec<String>, FieldMdpAction)>> {
     let sig_dict_definition = definition(resolver, sig_dict_num).map_err(|e| {
         undetermined(
             &format!("signature dictionary object {sig_dict_num} could not be read"),
@@ -720,23 +672,28 @@ fn extract_field_mdp_locks(
     })?;
     let sig_dict_slice = sig_dict_definition.as_slice();
     if sig_dict_slice.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     extract_fieldmdp_from_sig_dict(sig_dict_slice)
 }
 
-/// Extract FieldMDP info from a signature dictionary's /Reference array.
+/// Extract every FieldMDP lock from a signature dictionary's /Reference
+/// array.
+///
+/// Before this, `/TransformMethod`, `/Action` and `/Fields` were tracked as
+/// one flat set of variables shared across the *whole* `/Reference` array:
+/// a second element (a DocMDP entry, most often) simply overwrote what an
+/// earlier FieldMDP element had set, so a FieldMDP lock beside a DocMDP
+/// entry was read only when the FieldMDP element happened to come last.
+/// Each array element is now parsed as its own signature reference
+/// dictionary by [`parse_one_sig_ref`], and evaluated independently.
 fn extract_fieldmdp_from_sig_dict(
     sig_dict_slice: &[u8],
-) -> Result<Option<(Vec<String>, FieldMdpAction)>> {
+) -> Result<Vec<(Vec<String>, FieldMdpAction)>> {
     let context = "a signature dictionary's /Reference array";
     let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
     let mut key: Option<String> = None;
-    let mut in_reference = false;
-    let mut in_transform_params = false;
-    let mut action: Option<FieldMdpAction> = None;
-    let mut locked_fields = Vec::new();
-    let mut transform_method: Option<String> = None;
+    let mut locks = Vec::new();
 
     while let Some(token) = tokenizer
         .next_token()
@@ -746,99 +703,161 @@ fn extract_fieldmdp_from_sig_dict(
             break;
         }
 
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if key.is_none() && token_str.starts_with('/') {
-                if let Some(name) = token_str.strip_prefix('/') {
-                    key = Some(name.to_string());
+        if key.is_none() && token.starts_with(b"/") {
+            if let Ok(name) = std::str::from_utf8(&token[1..]) {
+                key = Some(name.to_string());
+            }
+            continue;
+        }
+        let Some(k) = key.take() else { continue };
+
+        if k == "Reference" && token == b"[" {
+            while let Some(element) = tokenizer
+                .next_token()
+                .map_err(|e| tokenizer_failed(context, e))?
+            {
+                if element == b"]" {
+                    break;
                 }
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "Reference" if token == b"[" => {
-                        in_reference = true;
+                if element == b"<<" {
+                    if let Some(lock) = parse_one_sig_ref(&mut tokenizer, context)? {
+                        locks.push(lock);
                     }
-                    "TransformMethod" => {
-                        if let Ok(method_str) = std::str::from_utf8(&token) {
-                            if let Some(method) = method_str.strip_prefix('/') {
-                                transform_method = Some(method.to_string());
-                            }
-                        }
-                    }
-                    "TransformParams" if token == b"<<" => {
-                        in_transform_params = true;
-                    }
-                    "Action" if in_transform_params => {
-                        // An /Action this build does not know is not "no
-                        // lock": its meaning decides whether the target field
-                        // may be filled, so it is Unsupported.
-                        let action_str = std::str::from_utf8(&token).map_err(|_| {
-                            PreflightRefusal::Unsupported(
-                                "FieldMDP /Action is not a readable name; could not determine \
-                                 whether the field is locked"
-                                    .to_string(),
-                            )
-                        })?;
-                        let action_name = action_str.strip_prefix('/').ok_or_else(|| {
-                            PreflightRefusal::Unsupported(format!(
-                                "FieldMDP /Action value '{action_str}' is not a name; could not \
-                                 determine whether the field is locked"
-                            ))
-                        })?;
-                        action = Some(match action_name {
-                            "All" => FieldMdpAction::All,
-                            "Include" => FieldMdpAction::Include,
-                            "Exclude" => FieldMdpAction::Exclude,
-                            other => {
-                                return Err(PreflightRefusal::Unsupported(format!(
-                                    "FieldMDP /Action '{other}' is not one of /All, /Include or \
-                                     /Exclude; could not determine whether the field is locked"
-                                )))
-                            }
-                        });
-                    }
-                    "Fields" if token == b"[" => {
-                        // Parse field names array
-                        while let Some(field_token) = tokenizer
-                            .next_token()
-                            .map_err(|e| tokenizer_failed(context, e))?
-                        {
-                            if field_token == b"]" {
-                                break;
-                            }
-                            // A locked field's name is a text string too, and
-                            // it is compared against the decoded target name.
-                            if let Some(field_name) = super::parse_pdf_string(&field_token) {
-                                locked_fields.push(field_name);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                // An element that is neither `<<` nor `]` (an indirect
+                // reference to a SigRef dictionary, say) is not a construct
+                // this build interprets as a lock; it contributes nothing,
+                // the same way an unrecognised /TransformMethod does below.
             }
         }
+    }
 
-        if token == b"]" && in_reference {
-            in_reference = false;
+    Ok(locks)
+}
+
+/// Parse one `/Reference` array element — a signature reference dictionary
+/// (§12.8.1 Table 253) — starting just past its opening `<<`, and return its
+/// FieldMDP lock if `/TransformMethod` names one.
+fn parse_one_sig_ref(
+    tokenizer: &mut PdfTokenizer<'_>,
+    context: &str,
+) -> Result<Option<(Vec<String>, FieldMdpAction)>> {
+    let mut depth = 1usize;
+    let mut key: Option<String> = None;
+    let mut transform_method: Option<String> = None;
+    let mut action: Option<FieldMdpAction> = None;
+    let mut locked_fields = Vec::new();
+    // The depth `/TransformParams`' own `<<` opened, so the flag can be
+    // cleared precisely when that dictionary (and not some other nested one)
+    // closes, however `/Action`/`/Fields` are ordered relative to it.
+    let mut transform_params_depth: Option<usize> = None;
+
+    while let Some(token) = tokenizer
+        .next_token()
+        .map_err(|e| tokenizer_failed(context, e))?
+    {
+        if token == b"<<" {
+            // This `<<` is a value, so it has to be recognised as
+            // `/TransformParams`' *before* `key` is cleared and depth
+            // incremented below — the two checks used to run in the other
+            // order, so this branch never saw the key that named it.
+            if depth == 1 && key.as_deref() == Some("TransformParams") {
+                transform_params_depth = Some(depth + 1);
+            }
+            key = None;
+            depth += 1;
+            continue;
         }
-        if token == b">>" && in_transform_params {
-            in_transform_params = false;
+        if token == b">>" {
+            if transform_params_depth == Some(depth) {
+                transform_params_depth = None;
+            }
+            depth -= 1;
+            key = None;
+            if depth == 0 {
+                break;
+            }
+            continue;
+        }
+        if depth == 0 {
+            break;
+        }
+
+        if key.is_none() && token.starts_with(b"/") {
+            if let Ok(name) = std::str::from_utf8(&token[1..]) {
+                key = Some(name.to_string());
+            }
+            continue;
+        }
+        let Some(k) = key.take() else { continue };
+
+        match k.as_str() {
+            "TransformMethod" if depth == 1 => {
+                if let Ok(method_str) = std::str::from_utf8(&token) {
+                    transform_method = method_str.strip_prefix('/').map(|m| m.to_string());
+                }
+            }
+            "Action" if transform_params_depth == Some(depth) => {
+                // An /Action this build does not know is not "no lock": its
+                // meaning decides whether the target field may be filled, so
+                // it is Unsupported.
+                let action_str = std::str::from_utf8(&token).map_err(|_| {
+                    PreflightRefusal::Unsupported(
+                        "FieldMDP /Action is not a readable name; could not determine whether \
+                         the field is locked"
+                            .to_string(),
+                    )
+                })?;
+                let action_name = action_str.strip_prefix('/').ok_or_else(|| {
+                    PreflightRefusal::Unsupported(format!(
+                        "FieldMDP /Action value '{action_str}' is not a name; could not \
+                         determine whether the field is locked"
+                    ))
+                })?;
+                action = Some(match action_name {
+                    "All" => FieldMdpAction::All,
+                    "Include" => FieldMdpAction::Include,
+                    "Exclude" => FieldMdpAction::Exclude,
+                    other => {
+                        return Err(PreflightRefusal::Unsupported(format!(
+                            "FieldMDP /Action '{other}' is not one of /All, /Include or \
+                             /Exclude; could not determine whether the field is locked"
+                        )))
+                    }
+                });
+            }
+            "Fields" if transform_params_depth == Some(depth) && token == b"[" => {
+                while let Some(field_token) = tokenizer
+                    .next_token()
+                    .map_err(|e| tokenizer_failed(context, e))?
+                {
+                    if field_token == b"]" {
+                        break;
+                    }
+                    // A locked field's name is a text string too, and it is
+                    // compared against the decoded target name.
+                    if let Some(field_name) = super::parse_pdf_string(&field_token) {
+                        locked_fields.push(field_name);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    // Only return if this is a FieldMDP transform.
-    if transform_method.as_deref() == Some("FieldMDP") {
-        // A FieldMDP transform with no readable /Action leaves the lock
-        // undetermined; refuse rather than treat the field as free.
-        let action = action.ok_or_else(|| {
-            PreflightRefusal::Unsupported(
-                "a prior signature carries a /FieldMDP transform with no /Action; could not \
-                 determine whether the field is locked"
-                    .to_string(),
-            )
-        })?;
-        return Ok(Some((locked_fields, action)));
+    if transform_method.as_deref() != Some("FieldMDP") {
+        return Ok(None);
     }
-
-    Ok(None)
+    // A FieldMDP transform with no readable /Action leaves the lock
+    // undetermined; refuse rather than treat the field as free.
+    let action = action.ok_or_else(|| {
+        PreflightRefusal::Unsupported(
+            "a prior signature carries a /FieldMDP transform with no /Action; could not \
+             determine whether the field is locked"
+                .to_string(),
+        )
+    })?;
+    Ok(Some((locked_fields, action)))
 }
 
 /// Check if a field is locked by a FieldMDP transform.
@@ -964,6 +983,45 @@ mod tests {
         let pdf = create_pdf_with_docmdp_signature(3); // P=3 (ANNOTATE)
         let result = preflight_sign(&pdf, Some("Sig2"));
         assert!(result.is_ok());
+    }
+
+    /// §77.9 / §78.3: `/Reference` is an array of *independent* signature
+    /// reference dictionaries (§12.8.1 Table 253) — a certifying signature's
+    /// DocMDP entry and a FieldMDP lock in the same array is ordinary, not
+    /// malformed. Before the fix, `/TransformMethod`, `/Action` and
+    /// `/Fields` were one flat set of variables shared across the whole
+    /// array, so whichever element parsed *last* decided the outcome: with
+    /// the DocMDP entry after the FieldMDP one (as here), the final
+    /// `/TransformMethod` read as `/DocMDP` and the FieldMDP lock vanished.
+    #[test]
+    fn a_fieldmdp_lock_beside_a_docmdp_entry_in_the_same_reference_array_is_honoured() {
+        let mut pdf = base(" /AcroForm 4 0 R /Perms 8 0 R");
+        pdf.add("<</Fields [5 0 R 6 0 R] /SigFlags 3>>");
+        pdf.add("<</FT /Sig /T (Sig1) /V 7 0 R>>");
+        pdf.add("<</FT /Sig /T (Sig2)>>");
+        pdf.add(
+            "<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached \
+             /Reference [\
+               <</Type /SigRef /TransformMethod /FieldMDP /Data 1 0 R \
+                 /TransformParams <</Type /TransformParams /V /1.2 /Action /All>>>> \
+               <</Type /SigRef /TransformMethod /DocMDP /Data 1 0 R \
+                 /TransformParams <</Type /TransformParams /V /1.2 /P 2>>>>\
+             ] \
+             /ByteRange [0 100 200 50] /Contents <00000000000000000000000000000000>>>",
+        );
+        pdf.add("<</DocMDP 7 0 R>>");
+        let pdf = pdf.build_with_trailer(TRAILER);
+
+        let result = preflight_sign(&pdf, Some("Sig2"));
+        assert!(
+            matches!(
+                result,
+                Err(PreflightRefusal::FieldLockedByPriorSignature { ref field, ref locked_by })
+                    if field == "Sig2" && locked_by == "Sig1"
+            ),
+            "a FieldMDP lock listed before a DocMDP entry in the same /Reference array must \
+             still be read, got {result:?}"
+        );
     }
 
     #[test]
@@ -1464,5 +1522,91 @@ mod tests {
         pdf.add("<</Fields [5 0 R] /SigFlags 3>>");
         pdf.add("<</FT /Sig /T (Sig1) /SV <</Type /SigFieldV>>>>");
         pdf.build_with_trailer(TRAILER)
+    }
+
+    // --- §76.6: field inheritance ------------------------------------------
+    //
+    // `/FT` and `/T` are inheritable (§12.7.3.2): a hierarchical field's
+    // terminal node may carry neither, and a `/FieldMDP` lock's `/Fields`
+    // array names fields by their *fully qualified* name (ancestors' `/T`
+    // joined with `.`). A field discovered through `find_fields_array`
+    // (which walks the tree with inheritance, as `discover_signatures`
+    // does) but read here node-by-node used to be invisible to
+    // certification and unmatchable by a qualified lock.
+
+    /// A signature field one level under a parent that carries the `/FT`:
+    /// object 5 is the parent (`/T (form) /FT /Sig`), object 6 is the
+    /// signed terminal field (`/T (Sig1)`, inheriting `/FT` and
+    /// contributing to the qualified name `form.Sig1`), object 7 is its
+    /// signature dictionary.
+    fn create_pdf_with_hierarchical_signed_field() -> Vec<u8> {
+        let mut pdf = base(" /AcroForm 4 0 R");
+        pdf.add("<</Fields [5 0 R] /SigFlags 3>>");
+        pdf.add("<</T (form) /FT /Sig /Kids [6 0 R]>>");
+        pdf.add("<</T (Sig1) /V 7 0 R>>");
+        pdf.add(
+            "<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached \
+             /ByteRange [0 100 200 50] /Contents <00000000000000000000000000000000>>>",
+        );
+        pdf.build_with_trailer(TRAILER)
+    }
+
+    #[test]
+    fn a_hierarchical_signed_field_is_seen_by_preflight_certify() {
+        // Before the fix, `resolver_and_fields` discarded the tree walk's
+        // inheritance and re-read each node in isolation, so `form.Sig1`
+        // (whose `/FT` lives on its parent, object 5) had no `/FT` of its
+        // own and was silently not a field at all: certifying over it was
+        // permitted, exactly the failure §25.4 rule 1 exists to prevent.
+        let pdf = create_pdf_with_hierarchical_signed_field();
+        assert_eq!(
+            preflight_certify(&pdf),
+            Err(PreflightRefusal::CertificationNotAllowed {
+                existing_signatures: 1
+            }),
+            "a signed hierarchical field must still block certification"
+        );
+    }
+
+    #[test]
+    fn a_fieldmdp_lock_on_a_qualified_name_locks_the_hierarchical_target() {
+        // Two children of the same parent "form": Sig1 (already signed,
+        // carrying a FieldMDP that locks "form.Sig2" — the fully qualified
+        // name a `/Fields` array actually names) and Sig2 (empty, the
+        // signing target). Neither child carries its own `/FT`; both
+        // inherit it from the parent at object 5. Before the fix, the
+        // target's name was read as the bare "Sig2" (per-node `/T` only),
+        // which a lock naming "form.Sig2" could never match.
+        let mut pdf = base(" /AcroForm 4 0 R");
+        pdf.add("<</Fields [5 0 R] /SigFlags 3>>");
+        pdf.add("<</T (form) /FT /Sig /Kids [6 0 R 8 0 R]>>");
+        pdf.add("<</T (Sig1) /V 7 0 R>>");
+        pdf.add(
+            "<</Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached \
+             /Reference [<</Type /SigRef /TransformMethod /FieldMDP /Data 1 0 R \
+             /TransformParams <</Type /TransformParams /V /1.2 /Action /Include \
+             /Fields [(form.Sig2)]>>>>] \
+             /ByteRange [0 100 200 50] /Contents <00000000000000000000000000000000>>>",
+        );
+        pdf.add("<</T (Sig2)>>");
+        let pdf = pdf.build_with_trailer(TRAILER);
+
+        let result = preflight_sign(&pdf, Some("form.Sig2"));
+        assert!(
+            matches!(
+                &result,
+                Err(PreflightRefusal::FieldLockedByPriorSignature { field, locked_by })
+                    if field == "form.Sig2" && locked_by == "form.Sig1"
+            ),
+            "a FieldMDP naming the qualified field 'form.Sig2' must lock it, got {result:?}"
+        );
+
+        // The unqualified name is not a field this document has, so it must
+        // not be reachable at all — confirming the match above is on the
+        // qualified name and not some looser fallback.
+        assert!(matches!(
+            preflight_sign(&pdf, Some("Sig2")),
+            Err(PreflightRefusal::NoSuchField { .. })
+        ));
     }
 }
