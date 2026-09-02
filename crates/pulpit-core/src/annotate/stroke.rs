@@ -103,7 +103,9 @@ pub fn simplify(points: &[InkPoint], tolerance: f32) -> Vec<InkPoint> {
         let mut worst = 0.0f32;
         let mut worst_at = first;
         for (index, point) in points.iter().enumerate().take(last).skip(first + 1) {
-            let distance = perpendicular_distance(point.at, points[first].at, points[last].at);
+            let distance = point
+                .at
+                .distance_to_segment(points[first].at, points[last].at);
             if distance > worst {
                 worst = distance;
                 worst_at = index;
@@ -121,23 +123,6 @@ pub fn simplify(points: &[InkPoint], tolerance: f32) -> Vec<InkPoint> {
         .zip(keep)
         .filter_map(|(point, keep)| keep.then_some(*point))
         .collect()
-}
-
-/// Distance from `point` to the segment `start`–`end`.
-///
-/// The *segment*, not the infinite line: on a stroke that doubles back, the
-/// line through the endpoints passes near points that are nowhere near the
-/// path, and using it would simplify away the fold.
-fn perpendicular_distance(point: PagePoint, start: PagePoint, end: PagePoint) -> f32 {
-    let (dx, dy) = (end.x - start.x, end.y - start.y);
-    let length_squared = dx * dx + dy * dy;
-    if length_squared <= f32::EPSILON {
-        return point.distance_to(start);
-    }
-    let t =
-        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
-    let projection = PagePoint::new(start.x + t * dx, start.y + t * dy);
-    point.distance_to(projection)
 }
 
 #[cfg(test)]

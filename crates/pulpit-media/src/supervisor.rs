@@ -1388,19 +1388,22 @@ mod tests {
     #[test]
     fn a_worker_that_cannot_be_launched_falls_through_to_the_next_candidate() {
         let mut supervisor = MediaSupervisor::unprobed(MediaConfig::default());
-        supervisor.record_probe(available(RuntimeId::ExternalChromium, &[ContentKind::Web]));
-        supervisor.record_probe(available(RuntimeId::WebKitGtk, &[ContentKind::Web]));
+        supervisor.record_probe(available(
+            RuntimeId::ExternalChromium,
+            &[ContentKind::Video],
+        ));
+        supervisor.record_probe(available(RuntimeId::LibMpv, &[ContentKind::Video]));
 
         supervisor.open(
             OverlayId(2),
             RenderGeneration(1),
-            ContentKind::Web,
+            ContentKind::Video,
             crate::protocol::SessionSource::File {
                 path: "/staged/page.html".into(),
             },
             Viewport::new(64, 64, 1.0),
             Default::default(),
-            &CapabilityRequest::for_kind(ContentKind::Web),
+            &CapabilityRequest::for_kind(ContentKind::Video),
             // Neither worker exists, so both launches fail and the chain is
             // exhausted — but every candidate must have been *tried*.
             |_| WorkerCommand::Explicit {
@@ -1482,7 +1485,7 @@ mod tests {
     fn the_policy_for_each_content_kind_is_read_from_configuration() {
         let config = MediaConfig {
             image_runtime: RuntimePolicy::Require(RuntimeId::ExternalChromium),
-            web_runtime: RuntimePolicy::Prefer(RuntimeId::WebKitGtk),
+            web_runtime: RuntimePolicy::Prefer(RuntimeId::LibMpv),
             ..Default::default()
         };
         assert_eq!(
@@ -1491,7 +1494,7 @@ mod tests {
         );
         assert_eq!(
             config.policy_for(ContentKind::Web),
-            RuntimePolicy::Prefer(RuntimeId::WebKitGtk)
+            RuntimePolicy::Prefer(RuntimeId::LibMpv)
         );
         assert_eq!(config.policy_for(ContentKind::Video), RuntimePolicy::Auto);
     }

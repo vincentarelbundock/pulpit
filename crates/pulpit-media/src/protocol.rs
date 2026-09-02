@@ -64,31 +64,16 @@ pub enum RuntimeId {
     /// for plain media this is an order of magnitude cheaper than the
     /// screencast path, which remains the fallback.
     LibMpv,
-    /// WebKitGTK snapshots (Linux).
-    WebKitGtk,
-    /// WebView2 snapshots (Windows).
-    WebView2,
-    /// WKWebView snapshots (macOS).
-    WkWebView,
 }
 
 impl RuntimeId {
-    pub const ALL: [RuntimeId; 5] = [
-        RuntimeId::ExternalChromium,
-        RuntimeId::LibMpv,
-        RuntimeId::WebKitGtk,
-        RuntimeId::WebView2,
-        RuntimeId::WkWebView,
-    ];
+    pub const ALL: [RuntimeId; 2] = [RuntimeId::ExternalChromium, RuntimeId::LibMpv];
 
     /// The stable name used in settings, diagnostics and the CLI.
     pub fn slug(self) -> &'static str {
         match self {
             RuntimeId::ExternalChromium => "external-chromium",
             RuntimeId::LibMpv => "libmpv",
-            RuntimeId::WebKitGtk => "webkitgtk",
-            RuntimeId::WebView2 => "webview2",
-            RuntimeId::WkWebView => "wkwebview",
         }
     }
 
@@ -96,17 +81,6 @@ impl RuntimeId {
         RuntimeId::ALL
             .into_iter()
             .find(|runtime| runtime.slug() == slug)
-    }
-
-    /// The worker executable that hosts this runtime.
-    pub fn worker_binary(self) -> &'static str {
-        match self {
-            RuntimeId::ExternalChromium => "pulpit-chromium-worker",
-            RuntimeId::LibMpv => "pulpit-mpv-worker",
-            RuntimeId::WebKitGtk => "pulpit-webkitgtk-worker",
-            RuntimeId::WebView2 => "pulpit-webview2-worker",
-            RuntimeId::WkWebView => "pulpit-wkwebview-worker",
-        }
     }
 }
 

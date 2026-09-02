@@ -309,28 +309,9 @@ pub fn probe_libmpv() -> RuntimeProbe {
     }
 }
 
-/// Probe the system-webview snapshot runtimes.
-///
-/// These stay out of automatic selection until they pass the continuous
-/// animation, input, scaling and hidden-window qualification gates.
-pub fn probe_system_webview(id: RuntimeId) -> RuntimeProbe {
-    RuntimeProbe::unavailable(
-        id,
-        Availability::NotQualified {
-            detail: "has not passed the continuous-animation and input qualification suite".into(),
-        },
-    )
-}
-
 /// Probe every runtime this build knows about.
 pub fn probe_all(configured_browser: Option<&Path>) -> Vec<RuntimeProbe> {
-    vec![
-        probe_external_chromium(configured_browser),
-        probe_libmpv(),
-        probe_system_webview(RuntimeId::WebKitGtk),
-        probe_system_webview(RuntimeId::WebView2),
-        probe_system_webview(RuntimeId::WkWebView),
-    ]
+    vec![probe_external_chromium(configured_browser), probe_libmpv()]
 }
 
 #[cfg(test)]
@@ -350,31 +331,6 @@ mod tests {
             ] {
                 assert!(probe.content.supports(kind), "{kind:?} is not covered");
             }
-        }
-    }
-
-    #[test]
-    fn an_unimplemented_runtime_is_reported_as_unavailable_not_assumed_working() {
-        let probe = probe_system_webview(RuntimeId::WebKitGtk);
-        assert!(!probe.is_available());
-        assert!(
-            !probe.content.supports(ContentKind::Web),
-            "an unavailable runtime must claim no capability at all"
-        );
-    }
-
-    #[test]
-    fn system_webviews_stay_out_of_automatic_selection_until_qualified() {
-        for id in [
-            RuntimeId::WebKitGtk,
-            RuntimeId::WebView2,
-            RuntimeId::WkWebView,
-        ] {
-            let probe = probe_system_webview(id);
-            assert!(matches!(
-                probe.availability,
-                Availability::NotQualified { .. }
-            ));
         }
     }
 

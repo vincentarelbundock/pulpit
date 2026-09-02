@@ -1028,7 +1028,10 @@ impl Annotations {
             let hit = match stroke.points.as_slice() {
                 [only] => distance_squared(*only, point) <= hit_radius_squared,
                 points => points.windows(2).any(|segment| {
-                    distance_to_segment_squared(point, segment[0], segment[1]) <= hit_radius_squared
+                    crate::page::PagePoint::new(point.0, point.1).distance_to_segment_squared(
+                        crate::page::PagePoint::new(segment[0].0, segment[0].1),
+                        crate::page::PagePoint::new(segment[1].0, segment[1].1),
+                    ) <= hit_radius_squared
                 }),
             };
             if hit {
@@ -1806,7 +1809,11 @@ fn text_mark_hit(mark: &TextMark, point: (f32, f32), radius: f32) -> bool {
 fn quad_hit(point: (f32, f32), quad: &[(f32, f32); 4], radius: f32) -> bool {
     let radius_squared = radius * radius;
     let touches_edge = (0..4).any(|corner| {
-        distance_to_segment_squared(point, quad[corner], quad[(corner + 1) % 4]) <= radius_squared
+        let (start, end) = (quad[corner], quad[(corner + 1) % 4]);
+        crate::page::PagePoint::new(point.0, point.1).distance_to_segment_squared(
+            crate::page::PagePoint::new(start.0, start.1),
+            crate::page::PagePoint::new(end.0, end.1),
+        ) <= radius_squared
     });
     touches_edge || point_in_quad(point, quad)
 }
@@ -1824,16 +1831,6 @@ fn point_in_quad(point: (f32, f32), quad: &[(f32, f32); 4]) -> bool {
         negative |= cross < 0.0;
     }
     !(positive && negative)
-}
-
-/// §80.6: the one owner of this arithmetic is
-/// [`crate::page::PagePoint::distance_to_segment_squared`]; this is a thin
-/// wrapper so callers here can keep working in `(f32, f32)` gesture space.
-fn distance_to_segment_squared(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
-    crate::page::PagePoint::new(point.0, point.1).distance_to_segment_squared(
-        crate::page::PagePoint::new(start.0, start.1),
-        crate::page::PagePoint::new(end.0, end.1),
-    )
 }
 
 #[cfg(test)]
