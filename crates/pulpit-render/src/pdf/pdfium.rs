@@ -59,6 +59,12 @@ const MAX_ATTACHMENT_NAME_BYTES: u64 = 1024;
 const MAX_ATTACHMENT_FILE_BYTES: u64 = crate::protocol::MAX_ATTACHMENT_BYTES;
 /// A page label longer than this is not a logical-slide marker.
 const MAX_PAGE_LABEL_BYTES: u64 = 256;
+/// One `/Info` metadata string longer than this is not a title, an author or
+/// a keyword list a person wrote — it is PDFium's answer to a length query
+/// this backend has no reason to trust ahead of the allocation it sizes
+/// (§77.8, the same shape `MAX_ATTACHMENT_NAME_BYTES` and
+/// `MAX_BOOKMARK_TITLE_BYTES` bound elsewhere in this file).
+const MAX_METADATA_TEXT_BYTES: u64 = 8192;
 /// A bookmark title longer than this is truncated before it is even decoded;
 /// the domain truncates again, in characters, once it is a string.
 const MAX_BOOKMARK_TITLE_BYTES: u64 = 4096;
@@ -271,15 +277,7 @@ impl PdfiumBackend {
                     // process before any other call; skipping this is an
                     // immediate segfault rather than an error return.
                     unsafe { bindings.FPDF_InitLibrary() };
-                    return Ok(Self {
-                        bindings,
-                        documents: HashMap::new(),
-                        forms: HashMap::new(),
-                        paths: HashMap::new(),
-                        next_id: 0,
-                        library_path: Some(candidate),
-                        page_text: Default::default(),
-                    });
+                    return Ok(Self::from_bindings(bindings, Some(candidate)));
                 }
                 Err(e) => errors.push(format!("{}: {e}", candidate.display())),
             }
@@ -287,21 +285,31 @@ impl PdfiumBackend {
         match Pdfium::bind_to_system_library() {
             Ok(bindings) => {
                 unsafe { bindings.FPDF_InitLibrary() };
-                Ok(Self {
-                    bindings,
-                    documents: HashMap::new(),
-                    forms: HashMap::new(),
-                    paths: HashMap::new(),
-                    next_id: 0,
-                    library_path: None,
-                    page_text: Default::default(),
-                })
+                Ok(Self::from_bindings(bindings, None))
             }
             Err(e) => {
                 errors.push(format!("system library: {e}"));
                 BOUND.store(false, std::sync::atomic::Ordering::SeqCst);
                 Err(PdfError::Unavailable(errors.join("; ")))
             }
+        }
+    }
+
+    /// The struct literal [`Self::bind`]'s two successful paths both build —
+    /// one candidate directory found the library, or the system loader did —
+    /// differing only in whether there is a path to remember (§80.2).
+    fn from_bindings(
+        bindings: Box<dyn PdfiumLibraryBindings>,
+        library_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            bindings,
+            documents: HashMap::new(),
+            forms: HashMap::new(),
+            paths: HashMap::new(),
+            next_id: 0,
+            library_path,
+            page_text: Default::default(),
         }
     }
 
@@ -359,20 +367,14 @@ impl PdfiumBackend {
                     return Ok(Vec::new());
                 }
                 let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
-                let hits = crate::pdf::search::hits_from_pdfium_matches(
+                let hits = crate::pdf::search::hits_on_loaded_page(
+                    self.bindings.as_ref(),
+                    text_page,
+                    &geometry,
                     pulpit_core::page::PageIndex(page),
                     &text,
                     &found,
-                    |start, length| {
-                        crate::pdf::search::quads_of(
-                            self.bindings.as_ref(),
-                            text_page,
-                            &geometry,
-                            start,
-                            length,
-                            MAX_QUADS_PER_HIT,
-                        )
-                    },
+                    MAX_QUADS_PER_HIT,
                 );
                 unsafe { self.bindings.FPDFText_ClosePage(text_page) };
                 Ok(hits)
@@ -390,20 +392,14 @@ impl PdfiumBackend {
             let geometry = crate::pdf::search::geometry_of(self.bindings.as_ref(), handle);
             let text = crate::pdf::search::PageText::extract(self.bindings.as_ref(), text_page);
             let found = text.matches(query, MAX_HITS_PER_SEARCH);
-            let hits = crate::pdf::search::hits_from_pdfium_matches(
+            let hits = crate::pdf::search::hits_on_loaded_page(
+                self.bindings.as_ref(),
+                text_page,
+                &geometry,
                 pulpit_core::page::PageIndex(page),
                 &text,
                 &found,
-                |start, length| {
-                    crate::pdf::search::quads_of(
-                        self.bindings.as_ref(),
-                        text_page,
-                        &geometry,
-                        start,
-                        length,
-                        MAX_QUADS_PER_HIT,
-                    )
-                },
+                MAX_QUADS_PER_HIT,
             );
             unsafe { self.bindings.FPDFText_ClosePage(text_page) };
             Ok((hits, text))
@@ -504,7 +500,7 @@ impl PdfiumBackend {
                 self.bindings
                     .FPDF_GetMetaText(handle, tag, std::ptr::null_mut(), 0)
             };
-            if length <= 2 {
+            if length as u64 <= 2 || length as u64 > MAX_METADATA_TEXT_BYTES {
                 continue;
             }
             let mut buffer = vec![0u8; length as usize];
@@ -1095,9 +1091,13 @@ impl PdfBackend for PdfiumBackend {
 
     fn page_labels(&self, document: BackendDocumentId) -> Result<pulpit_core::overlay::PageLabels> {
         let handle = self.handle(document)?;
-        let count = unsafe { self.bindings.FPDF_GetPageCount(handle) };
+        let count = unsafe { self.bindings.FPDF_GetPageCount(handle) }.max(0) as usize;
         let mut labels = pulpit_core::overlay::PageLabels::default();
-        for page in 0..count.max(0) {
+        // §77.8: the same bound `page_evidence` holds its page loop to,
+        // applied here for the same reason — a page count is PDFium's answer
+        // to a query on an untrusted file, not a fact this loop should run
+        // unbounded on.
+        for page in 0..count.min(MAX_INSPECTED_PAGES) as i32 {
             let length = unsafe {
                 self.bindings
                     .FPDF_GetPageLabel(handle, page, std::ptr::null_mut(), 0)
@@ -1155,20 +1155,15 @@ impl PdfBackend for PdfiumBackend {
         query: &pulpit_core::search::Query,
         pages: std::ops::Range<usize>,
     ) -> Result<Vec<pulpit_core::search::Hit>> {
-        let mut hits = Vec::new();
         if query.is_empty() {
-            return Ok(hits);
+            return Ok(Vec::new());
         }
         let prepared = query.prepare();
-        for page in pages {
-            let found = self.find_on_one_page(document, page, &prepared)?;
-            hits.extend(found);
-            if hits.len() >= MAX_HITS_PER_SEARCH {
-                hits.truncate(MAX_HITS_PER_SEARCH);
-                break;
-            }
-        }
-        Ok(hits)
+        Ok(crate::pdf::search::search_pages(
+            pages,
+            MAX_HITS_PER_SEARCH,
+            |page| self.find_on_one_page(document, page, &prepared),
+        ))
     }
 
     fn links(&self, document: BackendDocumentId, page: usize) -> Result<Vec<PageLink>> {
@@ -1535,9 +1530,11 @@ pub(crate) fn draw_form_fields(
 /// the form environment and taking it back out again.
 ///
 /// The render pool's case: it loads a page, draws it, and has no interactive
-/// state of its own to preserve.
+/// state of its own to preserve. Also the document engine's case for a page
+/// that is not the one an interaction is open on (§80.2): any view will do,
+/// and this is the announce/draw/close sequence either caller needs for one.
 #[allow(clippy::too_many_arguments, reason = "it forwards draw_form_fields'")]
-fn composite_form_fields(
+pub(crate) fn composite_form_fields(
     bindings: &dyn PdfiumLibraryBindings,
     form: FPDF_FORMHANDLE,
     page: FPDF_PAGE,

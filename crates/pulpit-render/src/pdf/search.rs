@@ -339,8 +339,71 @@ pub(crate) fn hits_from_pdfium_matches(
     })
 }
 
+/// [`hits_from_pdfium_matches`] closing over [`quads_of`], for a text page
+/// already loaded on `handle`.
+///
+/// §80.2: both PDFium-backed `find_on_one_page` drivers — the document
+/// engine's and the render backend's — wrote this same closure twice each,
+/// once for the page whose text is cached and once for the page read for the
+/// first time. One call here replaces both pairs.
+pub(crate) fn hits_on_loaded_page(
+    bindings: &dyn PdfiumLibraryBindings,
+    text_page: FPDF_TEXTPAGE,
+    geometry: &PageGeometry,
+    page: PageIndex,
+    text: &PageText,
+    found: &[TextMatch],
+    max_quads_per_hit: usize,
+) -> Vec<Hit> {
+    hits_from_pdfium_matches(page, text, found, |start, length| {
+        quads_of(
+            bindings,
+            text_page,
+            geometry,
+            start,
+            length,
+            max_quads_per_hit,
+        )
+    })
+}
+
+/// Search a run of pages, one at a time, with one error policy (§80.3).
+///
+/// The DjVu and PDFium `find_text` drivers (`djvu/backend.rs`,
+/// `pdf/pdfium.rs`) used to write this loop separately and disagree on what a
+/// page that fails to read means: both fell an error through `?`, which
+/// aborted the whole search. Neither is the right answer — a search runs
+/// over document-controlled input, and one page a text layer could not be
+/// built for is a fact about that page, not a reason to hide every hit on
+/// every other one. So a page whose `on_page` call errs is **skipped**, and
+/// the search continues.
+///
+/// `pages` is expected to already be bounds-clamped by the caller, since that
+/// clamp differs by backend — this owns only what both backends do
+/// identically once the range is decided: skip a page that errs, and stop at
+/// `max_hits`.
+pub(crate) fn search_pages<E>(
+    pages: std::ops::Range<usize>,
+    max_hits: usize,
+    mut on_page: impl FnMut(usize) -> Result<Vec<Hit>, E>,
+) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    for page in pages {
+        if let Ok(found) = on_page(page) {
+            hits.extend(found);
+        }
+        if hits.len() >= max_hits {
+            hits.truncate(max_hits);
+            break;
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn rust_character_offsets_are_mapped_back_to_pdfium_utf16_offsets() {
         let offsets: Vec<_> = std::iter::once(0)
@@ -350,5 +413,54 @@ mod tests {
             }))
             .collect();
         assert_eq!(offsets, [0, 1, 3, 4]);
+    }
+
+    /// §80.3: a page whose text fails to read must not fail the whole
+    /// search — the two backends this replaced disagreed on exactly this,
+    /// each propagating the error through `?` and losing every hit on every
+    /// other page in the run.
+    #[test]
+    fn a_page_that_fails_is_skipped_not_fatal_to_the_whole_search() {
+        let hit = |page: usize| Hit {
+            page: PageIndex(page),
+            source: HitSource::PageText,
+            ordinal: 0,
+            quads: Vec::new(),
+            context: String::new(),
+            highlight: TextMatch { offset: 0, len: 0 },
+        };
+        let found = search_pages(0..4, 100, |page| {
+            if page == 2 {
+                Err("this page's text layer would not build")
+            } else {
+                Ok(vec![hit(page)])
+            }
+        });
+        let pages: Vec<usize> = found.iter().map(|hit| hit.page.get()).collect();
+        assert_eq!(
+            pages,
+            [0, 1, 3],
+            "page 2 failed and was skipped; 0, 1 and 3 must still be found"
+        );
+    }
+
+    #[test]
+    fn search_pages_still_stops_at_the_hit_bound() {
+        let hit = |page: usize| Hit {
+            page: PageIndex(page),
+            source: HitSource::PageText,
+            ordinal: 0,
+            quads: Vec::new(),
+            context: String::new(),
+            highlight: TextMatch { offset: 0, len: 0 },
+        };
+        let found = search_pages(0..10, 3, |page| {
+            Ok::<_, ()>(vec![hit(page), hit(page), hit(page)])
+        });
+        assert_eq!(
+            found.len(),
+            3,
+            "the bound is enforced across pages, not per page"
+        );
     }
 }
