@@ -618,13 +618,24 @@ impl PreparedByteRangeDigest {
 }
 
 /// Incremental update writer for appending to existing PDFs.
-pub struct IncrementalWriter {
-    original_bytes: Vec<u8>,
+///
+/// §78.3: borrows the source rather than copying it. `open` used to take
+/// `bytes: &[u8]` and immediately clone it into `original_bytes: Vec<u8>`,
+/// so every signing pass paid for a full copy of the document it was
+/// signing while the caller was already holding one live.
+pub struct IncrementalWriter<'a> {
+    original_bytes: &'a [u8],
     #[allow(dead_code)]
     original_eof: u64,
     prev_startxref: u64, // The startxref offset being extended, for /Prev
     xref_kind: XRefKind,
     trailer_dict: TrailerDict,
+    // The first object number this writer will allocate: one past the
+    // higher of the trailer's declared `/Size` and the highest object
+    // number actually present anywhere in the cross-reference chain. See
+    // `next_object_number` for why the declared `/Size` alone is not
+    // trusted.
+    next_object_number: u32,
 }
 
 /// Whether to use classic xref table or xref stream.
@@ -665,9 +676,9 @@ fn one_past_highest(objects: &[(u32, u16, PdfObject)]) -> Result<u32> {
     }
 }
 
-impl IncrementalWriter {
+impl<'a> IncrementalWriter<'a> {
     /// Open an existing PDF for incremental update.
-    pub fn open(bytes: &[u8]) -> Result<Self> {
+    pub fn open(bytes: &'a [u8]) -> Result<Self> {
         // Find the last startxref
         let prev_startxref = find_startxref(bytes)?;
 
@@ -695,12 +706,41 @@ impl IncrementalWriter {
             )));
         }
 
+        // `/Size` is a producer's claim, not a fact: a document whose xref
+        // chain actually holds objects at or above the declared `/Size` is
+        // ordinary real-world damage the lenient reader (`ObjectResolver`)
+        // tolerates. Trusting `/Size` alone here would let the signature
+        // dictionary, appearance XObject or new field this writer appends
+        // land on an object number that a live page or content stream
+        // already occupies, silently overwriting it in the signed output.
+        // Cross-check against the highest object number the cross-reference
+        // chain itself reports and take the higher of the two. `/Size 0`
+        // (missing or unparseable) is refused outright: with no reliable
+        // floor at all, allocating from the xref chain alone without a
+        // sanity check from the trailer is not a case worth writing into.
+        if trailer_dict.size == 0 {
+            return Err(PdfWriteError::Unsupported(
+                "the document's trailer declares /Size 0 (missing or unparseable), so there \
+                 is no reliable floor for allocating new object numbers; the source document \
+                 is unchanged"
+                    .to_string(),
+            ));
+        }
+        let highest_xref_entry = crate::verify::objects::XrefIndex::build(bytes)
+            .ok()
+            .and_then(|index| index.entries().keys().next_back().copied());
+        let next_object_number = match highest_xref_entry {
+            Some(highest) => std::cmp::max(trailer_dict.size, highest.saturating_add(1)),
+            None => trailer_dict.size,
+        };
+
         Ok(IncrementalWriter {
-            original_bytes: bytes.to_vec(),
+            original_bytes: bytes,
             original_eof: bytes.len() as u64,
             prev_startxref,
             xref_kind,
             trailer_dict,
+            next_object_number,
         })
     }
 
@@ -709,10 +749,14 @@ impl IncrementalWriter {
         &self.trailer_dict
     }
 
-    /// The first object number that is free to allocate, taken from the
-    /// trailer's `/Size`.
+    /// The first object number that is free to allocate: one past the
+    /// higher of the trailer's declared `/Size` and the highest object
+    /// number the cross-reference chain actually reports. A `/Size` that
+    /// undercounts the real chain — ordinary damage, not necessarily
+    /// hostile — used to be trusted outright and could steer newly
+    /// allocated objects onto numbers a live object already occupied.
     pub fn next_object_number(&self) -> u32 {
-        self.trailer_dict.size.max(1)
+        self.next_object_number
     }
 
     /// Append multiple objects and finalize the PDF with proper xref.
@@ -726,18 +770,26 @@ impl IncrementalWriter {
     ) -> Result<()> {
         // Write the original bytes
         writer
-            .write_all(&self.original_bytes)
+            .write_all(self.original_bytes)
             .map_err(PdfWriteError::Io)?;
 
-        // Track object offsets for xref: (obj_num, offset)
-        let mut obj_offsets: Vec<(u32, u64)> = Vec::new();
+        // Track object offsets for xref: (obj_num, gen_num, offset). §77.9: a
+        // re-emitted *existing* object (the catalog, a field, a page) keeps
+        // whatever generation it already has in the source document — an
+        // incremental update never bumps it (§7.5.6) — and a trailer whose
+        // `/Root` still says `5 1 R` after this writer rewrote object 5 as
+        // `5 0 obj` pointed the reader at an entry the new xref never wrote,
+        // so the "newest revision wins" catalog silently reverted. The
+        // generation the caller passed in for each object is now the one
+        // written both in the object's own header and in its xref row.
+        let mut obj_offsets: Vec<(u32, u16, u64)> = Vec::new();
 
         // Write each object and record its offset
-        for (obj_num, _gen_num, obj) in objects {
+        for (obj_num, gen_num, obj) in objects {
             let offset = writer.stream_position().map_err(PdfWriteError::Io)?;
-            obj_offsets.push((*obj_num, offset));
+            obj_offsets.push((*obj_num, *gen_num, offset));
 
-            writeln!(writer, "{} 0 obj", obj_num).map_err(PdfWriteError::Io)?;
+            writeln!(writer, "{} {} obj", obj_num, gen_num).map_err(PdfWriteError::Io)?;
             obj.serialize(writer)?;
             writeln!(writer, "\nendobj").map_err(PdfWriteError::Io)?;
         }
@@ -753,7 +805,7 @@ impl IncrementalWriter {
             XRefKind::Stream => {
                 // Allocate next object number for the xref stream itself
                 let xref_stream_obj_num =
-                    std::cmp::max(self.trailer_dict.size, one_past_highest(objects)?);
+                    std::cmp::max(self.next_object_number, one_past_highest(objects)?);
                 self.write_xref_stream(writer, &obj_offsets, xref_stream_obj_num, new_id2)?;
                 // Return early; xref stream writing handles trailer and startxref
                 return Ok(());
@@ -761,7 +813,7 @@ impl IncrementalWriter {
         }
 
         // Write trailer (for classic xref only; xref stream returns above)
-        let new_size = std::cmp::max(self.trailer_dict.size, one_past_highest(objects)?);
+        let new_size = std::cmp::max(self.next_object_number, one_past_highest(objects)?);
 
         writeln!(writer, "trailer").map_err(PdfWriteError::Io)?;
         writeln!(writer, "<<").map_err(PdfWriteError::Io)?;
@@ -809,7 +861,7 @@ impl IncrementalWriter {
     fn write_xref_stream<W: Write + Seek>(
         &self,
         writer: &mut W,
-        obj_offsets: &[(u32, u64)],
+        obj_offsets: &[(u32, u16, u64)],
         xref_stream_obj_num: u32,
         new_id2: &[u8; 16],
     ) -> Result<()> {
@@ -828,8 +880,12 @@ impl IncrementalWriter {
         // (obj_num, type, offset, gen)
         let mut entries: Vec<(u32, u8, u64, u16)> = Vec::with_capacity(obj_offsets.len() + 2);
         entries.push((0, 0, 0, 65535)); // object 0: head of the free list
-        for (obj_num, offset) in obj_offsets {
-            entries.push((*obj_num, 1, *offset, 0));
+        for (obj_num, gen_num, offset) in obj_offsets {
+            // §77.9: the generation is the caller's, not always 0 — a
+            // re-emitted existing object (e.g. the catalog) keeps its
+            // existing generation, and an xref row of 0 for it would
+            // disagree with a trailer `/Root` that still points at gen 1.
+            entries.push((*obj_num, 1, *offset, *gen_num));
         }
         entries.push((xref_stream_obj_num, 1, xref_stream_offset, 0));
 
@@ -884,12 +940,12 @@ impl IncrementalWriter {
         // `/Size 0` written beside an object numbered 4294967295. Refuse.
         let highest = obj_offsets
             .iter()
-            .map(|(n, _)| *n)
+            .map(|(n, _, _)| *n)
             .chain(std::iter::once(xref_stream_obj_num))
             .max()
             .unwrap_or(0);
         let new_size = std::cmp::max(
-            self.trailer_dict.size,
+            self.next_object_number,
             highest.checked_add(1).ok_or_else(|| {
                 PdfWriteError::Unsupported(format!(
                     "object number {highest} leaves no room for a /Size one past it; \
@@ -943,7 +999,11 @@ impl IncrementalWriter {
         Ok(())
     }
 
-    fn write_xref_table<W: Write>(&self, writer: &mut W, obj_offsets: &[(u32, u64)]) -> Result<()> {
+    fn write_xref_table<W: Write>(
+        &self,
+        writer: &mut W,
+        obj_offsets: &[(u32, u16, u64)],
+    ) -> Result<()> {
         writeln!(writer, "xref").map_err(PdfWriteError::Io)?;
 
         // Always emit subsection for object 0 (free list head)
@@ -963,8 +1023,9 @@ impl IncrementalWriter {
                     // Gap found - emit current subsection and start a new one
                     writeln!(writer, "{} {}", subsection_start, subsection_entries.len())
                         .map_err(PdfWriteError::Io)?;
-                    for (_obj_num, offset) in &subsection_entries {
-                        writeln!(writer, "{:010} 00000 n ", offset).map_err(PdfWriteError::Io)?;
+                    for (_obj_num, gen_num, offset) in &subsection_entries {
+                        writeln!(writer, "{:010} {:05} n ", offset, gen_num)
+                            .map_err(PdfWriteError::Io)?;
                     }
                     subsection_start = obj_offsets[i].0;
                     subsection_entries = vec![obj_offsets[i]];
@@ -974,8 +1035,8 @@ impl IncrementalWriter {
             // Emit final subsection
             writeln!(writer, "{} {}", subsection_start, subsection_entries.len())
                 .map_err(PdfWriteError::Io)?;
-            for (_obj_num, offset) in &subsection_entries {
-                writeln!(writer, "{:010} 00000 n ", offset).map_err(PdfWriteError::Io)?;
+            for (_obj_num, gen_num, offset) in &subsection_entries {
+                writeln!(writer, "{:010} {:05} n ", offset, gen_num).map_err(PdfWriteError::Io)?;
             }
         }
 
@@ -1563,16 +1624,96 @@ mod tests {
         assert!(IncrementalWriter::open(ok.as_bytes()).is_ok());
     }
 
+    #[test]
+    fn open_refuses_a_size_of_zero() {
+        // `/Size 0` is what `parse_trailer` leaves in place when the trailer
+        // has no `/Size` at all or the value did not parse. With no reliable
+        // floor to allocate object numbers from, `open` MUST refuse rather
+        // than silently start allocation at object number 1, which is
+        // certain to collide with the catalog.
+        let head = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\n";
+        let xref_at = head.len();
+        let mut pdf_bytes = head.to_vec();
+        pdf_bytes.extend_from_slice(
+            b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+              trailer\n<<\n/Root 1 0 R\n>>\nstartxref\n",
+        );
+        pdf_bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let Err(err) = IncrementalWriter::open(&pdf_bytes) else {
+            panic!("a missing/unparseable /Size (Size 0) must be refused");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("Size 0") && message.contains("unchanged"),
+            "the refusal must name /Size 0 and say the source is unchanged, got: {message}"
+        );
+    }
+
+    #[test]
+    fn object_allocation_starts_past_the_real_highest_object_not_just_declared_size() {
+        // §76.5: a document whose trailer declares a `/Size` far smaller than
+        // the objects the cross-reference table actually lists is ordinary
+        // real-world damage; the lenient reader elsewhere in this crate
+        // tolerates it. Trusting `/Size` alone to seed allocation would let
+        // this writer hand out an object number that a live page or content
+        // stream already occupies, silently overwriting it in the signed
+        // output. Build a fixture with 40 real objects but a trailer that
+        // claims `/Size 3`, and check allocation starts at 41, not 3.
+        let mut pdf = builder::Pdf::new();
+        for i in 0..40 {
+            pdf.add(format!("<< /Type /Test /N {i} >>"));
+        }
+        let bytes = pdf.build_with_trailer("/Size 3 /Root 1 0 R");
+
+        let writer = IncrementalWriter::open(&bytes).expect("a lenient trailer is still openable");
+        assert_eq!(
+            writer.next_object_number(),
+            41,
+            "allocation must start past the real highest object number (40), not the \
+             under-declared /Size (3)"
+        );
+
+        // Confirm end to end: appending a new object must not reuse any
+        // object number already present in the source document.
+        let mut out = Vec::new();
+        let new_obj = writer.next_object_number();
+        writer
+            .append_objects(
+                &mut std::io::Cursor::new(&mut out),
+                &[(new_obj, 0, PdfObject::Name("Test".to_string()))],
+                &[0u8; 16],
+            )
+            .expect("append_objects must succeed");
+        assert!(
+            new_obj > 40,
+            "the appended object number ({new_obj}) must not collide with any of the 40 \
+             existing objects"
+        );
+    }
+
     /// A minimal valid classic-xref PDF, and the offset of its cross-reference
     /// table: what an appended revision has to point its /Prev at.
     ///
     /// The testkit computes the offsets, and the offset this hands back is the
     /// one it recorded, so nothing here counts bytes.
+    /// The three objects every "minimal document" fixture in this module
+    /// builds: a catalog, a one-page page tree, and the page itself. Shared
+    /// so the classic-xref and xref-stream fixture builders below — which
+    /// cannot otherwise share code, since one uses the `Pdf` test builder
+    /// and the other hand-writes a raw cross-reference stream — at least
+    /// agree on the one thing that was drifting apart: the document itself.
+    const MINIMAL_DOCUMENT_OBJECTS: [&str; 3] = [
+        "<</Type /Catalog /Pages 2 0 R>>",
+        "<</Type /Pages /Kids [3 0 R] /Count 1>>",
+        "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>",
+    ];
+
     fn build_classic_fixture() -> (Vec<u8>, u64) {
         let mut pdf = Pdf::new();
-        pdf.add("<</Type /Catalog /Pages 2 0 R>>");
-        pdf.add("<</Type /Pages /Kids [3 0 R] /Count 1>>");
-        pdf.add("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>");
+        for object in MINIMAL_DOCUMENT_OBJECTS {
+            pdf.add(object);
+        }
         let bytes = pdf.build_with_trailer(
             "/Size {size} /Root 1 0 R \
              /ID [<0102030405060708090A0B0C0D0E0F10> <1112131415161718191A1B1C1D1E1F20>]",
@@ -1722,23 +1863,15 @@ mod tests {
         // Write header
         buf.extend_from_slice(b"%PDF-1.4\n");
 
-        // Object 1: Catalog
+        // Objects 1-3: catalog, pages, page — the same minimal document
+        // `build_classic_fixture` builds.
+        let [obj1, obj2, obj3] = MINIMAL_DOCUMENT_OBJECTS;
         let obj1_offset = buf.len() as u64;
-        buf.extend_from_slice(b"1 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Catalog /Pages 2 0 R>>\n");
-        buf.extend_from_slice(b"endobj\n");
-
-        // Object 2: Pages
+        buf.extend_from_slice(format!("1 0 obj\n{obj1}\nendobj\n").as_bytes());
         let obj2_offset = buf.len() as u64;
-        buf.extend_from_slice(b"2 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Pages /Kids [3 0 R] /Count 1>>\n");
-        buf.extend_from_slice(b"endobj\n");
-
-        // Object 3: Page
+        buf.extend_from_slice(format!("2 0 obj\n{obj2}\nendobj\n").as_bytes());
         let obj3_offset = buf.len() as u64;
-        buf.extend_from_slice(b"3 0 obj\n");
-        buf.extend_from_slice(b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\n");
-        buf.extend_from_slice(b"endobj\n");
+        buf.extend_from_slice(format!("3 0 obj\n{obj3}\nendobj\n").as_bytes());
 
         // Object 4: xref stream (uncompressed)
         // 7 bytes per entry: 1 byte type + 4 byte offset + 2 byte generation
