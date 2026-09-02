@@ -5,6 +5,7 @@
 //! the application, one per domain, so a renderer's dependencies are visible
 //! in its signature.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use iced::widget::image::Handle as ImageHandle;
@@ -281,7 +282,13 @@ pub struct ReaderPage {
     /// Committed marks whose frames have not arrived yet, still drawn by the
     /// UI so a stroke does not vanish at release and reappear a round trip
     /// later (§9.2).
-    pub retained: Vec<crate::widgets::document::preview::GesturePreview>,
+    ///
+    /// `Rc<[T]>` rather than `Vec<T>`: this facet is rebuilt on every layout
+    /// pass (`sheets()` runs inside `responsive`), and while a stroke is
+    /// retained its `GesturePreview` can carry thousands of points. A shared
+    /// slice lets a redraw that changed nothing about the stroke bump a
+    /// reference count instead of copying the points again (§82.2).
+    pub retained: Rc<[crate::widgets::document::preview::GesturePreview]>,
     /// The most recent complete frame for this page at roughly this size, or
     /// `None` while one is being rendered. A page with no frame yet draws its
     /// sheet and nothing on it, rather than nothing at all: the column must
@@ -297,11 +304,11 @@ pub struct ReaderPage {
     /// Drawn by the UI rather than written into the document: a search result
     /// is not a mark, it goes when the query does, and nothing about it may
     /// reach a saved file.
-    pub found: Vec<pulpit_core::page::PageQuad>,
-    pub found_current: Vec<pulpit_core::page::PageQuad>,
+    pub found: Rc<[pulpit_core::page::PageQuad]>,
+    pub found_current: Rc<[pulpit_core::page::PageQuad]>,
     /// The marks the reader has picked up, when they are on this page, or the
     /// open rubber band while one is being dragged over it (§8.4).
-    pub selection: Vec<SelectedMark>,
+    pub selection: Rc<[SelectedMark]>,
     /// Which part of the page this sheet is a picture of, as a fraction of it
     /// (§8.1). The whole page unless a crop is in force.
     ///
@@ -320,7 +327,7 @@ pub struct ReaderPage {
     pub rotation: pulpit_core::page::PageRotation,
     /// Fields on this page that are drawn but can never be filled, so the
     /// reader is told rather than left clicking at a box that does nothing.
-    pub dead_fields: Vec<DeadField>,
+    pub dead_fields: Rc<[DeadField]>,
 }
 
 /// A widget pulpit shows and refuses to fill (§6.4).
@@ -420,7 +427,12 @@ pub struct ReaderData<'a> {
     /// How wide that window is, so a narrow page can be centred in it.
     pub viewport_width: f32,
     /// The pages currently in the window, with whatever frames exist.
-    pub visible: Vec<ReaderPage>,
+    ///
+    /// `Rc<[ReaderPage]>`, not `Vec`: `PageSurface::from` snapshots this every
+    /// layout pass, and a shared slice turns that snapshot into a reference
+    /// count bump instead of a deep copy of every page's geometry and
+    /// previews (§82.2).
+    pub visible: Rc<[ReaderPage]>,
     pub controls: &'a crate::widgets::document::model::ReaderControls,
     /// How much of the outline body is revealed, from shut (`0`) to open
     /// (`1`). The application owns the clock that drives this value; the

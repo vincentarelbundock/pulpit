@@ -6,6 +6,8 @@
 //! elements, so what is on screen is decided by something that can be tested
 //! without a window.
 
+use std::rc::Rc;
+
 use iced::widget::{
     button, column, container, image, mouse_area, responsive, row, scrollable, slider, space, text,
     text_editor, text_input, tooltip, Column, Row,
@@ -208,7 +210,11 @@ fn page_surface<'a, Message: Clone + 'static>(
 /// by [`view`] is gone. Keeping this small snapshot lets it use the viewport's
 /// real width without tying the returned element to that short-lived context.
 struct PageSurface {
-    pages: Vec<crate::widgets::context::ReaderPage>,
+    // `Rc<[ReaderPage]>`, matching `ReaderData::visible`: `responsive`
+    // rebuilds this snapshot every layout pass, so cloning it here must be a
+    // reference-count bump, not a deep copy of every page's geometry and
+    // retained-stroke previews (§82.2).
+    pages: std::rc::Rc<[crate::widgets::context::ReaderPage]>,
     column_height: f32,
     column_width: f32,
     pointer: Pointer,
@@ -271,7 +277,7 @@ impl PageSurface {
         // pair of facing sheets: the column decided that, and this only has to
         // draw what it decided.
         let mut rows: Vec<Vec<&crate::widgets::context::ReaderPage>> = Vec::new();
-        for page in &self.pages {
+        for page in self.pages.iter() {
             match rows.last_mut() {
                 Some(row)
                     if (row[0].placed.top - page.placed.top).abs() < f32::EPSILON.max(0.01) =>
@@ -532,7 +538,7 @@ fn sheet<'a, Message: Clone + 'static>(
             let tool_owns_pointer =
                 pointer.marqueeing || pointer.armed.is_some() || pointer.panning;
             layers = layers.push(super::preview::dead_field_layer(
-                page.dead_fields.clone(),
+                Rc::clone(&page.dead_fields),
                 theme::ambient::muted(),
                 shown,
                 origin,
@@ -551,7 +557,7 @@ fn sheet<'a, Message: Clone + 'static>(
             }
             layers = layers.push(super::preview::layer(
                 super::preview::GesturePreview {
-                    points: Vec::new(),
+                    points: Rc::from([]),
                     quads,
                     // A found word is washed, never ruled: it is a place on
                     // the page, not a mark somebody made on it.
@@ -569,8 +575,12 @@ fn sheet<'a, Message: Clone + 'static>(
                 drawn,
             ));
         }
-        for mark in page.retained.clone() {
-            layers = layers.push(super::preview::layer(mark, shown, origin, drawn));
+        // `retained` is a shared slice (§82.2): iterating by reference and
+        // cloning one `GesturePreview` at a time only bumps the `Rc`s inside
+        // it, rather than cloning the whole retained set (and every stroke's
+        // point vector in it) up front.
+        for mark in page.retained.iter() {
+            layers = layers.push(super::preview::layer(mark.clone(), shown, origin, drawn));
         }
         if let Some(preview) = page.preview.clone() {
             layers = layers.push(super::preview::layer(preview, shown, origin, drawn));
@@ -578,9 +588,9 @@ fn sheet<'a, Message: Clone + 'static>(
         // The selection goes on top of everything: it is chrome describing
         // what the reader is holding, and chrome that something else can
         // cover is chrome nobody can trust.
-        for selection in page.selection.clone() {
+        for selection in page.selection.iter() {
             layers = layers.push(super::preview::selection_layer(
-                selection,
+                selection.clone(),
                 theme::ambient::accent(),
                 shown,
                 origin,

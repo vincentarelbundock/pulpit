@@ -10,6 +10,7 @@
 //! viewport — which is why it is testable without a window or a PDF.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use pulpit_core::annotate::AnnotationInteraction;
 use pulpit_core::annotation::{AnnotationTool, SelectKind};
@@ -128,8 +129,8 @@ fn preview_of(
         _ => return None,
     };
     let preview = crate::widgets::document::preview::GesturePreview {
-        points,
-        quads,
+        points: Rc::from(points),
+        quads: Rc::from(quads),
         markup,
         color: style.color.rgb(),
         opacity: style.opacity,
@@ -2482,8 +2483,8 @@ impl ReaderSession {
             }
         };
         let preview = crate::widgets::document::preview::GesturePreview {
-            points,
-            quads,
+            points: Rc::from(points),
+            quads: Rc::from(quads),
             markup,
             color: style.color.rgb(),
             opacity: style.opacity,
@@ -4500,15 +4501,32 @@ impl ReaderSession {
                         .get(placed.page.get())
                         .map(|page| (page.width, page.height))
                         .unwrap_or((1.0, 1.0));
+                    // `points`/`quads` are shared slices (§82.2): at the
+                    // common upright rotation there is nothing to turn, so
+                    // this returns `preview` untouched and shares its `Rc`s
+                    // rather than allocating a rebuilt copy on every redraw.
+                    // A real turn still has to produce turned points, which
+                    // is the one case where a fresh allocation is
+                    // unavoidable — but it is one allocation, not the three
+                    // per-frame copies this fix removes.
                     let turn_preview =
-                        |mut preview: crate::widgets::document::preview::GesturePreview| {
-                            for point in &mut preview.points {
-                                *point = rotation.rotate_point(*point, width, height);
+                        |preview: crate::widgets::document::preview::GesturePreview| {
+                            if matches!(rotation, pulpit_core::page::PageRotation::None) {
+                                return preview;
                             }
-                            for quad in &mut preview.quads {
-                                *quad = rotation.rotate_quad(*quad, width, height);
+                            crate::widgets::document::preview::GesturePreview {
+                                points: preview
+                                    .points
+                                    .iter()
+                                    .map(|point| rotation.rotate_point(*point, width, height))
+                                    .collect(),
+                                quads: preview
+                                    .quads
+                                    .iter()
+                                    .map(|quad| rotation.rotate_quad(*quad, width, height))
+                                    .collect(),
+                                ..preview
                             }
-                            preview
                         };
                     // Whatever frame the cache has, plus the partial repaint
                     // held over it, if any. Frames are rasterised upright, so
@@ -4617,7 +4635,7 @@ impl ReaderSession {
                 })
                 .collect()
         } else {
-            Vec::new()
+            Rc::from([])
         };
         ReaderData {
             open: self.open && live,
@@ -9591,6 +9609,62 @@ mod tests {
             session.annotation_rows().len(),
             1,
             "and opening it shows what the pages already reported"
+        );
+    }
+
+    /// §82.2: `facet()` used to copy a retained stroke's points into
+    /// `ReaderPage`, `PageSurface::from` copied them again cloning
+    /// `reader.visible` wholesale, and `sheet()` copied them a third time —
+    /// every layout pass, which `responsive` runs on every redraw. A stroke
+    /// awaiting its frame can carry thousands of points, so this pins that
+    /// `GesturePreview::points` is now `Rc<[PagePoint]>` and is *shared*
+    /// rather than cloned: the same allocation survives an upright facet
+    /// unchanged, and a second facet of the same, unmoved stroke still
+    /// points at it.
+    #[test]
+    fn a_retained_stroke_s_points_are_shared_not_copied_by_facet() {
+        let mut session = open(1);
+        let points: Vec<PagePoint> = (0..5_000)
+            .map(|index| PagePoint::new(index as f32, index as f32))
+            .collect();
+        let shared_points: Rc<[PagePoint]> = Rc::from(points);
+        session.retained.push(RetainedMark {
+            page: PageIndex(0),
+            preview: crate::widgets::document::preview::GesturePreview {
+                points: Rc::clone(&shared_points),
+                quads: Rc::from([]),
+                markup: pulpit_core::annotation::MarkupKind::default(),
+                color: (0.0, 0.0, 0.0),
+                opacity: 1.0,
+                width: 2.0,
+            },
+            revision: None,
+            id: None,
+        });
+
+        let search = pulpit_core::search::SearchState::new();
+        let first = session.facet(true, &no_frames, &search);
+        let first_page = first
+            .visible
+            .first()
+            .expect("the page carrying the retained stroke is visible");
+        assert_eq!(first_page.retained.len(), 1);
+        assert!(
+            Rc::ptr_eq(&first_page.retained[0].points, &shared_points),
+            "an upright facet must share the retained stroke's points, not clone them"
+        );
+
+        // A second redraw of the same, unchanged stroke: the whole point of
+        // `Rc<[T]>` here is that this costs a reference-count bump, not a
+        // second 5,000-point allocation.
+        let second = session.facet(true, &no_frames, &search);
+        let second_page = second.visible.first().expect("still visible");
+        assert!(
+            Rc::ptr_eq(
+                &first_page.retained[0].points,
+                &second_page.retained[0].points
+            ),
+            "two facets of the same retained stroke must share one allocation"
         );
     }
 }
