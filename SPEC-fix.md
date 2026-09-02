@@ -4,8 +4,7 @@ Companion to `SPEC-signing.md`, `SPEC-reader-formats.md` and the retired
 `SPEC-simplify.md`. Adds §75–§84. Section numbers are stable so source
 comments and commits may cite them; gaps are deletions, not omissions.
 
-**Status.** Nothing in this document has been carried out. Every section is
-outstanding. When a section is done, replace its *(outstanding)* marker with
+**Status.** Phase 1 is on `main`: every §76 item, §77, §79.1–3/5/6, most of §80–§82 and the §81 deletions, each with a **Done** paragraph below recording what changed and, where the coordinator's review altered the fix, why. Phase 2 (§78, §79.4, §82.2, the §80.6/§80.8 remainders, `OnMount`, the `RuntimeId` placeholders, the view clock read) is in progress. When a section is done, replace its *(outstanding)* marker with
 a **Done** paragraph saying what changed and what the doing changed about the
 finding, as `SPEC-simplify.md` did.
 
@@ -70,8 +69,10 @@ Each is a wrong outcome reachable from ordinary use or from a document the
 user did not author. Each names the test that would have caught it, because
 the fix is not complete until that test exists.
 
-**§76.1 — The audience window never learns its scale factor.** *(outstanding,
+**§76.1 — The audience window never learns its scale factor.** *(done,
 verified)*
+
+**Done.** `Message::AudienceScale(f32)` is requested on the audience `WindowOpened` and every audience `Resized`; `audience_width()` goes through `audience_pixel_width(logical, scale)` and `audience_scale()` returns the stored value, falling back to 1.0 exactly as the presenter does. The test drives the pure width function rather than a whole `App`, because no App-and-messages harness exists.
 
 `Message::Resized` stores iced's logical `Size`; `audience_width()`
 (`crates/pulpit/src/app.rs:15892`) casts it straight to pixels, and
@@ -86,7 +87,9 @@ and `audience_scale()` exactly as `presenter_scale_factor()` does.
 Test: a scripted window event sequence with scale 2.0 MUST produce a
 `RenderJob` whose width is twice the logical width.
 
-**§76.2 — Crash recovery replays the redo of every undo.** *(outstanding)*
+**§76.2 — Crash recovery replays the redo of every undo.** *(done)*
+
+**Done.** `PendingEdit.reversal` is what the journal records for an undo, in both the interactive arm and the replay arm. The journal test is now end-to-end against a real `--document-worker` child: draw, undo, recover, and the mark stays absent.
 
 For `Ask::Undo` the worker's `Applied.undo` is the inverse of the undo, i.e.
 the redo (`pulpit-render/src/document/mod.rs:1117`); `ReaderSession::applied`
@@ -100,7 +103,9 @@ Test: the existing `undos_are_recorded_like_anything_else_so_replay_leaves_them_
 checks entry shape only. It MUST become an end-to-end assertion against a
 fixture-backend document: draw, undo, recover, assert the mark is absent.
 
-**§76.3 — Journalling stops silently after the first Save As.** *(outstanding)*
+**§76.3 — Journalling stops silently after the first Save As.** *(done)*
+
+**Done.** `Journal::finish` re-creates the file and header, and `append` on a fileless journal is an `Err`. The coordinator then changed what `finish` re-creates against: the saved copy, not the original source, because the edits before the save are in that copy and replaying onto the original would leave them out. `Told::Saved` fingerprints the copy and hands it to `finish`; a copy that cannot be fingerprinted keeps the old source.
 
 `Told::Saved` calls `journal.finish()` (`app.rs:7825`), which drops the file
 and deletes it but leaves `self.reader_journal = Some(_)`. Every later
@@ -113,7 +118,9 @@ a journal with no file is an `Err`.
 Test: save, edit, recover; the post-save edit MUST be replayed.
 
 **§76.4 — A PDF link URI with a multibyte character panics the render
-worker.** *(outstanding, verified)*
+worker.** *(done, verified)*
+
+**Done.** Both functions go through `as_bytes()`/`get()`; an ASCII prefix match guarantees the slice boundary. Two tests pin `https://école.fr` and a truncated escape beside a multibyte character.
 
 `strip_prefix_ignore_ascii_case` (`pulpit-core/src/overlay.rs:421`) does
 `value[..prefix.len()]`, `str` indexing at a byte offset. `is_media_uri` is
@@ -128,7 +135,9 @@ Test: `is_media_uri("https://école.fr")` and `decode("%aé")` MUST return
 without panicking. Rule: §83.2.
 
 **§76.5 — Signing allocates new object numbers from `/Size` alone.**
-*(outstanding, verified)*
+*(done, verified)*
+
+**Done.** `IncrementalWriter::open` refuses `/Size 0` and computes the allocation floor as the higher of `/Size` and one past the highest entry `XrefIndex::build` reports; both `assemble_revision` and `pdfoutline.rs` allocate through it. Tested with a 40-object fixture declaring `/Size 3`. The change altered the byte-exact signer output for object-stream fixtures, so the fuzz seeds were regenerated; note they must be regenerated under `cargo test --workspace` (feature unification changes the bytes), which is the form `make test` uses.
 
 `IncrementalWriter::next_object_number` (`pulpit-render/src/pdfwrite/mod.rs:714`)
 is `trailer_dict.size.max(1)`; `parse_trailer` (`mod.rs:1126`) leaves `size`
@@ -146,7 +155,9 @@ Test: a fixture with `/Size 3` and objects up to 40 MUST sign without any
 existing object number being reused.
 
 **§76.6 — Preflight ignores field inheritance, so certification fails
-open.** *(outstanding)*
+open.** *(done)*
+
+**Done.** Preflight keeps the inheritance-resolved `FieldEntry` and builds `FieldInfo` from it; only `/SV` needs a further read; FieldMDP matching uses the qualified name. A node the walk cannot resolve still fails closed. Hierarchical-field tests for `preflight_certify` refusal and lock matching were added.
 
 `resolver_and_fields` (`pulpit-render/src/verify/preflight.rs:115`) discards
 the `FieldEntry { field_type, qualified_name, value_ref }` that
@@ -163,7 +174,9 @@ Test: a hierarchical field fixture MUST be refused by `preflight_certify`
 and its lock MUST be honoured by `check_field_mdp_locks`. Rule: §78.
 
 **§76.7 — A render-worker restart replays `Open`, and the replayed `Opened`
-closes the live document.** *(outstanding)*
+closes the live document.** *(done)*
+
+**Done.** `RendererSupervisor::reported_open` suppresses a replayed `Opened`/`OpenFailed`; `open()` and `close()` clear the entry so a genuine reopen is still reported, and `first_alive()` was deleted. The restart test asserts exactly one `Opened` across the crash. Independently, `DocumentManager::on_candidate_opened` drops a duplicate `Opened` for the active document instead of discarding it, so the app is robust even if a future supervisor replays.
 
 `kill()` (`pulpit-render/src/supervisor.rs:1183`) re-sends `Request::Open`
 for every document; `handle()` forwards `Response::Opened` whenever
@@ -177,7 +190,9 @@ suppress replayed answers. Test: `a_crashing_worker_is_restarted_and_rendering_r
 stops at the supervisor; it MUST be extended through `DocumentManager`.
 
 **§76.8 — The media supervisor never closes a session it gives up on.**
-*(outstanding)*
+*(done)*
+
+**Done.** `recover` sends `Close` to the hosting worker before retrying or falling back; the chromium worker removes the session and releases its page on a per-session failure, and `Open` on a live id releases the old page first. A scripted worker binary under `tests/support/` proves `Close` reaches the worker's stdin.
 
 `recover` (`pulpit-media/src/supervisor.rs:992`) removes the `Session`, drops
 its ring, and relaunches or falls back, but never sends
@@ -195,7 +210,9 @@ explicit — a per-session `Failed` means the session is gone, or it is a
 Test: a scripted worker that answers `Failed` MUST receive `Close`.
 
 **§76.9 — Bundle extraction bounds expansion by the declared size.**
-*(outstanding, verified)*
+*(done, verified)*
+
+**Done.** `expanded` and the ratio are computed from the bytes actually read. The test patches a real ZIP's size fields to zero over a 1 MiB payload and asserts refusal.
 
 `extract_bundle` (`pulpit-render/src/pdf/overlays.rs:187`) adds `declared` to
 `expanded` and computes the ratio from it, then reads up to
@@ -206,8 +223,10 @@ Fix: accumulate `bytes.len()` into `expanded` after the read and compute the
 ratio from it. Test: an archive whose headers declare 0 bytes MUST be refused
 once real expansion exceeds `max_expanded_bytes`. Rule: §83.3.
 
-**§76.10 — The PDFium form-fill environment is never exited.** *(outstanding,
+**§76.10 — The PDFium form-fill environment is never exited.** *(done,
 verified)*
+
+**Done.** `impl Drop for PdfiumDocument` releases the form page, the text page and the form-fill environment in that order; `close` is gone. Two integration tests needed explicit `drop()`s because the new `Drop` extends borrow lifetimes.
 
 `PdfiumDocument::close` (`pulpit-render/src/document/pdfium.rs:1168`) is the
 only place `FPDFDOC_ExitFormFillEnvironment`, `release_form_page` and
@@ -218,8 +237,10 @@ only place `FPDFDOC_ExitFormFillEnvironment`, `release_form_page` and
 environment, which PDFium's header forbids.
 Fix: `impl Drop for PdfiumDocument` doing what `close` does; delete `close`.
 
-**§76.11 — Debug scaffolding on the annotation write path.** *(outstanding,
+**§76.11 — Debug scaffolding on the annotation write path.** *(done,
 verified)*
+
+**Done.** Both removed.
 
 `write_note_appearance` (`document/pdfium.rs:2082`) makes an extra
 `FPDFAnnot_GetAP` round trip per note to feed `eprintln!("DEBUG setap …")`;
@@ -227,8 +248,10 @@ verified)*
 per annotation to skip `FPDFPage_GenerateContent`, an undocumented switch
 that writes invisible annotations. Remove both.
 
-**§76.12 — A malformed layout file panics at startup.** *(outstanding,
+**§76.12 — A malformed layout file panics at startup.** *(done,
 verified)*
+
+**Done.** `validate()` returns once a Blocking structural issue exists and `layout_node` indexes `sizes` with `get`. A store-level test loads a hand-edited file with mismatched `sizes` and asserts it is skipped as invalid.
 
 `validate()` (`crates/pulpit/src/layout/validate.rs:376`) records a Blocking
 "not canonical" issue and continues into `layout.compute`, where
@@ -241,7 +264,9 @@ Fix: return from `validate` once any Blocking structural issue exists;
 Test: a layout with `sizes.len() != children.len()` MUST load as invalid.
 
 **§76.13 — The Clock widget's timezone is a cached `date +%z` subprocess.**
-*(outstanding, verified)*
+*(done, verified)*
+
+**Done.** `seconds_of_day()` uses `chrono::Local::now()` and the `date` subprocess is gone, so the offset is right on every platform and refreshes across DST. The read still lives in `view.rs`; moving it into `App` is phase-2 work.
 
 `prime_local_offset` (`crates/pulpit/src/view.rs:4301`) spawns `date` into a
 `OnceLock`. On Windows `date` is a shell builtin, so `output()` fails, the
@@ -253,7 +278,9 @@ Fix: `chrono::Local::now().num_seconds_from_midnight()` computed in `App`
 and passed to the view.
 
 **§76.14 — Erasing a not-yet-named stroke orphans it and misattributes the
-next id.** *(outstanding)*
+next id.** *(done)*
+
+**Done.** `Annotations` keeps a `pending_stroke_names` queue with one entry per in-flight stroke commit. `name_stroke` pops the front: a `Live` entry names the oldest unnamed stroke, an `Erased` entry turns the arriving id into an immediate delete via the existing `take_erased` drain, and a `Dropped` entry (the view cap evicted the stroke) consumes the id so it cannot be handed to a younger stroke while the mark stays in the file. The third state was the coordinator's addition: the agent's version deleted a capped stroke from the document.
 
 `erase_at` (`pulpit-core/src/annotation.rs:1003`) drops a stroke whose `id`
 is `None` from the view and records nothing; the comment says the caller
@@ -269,7 +296,9 @@ Test: draw A, erase A before its answer, draw B, deliver both answers; the
 document MUST contain exactly B under B's id.
 
 **§76.15 — Cross-reference stream entries are collected without a cap, and
-the repair scan is quadratic.** *(outstanding)*
+the repair scan is quadratic.** *(done)*
+
+**Done.** Both section parsers check `entries.len()` against `MAX_XREF_ENTRIES` inside the push loop, and the repair scan memoises the earliest offset from which an `endobj`/`endstream` search is known to fail. A 10 MB file of unterminated objects scans in milliseconds.
 
 `parse_xref_stream_section` (`pulpit-render/src/verify/objects.rs:955`)
 pushes every `(u32, XrefEntry)` before `MAX_XREF_ENTRIES` is consulted in
@@ -291,7 +320,7 @@ unterminated objects MUST open or refuse in bounded time. Rule: §83.3.
 Wrong outcomes that are rarer, platform-specific, or degrade rather than
 break. None threatens the three rules directly.
 
-**§77.1 — Display adapters that never ran on hardware.** *(outstanding)*
+**§77.1 — Display adapters that never ran on hardware.** *(done)*
 
 - macOS `place()` (`pulpit-display/src/macos.rs:416`) returns `Applied` for
   an asynchronous `toggleFullScreen:` sequence it cannot know succeeded;
@@ -314,7 +343,7 @@ break. None threatens the three rules directly.
   EDID-less outputs; the other adapters map that to `None`.
 
 **§77.2 — Role assignment mixes raw and logical monitor indices.**
-*(outstanding)*
+*(done)*
 
 `automatic_roles` (`pulpit-display/src/reconcile.rs:263`) compares raw
 indices from `resolve_role` and `snapshot.builtin()` against logical targets.
@@ -325,7 +354,7 @@ delete the second mapping at `reconcile.rs:393`. Capture the scenario with
 `pulpit-topology` as a regression script.
 
 **§77.3 — `resolve()` gives up as `Ambiguous` before trying the weaker
-candidate.** *(outstanding)*
+candidate.** *(done)*
 
 `snapshot.rs:256`: on ≥2 strong matches, `record.fallback` is never consulted.
 Twins whose EDID serial descriptor is the placeholder `"0"` (`x11.rs:594`
@@ -335,7 +364,7 @@ is never tried. Intersect with the next candidate first; treat all-zero
 serial text as absent.
 
 **§77.4 — The X11 `PlacementTrust` latch is unobservable by the app.**
-*(outstanding)*
+*(done)*
 
 `x11.rs:335` flips `capabilities()` to `TILING` after a refused placement,
 but `display.rs:100` reads capabilities once at connect and `reconcile`
@@ -344,7 +373,7 @@ excludes them from its `unchanged` check. Every later topology change emits a
 reconcile or drop the flip and let `Refused` be the signal.
 
 **§77.5 — Scenario files do not round-trip a make with whitespace.**
-*(outstanding)*
+*(done)*
 
 `scenario.rs:113`/`151`: `to_text` writes `make=Dell Inc.`; `parse` splits on
 whitespace and rejects `Inc.`. Wayland reports full vendor strings, so
@@ -352,7 +381,7 @@ whitespace and rejects `Inc.`. Wayland reports full vendor strings, so
 defeating the capture loop. Quote values on output and tokenise with quote
 awareness.
 
-**§77.6 — Application teardown asymmetries.** *(outstanding)*
+**§77.6 — Application teardown asymmetries.** *(done)*
 
 - WM-closing the audience window (`app.rs:3538`) resets window state but does
   not release `audience_claim`, restore `roles.audience_fullscreen` or drop
@@ -372,7 +401,7 @@ awareness.
   can win via rename, and a late session thread can recreate the snapshot
   after `clear()`. Join the in-flight writer in `quit()`.
 
-**§77.7 — Media coordination gaps.** *(outstanding)*
+**§77.7 — Media coordination gaps.** *(done)*
 
 - `rebuild()` on the same generation (`crates/pulpit/src/media/coordinator.rs:440`)
   retains sessions by `OverlayId`, but ids are numbered by occurrence in page
@@ -395,7 +424,7 @@ awareness.
 - `speech/download.rs:93` has no read timeout and no byte ceiling; a
   stalled network parks the thread past the cancel button.
 
-**§77.8 — Document session and protocol edges.** *(outstanding)*
+**§77.8 — Document session and protocol edges.** *(done)*
 
 - `document/session.rs:188` blocks on the document worker with no deadline;
   a `while(true){}` field script under V8 wedges the reader thread and every
@@ -417,7 +446,7 @@ awareness.
 - DjVu `open` and `page_info` (`djvu/backend.rs:594`, `306`) wait with no
   cancel or attempt bound while `page_text` in the same file has one.
 
-**§77.9 — Convention and correctness residue.** *(outstanding)*
+**§77.9 — Convention and correctness residue.** *(done)*
 
 - `crates/pulpit/src/display.rs:93–205` holds the only `cfg(target_os)`
   above `platform/`. It is adapter selection, not a view, so it is not the
@@ -461,11 +490,29 @@ awareness.
   result the control thread is about to collect. Evict all but the key just
   inserted.
 
+
+**Done.** macOS `place()` returns `Pending` and a new `verify_placement` compares the window frame to the target; Windows keeps geometry in physical pixels, toggles topmost through `SetWindowPos`, and prunes dead HWNDs from `saved_styles` on every `place()`; Wayland derives the scale from mode over logical size when both are known; X11 maps 0×0 mm to `None`. macOS and Windows were cross-compiled (`cargo check`/clippy for `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`) but remain unverified on hardware.
+
+**Done.** Explicit resolutions are mapped through `logical_target` before `automatic_roles`, the second mapping is deleted, and `builtin` is mapped too. Topology script 09 captures the A/B-mirror/C case and a dedicated test asserts the presenter lands on C.
+
+**Done.** `resolve()` narrows an ambiguous match by the next candidate before disambiguating by position; `parse_edid` treats all-zero, "0" and "1" serial text as absent.
+
+**Done.** The capability flip was dropped: `capabilities()` always reports `Capabilities::X11`, `place()`'s own trust short-circuit still avoids a futile request, and `Refused` is the signal.
+
+**Done.** Values containing whitespace are quoted on output and parsed with a quote-aware tokeniser (backslash escapes); `make="Dell Inc."` round-trips.
+
+**Done.** `audience_gone()` is shared by `WindowClosed` and `stop_audience`; `put_down_document` calls `end_sign_flow()` and `Rung::SignDialog` swallows keys with Escape cancelling; `quit()` resets reader rendering, removes its snapshot directory and sweeps stale ones; the settings and session writer threads are joined in `quit()` before the final synchronous writes.
+
+**Done.** `MediaCoordinator::rebuild` takes the supervisor and closes the session of any overlay id the rebuild removed or re-pointed at different content (the removed-id case was the coordinator's follow-up; the agent handled only re-pointed ids); a failed staging root marks embedded overlays `Blocked` with the reason. The mpv worker drains `mpv_wait_event` and emits `Failed`/`Ended`; the version handshake is enforced in `poll_limit` and `handshake_deadline` is deleted; mid-run worker discards drop on a detached thread; downloads have a 20 s read timeout and a byte ceiling.
+
+**Done.** `DocumentSession` reads answers on a thread and waits with `recv_timeout` (30 s), marking the session lost and killing the child on expiry; `validate` bounds `rgba_bytes()` by the wire ceiling; `DirtyRect` is normalised in `invalidate`; `ask()` questions are tracked per worker and replayed from `kill()`; give-up is a `Backoff{until}` retried each pump, dead slots do not count toward the pool and given-up tail workers are popped; `list_zip`/`list_tar` refuse inside the loop; DjVu `open` and `page_info` share `page_text`'s attempt bound.
+
+**Done.** Backend selection lives in `platform/display.rs` and the target_os grep above the boundary is empty; the mojibake bytes are fixed with a test on `report()`; `refresh()` returns a three-way `RefreshOutcome`; the snoozed cue tracks its origin and is cleared on remove or when stale; the layout id is stamped outside the undoable state; store imports sanitise, bound `format_version`, re-slug colliding stems and propagate delete errors; Typst pixels are demultiplied; the unfilled-required rule is `FormField::is_unfilled_required()`; `applied` stamps only the marks the commit left waiting (`pending_stamp_counts`), popped only for edit answers, which was the coordinator's correction; `CredentialSummary` carries `i64` validity; generation numbers thread through `append_objects`; `/Reference` is evaluated per entry; `path_for` rejects `.`/`..` and stale regions are reclaimed by age off Linux; the speaker cache keeps the key just inserted.
 ---
 
 ## 78. One parser for PDF objects
 
-*(outstanding)*
+*(outstanding; phase 2 in progress)*
 
 **§78.1** The finding. `verify::objects::Lexer` is a complete, bounded parser
 (`PdfValue`, depth cap, array cap, stream extents). `sign::apply::parse_value`
@@ -528,11 +575,13 @@ until `Lexer::parse_hex_string` records spans.
 preflight read the same set of signature fields from the hierarchical fixture
 of §76.6.
 
+
+**Done.** Only the last bullet is done: one `ObjectResolver` per signing pass and a borrowing `IncrementalWriter`. The rest of §78 is phase-2 work in progress.
 ---
 
 ## 79. Application structure
 
-*(outstanding)*
+*(done except §79.4; see the items)*
 
 **§79.1 — Park-on-a-flag fields.** `speech_nav`, `bookmark_added`,
 `sign_resume_pending`, `print_spool_pending`, `form_clipboard_text`,
@@ -591,11 +640,21 @@ unreachable. `on_candidate_opened` also reads `Instant::now()`
 (`manager.rs:312`) while every other transition takes `now`. Either wire the
 real first-frame event or delete the state and rename the action `Promote`.
 
+
+**Done.** `deferred: Vec<Message>` on `App`, drained once in `update()`; the eight flag fields and their `is_live` clauses are gone. `FocusSearchInput` deliberately still waits a tick so the widget has mounted.
+
+**Done.** All 41 recursive `self.update(..)` calls are `self.dispatch(..)`; the cache budget override is read once in `App::new`.
+
+**Done.** `submit_render` and `cancel_renders` are free functions over the three maps, used at the four submission sites and both planners.
+
+**Done.** `compose_found`, `commit_picker_value`, `send_undo`, `page_of_slide`/`slide_of_page`; `run_document_actions` returns `()`; the dead `DocumentInfo` block and the unreachable `SavingFirst` check are deleted.
+
+**Done.** `AwaitingFirstFrame` and `RenderFirstFrame` are gone; `on_candidate_opened` promotes directly and takes `now`; `Debouncing.last_stamp` is deleted; a duplicate `Opened` for the active document is dropped (see §76.7).
 ---
 
 ## 80. Duplication to collapse
 
-*(outstanding)* Each item names the one owner.
+*(done except the §80.6 and §80.8 remainders; see the items)* Each item names the one owner.
 
 **§80.1** `forward_to_child!` (`crates/pulpit/src/widgets/mod.rs:751`) lacks
 `update`, `draw` and `overlay` arms, so `residency.rs:242–306`,
@@ -691,11 +750,37 @@ tests through it cannot exercise links, search or attachments.
 constant tables, while `libc` is already a workspace dependency used by
 `pulpit` and `pulpit-display`.
 
+
+**Done.** `forward_to_child!` has `update`, `draw`, `overlay` arms and the four widgets use them.
+
+**Done.** `on_widgets` replaces the six walks; `field_script_reaches_out` reuses `additional_action_script`; one `pdf::search::hits_on_loaded_page`; `composite_form_fields` is shared; `from_bindings` replaces the duplicate literals.
+
+**Done.** `pdf::search::search_pages` drives both `find_text` loops with one error policy (a failing page is skipped). The per-method `NoSuchPage` re-checks inside the backends were left as defence in depth, a deliberate deviation.
+
+**Done.** `ImageDocument` wraps an `ImageBackend`; one `images::table::measure_pages` returns `Vec<Option<(u32,u32)>>`. It keeps a precomputed geometry table because `ImageBackend::page_size` would re-walk an archive per page.
+
+**Done.** `relayout_anchored(page)` and `crop_to(region)`; the x-offset clamp now applies uniformly. The page counter goes through `column.current` because a spread change can pair the anchor with an earlier page.
+
+**Done.** `PagePoint::distance_to_segment`/`_squared`, `Region::contains` and `Outline::level`/`level_mut` exist and the callers in `annotation.rs`, `document.rs`, `overlay.rs` and `navigation.rs` use them. The three private copies in `annotate/hit.rs`, `annotate/stroke.rs` and `annotation.rs:1832` were left behind and are phase-2 work.
+
+**Done.** `identity::ladder()` and a public `Monitor::matches_exactly` at all five sites; the adapters stay concrete.
+
+**Done.** `From` impls between the placement enums and the settings types (the settings types carry serde attributes the flow types deliberately do not); `common_name` delegates to `subject_common_name`. `AppearanceRotation` versus `PageRotation` is phase-2 work because the orphan rule forbids the impl from the app crate.
+
+**Done.** One `THEMED_VIEWS` roster; `Action::icon()` with `Icon::Mute`/`Icon::Maximize` added; media and navigation spacing on the scale.
+
+**Done.** `toggle_button(bool)` replaced 26 sites, `controls::TOOLBAR_BUTTON` 15 paddings, `menu_item`/`options_arrow` the two builders; `canvas_node` is deleted in favour of an `Editing` hook on `layout_renderer::node`, pinned by a test that editing and presenting agree on hug extent, gap and collapsed cells.
+
+**Done.** `platform::which()`; `inhibit::hold_with_child`/`release_child` with `libc::kill` and `waitpid`; all three atomic writes go through `atomic::replace`; the shape cache lives under the cache directory; `Directories::settings_file()` is used. `signing_credentials()` turned out not to be the duplicate the spec named and keeps its allowance.
+
+**Done.** `worker::default_backend()` shared by both bootstraps; `FailureInjectingBackend` forwards every method; one `serve_document` and one tracing init in `main.rs`, which also fixed the image worker never initialising tracing.
+
+**Done.** `libc::` throughout; `libc` added to the crate manifest from the workspace dependency.
 ---
 
 ## 81. Dead and bypassed machinery
 
-*(outstanding)* Established by reference count. Each MAY be deleted without a
+*(done)* Established by reference count. Each MAY be deleted without a
 design discussion; the ones marked *decide* need one sentence of intent first.
 
 - `settings/keys.rs:597–669`, `901–967`: ~300 lines migrate a keymap that
@@ -742,11 +827,13 @@ design discussion; the ones marked *decide* need one sentence of intent first.
   three-state enum `Need` already names; `Reading { state: SpeechStateInner
   { state } }` (`speech/cursor.rs:161`).
 
+
+**Done.** Deleted: the keymap migration layer (`Action::ALL` is now macro-derived so a new variant is a compile error); `REGISTRY`/`WidgetRegistration` with `catalog::definition` an array lookup; `RuntimeId` placeholders are phase-2; `SurfaceRing::held` and friends; `handshake_deadline`; `Action::Unfullscreen`, `WindowMode::Hidden`, `_randr_types`; `WindowPolicy`/`InputPolicy` as plain structs (`is_reserved` kept, it backs a real test); `Debouncing.last_stamp`; `run_document_actions`' task; `SignatureLine::InkMark`; `first_page_size` and `PageOverlay.page`/`.poster` as methods; `AttachedRegion::read_only`; the fake download test is real. Enums: `Gesture` in `Annotations`, `Staged` in the coordinator, `Reading` collapsed. **Correction:** `WidgetId`, `WidgetKind::id()`/`from_id()` are not dead — the v2 layout file format reads and writes them — and were kept with their stale doc comments fixed. Still open: `OnMount` (phase 2) and the lockstep snooze/target fields.
 ---
 
 ## 82. Hot-path efficiency
 
-*(outstanding)* Ordered by how often the path runs.
+*(done)* Ordered by how often the path runs.
 
 **§82.1 — Per redraw.** `App::theme()` rebuilds `iced::Theme::custom`
 (`theme/mod.rs:65`, `app.rs:2467`) every redraw of every window, allocating
@@ -812,6 +899,8 @@ enforce_budget` is O(entries × pinned) with `Vec::contains`; `Outline::len()`
 `sign_target_candidates` (`app.rs:12171`) reads the whole PDF and runs two
 preflight parses on the event loop.
 
+
+**Done.** §82.1: the theme is built once in `ThemeState` and cloned; `presenter()` hoists the no-document check; `Node::widgets_iter`/`contains_kind` and `occupies_iter` remove the per-frame `Vec`s. §82.3: `pointer_moved` matches by reference. §82.4: speech settings are borrowed, not cloned; `voice_library` caches the directory probe; `fit::Recommendation` carries its `LayoutId`; `Sketch` borrows with a `canvas::Cache`; `reprobe` runs on a helper thread. §82.5: a divider drag is one undo entry and one revalidation. §82.6: `with_annotation` loads the page once per edit; `adopt_texts` derives stable ids by FNV of the annotation name. §82.7: `crop_imm` borrows and the native-size path copies once; `measure_entries` reads a 64 KiB prefix first. §82.8: `dispatch` sorts once, `pinned` is a `HashSet`, `Outline::len` sums, `sign_target_candidates` runs in the async step. §82.2 (reader page surface) is phase-2 work.
 ---
 
 ## 83. Standing rules
