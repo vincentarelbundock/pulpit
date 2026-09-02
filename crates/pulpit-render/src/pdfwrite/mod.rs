@@ -921,9 +921,24 @@ pub fn find_startxref_offset(bytes: &[u8]) -> Option<u64> {
     let window = std::cmp::min(bytes.len(), STARTXREF_SEARCH_WINDOW);
     let start = bytes.len().saturating_sub(window);
     let pos = bytes[start..].windows(9).rposition(|w| w == b"startxref")?;
-    let mut tokenizer = PdfTokenizer::new(&bytes[start + pos + 9..]);
-    let token = tokenizer.next_token().ok()??;
-    std::str::from_utf8(&token).ok()?.parse().ok()
+    // The value is a single integer literal, not general PDF syntax, so a
+    // full tokenizer pass is more machinery than this needs (§78.2): skip
+    // whitespace, then read the run of digits that follows.
+    let mut i = start + pos + 9;
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0)) {
+        i += 1;
+    }
+    let digits_start = i;
+    while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    if i == digits_start {
+        return None;
+    }
+    std::str::from_utf8(&bytes[digits_start..i])
+        .ok()?
+        .parse()
+        .ok()
 }
 
 fn find_startxref(bytes: &[u8]) -> Result<u64> {
