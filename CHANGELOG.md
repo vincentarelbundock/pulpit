@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.15] — 2026-09-02
+
+### Fixed
+
+- **Windows release CI no longer flakes on the renderer doorbell test.** The
+  supervisor test now settles the document-open response explicitly before
+  asserting that an idle renderer stays quiet, removing a scheduling race
+  between queueing a worker response and ringing the event loop.
+
 ## [0.0.14] — 2026-08-31
 
 ### Added
