@@ -118,6 +118,12 @@ pub struct Speech {
     download: Option<DownloadState>,
     cancel: Cancel,
     notes: Option<Receiver<DownloadNote>>,
+    /// A re-probe running on its own thread; drained by [`Speech::poll`].
+    /// `Probe::run` walks `PATH` twice and scans the store on disk, so it
+    /// runs off the event loop here the same way the very first probe does
+    /// at startup, rather than blocking whatever called
+    /// [`Speech::reprobe`] until the disk work finishes.
+    probing: Option<Receiver<Probe>>,
     /// Why the engine last refused to start, so the reader is told the actual
     /// reason rather than a guess reconstructed from the probe.
     last_engine_error: Option<String>,
@@ -183,6 +189,7 @@ impl Speech {
             download: None,
             cancel: Cancel::new(),
             notes: None,
+            probing: None,
             last_engine_error: None,
             prompt: None,
         };
@@ -253,11 +260,32 @@ impl Speech {
             }
             self.reading.update(speech::Event::Stop);
         }
-        self.probe = Probe::run(&self.catalog, &self.store);
         // A speaker built against the old state would still point at the old
         // engine path, so it is dropped and rebuilt lazily.
         self.speaker = None;
         self.choose_voice(settings);
+
+        // `Probe::run` walks `PATH` twice and scans the store on disk — the
+        // same work `Speech::unprobed`'s doc comment says startup must not
+        // wait on. A re-probe is asked for from the event loop (a settings
+        // change, a finished download) just as often, so it goes to the same
+        // kind of helper thread [`Speech::poll`] already drains for download
+        // progress, rather than blocking whatever called this.
+        let (sender, receiver) = channel();
+        let catalog = self.catalog.clone();
+        let store = self.store.clone();
+        let spawn = std::thread::Builder::new()
+            .name("pulpit-speech-probe".into())
+            .spawn(move || {
+                let _ = sender.send(Probe::run(&catalog, &store));
+            });
+        match spawn {
+            Ok(_) => self.probing = Some(receiver),
+            // No thread means the receiver would wait forever; fall back to
+            // running it in place rather than leaving `capability()` stuck
+            // reporting the previous probe.
+            Err(_) => self.probe = Probe::run(&self.catalog, &self.store),
+        }
     }
 
     /// Pick the voice settings ask for, falling back to anything installed.
@@ -667,6 +695,15 @@ impl Speech {
             self.notes = None;
             self.reprobe(settings);
         }
+
+        // A re-probe's result, if the helper thread `reprobe` started has
+        // finished.
+        if let Some(probing) = self.probing.as_ref() {
+            if let Ok(probe) = probing.try_recv() {
+                self.probe = probe;
+                self.probing = None;
+            }
+        }
         out
     }
 
@@ -677,6 +714,7 @@ impl Speech {
                 .download
                 .as_ref()
                 .is_some_and(DownloadState::is_running)
+            || self.probing.is_some()
     }
 
     /// Start downloading a voice, and the engine too if it is missing.
@@ -925,6 +963,33 @@ mod tests {
         let settings = SpeechSettings::default();
         let speech = Speech::new(directory.path(), &settings);
         (directory, speech, settings)
+    }
+
+    #[test]
+    fn reprobe_runs_off_the_caller_and_poll_adopts_its_result() {
+        // `reprobe` must return before the probe it started necessarily has
+        // — it hands the disk work to a helper thread rather than running
+        // `Probe::run` in place, the same way the very first probe at
+        // startup does not block the window coming up. `is_live` says so
+        // while the result is in flight, and `poll` is what picks it up.
+        let (_directory, mut speech, settings) = temp_speech();
+        speech.reprobe(&settings);
+        assert!(speech.is_live(), "a probe in flight is worth another tick");
+
+        // The helper thread is real but the store is empty, so its result
+        // arrives quickly; poll until it does, bounded so a genuine bug —
+        // the thread never spawned, or `poll` never drains it — fails the
+        // test instead of hanging it.
+        let mut adopted = false;
+        for _ in 0..200 {
+            speech.poll(&settings);
+            if !speech.is_live() {
+                adopted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(adopted, "poll never adopted the re-probe's result");
     }
 
     #[test]
