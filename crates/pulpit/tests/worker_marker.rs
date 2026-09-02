@@ -39,10 +39,6 @@ const RE_EXECUTES: &[&str] = &[
 const LOCATES_ONLY: &[&str] = &[
     "../../pulpit-render/src/pdf/pdfium.rs",
     "../../pulpit-media/src/worker/mpv.rs",
-    // §76.2's end-to-end journal/undo test: finds the sibling `pulpit`
-    // executable to hand to `DocumentSession::start`, which is what asks the
-    // guard, exactly as `crates/pulpit/tests/document_worker.rs` does.
-    "../src/reader_journal.rs",
 ];
 
 fn crate_sources() -> Vec<std::path::PathBuf> {

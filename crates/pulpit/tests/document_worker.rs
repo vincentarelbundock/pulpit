@@ -8,9 +8,21 @@
 //! boundary is in the file afterwards.
 //!
 //! It lives in `pulpit` rather than `pulpit-render` because the worker is a
-//! role of *this* binary (§5.1), and `std::env::current_exe()` from a test in
-//! this crate is the test binary rather than pulpit — so the test names the
-//! built executable explicitly, and skips when there is not one to name.
+//! role of *this* binary (§5.1). `env!("CARGO_BIN_EXE_pulpit")` is what names
+//! the built executable: cargo sets it for every integration test in the
+//! package that owns a binary target, and — unlike hunting beside the test
+//! binary via `current_exe()`, which finds nothing under plain `cargo test`
+//! because the executable is built into `target/<profile>`, not
+//! `target/<profile>/deps` where the test binary lives — cargo *builds*
+//! `pulpit` because this test names it, so the child process this test
+//! spawns is never absent (§83.8: a test that can silently run nothing is
+//! the defect, not a convenience).
+//!
+//! What can still legitimately skip is the PDFium bind inside the worker
+//! (no `libpdfium` on this machine) and djvulibre for the one DjVu test.
+//! Both print an unambiguous `SKIP:` line naming why, and
+//! `PULPIT_REQUIRE_E2E=1` turns every such skip into a failure so CI can opt
+//! into never skipping silently.
 
 use std::path::PathBuf;
 
@@ -22,24 +34,26 @@ use pulpit_render::document::protocol::{
 use pulpit_render::document::session::{DocumentSession, DocumentWorkerCommand, SessionError};
 use pulpit_render::document::{DocumentRevision, DocumentTransaction, SaveOptions};
 
-/// The pulpit executable this test run built, beside the test binary itself.
+/// Whether a skip in this file must instead fail the test run.
 ///
-/// `cargo test` puts integration-test binaries in `target/<profile>/deps` and
-/// the executable in `target/<profile>`, so the parent of the test binary's
-/// directory is where to look. Absent under `cargo build --tests`, which is
-/// why this skips rather than fails.
-fn executable() -> Option<PathBuf> {
-    let test_binary = std::env::current_exe().ok()?;
-    let candidate = test_binary.parent()?.parent()?.join(if cfg!(windows) {
-        "pulpit.exe"
-    } else {
-        "pulpit"
-    });
-    candidate.is_file().then_some(candidate)
+/// Set by CI, unset for an ordinary developer machine that may be missing
+/// `libpdfium` or `djvulibre`.
+fn e2e_required() -> bool {
+    std::env::var_os("PULPIT_REQUIRE_E2E").is_some()
 }
 
-fn command(source: &std::path::Path) -> Option<DocumentWorkerCommand> {
-    let program = executable()?;
+/// Print the one `SKIP:` line every skip in this file goes through, and fail
+/// outright when `PULPIT_REQUIRE_E2E=1` asked never to skip.
+fn skip(test: &str, reason: &str) {
+    assert!(
+        !e2e_required(),
+        "PULPIT_REQUIRE_E2E is set but {test} would skip: {reason}"
+    );
+    eprintln!("SKIP: {test}: {reason}");
+}
+
+fn command(source: &std::path::Path) -> DocumentWorkerCommand {
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_pulpit"));
     // The child searches for PDFium relative to its own executable and the
     // working directory, and a test's working directory is the crate rather
     // than the workspace. Pointing it at the checked-out library is what the
@@ -48,10 +62,10 @@ fn command(source: &std::path::Path) -> Option<DocumentWorkerCommand> {
         let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib");
         std::env::set_var("PULPIT_PDFIUM_PATH", lib);
     }
-    Some(DocumentWorkerCommand::Explicit {
+    DocumentWorkerCommand::Explicit {
         program,
         args: vec![format!("--document-worker={}", source.display())],
-    })
+    }
 }
 
 fn stroke() -> DocumentTransaction {
@@ -73,13 +87,13 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let source = directory.path().join("source.pdf");
     if pulpit_render::pdf::synth::write_pdf(&source, 2, None).is_err() {
-        eprintln!("skipping: cannot write a synthetic PDF");
+        skip(
+            "a_mark_committed_across_the_process_boundary_is_in_the_saved_file",
+            "cannot write a synthetic PDF",
+        );
         return;
     }
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
 
     let mut session = match DocumentSession::start(&command, &source) {
         Ok(session) => session,
@@ -87,7 +101,10 @@ fn a_mark_committed_across_the_process_boundary_is_in_the_saved_file() {
             // The worker exits with guidance when it cannot bind PDFium,
             // which on a machine without one is the honest outcome and not a
             // failure of this test.
-            eprintln!("skipping the document worker test: {error}");
+            skip(
+                "a_mark_committed_across_the_process_boundary_is_in_the_saved_file",
+                &format!("the document worker would not start: {error}"),
+            );
             return;
         }
     };
@@ -219,10 +236,7 @@ fn a_worker_that_cannot_open_its_document_reports_it_rather_than_hanging() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let missing = directory.path().join("not-a-pdf.pdf");
     std::fs::write(&missing, b"this is not a PDF at all").unwrap();
-    let Some(command) = command(&missing) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&missing);
 
     // The worker exits before the handshake, so starting the session fails —
     // which is the point: the supervisor learns immediately instead of
@@ -248,10 +262,7 @@ fn a_format_pulpit_does_not_read_is_named_by_a_real_worker() {
     for (extension, expected) in [("epub", "EPUB"), ("ps", "PostScript"), ("cbr", "RAR")] {
         let source = directory.path().join(format!("thing.{extension}"));
         std::fs::write(&source, b"not that it is ever read").unwrap();
-        let Some(program) = executable() else {
-            eprintln!("skipping: the pulpit executable was not built beside this test");
-            return;
-        };
+        let program = PathBuf::from(env!("CARGO_BIN_EXE_pulpit"));
 
         let output = std::process::Command::new(program)
             .arg(format!("--document-worker={}", source.display()))
@@ -326,14 +337,14 @@ fn a_field_typed_across_the_process_boundary_is_in_the_saved_file() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let source = directory.path().join("form.pdf");
     std::fs::write(&source, form_pdf()).expect("the fixture is written");
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
     let mut session = match DocumentSession::start(&command, &source) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("skipping the document worker test: {error}");
+            skip(
+                "a_field_typed_across_the_process_boundary_is_in_the_saved_file",
+                &format!("the document worker would not start: {error}"),
+            );
             return;
         }
     };
@@ -453,14 +464,14 @@ fn a_filled_field_can_be_undone_and_redone_across_the_boundary() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let source = directory.path().join("form.pdf");
     std::fs::write(&source, form_pdf()).expect("the fixture is written");
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
     let mut session = match DocumentSession::start(&command, &source) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("skipping the document worker test: {error}");
+            skip(
+                "a_filled_field_can_be_undone_and_redone_across_the_boundary",
+                &format!("the document worker would not start: {error}"),
+            );
             return;
         }
     };
@@ -572,14 +583,14 @@ fn a_date_picked_from_the_calendar_lands_in_the_field_in_its_own_pattern() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let source = directory.path().join("dates.pdf");
     std::fs::write(&source, dated_pdf()).expect("the fixture is written");
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
     let mut session = match DocumentSession::start(&command, &source) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("skipping the document worker test: {error}");
+            skip(
+                "a_date_picked_from_the_calendar_lands_in_the_field_in_its_own_pattern",
+                &format!("the document worker would not start: {error}"),
+            );
             return;
         }
     };
@@ -681,10 +692,7 @@ fn a_folder_of_images_opens_in_a_document_worker_and_refuses_pdf_semantics() {
             .expect("write a fixture image");
     }
     let source = directory.path().to_path_buf();
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
 
     let mut session = DocumentSession::start(&command, &source)
         .expect("a folder needs no PDF library to open (§45.3)");
@@ -798,10 +806,7 @@ fn a_comic_archive_opens_in_a_document_worker_without_a_pdf_library() {
         writer.finish().unwrap();
     }
 
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
 
     let mut session = DocumentSession::start(&command, &source)
         .expect("a comic archive needs no PDF library to open (§56.1)");
@@ -856,25 +861,28 @@ fn a_comic_archive_opens_in_a_document_worker_without_a_pdf_library() {
 /// pretending to have an answer.
 ///
 /// Skips with a message when djvulibre is absent (§63.2), like every other
-/// Class B test. `PULPIT_REQUIRE_DJVU=1` makes the skip a failure.
+/// Class B test. `PULPIT_REQUIRE_DJVU=1` or `PULPIT_REQUIRE_E2E=1` makes the
+/// skip a failure.
 #[test]
 fn a_djvu_opens_in_a_document_worker_and_refuses_pdf_semantics() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../pulpit-render/tests/djvu_fixture/book.djvu");
-    let Some(command) = command(&source) else {
-        eprintln!("skipping: the pulpit executable was not built beside this test");
-        return;
-    };
+    let command = command(&source);
 
     let mut session = match DocumentSession::start(&command, &source) {
         Ok(session) => session,
         Err(error) => {
-            if std::env::var_os("PULPIT_REQUIRE_DJVU").is_some() {
-                panic!("PULPIT_REQUIRE_DJVU is set but the DjVu worker would not start: {error}");
-            }
-            eprintln!(
-                "skipping: no djvulibre on this machine, so the DjVu document worker was not \
-                 exercised. Set PULPIT_REQUIRE_DJVU=1 to make this a failure. ({error})"
+            assert!(
+                std::env::var_os("PULPIT_REQUIRE_DJVU").is_none(),
+                "PULPIT_REQUIRE_DJVU is set but the DjVu worker would not start: {error}"
+            );
+            skip(
+                "a_djvu_opens_in_a_document_worker_and_refuses_pdf_semantics",
+                &format!(
+                    "no djvulibre on this machine, so the DjVu document worker was not \
+                     exercised. Set PULPIT_REQUIRE_DJVU=1 or PULPIT_REQUIRE_E2E=1 to make this \
+                     a failure. ({error})"
+                ),
             );
             return;
         }

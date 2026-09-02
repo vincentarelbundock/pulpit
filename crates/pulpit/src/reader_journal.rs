@@ -874,36 +874,6 @@ mod tests {
         );
     }
 
-    /// The pulpit executable this test run built, beside the test binary
-    /// itself — the same trick `crates/pulpit/tests/document_worker.rs` uses,
-    /// since a document worker is a role of *this* binary (§5.1) and
-    /// `std::env::current_exe()` from a unit test is the test binary.
-    fn worker_executable() -> Option<PathBuf> {
-        let test_binary = std::env::current_exe().ok()?;
-        let candidate = test_binary.parent()?.parent()?.join(if cfg!(windows) {
-            "pulpit.exe"
-        } else {
-            "pulpit"
-        });
-        candidate.is_file().then_some(candidate)
-    }
-
-    fn worker_command(
-        source: &Path,
-    ) -> Option<pulpit_render::document::session::DocumentWorkerCommand> {
-        let program = worker_executable()?;
-        if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
-            let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib");
-            std::env::set_var("PULPIT_PDFIUM_PATH", lib);
-        }
-        Some(
-            pulpit_render::document::session::DocumentWorkerCommand::Explicit {
-                program,
-                args: vec![format!("--document-worker={}", source.display())],
-            },
-        )
-    }
-
     fn ink_stroke() -> DocumentTransaction {
         DocumentTransaction::from_annotations([AnnotationCommand::Create(AnnotationDraft::Ink(
             InkDraft {
@@ -914,8 +884,8 @@ mod tests {
         ))])
     }
 
-    /// §76.2, end to end against a real document worker: draw, undo, crash,
-    /// recover — the mark MUST stay absent.
+    /// §76.2, end to end against the document worker loop: draw, undo,
+    /// crash, recover — the mark MUST stay absent.
     ///
     /// This is the seam §83.1 asks for: it drives the journal (this module)
     /// and the document worker (`pulpit-render`) together, the same two
@@ -926,80 +896,77 @@ mod tests {
     /// `Applied.undo` from the *answer* to that undo, which is the redo of
     /// it. Journalling the latter (the bug) is reproduced below and shown to
     /// bring the mark back; journalling the former (the fix) does not.
+    ///
+    /// Run in process, against [`pulpit_render::document::worker::DocumentWorker`]
+    /// over a [`pulpit_render::document::memory::MemoryDocument`], the same
+    /// way `document/worker.rs`'s own tests drive the loop "over a pipe made
+    /// of byte vectors" — a unit test inside this crate's binary has no
+    /// `CARGO_BIN_EXE_pulpit` (that is only set for *integration* tests of
+    /// the package that owns the binary), so a real child process cannot be
+    /// named here the way `crates/pulpit/tests/document_worker.rs` names one.
+    /// Driving `DocumentWorker::handle` directly crosses the same journal ↔
+    /// worker seam without needing a process, a PDF library, or an
+    /// executable this test cannot build.
     #[test]
     fn drawing_then_undoing_then_recovering_leaves_the_mark_absent() {
+        use pulpit_render::document::memory::MemoryDocument;
         use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse};
-        use pulpit_render::document::session::DocumentSession;
-        use pulpit_render::document::{DocumentRevision, DocumentUndo};
+        use pulpit_render::document::worker::DocumentWorker;
+        use pulpit_render::document::{DocumentRevision, DocumentUndo, PdfDocument};
 
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source.pdf");
-        if pulpit_render::pdf::synth::write_pdf(&source, 1, None).is_err() {
-            eprintln!("skipping: cannot write a synthetic PDF");
-            return;
+        fn new_worker() -> DocumentWorker<'static> {
+            let mut worker = DocumentWorker::new();
+            worker.adopt(PdfDocument::new(Box::new(MemoryDocument::letter(1)), 3));
+            worker
         }
-        let Some(command) = worker_command(&source) else {
-            eprintln!("skipping: the pulpit executable was not built beside this test");
-            return;
-        };
 
-        let mut session = match DocumentSession::start(&command, &source) {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("skipping the recovery test: {error}");
-                return;
-            }
-        };
-
-        let annotations = |session: &mut DocumentSession| {
-            let DocumentResponse::Annotations(list) = session
-                .request(DocumentRequest::ListAnnotations { page: PageIndex(0) })
-                .expect("the worker answers")
+        let annotations = |worker: &mut DocumentWorker<'static>| {
+            let DocumentResponse::Annotations(list) =
+                worker.handle(DocumentRequest::ListAnnotations { page: PageIndex(0) })
             else {
                 panic!("expected an annotation list")
             };
             list.len()
         };
-        assert_eq!(annotations(&mut session), 0);
+
+        let mut worker = new_worker();
+        assert_eq!(annotations(&mut worker), 0);
 
         // Draw. `sent_as_undo` is what `PendingEdit.reversal` holds in the
         // real application: the operation that will be sent to reverse this,
         // captured at the moment the mark was applied — not derived from
         // whatever answer comes back later.
-        let response = session
-            .request(DocumentRequest::Apply {
-                expected_revision: DocumentRevision::INITIAL,
-                transaction: ink_stroke(),
-            })
-            .expect("the stroke commits");
+        let response = worker.handle(DocumentRequest::Apply {
+            expected_revision: DocumentRevision::INITIAL,
+            transaction: ink_stroke(),
+        });
         let DocumentResponse::Applied(applied) = response else {
             panic!("expected an applied transaction, got {response:?}")
         };
         let sent_as_undo: DocumentUndo = applied.undo.clone();
-        assert_eq!(annotations(&mut session), 1);
+        assert_eq!(annotations(&mut worker), 1);
 
         // Undo. The answer's own `.undo` is the *inverse of the undo* — the
         // redo — which is the value §76.2 found being journalled by mistake.
-        let response = session
-            .request(DocumentRequest::Undo {
-                expected_revision: applied.document_revision,
-                operation: sent_as_undo.clone(),
-            })
-            .expect("the undo commits");
+        let response = worker.handle(DocumentRequest::Undo {
+            expected_revision: applied.document_revision,
+            operation: sent_as_undo.clone(),
+        });
         let DocumentResponse::Applied(undone) = response else {
             panic!("expected an applied undo, got {response:?}")
         };
         let redo_of_the_undo: DocumentUndo = undone.undo.clone();
-        assert_eq!(annotations(&mut session), 0, "the undo removed the mark");
-        session.close();
+        assert_eq!(annotations(&mut worker), 0, "the undo removed the mark");
 
         // Recover with the fix: journal the operation that was sent.
+        let directory = tempfile::tempdir().unwrap();
+        let source = Path::new("/tmp/paper.pdf");
         let path = directory.path().join("journal.jsonl");
         let mut journal = Journal::start(
             &path,
-            &source,
+            source,
             DocumentFingerprint {
-                path: source.clone(),
+                path: source.into(),
                 size: None,
                 modified_unix: None,
             },
@@ -1019,30 +986,27 @@ mod tests {
             .unwrap();
         let recovered = Journal::recover(&path).expect("the journal recovers");
 
-        let mut replay = DocumentSession::start(&command, &source).unwrap();
+        // The crash: a fresh document, replayed onto from nothing.
+        let mut replay = new_worker();
         let mut revision = DocumentRevision::INITIAL;
         for entry in recovered.in_order() {
             match entry {
                 JournalEntry::Applied { transaction, .. } => {
-                    let DocumentResponse::Applied(applied) = replay
-                        .request(DocumentRequest::Apply {
+                    let DocumentResponse::Applied(applied) =
+                        replay.handle(DocumentRequest::Apply {
                             expected_revision: revision,
                             transaction,
                         })
-                        .unwrap()
                     else {
                         panic!("expected an applied transaction")
                     };
                     revision = applied.document_revision;
                 }
                 JournalEntry::Reversed { operation, .. } => {
-                    let DocumentResponse::Applied(applied) = replay
-                        .request(DocumentRequest::Undo {
-                            expected_revision: revision,
-                            operation: *operation,
-                        })
-                        .unwrap()
-                    else {
+                    let DocumentResponse::Applied(applied) = replay.handle(DocumentRequest::Undo {
+                        expected_revision: revision,
+                        operation: *operation,
+                    }) else {
                         panic!("expected an applied undo")
                     };
                     revision = applied.document_revision;
@@ -1054,31 +1018,23 @@ mod tests {
             0,
             "§76.2: journalling the operation that was sent leaves the undo undone"
         );
-        replay.close();
 
         // And the bug this replaces: journalling the *answer's* `.undo`
         // (the redo) instead brings the mark back, which is the defect
         // §76.2 records and this test exists to keep fixed.
-        let mut buggy_replay = DocumentSession::start(&command, &source).unwrap();
-        let mut revision = DocumentRevision::INITIAL;
-        let DocumentResponse::Applied(applied) = buggy_replay
-            .request(DocumentRequest::Apply {
-                expected_revision: revision,
-                transaction: ink_stroke(),
-            })
-            .unwrap()
-        else {
+        let mut buggy_replay = new_worker();
+        let DocumentResponse::Applied(applied) = buggy_replay.handle(DocumentRequest::Apply {
+            expected_revision: DocumentRevision::INITIAL,
+            transaction: ink_stroke(),
+        }) else {
             panic!("expected an applied transaction")
         };
-        revision = applied.document_revision;
-        let DocumentResponse::Applied(applied) = buggy_replay
-            .request(DocumentRequest::Undo {
-                expected_revision: revision,
-                // The bug: the *answer's* undo, i.e. `redo_of_the_undo`.
-                operation: redo_of_the_undo,
-            })
-            .unwrap()
-        else {
+        let revision = applied.document_revision;
+        let DocumentResponse::Applied(applied) = buggy_replay.handle(DocumentRequest::Undo {
+            expected_revision: revision,
+            // The bug: the *answer's* undo, i.e. `redo_of_the_undo`.
+            operation: redo_of_the_undo,
+        }) else {
             panic!("expected an applied undo")
         };
         let _ = applied;
@@ -1088,7 +1044,6 @@ mod tests {
             "the bug this test guards against: replaying the redo of the \
              undo brings the mark back"
         );
-        buggy_replay.close();
     }
 
     #[test]
