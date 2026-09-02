@@ -39,10 +39,6 @@ pub use event::WidgetEvent;
 pub use navigation::model::ButtonsOptions;
 pub use notes::model::NotesOptions;
 #[allow(unused_imports)] // see widgets::patch
-// `WidgetId`, `WidgetRegistration` and `registration` are Phase 3's public
-// surface (persistence by stable id); reachable today via `widgets::registry`
-// and via `WidgetKind::id`/`WidgetKind::from_id`, not yet re-exported at the
-// crate boundary because nothing outside this module needs them yet.
 pub use slides::model::SlideOptions;
 pub use timing::model::{Alarm, AlarmControls, ClockOptions, TimerControls, TimerOptions};
 
@@ -234,41 +230,41 @@ impl WidgetKind {
         }
     }
 
-    // The metadata below is the registry's, not a second copy of it. The
-    // registry itself resolves to the catalog's `WidgetDefinition`, so this
-    // is one hop further from the same single source of truth.
+    // The metadata below is the catalog's, not a second copy of it (§81:
+    // it used to hop through the registry's own `WidgetRegistration`
+    // first, a table holding exactly the same per-kind facts).
 
     pub fn label(self) -> &'static str {
-        registry::registration(self).label()
+        catalog::definition(self).label
     }
 
     #[allow(dead_code)] // reached by its tests, not by the application
     pub fn short_label(self) -> &'static str {
-        registry::registration(self).short_label()
+        catalog::definition(self).short_label
     }
 
     pub fn tooltip(self) -> &'static str {
-        registry::registration(self).tooltip()
+        catalog::definition(self).tooltip
     }
 
     pub fn group(self) -> WidgetGroup {
-        registry::registration(self).group()
+        catalog::definition(self).group
     }
 
     pub fn parts(self) -> &'static [WidgetKind] {
-        registry::registration(self).parts()
+        catalog::definition(self).parts
     }
 
     pub fn multi_instance(self) -> bool {
-        registry::registration(self).multi_instance()
+        catalog::definition(self).multi_instance()
     }
 
     pub fn placement(self) -> catalog::PlacementPolicy {
-        registry::registration(self).placement()
+        catalog::definition(self).placement
     }
 
     pub fn minimum_size(self) -> (f32, f32) {
-        registry::registration(self).minimum_size()
+        catalog::definition(self).minimum_size
     }
 
     /// The width a *hugging* cell hands this kind: what its full run wants,
@@ -289,7 +285,7 @@ impl WidgetKind {
     /// parts. Almost always what [`WidgetKind::capabilities`] should be
     /// called instead — this exists for the table itself and its tests.
     pub fn own_capabilities(self) -> &'static [WidgetCapability] {
-        registry::registration(self).capabilities()
+        catalog::definition(self).capabilities
     }
 
     /// The capabilities this kind offers, including whatever its compound

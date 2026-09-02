@@ -5,7 +5,8 @@
 //! are now one table, so adding a widget is one registration rather than a
 //! hunt for the arms somebody forgot.
 
-use super::{WidgetCapability, WidgetGroup, WidgetKind};
+use super::plan::WidgetPlan;
+use super::{Widget, WidgetCapability, WidgetGroup, WidgetKind};
 use std::num::NonZeroUsize;
 
 /// A sketch of one pane's contents, chosen so a glance distinguishes a notes
@@ -68,7 +69,10 @@ impl PlacementPolicy {
 }
 
 /// The static facts about a widget kind.
-#[derive(Debug, Clone, Copy, PartialEq)]
+// No `PartialEq`: a `plan` function pointer's address is not a meaningful
+// comparison (`unpredictable_function_pointer_comparisons`), and nothing
+// needs whole-struct equality — the tests below compare individual fields.
+#[derive(Debug, Clone, Copy)]
 pub struct WidgetDefinition {
     pub kind: WidgetKind,
     pub group: WidgetGroup,
@@ -93,6 +97,31 @@ pub struct WidgetDefinition {
     pub minimum_size: (f32, f32),
     /// What a thumbnail should sketch for this kind. See [`ThumbnailContent`].
     pub thumbnail: ThumbnailContent,
+    /// What frames this kind needs rendered, given its placed widget and its
+    /// cell's share of the window's width. See [`super::plan`].
+    ///
+    /// Folded in here rather than kept in a second, `registry.rs`-owned
+    /// table (§81): the two tables were both a total, per-kind map with
+    /// nothing distinguishing which one a given fact belonged in.
+    pub plan: fn(&Widget, f32) -> WidgetPlan,
+}
+
+impl WidgetDefinition {
+    /// Thin wrapper kept for existing callers; `placement` is the real
+    /// policy and knows more than yes/no.
+    pub fn multi_instance(&self) -> bool {
+        self.placement.max_instances.is_none()
+    }
+}
+
+/// A slide panel's plan hook, bound to its own kind so one function works for
+/// `CurrentSlide`, `PreviousSlide` and `NextSlide` alike.
+fn plan_current_slide(widget: &Widget, cell_width: f32) -> WidgetPlan {
+    super::plan::slide_panel(widget.kind(), cell_width)
+}
+
+fn plan_previous_current_next(_widget: &Widget, cell_width: f32) -> WidgetPlan {
+    super::plan::previous_current_next(cell_width)
 }
 
 const SLIDE_PARTS: &[WidgetKind] = &[
@@ -107,6 +136,7 @@ const NO_CAPS: &[WidgetCapability] = &[];
 pub const CATALOG: [WidgetDefinition; 26] = [
     WidgetDefinition {
         kind: WidgetKind::CurrentSlide,
+        plan: plan_current_slide,
         group: WidgetGroup::Slides,
         label: "Current Slide",
         short_label: "Current",
@@ -119,6 +149,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::PreviousSlide,
+        plan: plan_current_slide,
         group: WidgetGroup::Slides,
         label: "Previous Slide",
         short_label: "Prev",
@@ -131,6 +162,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::NextSlide,
+        plan: plan_current_slide,
         group: WidgetGroup::Slides,
         label: "Next Slide",
         short_label: "Next",
@@ -143,6 +175,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::PreviousCurrentNext,
+        plan: plan_previous_current_next,
         group: WidgetGroup::Slides,
         label: "Previous + Current + Next",
         short_label: "P·C·N",
@@ -155,6 +188,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::SpeakerNotes,
+        plan: super::plan::none,
         group: WidgetGroup::PresenterInformation,
         label: "Speaker Notes",
         short_label: "Notes",
@@ -167,6 +201,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::Timer,
+        plan: super::plan::none,
         group: WidgetGroup::PresenterInformation,
         label: "Timer",
         short_label: "Timer",
@@ -179,6 +214,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::Clock,
+        plan: super::plan::none,
         group: WidgetGroup::PresenterInformation,
         label: "Clock",
         short_label: "Clock",
@@ -191,6 +227,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::SlideButtons,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Back and Forward",
         short_label: "Buttons",
@@ -204,6 +241,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::SlideSlider,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Slide Slider",
         short_label: "Slider",
@@ -216,6 +254,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::SlideCounter,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Slide Counter",
         short_label: "Count",
@@ -228,6 +267,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::PauseResume,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Pause or Resume",
         short_label: "Pause",
@@ -240,6 +280,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::EndPresentation,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "End Presentation",
         short_label: "End",
@@ -252,6 +293,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::Annotations,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Annotations",
         short_label: "Annotate",
@@ -270,6 +312,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::MediaTransport,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Media Transport",
         short_label: "Media",
@@ -286,6 +329,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::MainMenu,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Menu",
         short_label: "Menu",
@@ -302,6 +346,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::AudienceControls,
+        plan: super::plan::none,
         group: WidgetGroup::PresentationControls,
         label: "Start and Stop",
         short_label: "Start",
@@ -315,6 +360,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::PresentationTitle,
+        plan: super::plan::none,
         group: WidgetGroup::OptionalInformation,
         label: "Presentation Title",
         short_label: "Title",
@@ -327,6 +373,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::CurrentSection,
+        plan: super::plan::none,
         group: WidgetGroup::OptionalInformation,
         label: "Current Section",
         short_label: "Section",
@@ -339,6 +386,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::AudienceScreenStatus,
+        plan: super::plan::none,
         group: WidgetGroup::OptionalInformation,
         label: "Audience Screen Status",
         short_label: "Audience",
@@ -351,6 +399,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::ConnectionStatus,
+        plan: super::plan::none,
         group: WidgetGroup::OptionalInformation,
         label: "Connection Status",
         short_label: "Connection",
@@ -363,6 +412,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::BlankSpace,
+        plan: super::plan::none,
         group: WidgetGroup::OptionalInformation,
         label: "Blank Space",
         short_label: "Blank",
@@ -376,6 +426,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentPage,
+        plan: super::plan::document_page,
         group: WidgetGroup::Document,
         label: "Page",
         short_label: "Page",
@@ -392,6 +443,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentNav,
+        plan: super::plan::none,
         group: WidgetGroup::Document,
         label: "Page Navigation",
         short_label: "Pages",
@@ -405,6 +457,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::DocumentOutline,
+        plan: super::plan::none,
         group: WidgetGroup::Document,
         label: "Bookmarks",
         short_label: "Bookmarks",
@@ -419,6 +472,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::AnnotationTools,
+        plan: super::plan::none,
         group: WidgetGroup::Document,
         label: "Annotation Tools",
         short_label: "Tools",
@@ -436,6 +490,7 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
     WidgetDefinition {
         kind: WidgetKind::Search,
+        plan: super::plan::none,
         group: WidgetGroup::Document,
         label: "Search",
         short_label: "Find",
@@ -452,13 +507,30 @@ pub const CATALOG: [WidgetDefinition; 26] = [
     },
 ];
 
+/// `CATALOG`'s position for each `WidgetKind`, computed once so
+/// [`definition`] is an array index rather than a linear scan run from
+/// `Widget::minimum_size` on every frame (§81, §82.8-adjacent). `CATALOG`'s
+/// own order is the library sidebar's, grouped by [`WidgetGroup`], so this
+/// is the permutation between that order and `kind as usize`.
+///
+/// Every slot is written exactly once: `every_kind_is_registered_exactly_once`
+/// below proves `CATALOG` has one entry per `WidgetKind`, which is what
+/// makes this total rather than leaving an untouched (and wrongly aliased)
+/// slot behind.
+const INDEX_BY_KIND: [usize; WidgetKind::ALL.len()] = {
+    let mut table = [0usize; WidgetKind::ALL.len()];
+    let mut position = 0;
+    while position < CATALOG.len() {
+        table[CATALOG[position].kind as usize] = position;
+        position += 1;
+    }
+    table
+};
+
 /// The definition of a kind. Total by construction, and proved so by the
 /// tests below.
 pub fn definition(kind: WidgetKind) -> &'static WidgetDefinition {
-    CATALOG
-        .iter()
-        .find(|definition| definition.kind == kind)
-        .expect("every WidgetKind is registered; the catalog tests prove it")
+    &CATALOG[INDEX_BY_KIND[kind as usize]]
 }
 
 #[cfg(test)]
@@ -479,6 +551,16 @@ mod tests {
             WidgetKind::ALL.len(),
             "the catalog and WidgetKind::ALL describe the same set"
         );
+    }
+
+    #[test]
+    fn definition_finds_the_matching_entry_for_every_kind() {
+        // §81: `definition` indexes `CATALOG` through `INDEX_BY_KIND` rather
+        // than scanning it, which only proves anything once each kind's
+        // slot is checked to point back at itself.
+        for kind in WidgetKind::ALL {
+            assert_eq!(definition(kind).kind, kind);
+        }
     }
 
     #[test]
