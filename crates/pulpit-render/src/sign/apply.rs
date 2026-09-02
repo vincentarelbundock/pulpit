@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::pdfwrite::{
-    BackPatchContext, IncrementalWriter, PdfObject, PdfTokenizer, PdfWriteError, PlaceholderOffsets,
+    BackPatchContext, IncrementalWriter, PdfObject, PdfWriteError, PlaceholderOffsets,
 };
 use crate::sign::{
     build_cms, digest_algorithm_for, estimate_cms_size, Credential, DigestAlgorithm, SigningError,
@@ -1465,235 +1465,70 @@ pub(crate) fn parse_object_dictionary(
 ///
 /// Building an `ObjectResolver` re-parses the whole cross-reference chain, so
 /// a loop over the AcroForm's fields must build one, not one per field.
+///
+/// §78.2: `ObjectResolver`/`Lexer` is the only parser of untrusted PDF bytes
+/// in this crate; this used to re-tokenize `resolver.object_bytes(obj_num)`
+/// with its own recursive-descent parser (`parse_value`/`tokenize`), a
+/// second reader of the same bytes the resolver had already parsed once. It
+/// now converts the resolver's own [`PdfValue`] into the [`PdfObject`] this
+/// module writes with.
 pub(crate) fn parse_object_dictionary_with(
     resolver: &crate::verify::ObjectResolver<'_>,
     obj_num: u32,
 ) -> Result<Vec<(String, PdfObject)>, SignApplyError> {
-    // Through the resolution layer, so that a dictionary packed into a
-    // /Type /ObjStm reads exactly like one at its own file offset.
-    let (definition, _) = resolver.object_bytes(obj_num)?;
-    let tokens = tokenize(&definition)?;
-    // Skip the "N 0 obj" header.
-    let start = tokens
-        .iter()
-        .position(|t| t == b"obj")
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    if tokens.get(start).map(Vec::as_slice) != Some(b"<<".as_slice()) {
-        return Err(SignApplyError::Unsupported(format!(
+    let (value, _) = resolver.resolve(obj_num)?;
+    let dict = value.as_dict().ok_or_else(|| {
+        SignApplyError::Unsupported(format!(
             "object {obj_num} is not a dictionary; this document cannot be signed by pulpit"
-        )));
-    }
-    let (object, _) = parse_value(&tokens, start, 0)?;
-    match object {
-        PdfObject::Dictionary(entries) => Ok(entries),
-        _ => Err(SignApplyError::Unsupported(format!(
-            "object {obj_num} is not a dictionary"
-        ))),
-    }
+        ))
+    })?;
+    Ok(dict
+        .iter()
+        .map(|(k, v)| (k.clone(), pdf_object_from_value(v)))
+        .collect())
 }
 
-fn tokenize(slice: &[u8]) -> Result<Vec<Vec<u8>>, SignApplyError> {
-    let mut tokenizer = PdfTokenizer::new(slice);
-    let mut tokens = Vec::new();
-    while let Some(token) = tokenizer.next_token()? {
-        if token == b"endobj" || token == b"stream" {
-            break;
-        }
-        tokens.push(token);
-    }
-    Ok(tokens)
-}
-
-/// Maximum nesting depth of a parsed value (FINDING #4: guard against unbounded recursion).
-const MAX_VALUE_DEPTH: usize = 64;
-
-/// Parse one value starting at `index`, returning it and the index just past
-/// it. Streams are not handled: none of the objects this module re-emits —
-/// catalog, AcroForm, page node, field — carries one.
+/// Convert a resolved [`PdfValue`] into the [`PdfObject`] this module
+/// re-serializes objects with.
 ///
-/// The `depth` parameter guards against pathological nesting (FINDING #4).
-fn parse_value(
-    tokens: &[Vec<u8>],
-    index: usize,
-    depth: usize,
-) -> Result<(PdfObject, usize), SignApplyError> {
-    if depth > MAX_VALUE_DEPTH {
-        return Err(SignApplyError::Unsupported(
-            "value nesting too deep".to_string(),
-        ));
-    }
-
-    let malformed =
-        || SignApplyError::Unsupported("the document's object structure is malformed".to_string());
-    let token = tokens.get(index).ok_or_else(malformed)?;
-
-    if token.as_slice() == b"<<" {
-        let mut entries = Vec::new();
-        let mut i = index + 1;
-        loop {
-            let key = tokens.get(i).ok_or_else(malformed)?;
-            if key.as_slice() == b">>" {
-                return Ok((PdfObject::Dictionary(entries), i + 1));
-            }
-            let name = decode_pdf_name(key).ok_or_else(malformed)?;
-            let (value, next) = parse_value(tokens, i + 1, depth + 1)?;
-            entries.push((name, value));
-            i = next;
+/// A parsed literal or hex string becomes [`PdfObject::RawString`] rather
+/// than [`PdfObject::String`]: both carry the source's own bytes forward
+/// unchanged, which is what round-tripping an existing document's value
+/// needs, and [`PdfObject::String`] is reserved for text this crate
+/// generates itself (a signer name, a reason), which the writer is free to
+/// re-encode.
+fn pdf_object_from_value(value: &crate::verify::objects::PdfValue) -> PdfObject {
+    use crate::verify::objects::PdfValue;
+    match value {
+        PdfValue::Null => PdfObject::Null,
+        PdfValue::Bool(b) => PdfObject::Boolean(*b),
+        PdfValue::Int(i) => PdfObject::Integer(*i),
+        PdfValue::Real(r) => PdfObject::Real(*r),
+        PdfValue::Str(bytes) => PdfObject::RawString(bytes.clone()),
+        PdfValue::Name(name) => PdfObject::Name(name.clone()),
+        PdfValue::Array(items) => {
+            PdfObject::Array(items.iter().map(pdf_object_from_value).collect())
         }
+        PdfValue::Dict(dict) => PdfObject::Dictionary(
+            dict.iter()
+                .map(|(k, v)| (k.clone(), pdf_object_from_value(v)))
+                .collect(),
+        ),
+        // None of the objects this module reads for re-emission — catalog,
+        // AcroForm, page node, field — is itself a stream; a caller that
+        // hands one a stream object number gets its dictionary, matching
+        // what the tokenizer this replaced did (it stopped at the `stream`
+        // keyword and parsed only the preceding dictionary tokens).
+        PdfValue::Stream { dict, .. } => PdfObject::Dictionary(
+            dict.iter()
+                .map(|(k, v)| (k.clone(), pdf_object_from_value(v)))
+                .collect(),
+        ),
+        PdfValue::Ref(obj_num, gen_num) => PdfObject::IndirectRef {
+            obj_num: *obj_num,
+            gen_num: *gen_num,
+        },
     }
-
-    if token.as_slice() == b"[" {
-        let mut items = Vec::new();
-        let mut i = index + 1;
-        loop {
-            let next = tokens.get(i).ok_or_else(malformed)?;
-            if next.as_slice() == b"]" {
-                return Ok((PdfObject::Array(items), i + 1));
-            }
-            let (value, after) = parse_value(tokens, i, depth + 1)?;
-            items.push(value);
-            i = after;
-        }
-    }
-
-    // FINDING #5: Preserve raw bytes for string values instead of lossy UTF-8
-    // conversion. For literal strings (starting with '('), extract the raw bytes
-    // between '(' and ')' without converting to string first.
-    if !token.is_empty() && token[0] == b'(' {
-        // Literal string: extract raw bytes between '(' and ')'
-        let mut string_bytes = Vec::new();
-        let mut i = 1usize;
-        let mut paren_depth = 1usize;
-        while i < token.len() {
-            match token[i] {
-                b'\\' if i + 1 < token.len() => {
-                    // Escape sequence: keep the backslash and the next byte
-                    string_bytes.push(token[i]);
-                    string_bytes.push(token[i + 1]);
-                    i += 2;
-                }
-                b'(' => {
-                    paren_depth += 1;
-                    string_bytes.push(token[i]);
-                    i += 1;
-                }
-                b')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        // End of string
-                        return Ok((
-                            PdfObject::RawString(unescape_bytes(&string_bytes)),
-                            index + 1,
-                        ));
-                    }
-                    string_bytes.push(token[i]);
-                    i += 1;
-                }
-                _ => {
-                    string_bytes.push(token[i]);
-                    i += 1;
-                }
-            }
-        }
-        // Unterminated string: treat the whole token as the string
-        return Ok((PdfObject::String(unescape_bytes(&string_bytes)), index + 1));
-    }
-
-    if token.starts_with(b"/") {
-        let name = decode_pdf_name(token).ok_or_else(malformed)?;
-        return Ok((PdfObject::Name(name), index + 1));
-    }
-    // Names and strings have already taken their byte-preserving paths. The
-    // remaining token kinds are ASCII PDF syntax and numbers.
-    let text = std::str::from_utf8(token)
-        .map_err(|_| malformed())?
-        .to_string();
-    if text.starts_with('<') {
-        let inner: String = text
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect();
-        let bytes = (0..inner.len() / 2)
-            .filter_map(|i| u8::from_str_radix(&inner[i * 2..i * 2 + 2], 16).ok())
-            .collect();
-        return Ok((PdfObject::HexString(bytes), index + 1));
-    }
-    match text.as_str() {
-        "true" => return Ok((PdfObject::Boolean(true), index + 1)),
-        "false" => return Ok((PdfObject::Boolean(false), index + 1)),
-        "null" => return Ok((PdfObject::Null, index + 1)),
-        _ => {}
-    }
-    if let Ok(number) = text.parse::<i64>() {
-        // "n g R" is an indirect reference; anything else is just a number.
-        let is_reference = tokens
-            .get(index + 1)
-            .and_then(|t| std::str::from_utf8(t).ok())
-            .and_then(|s| s.parse::<u16>().ok())
-            .is_some()
-            && tokens.get(index + 2).map(Vec::as_slice) == Some(b"R".as_slice());
-        if is_reference && number >= 0 {
-            let gen_num = String::from_utf8_lossy(&tokens[index + 1])
-                .parse::<u16>()
-                .unwrap_or(0);
-            return Ok((
-                PdfObject::IndirectRef {
-                    obj_num: number as u32,
-                    gen_num,
-                },
-                index + 3,
-            ));
-        }
-        return Ok((PdfObject::Integer(number), index + 1));
-    }
-    if let Ok(real) = text.parse::<f64>() {
-        return Ok((PdfObject::Real(real), index + 1));
-    }
-    Err(malformed())
-}
-
-/// Decode one PDF name token, including `#xx` byte escapes.
-///
-/// The writer escapes these bytes again. Decoding here prevents an existing
-/// `/A#20B` from becoming `/A#2320B` when a containing dictionary is signed
-/// and re-emitted. The current object model represents names as UTF-8, so an
-/// arbitrary-byte name is refused instead of silently replaced.
-fn decode_pdf_name(token: &[u8]) -> Option<String> {
-    let bytes = token.strip_prefix(b"/")?;
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'#' {
-            let pair = bytes.get(index + 1..index + 3)?;
-            let hex = std::str::from_utf8(pair).ok()?;
-            decoded.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-#[allow(dead_code)]
-fn unescape(text: &str) -> Vec<u8> {
-    unescape_bytes(text.as_bytes())
-}
-
-/// Unescape PDF literal string bytes, preserving non-ASCII bytes (§7.3.4.2).
-///
-/// Shared with pre-flight and verification. Dropping the backslash and
-/// keeping the byte after it — which is what this did — is right for `\(`,
-/// `\)` and `\\` and wrong for everything else: `\351` became the three
-/// characters `351` rather than the byte `0xE9`, so a name written with
-/// octal escapes never matched. Acrobat writes UTF-16BE names exactly that
-/// way, since almost every byte of one is unprintable.
-fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
-    crate::pdftext::unescape_literal(bytes)
 }
 
 /// Maximum depth of the `/Kids` walk, and the number of nodes it may visit.
@@ -1936,14 +1771,13 @@ mod tests {
 
     #[test]
     fn parsing_a_dictionary_keeps_references_apart_from_numbers() {
-        let source =
-            b"7 0 obj\n<< /Type /Page /Parent 2 0 R /Count 3 /Rect [0 0 612 792] >>\nendobj";
-        let tokens = tokenize(source).unwrap();
-        let start = tokens.iter().position(|t| t == b"obj").unwrap() + 1;
-        let (object, _) = parse_value(&tokens, start, 0).unwrap();
-        let PdfObject::Dictionary(entries) = object else {
-            panic!("expected a dictionary");
-        };
+        // §78.2/§78.3: `parse_object_dictionary` reads through the same
+        // `ObjectResolver`/`Lexer` that discovery and verification use,
+        // rather than a second recursive-descent parser over token text.
+        let mut pdf = Pdf::new();
+        pdf.add(&b"<< /Type /Page /Parent 2 0 R /Count 3 /Rect [0 0 612 792] >>"[..]);
+        let bytes = pdf.build();
+        let entries = parse_object_dictionary(&bytes, 1).expect("dictionary parses");
         assert!(matches!(
             entry(&entries, "Parent"),
             Some(PdfObject::IndirectRef { obj_num: 2, .. })
@@ -1957,16 +1791,10 @@ mod tests {
 
     #[test]
     fn escaped_pdf_names_are_decoded_once_and_reemitted_canonically() {
-        let tokens = vec![
-            b"<<".to_vec(),
-            b"/Key#20With#23Escapes".to_vec(),
-            b"/Value#2FPart".to_vec(),
-            b">>".to_vec(),
-        ];
-        let (object, _) = parse_value(&tokens, 0, 0).expect("dictionary parses");
-        let PdfObject::Dictionary(entries) = &object else {
-            panic!("expected a dictionary");
-        };
+        let mut pdf = Pdf::new();
+        pdf.add(&b"<< /Key#20With#23Escapes /Value#2FPart >>"[..]);
+        let bytes = pdf.build();
+        let entries = parse_object_dictionary(&bytes, 1).expect("dictionary parses");
         assert_eq!(entries[0].0, "Key With#Escapes");
         assert!(matches!(
             &entries[0].1,
@@ -1974,7 +1802,9 @@ mod tests {
         ));
 
         let mut emitted = Vec::new();
-        object.serialize(&mut emitted).expect("dictionary emits");
+        PdfObject::Dictionary(entries)
+            .serialize(&mut emitted)
+            .expect("dictionary emits");
         let emitted = String::from_utf8(emitted).expect("PDF syntax is ASCII");
         assert!(emitted.contains("/Key#20With#23Escapes"), "{emitted}");
         assert!(emitted.contains("/Value#2FPart"), "{emitted}");
@@ -2067,48 +1897,42 @@ mod tests {
 
     // --- Regression tests for HIGH-severity findings ---------------------
 
-    /// FINDING #4: Deeply nested arrays should error cleanly, not overflow stack.
+    /// FINDING #4, through the resolver §78.2 now routes every reader
+    /// through: a value nested past the `Lexer`'s own depth cap
+    /// (`verify::objects::MAX_VALUE_DEPTH`, covered directly by
+    /// `verify::objects::tests::nesting_depth_is_bounded`) must come back as
+    /// a refusal from `parse_object_dictionary`, not overflow the stack or
+    /// silently truncate.
     #[test]
-    fn deeply_nested_array_errors_cleanly() {
-        // Construct tokens representing deeply nested arrays: [[[[[...
-        let mut tokens = vec![];
-        for _ in 0..MAX_VALUE_DEPTH + 10 {
-            tokens.push(b"[".to_vec());
-        }
-        tokens.push(b"42".to_vec());
-        for _ in 0..MAX_VALUE_DEPTH + 10 {
-            tokens.push(b"]".to_vec());
-        }
+    fn deeply_nested_values_are_refused_through_the_resolver() {
+        let depth = crate::verify::objects::MAX_VALUE_DEPTH + 10;
+        let body = format!("<< /A {}42{} >>", "[".repeat(depth), "]".repeat(depth));
+        let mut pdf = Pdf::new();
+        pdf.add(body.as_bytes());
+        let bytes = pdf.build();
 
-        let result = parse_value(&tokens, 0, 0);
+        let result = parse_object_dictionary(&bytes, 1);
         assert!(
             result.is_err(),
             "deeply nested value should error, not overflow"
         );
-        match result {
-            Err(SignApplyError::Unsupported(msg)) if msg.contains("nesting too deep") => {
-                // Expected
-            }
-            other => panic!("expected nesting depth error, got {:?}", other),
-        }
     }
 
     /// FINDING #5: Non-ASCII string bytes should survive parse/re-emit round trip.
     /// Tests that `(Café)` with raw byte 0xE9 is preserved, not converted to replacement char.
     #[test]
     fn non_ascii_string_bytes_preserved_in_parse() {
-        // Create tokens for a literal string containing non-ASCII bytes.
         // Représent (Café) where é is 0xE9 (PDFDocEncoding).
-        let cafe_bytes = b"(Caf\xE9)".to_vec();
-        let tokens = vec![cafe_bytes];
+        let mut pdf = Pdf::new();
+        pdf.add(&b"<< /S (Caf\xE9) >>"[..]);
+        let bytes = pdf.build();
 
-        let (object, _) = parse_value(&tokens, 0, 0).expect("parse should succeed");
-        match object {
-            PdfObject::RawString(bytes) => {
-                // The string content (without the parentheses) should be [C, a, f, 0xE9]
+        let entries = parse_object_dictionary(&bytes, 1).expect("dictionary parses");
+        match entry(&entries, "S") {
+            Some(PdfObject::RawString(bytes)) => {
                 assert_eq!(bytes, b"Caf\xE9", "non-ASCII bytes must be preserved");
             }
-            other => panic!("expected PdfObject::String, got {:?}", other),
+            other => panic!("expected PdfObject::RawString, got {:?}", other),
         }
     }
 
@@ -2152,49 +1976,14 @@ mod tests {
     /// Parse `<< /T token /FT /Sig >>` and read the name back out the way
     /// `find_field_object` and `existing_field_names` do.
     fn name_from_token(token: &[u8]) -> Option<String> {
-        let tokens: Vec<Vec<u8>> = [
-            &b"<<"[..],
-            &b"/T"[..],
-            token,
-            &b"/FT"[..],
-            &b"/Sig"[..],
-            &b">>"[..],
-        ]
-        .iter()
-        .map(|t| t.to_vec())
-        .collect();
-        let (object, _) = parse_value(&tokens, 0, 0).expect("the dictionary parses");
-        let PdfObject::Dictionary(entries) = object else {
-            panic!("expected a dictionary");
-        };
+        let mut body = b"<< /T ".to_vec();
+        body.extend_from_slice(token);
+        body.extend_from_slice(b" /FT /Sig >>");
+        let mut pdf = Pdf::new();
+        pdf.add(body);
+        let bytes = pdf.build();
+        let entries = parse_object_dictionary(&bytes, 1).expect("the dictionary parses");
         field_name_of(&entries)
-    }
-
-    /// FINDING #4: Deeply nested dictionaries should also error cleanly.
-    #[test]
-    fn deeply_nested_dictionary_errors_cleanly() {
-        // Construct tokens representing deeply nested dicts: <<</A<<
-        let mut tokens = vec![];
-        for _ in 0..MAX_VALUE_DEPTH + 10 {
-            tokens.push(b"<<".to_vec());
-            tokens.push(b"/A".to_vec());
-        }
-        tokens.push(b"1".to_vec()); // inner value
-        for _ in 0..MAX_VALUE_DEPTH + 10 {
-            tokens.push(b">>".to_vec());
-        }
-
-        let result = parse_value(&tokens, 0, 0);
-        assert!(
-            result.is_err(),
-            "deeply nested dictionary should error, not overflow"
-        );
-        match result {
-            Err(SignApplyError::Unsupported(msg)) if msg.contains("nesting too deep") => {
-                // Expected
-            }
-            other => panic!("expected nesting depth error, got {:?}", other),
-        }
     }
 
     // --- §77.9: generation numbers are not silently dropped ----------------
