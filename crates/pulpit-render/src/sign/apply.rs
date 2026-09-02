@@ -155,6 +155,19 @@ pub enum AppearanceRotation {
     Cw270,
 }
 
+impl From<pulpit_core::page::PageRotation> for AppearanceRotation {
+    /// The two enums name the same four rotations; this is the one place
+    /// that says so, rather than every caller matching them arm-by-arm.
+    fn from(rotation: pulpit_core::page::PageRotation) -> Self {
+        match rotation {
+            pulpit_core::page::PageRotation::None => AppearanceRotation::None,
+            pulpit_core::page::PageRotation::Clockwise90 => AppearanceRotation::Cw90,
+            pulpit_core::page::PageRotation::Clockwise180 => AppearanceRotation::Cw180,
+            pulpit_core::page::PageRotation::Clockwise270 => AppearanceRotation::Cw270,
+        }
+    }
+}
+
 impl AppearanceRotation {
     /// Does the page's rotation exchange the box's width and height between
     /// user space and what the reader sees?
@@ -916,18 +929,15 @@ fn assemble_revision(
         ));
     }
 
-    objects.push((
-        signature_object,
-        0,
-        signature_dictionary(request, bytes_reserved),
-    ));
+    let sig_dict = signature_dictionary(request, bytes_reserved);
+    objects.push((signature_object, 0, sig_dict.clone()));
     objects.sort_by_key(|(n, _, _)| *n);
 
     let mut cursor = Cursor::new(Vec::new());
-    writer.append_objects(&mut cursor, &objects, &request.id2)?;
+    let obj_offsets = writer.append_objects(&mut cursor, &objects, &request.id2)?;
     let bytes = cursor.into_inner();
 
-    let offsets = locate_placeholders(&bytes, source.len(), bytes_reserved)?;
+    let offsets = locate_placeholders(&obj_offsets, signature_object, &sig_dict, bytes_reserved)?;
     Ok(Assembled { bytes, offsets })
 }
 
@@ -1238,31 +1248,54 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
-/// Find the placeholders in the assembled bytes. They are unique within the
-/// appended revision, which is everything past the source's length.
+/// Find the placeholders inside the signature object `append_objects` just
+/// wrote, from its own recorded offset (§78.3).
+///
+/// This used to search the whole appended revision for the literal
+/// `/ByteRange [`: a page dictionary carrying `/Contents <00>` (a name any
+/// producer is free to use) could make that search land in the wrong object.
+/// The placeholders instead are found within a byte-exact re-serialization
+/// of the signature dictionary this crate itself built — nothing untrusted
+/// can appear in it — and the result is offset by where `append_objects`
+/// says that object actually starts.
 fn locate_placeholders(
-    bytes: &[u8],
-    search_from: usize,
+    obj_offsets: &[(u32, u16, u64)],
+    signature_object: u32,
+    sig_dict: &PdfObject,
     bytes_reserved: usize,
 ) -> Result<PlaceholderOffsets, SignApplyError> {
+    let (obj_num, gen_num, object_offset) = obj_offsets
+        .iter()
+        .find(|(n, _, _)| *n == signature_object)
+        .ok_or_else(|| {
+            SignApplyError::Unsupported("the signature object was not written".into())
+        })?;
+    let header = format!("{obj_num} {gen_num} obj\n");
+
+    let mut serialized = Vec::new();
+    sig_dict
+        .serialize(&mut serialized)
+        .map_err(|e| SignApplyError::Unsupported(e.to_string()))?;
+
     let find = |needle: &[u8]| -> Option<usize> {
-        bytes[search_from..]
-            .windows(needle.len())
-            .position(|w| w == needle)
-            .map(|p| search_from + p)
+        serialized.windows(needle.len()).position(|w| w == needle)
     };
     let byterange_key = b"/ByteRange [";
     let contents_key = b"/Contents <";
-    let byterange_start = find(byterange_key)
+    let byterange_local = find(byterange_key)
         .map(|p| p + byterange_key.len() - 1)
         .ok_or_else(|| {
             SignApplyError::Unsupported("the /ByteRange placeholder went missing".into())
-        })? as u64;
-    let sig_start = find(contents_key)
+        })?;
+    let sig_start_local = find(contents_key)
         .map(|p| p + contents_key.len() - 1)
         .ok_or_else(|| {
             SignApplyError::Unsupported("the /Contents placeholder went missing".into())
-        })? as u64;
+        })?;
+
+    let base = object_offset + header.len() as u64;
+    let byterange_start = base + byterange_local as u64;
+    let sig_start = base + sig_start_local as u64;
 
     let offsets = PlaceholderOffsets {
         byterange_start,
@@ -1271,7 +1304,7 @@ fn locate_placeholders(
         bytes_reserved,
     };
     offsets.validate()?;
-    if bytes.get(offsets.sig_end as usize - 1) != Some(&b'>') {
+    if serialized.get(sig_start_local + bytes_reserved + 1) != Some(&b'>') {
         return Err(SignApplyError::Unsupported(
             "the /Contents reservation is not the size it was written at".into(),
         ));
