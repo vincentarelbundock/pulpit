@@ -1,6 +1,6 @@
 //! The capability snapshot.
 //!
-//! Views ask this, never `cfg!(target_os = â¦)`. It is immutable: when the
+//! Views ask this, never `cfg!(target_os = …)`. It is immutable: when the
 //! session changes, a *new* snapshot is taken, exactly as with display
 //! topology, so nothing can hold a stale belief about what is possible.
 
@@ -34,7 +34,7 @@ impl IdentityQuality {
 ///
 /// Iced 0.14 has no AccessKit integration and exposes no accessibility tree,
 /// so no label, role or description pulpit writes reaches assistive technology
-/// â on any platform, under any desktop, however well equipped the session is.
+/// — on any platform, under any desktop, however well equipped the session is.
 /// Every adapter's `accessibility_bridge` is therefore gated on this, and the
 /// gate is what keeps a platform that *can* detect a session bus from
 /// reporting one pulpit cannot put anything on.
@@ -47,7 +47,7 @@ pub const TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE: bool = false;
 /// What the running desktop can actually do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
-    /// Session/window backend, for diagnostics: `x11`, `wayland`, `win32`, â¦
+    /// Session/window backend, for diagnostics: `x11`, `wayland`, `win32`, …
     pub backend: String,
     pub identity: IdentityQuality,
     /// Position a window at chosen coordinates.
@@ -73,7 +73,7 @@ pub struct Capabilities {
     /// from here, and reporting that as a bridge would tell a screen-reader
     /// user the one thing they most need to be told the truth about. Both
     /// halves have to hold: the session must offer a bridge *and* the toolkit
-    /// must publish a tree to put on it â see
+    /// must publish a tree to put on it — see
     /// [`TOOLKIT_PUBLISHES_AN_ACCESSIBILITY_TREE`].
     pub accessibility_bridge: bool,
     /// Media and presenter-remote keys reach the application.
@@ -89,7 +89,7 @@ pub struct Capabilities {
     /// which queue.
     ///
     /// One flag for all three because they arrive together. A spooler either
-    /// takes a job description â CUPS does â or it is a shell verb that
+    /// takes a job description — CUPS does — or it is a shell verb that
     /// prints a file to the default printer and takes nothing else, in which
     /// case none of the three can be honoured and the dialog must not offer
     /// them. False here never means "printing does not work"; that is
@@ -214,32 +214,32 @@ impl Capabilities {
             flag(
                 self.arbitrary_placement,
                 "window placement: yes",
-                "window placement: NO â manual placement may be required",
+                "window placement: NO — manual placement may be required",
             ),
             flag(
                 self.safe_unfullscreen,
                 "leaving fullscreen: safe",
-                "leaving fullscreen: unsafe â windows are left as they are",
+                "leaving fullscreen: unsafe — windows are left as they are",
             ),
             flag(
                 self.system_appearance,
                 "system appearance: detected",
-                "system appearance: not detectable â using the dark palette",
+                "system appearance: not detectable — using the dark palette",
             ),
             flag(
                 self.sleep_inhibition,
                 "sleep inhibition: available",
-                "sleep inhibition: NOT available â the screen may blank",
+                "sleep inhibition: NOT available — the screen may blank",
             ),
             flag(
                 self.native_dialogs,
                 "file dialogs: native",
-                "file dialogs: none â open files from the command line",
+                "file dialogs: none — open files from the command line",
             ),
             flag(
                 self.printing,
                 "printing: available",
-                "printing: NOT available â no spooler answered",
+                "printing: NOT available — no spooler answered",
             ),
             flag(
                 self.system_print_dialog,
@@ -364,6 +364,29 @@ mod tests {
         };
         assert!(ready.speech.can_speak());
         assert!(ready.report().join("\n").contains("speech: ready"));
+    }
+
+    #[test]
+    fn the_report_contains_no_c1_control_characters() {
+        // A prior version's em dashes and ellipses were UTF-8 bytes that
+        // had been decoded once too many times: valid UTF-8, but decoding
+        // to C1 control characters (U+0080-U+009F) rather than the
+        // punctuation intended. This bundle goes into bug reports verbatim,
+        // so every line must be made only of printable characters (plus
+        // ordinary whitespace).
+        let capabilities = Capabilities {
+            speech: Speech::Ready { voices: 1 },
+            ..Capabilities::default()
+        };
+        for line in capabilities.report() {
+            for ch in line.chars() {
+                assert!(
+                    !ch.is_control() || ch == ' ',
+                    "report line {line:?} contains a control character {ch:?} (U+{:04X})",
+                    ch as u32
+                );
+            }
+        }
     }
 
     #[test]

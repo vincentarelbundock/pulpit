@@ -31,6 +31,7 @@ pub mod capabilities;
 pub mod clipboard;
 #[cfg(unix)]
 pub mod cups;
+pub mod display;
 pub mod inhibit;
 pub mod input;
 pub mod instance;
@@ -107,6 +108,20 @@ impl Outcome {
     }
 }
 
+/// Is `program` on `$PATH`?
+///
+/// The one walk of `$PATH` every adapter's "is this helper installed" check
+/// shares — `linux.rs`'s `systemd-inhibit` probe and `cups.rs`'s `lp` probe
+/// used to each walk it themselves. A caller building one capability
+/// snapshot that needs the answer more than once (`cups::available` is asked
+/// twice building a Linux or macOS snapshot) SHOULD call this once and reuse
+/// the `bool`, rather than calling it — or `cups::available` — again.
+pub fn which(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|directory| directory.join(program).is_file()))
+        .unwrap_or(false)
+}
+
 /// Everything the application needs from the desktop, in one value.
 ///
 /// Constructed once at startup by [`detect`], and re-derived when the session
@@ -117,8 +132,8 @@ pub struct Platform {
     /// waits for a person, which has to happen off the event loop. The thread
     /// that waits holds one of these.
     pub services: std::sync::Arc<dyn PlatformServices>,
-    pub window: Box<dyn WindowPolicy>,
-    pub input: Box<dyn InputPolicy>,
+    pub window: WindowPolicy,
+    pub input: InputPolicy,
     pub capabilities: Capabilities,
 }
 
@@ -161,8 +176,8 @@ impl Platform {
         let capabilities = services.startup_capabilities();
         Platform {
             services,
-            window: Box::new(window::DesktopWindowPolicy),
-            input: Box::new(input::DesktopInput),
+            window: window::WindowPolicy,
+            input: input::InputPolicy,
             capabilities,
         }
     }
@@ -174,8 +189,8 @@ impl Platform {
         let capabilities = services.capabilities();
         Platform {
             services: std::sync::Arc::new(services),
-            window: Box::new(window::DesktopWindowPolicy),
-            input: Box::new(input::DesktopInput),
+            window: window::WindowPolicy,
+            input: input::InputPolicy,
             capabilities,
         }
     }
