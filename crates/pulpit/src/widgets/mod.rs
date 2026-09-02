@@ -822,6 +822,70 @@ macro_rules! forward_to_child {
             });
         }
     };
+    (@one $field:ident, update) => {
+        fn update(
+            &mut self,
+            tree: &mut widget::Tree,
+            event: &Event,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            renderer: &iced::Renderer,
+            clipboard: &mut dyn Clipboard,
+            shell: &mut Shell<'_, Message>,
+            viewport: &Rectangle,
+        ) {
+            self.$field.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
+    };
+    (@one $field:ident, draw) => {
+        fn draw(
+            &self,
+            tree: &widget::Tree,
+            renderer: &mut iced::Renderer,
+            theme: &iced::Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+        ) {
+            self.$field.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        }
+    };
+    (@one $field:ident, overlay) => {
+        fn overlay<'a>(
+            &'a mut self,
+            tree: &'a mut widget::Tree,
+            layout: Layout<'a>,
+            renderer: &iced::Renderer,
+            viewport: &Rectangle,
+            translation: iced::Vector,
+        ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
+            self.$field.as_widget_mut().overlay(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                viewport,
+                translation,
+            )
+        }
+    };
 }
 
 pub(crate) use forward_to_child;

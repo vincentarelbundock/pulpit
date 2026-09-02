@@ -54,7 +54,7 @@ use iced::advanced::widget::{self, Widget};
 use crate::widgets::forward_to_child;
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::widget::image::{Allocation, Handle};
-use iced::{Element, Event, Length, Rectangle, Size, Vector};
+use iced::{Element, Event, Length, Rectangle, Size};
 
 /// An upload long enough to be worth naming in the log. A frame at sixty
 /// hertz is about sixteen milliseconds, so anything at or above this cost the
@@ -210,7 +210,16 @@ fn next_missing(wanted: &[Handle], settled: &[Id]) -> Option<Handle> {
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Message> {
-    forward_to_child!(content: children, diff, size, size_hint, mouse_interaction, operate);
+    forward_to_child!(
+        content: children,
+        diff,
+        size,
+        size_hint,
+        mouse_interaction,
+        operate,
+        update,
+        overlay
+    );
 
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<Held>()
@@ -239,29 +248,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
             .layout(&mut tree.children[0], renderer, limits)
     }
 
-    fn update(
-        &mut self,
-        tree: &mut widget::Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
-    }
-
     fn draw(
         &self,
         tree: &widget::Tree,
@@ -286,23 +272,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Resident<'_, Mess
             cursor,
             viewport,
         );
-    }
-
-    fn overlay<'a>(
-        &'a mut self,
-        tree: &'a mut widget::Tree,
-        layout: Layout<'a>,
-        renderer: &iced::Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'a, Message, iced::Theme, iced::Renderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
     }
 }
 
