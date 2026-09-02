@@ -520,33 +520,11 @@ mod tests {
     #[test]
     #[cfg(feature = "p12-keystore")]
     fn test_pkcs12_loading_and_passphrase() {
-        // Generate a test certificate and key with rcgen
-        let subject_alt_names = vec!["test.example.com".to_string()];
-        let cert_params = rcgen::CertificateParams::new(subject_alt_names);
-        let cert = rcgen::Certificate::from_params(cert_params).unwrap();
-
-        // Get the certificate and key DER
-        let cert_der = cert.serialize_der().unwrap();
-        let key_der = cert.serialize_private_key_der();
-
-        // Create a PKCS#12 file with the certificate and key
-        let mut keystore = p12_keystore::KeyStore::new();
-        let private_key =
-            p12_keystore::PrivateKey::from_der(&key_der).expect("Failed to parse private key");
-        let p12_cert =
-            p12_keystore::Certificate::from_der(&cert_der).expect("Failed to parse certificate");
-        let chain = p12_keystore::PrivateKeyChain::new("test_key", private_key, vec![p12_cert]);
-
-        keystore.add_entry(
-            "test_alias",
-            p12_keystore::KeyStoreEntry::PrivateKeyChain(chain),
-        );
-
+        // §80.8-adjacent: this used to hand-build the same self-signed
+        // PKCS#12 container `crate::sign::test_pkcs12` already builds for
+        // every other test that needs one.
         let password = "test_password_123";
-        let p12_bytes = keystore
-            .writer(password)
-            .write()
-            .expect("Failed to write PKCS#12");
+        let p12_bytes = crate::sign::test_pkcs12(password);
 
         // Test loading with correct passphrase succeeds
         let credential =
