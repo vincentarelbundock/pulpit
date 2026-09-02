@@ -2359,6 +2359,16 @@ fn download_panel<'a>(
 }
 
 /// Voices by language: installed first, one language expanded at a time.
+/// Where speech voices are stored, cached: `Directories::detect()` walks
+/// environment overrides and platform conventions, which a resolved path is
+/// not going to change mid-session, so §82.4 has `voice_library` — redrawn
+/// on every frame the Settings panel is open — stop paying for it while
+/// Settings is open.
+fn speech_data_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::platform::Directories::detect().data)
+}
+
 fn voice_library(app: &App) -> Element<'_, Message> {
     let groups = crate::speech::browsable(app.speech.catalog(), app.speech.store());
     let busy = app
@@ -2453,7 +2463,7 @@ fn voice_library(app: &App) -> Element<'_, Message> {
             "Voices are downloaded once and kept in {}. Each is checked \
              against a published checksum before it is used, and discarded if \
              it does not match.",
-            crate::speech::store_location(&crate::platform::Directories::detect().data).display()
+            crate::speech::store_location(speech_data_dir()).display()
         )),
         container(
             scrollable(list)

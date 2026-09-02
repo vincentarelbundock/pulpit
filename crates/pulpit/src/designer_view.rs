@@ -195,19 +195,28 @@ fn layout_card<'a>(
 /// the deck shape the layout was designed at: the bars a card shows are the
 /// bars that layout will produce.
 fn thumbnail(layout: &Layout) -> Element<'_, Message> {
-    layout_thumbnail(&layout.root, layout.design_ratio, 120.0)
+    layout_thumbnail(
+        std::borrow::Cow::Borrowed(&layout.root),
+        layout.design_ratio,
+        120.0,
+    )
 }
 
 /// A layout drawn to scale at `height`, slide bounds and letterboxing
 /// included.
+///
+/// `root` borrows when the caller already holds the layout for at least as
+/// long as the returned element (`thumbnail`'s library cards, backed by the
+/// store); `recommendation_preview` hands in an owned, cloned tree instead,
+/// since a `built_in_layouts()` result does not live that long.
 fn layout_thumbnail<'a>(
-    root: &Node,
+    root: std::borrow::Cow<'a, Node>,
     slide_ratio: AspectRatio,
     height: f32,
 ) -> Element<'a, Message> {
     container(
         canvas(Sketch {
-            root: root.clone(),
+            root,
             slide_ratio,
             palette: theme::ambient::palette(),
         })
@@ -227,34 +236,47 @@ fn layout_thumbnail<'a>(
 ///
 /// Every decision — which rectangle, which widget, where the slide lands —
 /// is made by the model at the size the canvas reports; this only paints.
-/// The tree is cloned because a thumbnail may be drawn for a layout that is
-/// not being held anywhere, such as a recommended built-in.
-struct Sketch {
-    root: Node,
+///
+/// §82.4: borrows the tree, `Cow`-fashion, rather than always cloning it —
+/// a library page draws several of these per pass, all backed by layouts
+/// the store already holds for at least as long as the element lives.
+/// `recommendation_preview`'s built-in-lookup result does not live that
+/// long, so it still owns its copy. `State` is a `canvas::Cache`, so a
+/// redraw that changes nothing about this card (most of them: hovering
+/// another card, scrolling the list) returns the cached geometry without
+/// walking the tree or painting again.
+struct Sketch<'a> {
+    root: std::borrow::Cow<'a, Node>,
     slide_ratio: AspectRatio,
     palette: Palette,
 }
 
-impl<Message> canvas::Program<Message> for Sketch {
-    type State = ();
+impl<Message> canvas::Program<Message> for Sketch<'_> {
+    type State = canvas::Cache;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let model = Thumbnail::of(&self.root, bounds.width, bounds.height, self.slide_ratio);
-        for cell in &model.cells {
-            paint_cell(&mut frame, self.palette, cell);
-        }
-        for divider in &model.dividers {
-            paint_divider(&mut frame, self.palette, divider);
-        }
-        vec![frame.into_geometry()]
+        let geometry = state.draw(renderer, bounds.size(), |frame| {
+            let model = Thumbnail::of(
+                self.root.as_ref(),
+                bounds.width,
+                bounds.height,
+                self.slide_ratio,
+            );
+            for cell in &model.cells {
+                paint_cell(frame, self.palette, cell);
+            }
+            for divider in &model.dividers {
+                paint_divider(frame, self.palette, divider);
+            }
+        });
+        vec![geometry]
     }
 }
 
@@ -843,16 +865,14 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     // Ranked, labelled, and inert until pressed: the arithmetic can say which
     // built-in fits a 4:3 deck best, but it cannot know that the rail on the
     // right is where the presenter keeps their notes.
-    let built_ins = crate::layout::builtin::built_in_layouts();
+    //
+    // §82.4: `Recommendation` carries the layout's id, so listing and
+    // selecting one no longer needs `built_in_layouts()` rebuilt and
+    // searched by name on every pass — only fetching the actual `Layout` to
+    // preview, below, still does, and only when something is previewed.
     let mut suggestions = Row::new().spacing(gap::S).align_y(Alignment::Center);
     suggestions = suggestions.push(theme::typography::caption("Built-ins for this deck"));
     for recommendation in designer.recommendations().into_iter().take(3) {
-        let Some(layout) = built_ins
-            .iter()
-            .find(|layout| layout.name == recommendation.layout)
-        else {
-            continue;
-        };
         suggestions = suggestions.push(tooltip(
             button(
                 text(format!(
@@ -862,14 +882,10 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
                 .size(type_scale::CAPTION),
             )
             .padding(gap::XS)
-            .style(
-                if designer.previewed_recommendation.as_ref() == Some(&layout.id) {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                },
-            )
-            .on_press(msg(Msg::PreviewRecommendation(layout.id.clone()))),
+            .style(theme::ambient::toggle_button(
+                designer.previewed_recommendation.as_ref() == Some(&recommendation.id),
+            ))
+            .on_press(msg(Msg::PreviewRecommendation(recommendation.id.clone()))),
             container(
                 text("Show this layout. Nothing changes until you use it.")
                     .size(type_scale::CAPTION),
@@ -881,11 +897,15 @@ fn space_report<'a>(designer: &'a Designer) -> Element<'a, Message> {
     }
     panel = panel.push(suggestions.wrap());
 
-    if let Some(previewed) = designer
-        .previewed_recommendation
-        .as_ref()
-        .and_then(|id| built_ins.iter().find(|layout| &layout.id == id))
-    {
+    // Bound at function scope, not inside the `if let` below: `recommendation_preview`'s
+    // element now borrows `previewed` directly (§82.4), so it must outlive
+    // the `container(panel)` built from it.
+    let previewed = designer.previewed_recommendation.as_ref().and_then(|id| {
+        crate::layout::builtin::built_in_layouts()
+            .into_iter()
+            .find(|layout| &layout.id == id)
+    });
+    if let Some(previewed) = &previewed {
         panel = panel.push(recommendation_preview(designer, previewed));
     }
 
@@ -904,8 +924,17 @@ fn recommendation_preview<'a>(designer: &Designer, layout: &Layout) -> Element<'
 
     container(
         row![
-            container(layout_thumbnail(&layout.root, designer.slide_ratio, 90.0))
-                .width(Length::Fixed(170.0)),
+            // `layout` is a `built_in_layouts()` result the caller owns only
+            // for this call — shorter-lived than this element — so its tree
+            // is cloned here rather than borrowed, exactly as before §82.4;
+            // the clone this module actually draws several of, every pass,
+            // is the library grid's, which `thumbnail` below now avoids.
+            container(layout_thumbnail(
+                std::borrow::Cow::Owned(layout.root.clone()),
+                designer.slide_ratio,
+                90.0
+            ))
+            .width(Length::Fixed(170.0)),
             column![
                 text(layout.name.clone()).size(type_scale::BODY),
                 theme::typography::caption(format!(

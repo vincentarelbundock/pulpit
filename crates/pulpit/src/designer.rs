@@ -334,12 +334,12 @@ impl Designer {
             }
         }
         let area = self.design_area();
-        let candidates: Vec<(String, Vec<crate::layout::Frame>)> =
+        let candidates: Vec<(LayoutId, String, Vec<crate::layout::Frame>)> =
             crate::layout::builtin::built_in_layouts()
                 .into_iter()
                 .map(|layout| {
                     let cells = crate::layout::thumbnail::slide_cells(&layout.root, area);
-                    (layout.name, cells)
+                    (layout.id, layout.name, cells)
                 })
                 .collect();
         let recommendations =
