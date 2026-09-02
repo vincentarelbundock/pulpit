@@ -36,12 +36,18 @@ use crate::pdf::{
 /// a second one in front.
 const DECODED_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// How many times a page's text is asked for before the search gives up.
+/// How many messages djvulibre's asynchronous API is pumped for before a
+/// caller gives up on it (§77.8).
 ///
 /// `ddjvu_document_get_pagetext` answers "not yet" until the page has been
-/// fetched, and each attempt costs one blocking wait on a message. A page
-/// that has not arrived after this many is not going to.
-const MAX_TEXT_ATTEMPTS: usize = 4096;
+/// fetched, and every asynchronous call in this API shares that shape —
+/// `document_job` while a file decodes, `page_info` while a page's geometry
+/// is fetched — each attempt costing one blocking wait on a message. A
+/// message that has not arrived after this many is not going to: without a
+/// bound here, `open` and `page_info` waited on `&NeverCancel` or on a
+/// deadline enforced only by a *different* process, so a djvulibre context
+/// that never posts another message parked this thread for good.
+const MAX_WAIT_ATTEMPTS: usize = 4096;
 
 /// The bounds a search answers within, shared with the PDF path so that a
 /// query does not mean two different things depending on the format.
@@ -168,6 +174,7 @@ unsafe fn wait_for(
     cancel: &dyn CancelSignal,
 ) -> Result<()> {
     let mut last_error: Option<String> = None;
+    let mut attempts = 0;
     loop {
         let status = (api.job_status)(job);
         if status >= STATUS_FAILED {
@@ -180,6 +187,15 @@ unsafe fn wait_for(
         }
         if cancel.is_cancelled() {
             return Err(PdfError::Cancelled);
+        }
+        // §77.8: a caller with no real cancel signal (`open`, on
+        // `&NeverCancel`) must not be able to park this thread forever on a
+        // context that stops posting messages.
+        attempts += 1;
+        if attempts > MAX_WAIT_ATTEMPTS {
+            return Err(PdfError::Render(
+                last_error.unwrap_or_else(|| "djvulibre never finished this job".into()),
+            ));
         }
         if let Some(error) = pump(api, context, true) {
             last_error = Some(error);
@@ -305,6 +321,7 @@ impl Inner {
     /// word where the renderer will draw it.
     fn page_info(&mut self, handle: *mut Document, page: usize) -> Result<sys::PageInfo> {
         let mut last_error: Option<String> = None;
+        let mut attempts = 0;
         loop {
             // SAFETY: `handle` is a live document on this context.
             let (status, info) = unsafe { self.api.page_info(handle, page as c_int) };
@@ -315,6 +332,15 @@ impl Inner {
             }
             if status >= STATUS_OK {
                 return Ok(info);
+            }
+            // §77.8: `page_text` already bounds this same asynchronous shape;
+            // `page_info` — reached from `page_size` and `page_text` alike —
+            // must not be the one caller left free to wait forever.
+            attempts += 1;
+            if attempts > MAX_WAIT_ATTEMPTS {
+                return Err(PdfError::Render(last_error.unwrap_or_else(|| {
+                    format!("djvulibre never described page {}", page + 1)
+                })));
             }
             // SAFETY: the context is live and owned by `self.api`.
             if let Some(error) = unsafe { pump(&self.api, self.context, true) } {
@@ -428,7 +454,7 @@ impl Inner {
                 break expression;
             }
             attempts += 1;
-            if attempts > MAX_TEXT_ATTEMPTS {
+            if attempts > MAX_WAIT_ATTEMPTS {
                 return Err(PdfError::Render(format!(
                     "djvulibre never produced the text of page {}",
                     page + 1
@@ -702,30 +728,28 @@ impl PdfBackend for DjvuBackend {
         query: &pulpit_core::search::Query,
         pages: std::ops::Range<usize>,
     ) -> Result<Vec<pulpit_core::search::Hit>> {
-        let mut hits = Vec::new();
         if query.is_empty() {
-            return Ok(hits);
+            return Ok(Vec::new());
         }
         let prepared = query.prepare();
         let mut inner = self.locked();
         // Clamped rather than refused: the caller's page count can be one
         // reload behind, and a scan that walks off the end should stop.
         let page_count = inner.look_up(document)?.page_count;
-        for page in pages.start..pages.end.min(page_count) {
-            let (text, at) = inner.page_text(document, page)?;
-            let found = text.matches(&prepared, MAX_HITS_PER_SEARCH);
-            hits.extend(crate::pdf::search::hits_from_matches(
-                pulpit_core::page::PageIndex(page),
-                text.text(),
-                &found,
-                |matched| text.quads(matched, &at, MAX_QUADS_PER_HIT),
-            ));
-            if hits.len() >= MAX_HITS_PER_SEARCH {
-                hits.truncate(MAX_HITS_PER_SEARCH);
-                break;
-            }
-        }
-        Ok(hits)
+        Ok(crate::pdf::search::search_pages(
+            pages.start..pages.end.min(page_count),
+            MAX_HITS_PER_SEARCH,
+            |page| -> Result<Vec<pulpit_core::search::Hit>> {
+                let (text, at) = inner.page_text(document, page)?;
+                let found = text.matches(&prepared, MAX_HITS_PER_SEARCH);
+                Ok(crate::pdf::search::hits_from_matches(
+                    pulpit_core::page::PageIndex(page),
+                    text.text(),
+                    &found,
+                    |matched| text.quads(matched, &at, MAX_QUADS_PER_HIT),
+                ))
+            },
+        ))
     }
 }
 
