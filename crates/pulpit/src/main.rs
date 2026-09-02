@@ -421,8 +421,6 @@ fn serve_document<'a>(engine: Box<dyn pulpit_render::document::DocumentBackend +
 fn run_image_document_worker(source: PathBuf) {
     use pulpit_render::images::ImageDocument;
 
-    init_worker_tracing();
-
     let engine = match ImageDocument::open(&source) {
         Ok(engine) => engine,
         Err(error) => {
@@ -443,8 +441,6 @@ fn run_image_document_worker(source: PathBuf) {
 #[cfg(feature = "djvu")]
 fn run_djvu_document_worker(source: PathBuf) {
     use pulpit_render::DjvuDocument;
-
-    init_worker_tracing();
 
     let engine = match DjvuDocument::open(&source) {
         Ok(engine) => engine,
