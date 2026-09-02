@@ -1702,6 +1702,102 @@ fn back_parse_object_header(bytes: &[u8], obj_pos: usize) -> Option<(usize, u32,
     Some((i, num, gen))
 }
 
+// ---------------------------------------------------------------------------
+// `/Reference` — signature reference dictionaries (§12.8.1 Table 253)
+// ---------------------------------------------------------------------------
+
+/// One element of a signature dictionary's `/Reference` array, parsed on its
+/// own.
+///
+/// §77.9 / §78.3: `/Reference` is an array of *independent* signature
+/// reference dictionaries — a certifying signature's `/DocMDP` entry and a
+/// `/FieldMDP` lock in the same array is ordinary, not malformed. A flat set
+/// of variables shared across the whole array let whichever element parsed
+/// last decide the outcome; each element is now its own [`SigRef`].
+#[derive(Debug, Clone, Default)]
+pub(super) struct SigRef {
+    /// `/TransformMethod`, without its leading slash.
+    pub(super) transform_method: Option<String>,
+    /// `/TransformParams` `/P`: the DocMDP permission level, 1-3.
+    pub(super) p: Option<i64>,
+    /// `/TransformParams` `/Action`, without its leading slash.
+    ///
+    /// Read only by `preflight`'s FieldMDP lock check (§78.3, step 3); kept
+    /// alongside `p` here rather than in a second `/Reference` array parser.
+    #[allow(dead_code)]
+    pub(super) action: Option<String>,
+    /// `/TransformParams` `/Fields`, decoded as text strings.
+    #[allow(dead_code)]
+    pub(super) fields: Vec<String>,
+}
+
+/// Parse `dict`'s `/Reference` array, one element at a time.
+///
+/// An element may be a direct dictionary or an indirect reference to one;
+/// `resolver.dict_get` follows either. An element that is neither a
+/// dictionary nor a resolvable reference contributes nothing, the same way
+/// an unrecognised `/TransformMethod` does.
+pub(super) fn parse_reference_array(resolver: &ObjectResolver<'_>, dict: &Dict) -> Vec<SigRef> {
+    let Some(refs) = resolver
+        .dict_get(dict, "Reference")
+        .and_then(|v| v.as_array().map(<[PdfValue]>::to_vec))
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(refs.len());
+    for item in refs {
+        let resolved_item;
+        let item_dict = match &item {
+            PdfValue::Dict(d) => Some(d),
+            PdfValue::Ref(n, _) => {
+                resolved_item = resolver.resolve(*n).ok();
+                resolved_item.as_ref().and_then(|(v, _)| v.as_dict())
+            }
+            _ => None,
+        };
+        let Some(item_dict) = item_dict else {
+            continue;
+        };
+
+        let transform_method = item_dict
+            .get("TransformMethod")
+            .and_then(|v| v.as_name())
+            .map(str::to_string);
+
+        let transform_params = resolver.dict_get(item_dict, "TransformParams");
+        let transform_params = transform_params.as_ref().and_then(|v| v.as_dict());
+
+        let p = transform_params
+            .and_then(|tp| tp.get("P"))
+            .and_then(|v| v.as_i64());
+        let action = transform_params
+            .and_then(|tp| tp.get("Action"))
+            .and_then(|v| v.as_name())
+            .map(str::to_string);
+        let fields = transform_params
+            .and_then(|tp| tp.get("Fields"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| match f {
+                        PdfValue::Str(s) => Some(crate::pdftext::decode_text_string(s)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        out.push(SigRef {
+            transform_method,
+            p,
+            action,
+            fields,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
