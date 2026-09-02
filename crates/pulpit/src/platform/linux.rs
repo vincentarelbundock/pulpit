@@ -4,7 +4,7 @@
 //! fallback chain, and every step reports what actually happened. This module
 //! is the only place in the workspace that knows what a D-Bus name is.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, Value};
@@ -100,6 +100,8 @@ impl LinuxServices {
     /// Everything about the capability snapshot that is not a bus question,
     /// shared by the trait's two answers.
     fn capabilities_with(&self, (portal_present, print_portal): (bool, bool)) -> Capabilities {
+        // Walked once per snapshot and reused below rather than asked twice.
+        let cups_available = crate::platform::cups::available();
         Capabilities {
             backend: if self.wayland {
                 "wayland".into()
@@ -123,7 +125,7 @@ impl LinuxServices {
             place_before_map: false,
             system_appearance: portal_present,
             high_contrast_detection: portal_present,
-            sleep_inhibition: portal_present || which("systemd-inhibit"),
+            sleep_inhibition: portal_present || crate::platform::which("systemd-inhibit"),
             native_dialogs: true,
             native_menus: false,
             // Both halves, not just the session's. AT-SPI is running on any
@@ -147,11 +149,11 @@ impl LinuxServices {
             // prints perfectly well; asking only about `lp` there would grey
             // out a command that works. What this must not do is say yes
             // when neither answered.
-            printing: crate::platform::cups::available() || print_portal,
+            printing: cups_available || print_portal,
             // CUPS takes a page range, a copy count and a named queue. It
             // matters only where there is no portal to ask for them, since
             // where there is one it does the asking.
-            print_options: crate::platform::cups::available(),
+            print_options: cups_available,
             // The portal is the desktop's own print dialog, and where it
             // answers it asks every question pulpit would otherwise ask
             // badly. `lp` stays underneath it for a session that has CUPS
@@ -365,32 +367,16 @@ impl PlatformServices for LinuxServices {
         }
 
         // 3. A child process, which the kernel reaps if we die mid-talk.
-        match Command::new("systemd-inhibit")
-            .args([
-                "--what=idle:sleep",
-                "--who=pulpit",
-                &format!("--why={REASON}"),
-                "--mode=block",
-                "sleep",
-                "infinity",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => InhibitState::Held {
-                mechanism: "systemd-inhibit",
-                token: InhibitToken::Process(child.id()),
-            },
-            Err(e) => {
-                attempts.push(format!("systemd-inhibit: {e}"));
-                InhibitState::Unavailable {
-                    reason: "no inhibition mechanism answered".into(),
-                    attempts,
-                }
-            }
-        }
+        let mut command = Command::new("systemd-inhibit");
+        command.args([
+            "--what=idle:sleep",
+            "--who=pulpit",
+            &format!("--why={REASON}"),
+            "--mode=block",
+            "sleep",
+            "infinity",
+        ]);
+        crate::platform::inhibit::hold_with_child(command, "systemd-inhibit", attempts)
     }
 
     fn release_inhibit(&self, state: &InhibitState) -> Outcome {
@@ -437,23 +423,10 @@ impl PlatformServices for LinuxServices {
                 })
                 .unwrap_or_else(|| Outcome::failed("the screensaver did not answer"))
             }
-            InhibitToken::Process(pid) => {
-                // The child is ours; SIGTERM releases the lock.
-                match Command::new("kill").arg(pid.to_string()).status() {
-                    Ok(status) if status.success() => Outcome::Done,
-                    Ok(status) => Outcome::failed(format!("kill exited with {status}")),
-                    Err(e) => Outcome::failed(e.to_string()),
-                }
-            }
+            InhibitToken::Process(pid) => crate::platform::inhibit::release_child(*pid),
             InhibitToken::None => Outcome::Done,
         }
     }
-}
-
-fn which(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|directory| directory.join(program).is_file()))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

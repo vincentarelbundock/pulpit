@@ -28,9 +28,7 @@ use crate::platform::Outcome;
 /// Asked of the path rather than of the operating system: a container with
 /// no CUPS in it is a session that cannot print, whatever it is running on.
 pub fn available() -> bool {
-    std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|directory| directory.join("lp").is_file()))
-        .unwrap_or(false)
+    crate::platform::which("lp")
 }
 
 /// The queues CUPS knows about, in the order it lists them.
