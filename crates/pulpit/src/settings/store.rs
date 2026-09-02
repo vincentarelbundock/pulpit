@@ -1,6 +1,5 @@
 //! Atomic, schema-versioned settings persistence.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::settings::{Settings, SCHEMA_VERSION};
@@ -31,7 +30,7 @@ pub struct SettingsStore {
 
 impl Default for SettingsStore {
     fn default() -> Self {
-        Self::new(config_directory().join("settings.toml"))
+        Self::new(crate::platform::Directories::detect().settings_file())
     }
 }
 
@@ -149,22 +148,14 @@ impl SettingsStore {
                 "a credential already exists for this profile",
             )));
         }
-        let temporary = destination.with_extension("p12.tmp");
-        let result = (|| -> Result<(), SettingsError> {
-            let mut file = crate::platform::paths::create_owner_private_file(&temporary)?;
-            file.write_all(bytes)?;
-            file.flush()?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &destination)?;
-            if let Ok(handle) = std::fs::File::open(directory) {
-                let _ = handle.sync_all();
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result.map(|()| destination)
+        pulpit_render::atomic::replace(
+            &destination,
+            "credential",
+            pulpit_render::atomic::Visibility::Private,
+            bytes,
+        )
+        .map_err(std::io::Error::from)?;
+        Ok(destination)
     }
 
     pub fn remove_managed_credential(&self, id: &str) -> Result<(), SettingsError> {

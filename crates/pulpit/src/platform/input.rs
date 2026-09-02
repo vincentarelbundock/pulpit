@@ -64,59 +64,19 @@ impl Shortcut {
 }
 
 /// Platform input conventions.
-pub trait InputPolicy: Send + Sync {
-    /// `⌘` or `Ctrl`.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    fn primary_label(&self) -> &'static str;
-
-    /// Format a shortcut for display.
-    fn format(&self, shortcut: &Shortcut) -> String;
-
-    /// One shortcut, spelled as the caps a hand would press — every modifier
-    /// this desktop's way round, then the key — rather than as one joined
-    /// string. The shortcut reference draws each part as its own keycap, and
-    /// splitting a formatted string back apart would re-derive here what
-    /// this trait already knows.
-    fn keycaps(&self, shortcut: &Shortcut) -> Vec<String>;
-
-    /// Does this collide with something the desktop reserves? Best effort:
-    /// a false negative is acceptable, a false positive is not.
-    #[allow(dead_code)] // reached by its tests, not by the application
-    fn is_reserved(&self, shortcut: &Shortcut) -> Option<&'static str>;
-
-    /// Should a press with these modifiers count as the primary modifier?
-    #[allow(dead_code)] // reached by its tests, not by the application
-    fn is_primary(&self, control: bool, command: bool) -> bool;
-
-    /// Fold the toolkit's raw modifier flags into the two semantic ones:
-    /// `(primary, control)`.
-    ///
-    /// `control` and `command` are the physical Control and Command/logo
-    /// keys as the event reported them. On macOS the Command key is primary
-    /// and Control comes back separately, for the rare binding that means
-    /// that key specifically. Everywhere else the Control key *is* primary
-    /// — one press must never count as both — and the logo key belongs to
-    /// the desktop, so it is not pulpit's to interpret.
-    fn split_modifiers(&self, control: bool, command: bool) -> (bool, bool);
-}
-
-/// The portable implementation, parameterised by target at compile time.
+///
+/// One portable ruleset rather than a boxed trait with a single
+/// implementation: `Platform::detect` built the same value on every `cfg`
+/// arm regardless of which one ran, so the indirection bought nothing.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DesktopInput;
+pub struct InputPolicy;
 
 /// macOS spells modifiers with glyphs and no separators.
 const MACOS: bool = cfg!(target_os = "macos");
 
-impl InputPolicy for DesktopInput {
-    fn primary_label(&self) -> &'static str {
-        if MACOS {
-            "⌘"
-        } else {
-            "Ctrl"
-        }
-    }
-
-    fn format(&self, shortcut: &Shortcut) -> String {
+impl InputPolicy {
+    /// Format a shortcut for display.
+    pub fn format(&self, shortcut: &Shortcut) -> String {
         let parts = self.keycaps(shortcut);
         if MACOS {
             parts.concat()
@@ -125,7 +85,12 @@ impl InputPolicy for DesktopInput {
         }
     }
 
-    fn keycaps(&self, shortcut: &Shortcut) -> Vec<String> {
+    /// One shortcut, spelled as the caps a hand would press — every modifier
+    /// this desktop's way round, then the key — rather than as one joined
+    /// string. The shortcut reference draws each part as its own keycap, and
+    /// splitting a formatted string back apart would re-derive here what
+    /// this already knows.
+    pub fn keycaps(&self, shortcut: &Shortcut) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         // A stable order, so the same binding always reads the same way.
         for modifier in [
@@ -155,7 +120,14 @@ impl InputPolicy for DesktopInput {
         parts
     }
 
-    fn is_reserved(&self, shortcut: &Shortcut) -> Option<&'static str> {
+    /// Does this collide with something the desktop reserves? Best effort:
+    /// a false negative is acceptable, a false positive is not.
+    ///
+    /// Reached by [`crate::settings::keys`]'s test that the curated default
+    /// keymap never collides with a reservation, not by the running
+    /// application — there is no live "this key does nothing" warning yet.
+    #[allow(dead_code)] // reached by its tests, not by the application
+    pub fn is_reserved(&self, shortcut: &Shortcut) -> Option<&'static str> {
         let key = shortcut.key.to_ascii_uppercase();
         let primary = shortcut.has(Modifier::Primary);
         if MACOS {
@@ -177,15 +149,16 @@ impl InputPolicy for DesktopInput {
         }
     }
 
-    fn is_primary(&self, control: bool, command: bool) -> bool {
-        if MACOS {
-            command
-        } else {
-            control
-        }
-    }
-
-    fn split_modifiers(&self, control: bool, command: bool) -> (bool, bool) {
+    /// Fold the toolkit's raw modifier flags into the two semantic ones:
+    /// `(primary, control)`.
+    ///
+    /// `control` and `command` are the physical Control and Command/logo
+    /// keys as the event reported them. On macOS the Command key is primary
+    /// and Control comes back separately, for the rare binding that means
+    /// that key specifically. Everywhere else the Control key *is* primary
+    /// — one press must never count as both — and the logo key belongs to
+    /// the desktop, so it is not pulpit's to interpret.
+    pub fn split_modifiers(&self, control: bool, command: bool) -> (bool, bool) {
         if MACOS {
             (command, control)
         } else {
@@ -250,22 +223,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_primary_modifier_matches_the_platform() {
-        let input = DesktopInput;
-        if MACOS {
-            assert_eq!(input.primary_label(), "⌘");
-            assert!(input.is_primary(false, true));
-            assert!(!input.is_primary(true, false));
-        } else {
-            assert_eq!(input.primary_label(), "Ctrl");
-            assert!(input.is_primary(true, false));
-            assert!(!input.is_primary(false, true));
-        }
-    }
-
-    #[test]
     fn one_press_is_never_both_primary_and_control() {
-        let input = DesktopInput;
+        let input = InputPolicy;
         if MACOS {
             assert_eq!(input.split_modifiers(false, true), (true, false));
             assert_eq!(input.split_modifiers(true, false), (false, true));
@@ -278,7 +237,7 @@ mod tests {
 
     #[test]
     fn shortcuts_format_in_a_stable_order() {
-        let input = DesktopInput;
+        let input = InputPolicy;
         let save = input.format(&Shortcut::primary("S"));
         let redo = input.format(&Shortcut::primary_shift("Z"));
         if MACOS {
@@ -293,7 +252,7 @@ mod tests {
 
     #[test]
     fn reserved_shortcuts_are_reported_with_a_reason() {
-        let input = DesktopInput;
+        let input = InputPolicy;
         let clash = Shortcut {
             modifiers: vec![Modifier::Alt],
             key: "Tab".into(),
@@ -309,7 +268,7 @@ mod tests {
 
     #[test]
     fn arrow_keys_read_naturally_on_each_platform() {
-        let input = DesktopInput;
+        let input = InputPolicy;
         let right = input.format(&Shortcut::key("Right"));
         assert_eq!(right, if MACOS { "→" } else { "Right" });
     }

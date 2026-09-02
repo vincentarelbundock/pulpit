@@ -7,7 +7,7 @@
 //! pulpit dies mid-talk — the same ordering as the Linux adapter.
 
 use std::ffi::c_void;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::platform::appearance::{MotionPreference, SystemAppearance};
 use crate::platform::capabilities::{
@@ -181,6 +181,8 @@ impl PlatformServices for MacosServices {
     }
 
     fn capabilities(&self) -> Capabilities {
+        // Walked once per snapshot and reused below rather than asked twice.
+        let cups_available = crate::platform::cups::available();
         Capabilities {
             backend: "appkit".into(),
             // CoreGraphics reports a vendor/model/serial triple derived from
@@ -205,11 +207,10 @@ impl PlatformServices for MacosServices {
             image_clipboard: true,
             // As on Linux: either way of reaching a printer counts, and a
             // build with Quartz but no `lp` still prints through the panel.
-            printing: crate::platform::cups::available()
-                || crate::platform::appkit_print::available(),
+            printing: cups_available || crate::platform::appkit_print::available(),
             // CUPS takes a page range, a copy count and a named queue, and is
             // asked for them only where the panel is not there to ask.
-            print_options: crate::platform::cups::available(),
+            print_options: cups_available,
             // PDFKit draws the pages into an `NSPrintOperation`, so the
             // panel's paper, duplex, range and copies are applied by Apple's
             // code to Apple's rendering rather than translated by ours. `lp`
@@ -321,25 +322,9 @@ impl PlatformServices for MacosServices {
 
         // 2. `caffeinate`, which ships with macOS. `-d` keeps the display
         //    awake, `-i` the system.
-        match Command::new("caffeinate")
-            .args(["-d", "-i"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => InhibitState::Held {
-                mechanism: "caffeinate",
-                token: InhibitToken::Process(child.id()),
-            },
-            Err(e) => {
-                attempts.push(format!("caffeinate: {e}"));
-                InhibitState::Unavailable {
-                    reason: "no inhibition mechanism answered".into(),
-                    attempts,
-                }
-            }
-        }
+        let mut command = Command::new("caffeinate");
+        command.args(["-d", "-i"]);
+        crate::platform::inhibit::hold_with_child(command, "caffeinate", attempts)
     }
 
     fn release_inhibit(&self, state: &InhibitState) -> Outcome {
@@ -357,13 +342,7 @@ impl PlatformServices for MacosServices {
                     Outcome::failed(format!("the power assertion would not release ({status})"))
                 }
             }
-            InhibitToken::Process(pid) => {
-                match Command::new("kill").arg(pid.to_string()).status() {
-                    Ok(status) if status.success() => Outcome::Done,
-                    Ok(status) => Outcome::failed(format!("kill exited with {status}")),
-                    Err(e) => Outcome::failed(e.to_string()),
-                }
-            }
+            InhibitToken::Process(pid) => crate::platform::inhibit::release_child(*pid),
             InhibitToken::Handle(_) | InhibitToken::None => Outcome::Done,
         }
     }
