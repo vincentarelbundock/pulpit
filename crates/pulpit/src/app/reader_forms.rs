@@ -199,6 +199,7 @@ impl App {
         // Tab and typed into, which never sent a `ReadCommand` at all.
         if may_commit
             && self
+                .sign
                 .append_only
                 .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
         {
@@ -845,6 +846,7 @@ impl App {
         // still refusing the one thing the hand can change — picking a mark
         // up and putting it down somewhere else.
         if self
+            .sign
             .append_only
             .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
         {
