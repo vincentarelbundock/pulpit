@@ -777,24 +777,31 @@ pub struct Annotations {
     /// Whether the audience screen shows these too. On by default — a mark is
     /// drawn to be seen. Off means the presenter is marking up their own copy.
     pub audience_visible: bool,
-    /// Whether a stroke is open, i.e. the button is down and points are
-    /// still arriving. Not serialised state anybody depends on, but it is
-    /// what makes a stray move event after a release harmless.
+    /// What the hand or the keyboard is in the middle of doing. Not
+    /// serialised state anybody depends on, but it is what makes a stray
+    /// move event after a release harmless, and what the eraser and the
+    /// text tool use to tell their own open gesture from each other's
+    /// (§81: was a `drawing`/`erasing` bool pair plus a `typing` index for
+    /// what is, at any moment, one gesture).
     #[serde(skip)]
-    drawing: bool,
-    /// Whether the open gesture is an eraser sweep, so the strokes one sweep
-    /// took are taken back together rather than one press-worth at a time.
-    #[serde(skip)]
-    erasing: bool,
-    /// Index of the label currently receiving keyboard input.
-    #[serde(skip)]
-    typing: Option<usize>,
+    gesture: Gesture,
     #[serde(skip)]
     next_text_id: u64,
     /// Annotations the eraser has taken and the document has not been told
     /// about yet. Not serialised: it is a message in transit, not state.
     #[serde(skip)]
     erased: Vec<crate::annotate::AnnotationId>,
+    /// One entry per stroke commit still awaiting its answer, in the order
+    /// the commits were sent, so [`Self::name_stroke`] can tell whether the
+    /// next id due back names a stroke still on screen (`false`) or one the
+    /// eraser already took before it had a name (`true`).
+    ///
+    /// Without this a stroke erased before it was named was simply dropped,
+    /// and its arriving id was handed to whatever unnamed stroke happened to
+    /// be oldest by then — misnaming a later stroke and leaving the erased
+    /// one stuck in the document forever (§76.14).
+    #[serde(skip)]
+    pending_stroke_names: std::collections::VecDeque<bool>,
     /// Bumped by every visible change, so a consumer holding a rendered copy
     /// can tell "changed" from "same" without a deep comparison.
     #[serde(skip)]
@@ -817,14 +824,35 @@ impl Default for Annotations {
             tool: None,
             selection: None,
             audience_visible: true,
-            drawing: false,
-            erasing: false,
-            typing: None,
+            gesture: Gesture::None,
             next_text_id: 1,
             erased: Vec::new(),
+            pending_stroke_names: std::collections::VecDeque::new(),
             revision: Revision::default(),
         }
     }
+}
+
+/// What the pointer or the keyboard is in the middle of doing to the slide.
+///
+/// A stroke and an eraser sweep both hold the pointer down, which is why the
+/// two used to share one `drawing` bool; they differ in what letting go
+/// means, which is why a second `erasing` bool rode along beside it. Typing
+/// held a third, `Option<usize>`, that never overlapped the other two in
+/// practice, only in representation — so this is the one gesture the three
+/// fields described, made into the type that can only hold one at a time
+/// (§81).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Gesture {
+    #[default]
+    None,
+    /// An ink or highlighter stroke is open.
+    Stroke,
+    /// An eraser sweep is open.
+    Erase,
+    /// A text or note label at this index in [`Annotations::texts`] is
+    /// receiving keyboard input.
+    Typing(usize),
 }
 
 /// A monotonic change counter that deliberately compares equal to any other,
@@ -885,7 +913,7 @@ impl Annotations {
     /// down, which the caller needs to know because settling the gesture is
     /// what makes the undo mean what the presenter expects.
     pub fn has_open_gesture(&self) -> bool {
-        self.drawing || self.typing.is_some()
+        self.gesture != Gesture::None
     }
 
     /// Is this a point on the page at all?
@@ -933,7 +961,10 @@ impl Annotations {
             // The oldest mark goes off the screen. It stays in the document:
             // this cap is about how much the presenter can usefully see at
             // once, not about what the file holds.
-            self.strokes.remove(0);
+            let dropped = self.strokes.remove(0);
+            if dropped.id.is_none() {
+                mark_pending_stroke_erased(&mut self.pending_stroke_names, 0);
+            }
         }
         self.strokes.push(InkStroke {
             points: vec![point],
@@ -944,7 +975,8 @@ impl Annotations {
             // commit, which cannot have happened before the pen is up.
             id: None,
         });
-        self.drawing = true;
+        self.pending_stroke_names.push_back(false);
+        self.gesture = Gesture::Stroke;
         self.bump();
         true
     }
@@ -954,14 +986,13 @@ impl Annotations {
         if !Self::is_on_page(point) {
             return false;
         }
-        self.drawing = true;
-        self.erasing = true;
+        self.gesture = Gesture::Erase;
         self.erase_at(point, radius)
     }
 
     /// Continue an eraser gesture while the pointer button is held.
     pub fn extend_erase(&mut self, point: (f32, f32), radius: f32) -> bool {
-        if !self.drawing || !Self::is_on_page(point) {
+        if !self.is_drawing() || !Self::is_on_page(point) {
             return false;
         }
         self.erase_at(point, radius)
@@ -985,7 +1016,9 @@ impl Annotations {
         // *identity* of what was taken, not a copy of it — putting it back is
         // the document's business now, and the document restores the
         // annotation rather than drawing a new one that looks the same (§9.4).
+        let mut unnamed_seen = 0usize;
         self.strokes.retain(|stroke| {
+            let unnamed = stroke.id.is_none();
             let hit_radius = radius + stroke.width / 2.0;
             let hit_radius_squared = hit_radius * hit_radius;
             // One pass: every interior point is an endpoint of some segment,
@@ -1000,14 +1033,20 @@ impl Annotations {
             };
             if hit {
                 took = true;
-                // A stroke the document has not named yet is one whose commit
-                // is still in flight. Erasing it here takes it off the screen;
-                // the delete that follows its own commit is what takes it out
-                // of the file, and the caller sends that when the name
-                // arrives.
                 if let Some(id) = &stroke.id {
                     self.erased.push(id.clone());
+                } else {
+                    // A stroke the document has not named yet is one whose
+                    // commit is still in flight. Erasing it here takes it off
+                    // the screen and marks its pending commit so that the id
+                    // which eventually arrives for it becomes an immediate
+                    // delete instead of being handed to a different stroke
+                    // (§76.14).
+                    mark_pending_stroke_erased(&mut self.pending_stroke_names, unnamed_seen);
                 }
+            }
+            if unnamed {
+                unnamed_seen += 1;
             }
             !hit
         });
@@ -1059,7 +1098,7 @@ impl Annotations {
     /// Returns whether the point was kept, which is what a caller needs to
     /// know to decide whether anything has to be redrawn.
     pub fn extend_stroke(&mut self, point: (f32, f32)) -> bool {
-        if !self.drawing || !Self::is_on_page(point) {
+        if !self.is_drawing() || !Self::is_on_page(point) {
             return false;
         }
         let Some(stroke) = self.strokes.last_mut() else {
@@ -1091,16 +1130,18 @@ impl Annotations {
     /// named once the engine answers, and it is the engine's from then on.
     #[must_use = "a completed stroke that is not committed is a mark that vanishes"]
     pub fn end_stroke(&mut self) -> Option<InkStroke> {
-        let drawing = self.drawing;
-        let erasing = self.erasing;
-        self.drawing = false;
-        self.erasing = false;
+        let gesture = self.gesture;
+        // Only a stroke or an erase sweep is this gesture's to end; typing
+        // is a different one and is left exactly where it was.
+        if matches!(gesture, Gesture::Stroke | Gesture::Erase) {
+            self.gesture = Gesture::None;
+        }
         if self.strokes.last().is_some_and(InkStroke::is_empty) {
             self.strokes.pop();
             self.bump();
             return None;
         }
-        if drawing && !erasing {
+        if gesture == Gesture::Stroke {
             return self.strokes.last().cloned();
         }
         None
@@ -1112,9 +1153,20 @@ impl Annotations {
     /// because between the commit and the answer the presenter may have drawn
     /// another one — and commits are answered in order, so the oldest unnamed
     /// stroke is the one this answer is about.
+    ///
+    /// When the commit this id answers was for a stroke the eraser already
+    /// took before it had a name, `pending_stroke_names` says so, and the
+    /// arriving id is turned into an immediate delete for the caller to send
+    /// instead of being handed to whichever stroke happens to be oldest
+    /// (§76.14).
     pub fn name_stroke(&mut self, id: crate::annotate::AnnotationId) {
-        if let Some(stroke) = self.strokes.iter_mut().find(|stroke| stroke.id.is_none()) {
-            stroke.id = Some(id);
+        match self.pending_stroke_names.pop_front() {
+            Some(true) => self.erased.push(id),
+            Some(false) | None => {
+                if let Some(stroke) = self.strokes.iter_mut().find(|stroke| stroke.id.is_none()) {
+                    stroke.id = Some(id);
+                }
+            }
         }
     }
 
@@ -1154,11 +1206,23 @@ impl Annotations {
     /// which is a label the engine has not answered about — dropping it would
     /// take a mark off the screen between the commit and its confirmation.
     ///
-    /// Local drawing identities are minted here rather than carried in from
+    /// Local drawing identities are derived here rather than carried in from
     /// the document, because they exist to key an in-process compile cache and
     /// an annotation's name is not a `u64`.
+    ///
+    /// Derived *from* the annotation's name rather than freshly minted,
+    /// though: a name is stable across a round trip, so a re-adopted label
+    /// keeps the id it had, and the Typst cache keyed by that id does not
+    /// have to recompile every label on the slide just because one `Applied`
+    /// answer came back (§82.6). A label with no name yet — unreachable in
+    /// practice, since only the document's own committed labels arrive here
+    /// — still gets a fresh one so the id remains a total function of the
+    /// input.
     pub fn adopt_texts(&mut self, texts: impl IntoIterator<Item = TextMark>) {
-        let typing = self.typing.and_then(|index| self.texts.get(index)).cloned();
+        let typing = self
+            .typing_index()
+            .and_then(|index| self.texts.get(index))
+            .cloned();
         let unnamed: Vec<TextMark> = self
             .texts
             .iter()
@@ -1168,15 +1232,25 @@ impl Annotations {
             .collect();
         let mut adopted: Vec<TextMark> = texts.into_iter().collect();
         for mark in &mut adopted {
-            mark.id = self.next_text_id;
-            self.next_text_id = self.next_text_id.wrapping_add(1).max(1);
+            mark.id = match &mark.annotation {
+                Some(name) => stable_text_id(name),
+                None => {
+                    let id = self.next_text_id;
+                    self.next_text_id = self.next_text_id.wrapping_add(1).max(1);
+                    id
+                }
+            };
         }
         self.texts = adopted;
         self.texts.extend(unnamed);
-        self.typing = typing.map(|mark| {
+        // `typing` is `Some` only when `self.gesture` was already
+        // `Typing(_)`; any other gesture (including none at all) is left
+        // exactly where it was, the way the separate `typing` field used to
+        // be untouched by this method.
+        if let Some(mark) = typing {
             self.texts.push(mark);
-            self.texts.len() - 1
-        });
+            self.gesture = Gesture::Typing(self.texts.len() - 1);
+        }
         self.bump();
     }
 
@@ -1224,16 +1298,11 @@ impl Annotations {
             return (false, None);
         }
         let finished = self.finish_text();
-        let id = self
-            .texts
-            .iter()
-            .map(|mark| mark.id)
-            .max()
-            .unwrap_or(0)
-            .wrapping_add(1)
-            .max(self.next_text_id)
-            .max(1);
-        self.next_text_id = self.next_text_id.wrapping_add(1).max(1);
+        // `next_text_id` is already the one counter every local id is minted
+        // from — here and in `adopt_texts` — so it alone is the next value;
+        // no need to also scan `self.texts` for its current maximum (§81).
+        let id = self.next_text_id.max(1);
+        self.next_text_id = id.wrapping_add(1).max(1);
         self.texts.push(TextMark {
             id,
             position: point,
@@ -1250,14 +1319,17 @@ impl Annotations {
             // Written here, so it is drawn at the size it was set at.
             fit: None,
         });
-        self.typing = Some(self.texts.len() - 1);
+        self.gesture = Gesture::Typing(self.texts.len() - 1);
         self.bump();
         (true, finished)
     }
 
     /// Append composed keyboard text to the active label.
     pub fn type_text(&mut self, value: &str) -> bool {
-        let Some(mark) = self.typing.and_then(|index| self.texts.get_mut(index)) else {
+        let Some(mark) = self
+            .typing_index()
+            .and_then(|index| self.texts.get_mut(index))
+        else {
             return false;
         };
         let remaining = Self::MAX_TEXT_BYTES.saturating_sub(mark.text.len());
@@ -1279,7 +1351,10 @@ impl Annotations {
     }
 
     pub fn backspace_text(&mut self) -> bool {
-        let Some(mark) = self.typing.and_then(|index| self.texts.get_mut(index)) else {
+        let Some(mark) = self
+            .typing_index()
+            .and_then(|index| self.texts.get_mut(index))
+        else {
             return false;
         };
         if mark.text.pop().is_some() {
@@ -1298,7 +1373,7 @@ impl Annotations {
     /// viewers draw as an empty box, and it is never what someone meant.
     #[must_use = "a finished label that is not committed is a mark that vanishes"]
     pub fn finish_text(&mut self) -> Option<TextMark> {
-        let index = self.typing.take()?;
+        let index = self.take_typing()?;
         let finished = match self.texts.get(index) {
             Some(mark) if mark.text.is_empty() => {
                 self.texts.remove(index);
@@ -1324,17 +1399,32 @@ impl Annotations {
     }
 
     pub fn is_typing(&self) -> bool {
-        self.typing.is_some()
+        self.typing_index().is_some()
     }
 
     /// The mark receiving input, for presenter-only editing affordances.
     pub fn typing_index(&self) -> Option<usize> {
-        self.typing
+        match self.gesture {
+            Gesture::Typing(index) => Some(index),
+            _ => None,
+        }
     }
 
-    /// Is a stroke currently being drawn?
+    /// Take the index of the label being typed, if any, the way
+    /// `Option::take` would — leaving any other open gesture untouched.
+    fn take_typing(&mut self) -> Option<usize> {
+        match self.gesture {
+            Gesture::Typing(index) => {
+                self.gesture = Gesture::None;
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// Is a stroke or an eraser sweep currently open?
     pub fn is_drawing(&self) -> bool {
-        self.drawing
+        matches!(self.gesture, Gesture::Stroke | Gesture::Erase)
     }
 
     /// Start a rubber band at `point`, dropping whatever was held.
@@ -1376,15 +1466,13 @@ impl Annotations {
         let Some((from, to)) = self.band.take() else {
             return &self.selected;
         };
-        let rect = (
+        let rect = crate::notes::Region::new(
             from.0.min(to.0),
             from.1.min(to.1),
-            from.0.max(to.0),
-            from.1.max(to.1),
+            (from.0 - to.0).abs(),
+            (from.1 - to.1).abs(),
         );
-        let within = |point: (f32, f32)| {
-            point.0 >= rect.0 && point.0 <= rect.2 && point.1 >= rect.1 && point.1 <= rect.3
-        };
+        let within = |point: (f32, f32)| rect.contains(point.0, point.1);
         let mut held = Vec::new();
         for stroke in &self.strokes {
             if let Some(id) = &stroke.id {
@@ -1457,7 +1545,7 @@ impl Annotations {
     /// mutation (§8.5). Distinct from [`Self::finish_text`], which hands the
     /// label over to be committed.
     pub fn cancel_text(&mut self) {
-        let Some(index) = self.typing.take() else {
+        let Some(index) = self.take_typing() else {
             return;
         };
         if index < self.texts.len() {
@@ -1482,7 +1570,7 @@ impl Annotations {
     /// than kept, so there would otherwise be no way to tell which it was.
     #[must_use = "a settled label that is not committed is a mark that vanishes"]
     pub fn settle(&mut self) -> Option<TextMark> {
-        if self.drawing {
+        if self.is_drawing() {
             let _ = self.end_stroke();
         }
         self.finish_text()
@@ -1500,9 +1588,8 @@ impl Annotations {
         self.selection = None;
         self.band = None;
         self.selected.clear();
-        self.drawing = false;
-        self.erasing = false;
-        self.typing = None;
+        self.gesture = Gesture::None;
+        self.pending_stroke_names.clear();
         self.bump();
     }
 
@@ -1567,8 +1654,11 @@ impl Annotations {
     #[must_use = "a label closed by changing tool is a mark that vanishes"]
     pub fn arm(&mut self, tool: Option<AnnotationTool>) -> Option<TextMark> {
         self.tool = tool;
-        self.drawing = false;
-        self.erasing = false;
+        // Only a stroke or an erase sweep is put down here; typing is left
+        // for `finish_text` below to settle on its own terms.
+        if matches!(self.gesture, Gesture::Stroke | Gesture::Erase) {
+            self.gesture = Gesture::None;
+        }
         // A label and a note are both typed, so neither one ends the other's
         // typing; every other tool does.
         let finished = if matches!(tool, Some(AnnotationTool::Text | AnnotationTool::Note)) {
@@ -1617,10 +1707,42 @@ impl Annotations {
     }
 }
 
+/// A local `u64` id derived from an annotation's name, so the same
+/// annotation always adopts to the same id.
+///
+/// The same FNV-1a construction as `overlay.rs::stable_overlay_id`, for the
+/// same reason: a name is stable across a round trip and an incrementing
+/// counter is not (§82.6).
+fn stable_text_id(name: &crate::annotate::AnnotationId) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in name.as_str().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    // Zero is reserved so a derived id is never confused with an unset one.
+    hash | 1
+}
+
 fn distance_squared(left: (f32, f32), right: (f32, f32)) -> f32 {
     let x = left.0 - right.0;
     let y = left.1 - right.1;
     x * x + y * y
+}
+
+/// Mark the `index`-th still-live (`false`) entry of a stroke-naming queue
+/// as erased-before-naming.
+///
+/// `index` counts only over entries not yet marked erased, because those
+/// already-erased entries have no counterpart left in `Annotations::strokes`
+/// to be confused with (§76.14). A free function, not a method, so it can be
+/// called from inside a `retain` closure that already borrows
+/// `self.strokes` and `self.erased` under Rust's disjoint-field capture.
+fn mark_pending_stroke_erased(queue: &mut std::collections::VecDeque<bool>, index: usize) {
+    if let Some(entry) = queue.iter_mut().filter(|erased| !**erased).nth(index) {
+        *entry = true;
+    }
 }
 
 /// Hit-test the same approximate text block the canvas lays out. Exact glyph
@@ -1679,20 +1801,14 @@ fn point_in_quad(point: (f32, f32), quad: &[(f32, f32); 4]) -> bool {
     !(positive && negative)
 }
 
+/// §80.6: the one owner of this arithmetic is
+/// [`crate::page::PagePoint::distance_to_segment_squared`]; this is a thin
+/// wrapper so callers here can keep working in `(f32, f32)` gesture space.
 fn distance_to_segment_squared(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
-    let segment = (end.0 - start.0, end.1 - start.1);
-    let length_squared = segment.0 * segment.0 + segment.1 * segment.1;
-    if length_squared <= f32::EPSILON {
-        return distance_squared(point, start);
-    }
-    let offset = (point.0 - start.0, point.1 - start.1);
-    let projection =
-        ((offset.0 * segment.0 + offset.1 * segment.1) / length_squared).clamp(0.0, 1.0);
-    let nearest = (
-        start.0 + segment.0 * projection,
-        start.1 + segment.1 * projection,
-    );
-    distance_squared(point, nearest)
+    crate::page::PagePoint::new(point.0, point.1).distance_to_segment_squared(
+        crate::page::PagePoint::new(start.0, start.1),
+        crate::page::PagePoint::new(end.0, end.1),
+    )
 }
 
 #[cfg(test)]
@@ -2198,6 +2314,44 @@ mod tests {
         }
 
         #[test]
+        fn a_re_adopted_label_keeps_the_same_local_id() {
+            // §82.6: the Typst compile cache is keyed by `TextMark::id`, so
+            // an id that changed on every `Applied` answer would recompile
+            // every label on the slide for nothing. A label's PDF name is
+            // stable across the round trip, so the id derived from it must
+            // be too.
+            let mark = |text: &str| TextMark {
+                id: 0,
+                position: (0.3, 0.3),
+                text: text.to_string(),
+                size: 0.025,
+                color: RED,
+                annotation: Some(named("label")),
+                note: false,
+                fit: None,
+            };
+            let mut annotations = Annotations::default();
+            annotations.adopt_texts(vec![mark("first draft")]);
+            let first_id = annotations.texts[0].id;
+            assert_ne!(first_id, 0);
+
+            annotations.adopt_texts(vec![mark("first draft")]);
+            assert_eq!(
+                annotations.texts[0].id, first_id,
+                "the same name must adopt to the same id"
+            );
+
+            annotations.adopt_texts(vec![TextMark {
+                annotation: Some(named("a different label")),
+                ..mark("first draft")
+            }]);
+            assert_ne!(
+                annotations.texts[0].id, first_id,
+                "a different name must not collide"
+            );
+        }
+
+        #[test]
         fn the_eraser_reports_what_it_took_so_the_document_can_be_told() {
             let mut annotations = Annotations::default();
             annotations.adopt(vec![
@@ -2237,6 +2391,45 @@ mod tests {
             assert!(annotations.begin_erase((0.4, 0.5), 0.03));
             assert!(annotations.strokes.is_empty());
             assert!(annotations.take_erased().is_empty());
+        }
+
+        #[test]
+        fn erasing_before_the_answer_does_not_misname_the_next_stroke() {
+            // §76.14: draw A, erase A before its commit is answered, draw B,
+            // then deliver both answers in the order they were sent. The
+            // document must end up with exactly B under B's id — not A's id
+            // stuck on B while A is orphaned in the file.
+            let mut annotations = Annotations::default();
+            assert!(annotations.begin_stroke((0.2, 0.2), WIDTH, RED));
+            let _ = annotations.end_stroke();
+            assert!(annotations.begin_erase((0.2, 0.2), 0.03));
+            assert!(
+                annotations.strokes.is_empty(),
+                "A is off the screen before it ever had a name"
+            );
+            assert!(
+                annotations.take_erased().is_empty(),
+                "A has no name yet, so nothing can be sent to delete it"
+            );
+            assert!(annotations.begin_stroke((0.6, 0.6), WIDTH, RED));
+            let _ = annotations.end_stroke();
+
+            // Answers arrive in commit order: A's, then B's.
+            annotations.name_stroke(named("a"));
+            annotations.name_stroke(named("b"));
+
+            assert_eq!(
+                annotations.take_erased(),
+                vec![named("a")],
+                "A's arriving name became an immediate delete"
+            );
+            assert_eq!(annotations.strokes.len(), 1);
+            assert_eq!(
+                annotations.strokes[0].id,
+                Some(named("b")),
+                "B kept its own name"
+            );
+            assert_eq!(annotations.strokes[0].points, vec![(0.6, 0.6)]);
         }
 
         #[test]
