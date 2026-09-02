@@ -3107,7 +3107,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
         list = list.push(theme::typography::note("No alarms set."));
     }
     for alarm in &controls.alarms {
-        let passed = alarm.at < crate::view::seconds_of_day();
+        let passed = alarm.at < app.last_seconds_of_day;
         list = list.push(
             row![
                 theme::typography::body(options.format_alarm(alarm.at))
@@ -4285,22 +4285,6 @@ fn editor_page(app: &App) -> Element<'_, Message> {
     designer_view::editor(designer, &context, app.compact_editor())
 }
 
-/// Seconds since local midnight, for the clock widget.
-///
-/// §76.13: this used to cache a UTC offset primed once from a `date +%z`
-/// subprocess, which is a shell builtin (so it fails outright) on Windows,
-/// and which never refreshed across a DST change during a session.
-/// `chrono::Local` reads the platform timezone database directly and
-/// re-derives the offset on every call, so both problems are gone at the
-/// same time. This is still a view module reading a clock — the right home
-/// for the read is `App`, which already threads other timestamps into the
-/// view; hoisting it there is deferred to a later phase and is not part of
-/// this fix.
-pub fn seconds_of_day() -> u32 {
-    use chrono::Timelike;
-    chrono::Local::now().num_seconds_from_midnight()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4398,11 +4382,6 @@ mod tests {
             best,
             "the two tables should be as balanced as whole groups allow"
         );
-    }
-
-    #[test]
-    fn the_clock_is_within_a_day() {
-        assert!(seconds_of_day() < 86_400);
     }
 }
 
