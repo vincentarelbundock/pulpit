@@ -1715,7 +1715,13 @@ impl ReaderSession {
             // still in flight behind this one. Commits are answered in
             // order, so the oldest `count` unstamped marks are always this
             // answer's, regardless of what its effects did or did not name.
-            let count = self.pending_stamp_counts.pop_front().unwrap_or(0);
+            // Only a commit pushes a count (`retain_commit`), so only a commit.s
+            // answer may pop one: an undo or redo answered ahead of a stroke
+            // must not consume the stroke.s entry.
+            let count = match kind {
+                AppliedKind::Edit => self.pending_stamp_counts.pop_front().unwrap_or(0),
+                AppliedKind::Undo | AppliedKind::Redo => 0,
+            };
             for mark in self
                 .retained
                 .iter_mut()
