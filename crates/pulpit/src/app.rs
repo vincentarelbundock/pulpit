@@ -2192,8 +2192,7 @@ impl App {
             designer: None,
             layout_dialog: None,
             cache: FrameCache::new(
-                cache_budget_override
-                    .unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
+                cache_budget_override.unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
             ),
             handles: std::collections::HashMap::new(),
             color_mode: crate::page_colors::ColorMode::default(),
@@ -6511,7 +6510,7 @@ impl App {
                     );
                     self.state.apply(Nav::SetNotesMapping(mapping), self.now);
                 }
-                let actions = self.documents.on_candidate_opened(info);
+                let actions = self.documents.on_candidate_opened(info, self.now);
                 let _ = self.run_document_actions(actions);
             }
             RenderEvent::OpenFailed { document, reason } => {
@@ -6852,14 +6851,6 @@ impl App {
                     if let Some(supervisor) = self.supervisor.as_mut() {
                         supervisor.open(document.0, &path.to_string_lossy());
                     }
-                }
-                DocAction::RenderFirstFrame { info, .. } => {
-                    // Promotion is immediate here because the state machine
-                    // already validated the candidate; the audience frame is
-                    // requested below and the previous frame stays visible
-                    // until it lands.
-                    let promoted = self.documents.on_first_frame(info);
-                    let _ = self.run_document_actions(promoted);
                 }
                 DocAction::Promote { info } => {
                     tracing::info!(path = %info.path.display(), pages = info.pdf_pages, "promoted document");
