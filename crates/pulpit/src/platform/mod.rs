@@ -116,6 +116,10 @@ impl Outcome {
 /// snapshot that needs the answer more than once (`cups::available` is asked
 /// twice building a Linux or macOS snapshot) SHOULD call this once and reuse
 /// the `bool`, rather than calling it — or `cups::available` — again.
+///
+/// Unix only: both callers are `#[cfg(unix)]`, and a `$PATH` walk is not how
+/// Windows answers the question.
+#[cfg(unix)]
 pub fn which(program: &str) -> bool {
     std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).any(|directory| directory.join(program).is_file()))
