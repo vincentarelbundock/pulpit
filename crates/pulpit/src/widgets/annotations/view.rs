@@ -326,11 +326,7 @@ fn overflow_control<Message: Clone + 'static>(
     let mut trigger = button(theme::icon::icon(theme::Icon::Ellipsis, size * 0.65))
         .padding(size * 0.18)
         .height(Length::Fixed(size))
-        .style(if overflow_open {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .style(theme::ambient::toggle_button(overflow_open));
     if mode.interactive() {
         trigger = trigger.on_press(on(WidgetEvent::Annotate(AnnotationCommand::OpenOverflow(
             !overflow_open,
@@ -360,22 +356,19 @@ fn overflow_control<Message: Clone + 'static>(
             } else {
                 tool
             };
-            let (red, green, blue) = colour_of(armable, options).rgb();
-            crate::vendor::iced_aw::ColorPicker::new(
-                true,
-                iced::Color::from_rgb(red, green, blue),
+            crate::widgets::common::color::wheel(
                 trigger,
+                true,
+                colour_of(armable, options),
                 on(WidgetEvent::Annotate(AnnotationCommand::OpenColorWheel(
                     None,
                 ))),
-                move |colour| {
+                move |ink| {
                     on(WidgetEvent::Annotate(AnnotationCommand::SetColor(
-                        armable,
-                        InkColor::from_rgb(colour.r, colour.g, colour.b),
+                        armable, ink,
                     )))
                 },
             )
-            .into()
         }
         _ => trigger,
     };
@@ -386,6 +379,46 @@ fn overflow_control<Message: Clone + 'static>(
             false,
         ))))
         .into()
+}
+
+/// One row of the overflow menu: an icon, a label, filling the row, styled
+/// selected or not — the shape `Slot::Tool` and `Slot::Command` both draw
+/// (§80.10).
+fn menu_item<'a, Message: Clone + 'a>(
+    icon: Element<'a, Message>,
+    label: &str,
+    selected: bool,
+    on_press: Option<Message>,
+) -> iced::widget::Button<'a, Message> {
+    let mut item = button(
+        row![
+            icon,
+            text(label.to_string()).size(theme::type_scale::CAPTION)
+        ]
+        .spacing(theme::space::S)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(theme::controls::TOOLBAR_BUTTON)
+    .style(theme::ambient::toggle_button(selected));
+    if let Some(message) = on_press {
+        item = item.on_press(message);
+    }
+    item
+}
+
+/// The small chevron that opens a control's options, in the overflow menu.
+fn options_arrow<Message: Clone + 'static>(
+    size: f32,
+    on_press: Option<Message>,
+) -> iced::widget::Button<'static, Message> {
+    let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, size))
+        .padding(theme::space::XS)
+        .style(theme::ambient::tool_button);
+    if let Some(message) = on_press {
+        arrow = arrow.on_press(message);
+    }
+    arrow
 }
 
 fn overflow_menu<Message: Clone + 'static>(
@@ -416,30 +449,19 @@ fn overflow_menu<Message: Clone + 'static>(
                 command,
             } => {
                 let icon = armable_tool_glyph(armable, options, glyph);
-                let mut arm = button(
-                    row![icon, text(armable.label()).size(theme::type_scale::CAPTION)]
-                        .spacing(theme::space::S)
-                        .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding(Padding::from([4.0, theme::space::S]))
-                .style(if selected {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
+                let arm_press = mode
+                    .interactive()
+                    .then(|| on(WidgetEvent::Annotate(command)));
+                let arm = menu_item(icon, armable.label(), selected, arm_press);
                 // The options open *inside* the menu rather than in a second
                 // popover over it: a panel hanging off a panel is hard to
                 // dismiss, and this one is already a list with room in it.
-                let mut arrow = button(theme::icon::icon(theme::Icon::ChevronDown, glyph))
-                    .padding(theme::space::XS)
-                    .style(theme::ambient::tool_button);
-                if mode.interactive() {
-                    arm = arm.on_press(on(WidgetEvent::Annotate(command)));
-                    arrow = arrow.on_press(on(WidgetEvent::Annotate(
-                        AnnotationCommand::OpenOptions((open != Some(tool)).then_some(tool)),
-                    )));
-                }
+                let arrow_press = mode.interactive().then(|| {
+                    on(WidgetEvent::Annotate(AnnotationCommand::OpenOptions(
+                        (open != Some(tool)).then_some(tool),
+                    )))
+                });
+                let arrow = options_arrow(glyph, arrow_press);
                 menu = menu.push(
                     row![arm, arrow]
                         .spacing(theme::space::XS)
@@ -456,24 +478,9 @@ fn overflow_menu<Message: Clone + 'static>(
                 selected,
                 enabled,
             } => {
-                let mut item = button(
-                    row![
-                        theme::icon::icon(icon, glyph),
-                        text(label).size(theme::type_scale::CAPTION),
-                    ]
-                    .spacing(theme::space::S)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding(Padding::from([4.0, theme::space::S]))
-                .style(if selected {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
-                if mode.interactive() && enabled {
-                    item = item.on_press(on(WidgetEvent::Annotate(command)));
-                }
+                let press =
+                    (mode.interactive() && enabled).then(|| on(WidgetEvent::Annotate(command)));
+                let item = menu_item(theme::icon::icon(icon, glyph), label, selected, press);
                 menu = menu.push(item);
             }
         }
@@ -510,11 +517,7 @@ fn tool_control<Message: Clone + 'static>(
     let mut main = button(icon)
         .padding(Padding::from([size * 0.12, size * 0.2]))
         .height(Length::Fixed(size))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .style(theme::ambient::toggle_button(selected));
     if mode.interactive() {
         main = main.on_press(on(WidgetEvent::Annotate(command)));
     }
@@ -706,12 +709,8 @@ fn options_panel<Message: Clone + 'static>(
                 .spacing(theme::space::XS)
                 .align_y(Alignment::Center),
             )
-            .padding(Padding::from([4.0, theme::space::S]))
-            .style(if chosen {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            });
+            .padding(theme::controls::TOOLBAR_BUTTON)
+            .style(theme::ambient::toggle_button(chosen));
             if mode.interactive() {
                 choice = choice.on_press(on(WidgetEvent::Annotate(
                     AnnotationCommand::SetPointerSpotlight(spotlight),
@@ -733,12 +732,8 @@ fn options_panel<Message: Clone + 'static>(
             // choices wide and the words made it read as three commands. The
             // tooltip carries the word instead.
             let mut choice = button(theme::icon::icon(glyph, theme::type_scale::BODY))
-                .padding(Padding::from([4.0, theme::space::S]))
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
+                .padding(theme::controls::TOOLBAR_BUTTON)
+                .style(theme::ambient::toggle_button(chosen));
             if mode.interactive() {
                 choice = choice.on_press(on(WidgetEvent::Annotate(
                     AnnotationCommand::SetSelectKind(kind),
@@ -759,12 +754,8 @@ fn options_panel<Message: Clone + 'static>(
             let glyph = crate::widgets::common::view::markup_kind_glyph(kind);
             let chosen = options.markup_kind == kind;
             let mut choice = button(theme::icon::icon(glyph, theme::type_scale::BODY))
-                .padding(Padding::from([4.0, theme::space::S]))
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                });
+                .padding(theme::controls::TOOLBAR_BUTTON)
+                .style(theme::ambient::toggle_button(chosen));
             if mode.interactive() {
                 choice = choice.on_press(on(WidgetEvent::Annotate(
                     AnnotationCommand::SetMarkupKind(kind),
@@ -936,11 +927,7 @@ fn control<Message: Clone + 'static>(
     let mut control = button(icon)
         .padding(size * 0.18)
         .height(Length::Fixed(size))
-        .style(if selected {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .style(theme::ambient::toggle_button(selected));
     if mode.interactive() && enabled {
         control = control.on_press(on(WidgetEvent::Annotate(command)));
     }
