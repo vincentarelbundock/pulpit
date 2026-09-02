@@ -175,11 +175,15 @@ impl PdfBackend for RoutingBackend {
                 reason: message.to_string(),
             });
         }
-        self.next_id += 1;
-        let outer = BackendDocumentId(self.next_id);
         // A directory source — or a bare image file, which resolves to one —
         // is an image document; a `.djvu` goes to djvulibre; everything else
         // is a PDF (§45.2, §56.1).
+        //
+        // The id is minted *after* the inner open succeeds (§77.8): every
+        // `?` below can fail a source that never becomes a document, and an
+        // id minted ahead of that would be burned on every such refusal —
+        // consumed, routed nowhere, and never reused — for no reason a
+        // caller can see.
         let route = if resolve_source(source).is_some() {
             Route::Images(self.images.open(source)?)
         } else if crate::djvu::is_djvu(source) {
@@ -195,6 +199,8 @@ impl PdfBackend for RoutingBackend {
             let pdf = self.pdf.as_mut().expect("just bound");
             Route::Pdf(pdf.open(source)?)
         };
+        self.next_id += 1;
+        let outer = BackendDocumentId(self.next_id);
         self.routes.insert(outer.0, route);
         Ok(outer)
     }
@@ -419,6 +425,32 @@ mod tests {
         assert!(router.open(Path::new("/decks/talk.pdf")).is_err());
         let folder = router.open(dir.path()).unwrap();
         assert_eq!(router.metadata(folder).unwrap().page_count, 1);
+    }
+
+    /// §77.8: the router used to mint its own id *before* routing to the
+    /// inner backend, so a refused open still burned one — consumed,
+    /// unreachable, never reused. This checks the id sequence stays dense
+    /// across a run of refusals, which is only true once the id is minted
+    /// after the inner open has actually succeeded.
+    #[test]
+    fn a_refused_open_does_not_burn_a_document_id() {
+        let binds = Arc::new(AtomicUsize::new(0));
+        let mut router = router(binds);
+
+        for _ in 0..5 {
+            assert!(
+                router.open(Path::new("fixture:unreadable")).is_err(),
+                "the fixture must actually refuse this open"
+            );
+        }
+        let first = router.open(Path::new("fixture:pages=1")).unwrap();
+        assert_eq!(
+            first,
+            BackendDocumentId(1),
+            "five refused opens must not have consumed five ids"
+        );
+        let second = router.open(Path::new("fixture:pages=1")).unwrap();
+        assert_eq!(second, BackendDocumentId(2));
     }
 
     /// A router whose DjVu route is a stand-in, so the routing itself can be
