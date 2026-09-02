@@ -538,9 +538,28 @@ fn a_finished_frame_rings_the_doorbell() {
     // Opening is itself something a worker answers, and that answer rings:
     // every worker message is one, not only a frame. Settle those first, so
     // what the frame does is what this test is measuring.
-    while wakeup.wait(Duration::from_millis(200)) == Wakeup::Ring {
-        supervisor.pump();
-    }
+    let opening = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, RenderEvent::Opened(_)))
+    });
+    assert!(
+        opening
+            .iter()
+            .any(|event| matches!(event, RenderEvent::Opened(_))),
+        "the fixture document opened: {opening:?}"
+    );
+    // The reader queues a response before it rings. On Windows it can be
+    // preempted between those operations, so pumping until the queue looks
+    // empty can observe `Opened` just before its ring lands. Once `Opened`
+    // has arrived, consume the coalesced opening ring explicitly: it is the
+    // last response to `Open`, hence no timing-based quiet period is needed.
+    assert_eq!(
+        wakeup.wait(Duration::from_secs(10)),
+        Wakeup::Ring,
+        "the opening response announced itself"
+    );
+    supervisor.pump();
     assert_eq!(
         wakeup.wait(Duration::from_millis(100)),
         Wakeup::Idle,
