@@ -552,13 +552,7 @@ impl Placement {
 
 /// The engine's name for a page's `/Rotate`, which it cannot read for itself.
 fn appearance_rotation(rotation: PageRotation) -> pulpit_render::sign::AppearanceRotation {
-    use pulpit_render::sign::AppearanceRotation;
-    match rotation {
-        PageRotation::None => AppearanceRotation::None,
-        PageRotation::Clockwise90 => AppearanceRotation::Cw90,
-        PageRotation::Clockwise180 => AppearanceRotation::Cw180,
-        PageRotation::Clockwise270 => AppearanceRotation::Cw270,
-    }
+    rotation.into()
 }
 
 /// The `CN=` component of a subject distinguished name, or the whole string

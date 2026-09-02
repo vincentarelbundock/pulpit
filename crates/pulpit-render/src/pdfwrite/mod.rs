@@ -8,7 +8,6 @@
 //! - Byte-range placeholder writing and back-patching (§23.2-23.4)
 //! - Incremental update writing (§24)
 //! - Dictionary and object serialization (§25.1-25.3)
-//! - Typestate machine for split signing (§29)
 //!
 //! The module MUST NOT depend on the `sign` module, PDFium, or any crypto crates.
 
@@ -69,15 +68,6 @@ impl PlaceholderOffsets {
     }
 }
 
-/// The spans that must be hashed to produce the document digest.
-#[derive(Debug, Clone)]
-pub struct DigestSpans {
-    /// First span: from start of file to sig_start
-    pub first_end: u64,
-    /// Second span: from sig_end to end of file
-    pub second_start: u64,
-}
-
 /// After the document has been completely written to a stream.
 #[derive(Debug)]
 pub struct BackPatchContext {
@@ -87,17 +77,11 @@ pub struct BackPatchContext {
 }
 
 impl BackPatchContext {
-    /// Compute the digest spans: [0..sig_start) and [sig_end..eof)
-    pub fn digest_spans(&self, _eof: u64) -> DigestSpans {
-        DigestSpans {
-            first_end: self.sig_start,
-            second_start: self.sig_end,
-        }
-    }
-
-    /// Back-patch the /ByteRange with the actual offsets.
-    /// Returns the two spans to be hashed.
-    pub fn finish<W: Write + Seek>(&self, eof: u64, output: &mut W) -> Result<DigestSpans> {
+    /// Back-patch the `/ByteRange` with the actual offsets. The two spans a
+    /// caller must hash to produce the document digest are `[0..sig_start)`
+    /// and `[sig_end..eof)`, which it already has from the offsets it built
+    /// this context with.
+    pub fn finish<W: Write + Seek>(&self, eof: u64, output: &mut W) -> Result<()> {
         // Seek to the ByteRange offset
         output
             .seek(SeekFrom::Start(self.byterange_start))
@@ -125,78 +109,8 @@ impl BackPatchContext {
             output.write_all(b" ").map_err(PdfWriteError::Io)?;
         }
 
-        Ok(self.digest_spans(eof))
+        Ok(())
     }
-}
-
-/// Emit /ByteRange and /Contents placeholders.
-/// Returns the offsets for back-patching later.
-pub fn emit_placeholders<W: Write + Seek>(
-    writer: &mut W,
-    bytes_reserved: usize,
-) -> Result<PlaceholderOffsets> {
-    // Validate bytes_reserved is even
-    if !bytes_reserved.is_multiple_of(2) {
-        return Err(PdfWriteError::OddReservationSize(bytes_reserved));
-    }
-
-    // Emit /ByteRange placeholder: [] + 60 spaces = 62 bytes
-    let byterange_start = current_position(writer)?;
-    writer.write_all(b"[]").map_err(PdfWriteError::Io)?;
-    writer.write_all(&[b' '; 60]).map_err(PdfWriteError::Io)?;
-
-    // Emit /Contents placeholder: < + bytes_reserved 0s + >
-    let sig_start = current_position(writer)?;
-    writer.write_all(b"<").map_err(PdfWriteError::Io)?;
-    for _ in 0..bytes_reserved {
-        writer.write_all(b"0").map_err(PdfWriteError::Io)?;
-    }
-    writer.write_all(b">").map_err(PdfWriteError::Io)?;
-    let sig_end = current_position(writer)?;
-
-    Ok(PlaceholderOffsets {
-        byterange_start,
-        sig_start,
-        sig_end,
-        bytes_reserved,
-    })
-}
-
-/// Get current position in a writer. Requires seeking.
-fn current_position<W: Write + Seek>(writer: &mut W) -> Result<u64> {
-    writer.stream_position().map_err(PdfWriteError::Io)
-}
-
-/// Fill the /Contents reservation with hex-encoded signature bytes.
-pub fn fill_signature_reservation<W: Write + Seek>(
-    writer: &mut W,
-    offsets: &PlaceholderOffsets,
-    cms_bytes: &[u8],
-) -> Result<()> {
-    // Validate the offsets
-    offsets.validate()?;
-
-    let bytes_reserved = offsets.sig_end as usize - offsets.sig_start as usize - 2; // -2 for < and >
-    let hex_needed = cms_bytes.len() * 2;
-
-    if hex_needed > bytes_reserved {
-        return Err(PdfWriteError::SignatureTooLarge {
-            required: hex_needed,
-            reserved: bytes_reserved,
-        });
-    }
-
-    // Seek to just after the <
-    writer
-        .seek(SeekFrom::Start(offsets.sig_start + 1))
-        .map_err(PdfWriteError::Io)?;
-
-    // Write uppercase hex
-    for byte in cms_bytes {
-        write!(writer, "{:02X}", byte).map_err(PdfWriteError::Io)?;
-    }
-
-    Ok(())
 }
 
 /// Minimal PDF object representation for writing, using deterministic ordering.
@@ -540,83 +454,6 @@ impl<'a> PdfTokenizer<'a> {
     }
 }
 
-/// Typestate machine for split signing: preparation → digest → signing.
-pub struct SigningSession;
-
-impl SigningSession {
-    /// Create a new signing session.
-    pub fn new() -> Self {
-        SigningSession
-    }
-
-    /// Prepare the document: write signature dictionaries and placeholders.
-    pub fn prepare_tbs<W: Write + Seek>(
-        self,
-        writer: &mut W,
-        bytes_reserved: usize,
-    ) -> Result<TbsDocument> {
-        // Emit placeholders
-        let offsets = emit_placeholders(writer, bytes_reserved)?;
-
-        Ok(TbsDocument { offsets })
-    }
-}
-
-impl Default for SigningSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Document prepared for digest computation: ready to hash the byte ranges.
-pub struct TbsDocument {
-    offsets: PlaceholderOffsets,
-}
-
-impl TbsDocument {
-    /// Consume this document and return the digest spans and context for back-patching.
-    /// Caller is responsible for hashing the two spans.
-    pub fn digest(self, eof: u64) -> Result<PreparedByteRangeDigest> {
-        self.offsets.validate()?;
-        Ok(PreparedByteRangeDigest {
-            offsets: self.offsets,
-            eof,
-        })
-    }
-}
-
-/// Result of the digest operation: the byte spans to hash and context for finalization.
-pub struct PreparedByteRangeDigest {
-    offsets: PlaceholderOffsets,
-    eof: u64,
-}
-
-impl PreparedByteRangeDigest {
-    /// Get the two byte ranges that must be hashed to produce the document digest.
-    pub fn digest_spans(&self) -> DigestSpans {
-        DigestSpans {
-            first_end: self.offsets.sig_start,
-            second_start: self.offsets.sig_end,
-        }
-    }
-
-    /// Resume signing: fill the signature and back-patch the ByteRange.
-    pub fn resume<W: Write + Seek>(self, writer: &mut W, cms_bytes: &[u8]) -> Result<()> {
-        // Fill the signature reservation
-        fill_signature_reservation(writer, &self.offsets, cms_bytes)?;
-
-        // Back-patch the ByteRange
-        let ctx = BackPatchContext {
-            byterange_start: self.offsets.byterange_start,
-            sig_start: self.offsets.sig_start,
-            sig_end: self.offsets.sig_end,
-        };
-        ctx.finish(self.eof, writer)?;
-
-        Ok(())
-    }
-}
-
 /// Incremental update writer for appending to existing PDFs.
 ///
 /// §78.3: borrows the source rather than copying it. `open` used to take
@@ -762,12 +599,20 @@ impl<'a> IncrementalWriter<'a> {
     /// Append multiple objects and finalize the PDF with proper xref.
     /// objects: slice of (obj_num, gen_num, PdfObject) tuples
     /// new_id2: 16 bytes for new /ID second element
+    ///
+    /// Returns each object's `(obj_num, gen_num, offset)`, `offset` being
+    /// where its `"{obj_num} {gen_num} obj"` header starts in `writer`, in
+    /// the same order as `objects`. A caller that needs to find a byte range
+    /// inside one of the objects it just wrote — the signature reservation,
+    /// say — computes it from the object's own known layout starting at that
+    /// offset, rather than searching the appended bytes for a literal that
+    /// untrusted content elsewhere in the same revision could also contain.
     pub fn append_objects<W: Write + Seek>(
         self,
         writer: &mut W,
         objects: &[(u32, u16, PdfObject)],
         new_id2: &[u8; 16],
-    ) -> Result<()> {
+    ) -> Result<Vec<(u32, u16, u64)>> {
         // Write the original bytes
         writer
             .write_all(self.original_bytes)
@@ -808,7 +653,7 @@ impl<'a> IncrementalWriter<'a> {
                     std::cmp::max(self.next_object_number, one_past_highest(objects)?);
                 self.write_xref_stream(writer, &obj_offsets, xref_stream_obj_num, new_id2)?;
                 // Return early; xref stream writing handles trailer and startxref
-                return Ok(());
+                return Ok(obj_offsets);
             }
         }
 
@@ -833,7 +678,7 @@ impl<'a> IncrementalWriter<'a> {
         writeln!(writer, "{}", xref_offset).map_err(PdfWriteError::Io)?;
         writeln!(writer, "%%EOF").map_err(PdfWriteError::Io)?;
 
-        Ok(())
+        Ok(obj_offsets)
     }
 
     /// The `/ID` entry an incremental update carries: the file's first
@@ -1283,32 +1128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_signature_too_large() {
-        let cms_bytes = vec![0u8; 200];
-        let offsets = PlaceholderOffsets {
-            byterange_start: 100,
-            sig_start: 100,
-            sig_end: 150,
-            bytes_reserved: 48,
-        };
-        let mut buffer = io::Cursor::new(vec![0u8; 1000]);
-        let result = fill_signature_reservation(&mut buffer, &offsets, &cms_bytes);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_digest_spans() {
-        let ctx = BackPatchContext {
-            byterange_start: 100,
-            sig_start: 200,
-            sig_end: 300,
-        };
-        let spans = ctx.digest_spans(500);
-        assert_eq!(spans.first_end, 200);
-        assert_eq!(spans.second_start, 300);
-    }
-
-    #[test]
     fn test_byterange_overflow() {
         let ctx = BackPatchContext {
             byterange_start: 100,
@@ -1499,9 +1318,7 @@ mod tests {
             sig_end: 300,
         };
 
-        let spans = ctx.finish(400, &mut buffer).unwrap();
-        assert_eq!(spans.first_end, 200);
-        assert_eq!(spans.second_start, 300);
+        ctx.finish(400, &mut buffer).unwrap();
 
         buffer.seek(SeekFrom::Start(100)).unwrap();
         let mut content = vec![0u8; 62];
@@ -1509,31 +1326,6 @@ mod tests {
 
         let content_str = String::from_utf8_lossy(&content);
         assert!(content_str.starts_with("[0 200 300 100]"));
-    }
-
-    #[test]
-    fn test_emit_placeholders() {
-        let mut buffer = io::Cursor::new(Vec::new());
-        let offsets = emit_placeholders(&mut buffer, 256).unwrap();
-
-        offsets.validate().unwrap();
-        assert_eq!(offsets.bytes_reserved, 256);
-
-        let written = buffer.into_inner();
-        let expected_len = 2 + 60 + 1 + 256 + 1;
-        assert_eq!(written.len(), expected_len);
-    }
-
-    #[test]
-    fn test_typing_session() {
-        let mut buffer = io::Cursor::new(Vec::new());
-        let session = SigningSession::new();
-        let tbs = session.prepare_tbs(&mut buffer, 256).unwrap();
-
-        let prepared = tbs.digest(1000).unwrap();
-        let spans = prepared.digest_spans();
-        assert_eq!(spans.first_end, 62);
-        assert_eq!(spans.second_start, 62 + 1 + 256 + 1);
     }
 
     /// A hybrid-reference file must be refused *for being hybrid*.
