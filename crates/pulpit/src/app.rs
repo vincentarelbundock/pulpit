@@ -178,6 +178,15 @@ pub enum Message {
     /// The Sign dialog (SPEC-signing.md §31.1); grouped the way `Timer` and
     /// `Read` already group their own popups' messages.
     Sign(crate::signing::SignMsg),
+    /// §82.8: `sign_open_destination_picker`'s read of the source and its two
+    /// preflight parses have finished, off the event loop. Not folded into
+    /// `SignMsg` (defined outside this file's ownership for this pass) —
+    /// this is `App`'s own message, the way `BookmarkAdded` and the rest of
+    /// `App::deferred`'s payloads are.
+    SignCandidatesReady(
+        std::sync::Arc<pulpit_render::sign::Credential>,
+        SignTargetCandidates,
+    ),
     /// The reader accepted or declined the append-only offer (§31.3, A9).
     AcceptAppendOnly,
     EditAnyway,
@@ -226,6 +235,12 @@ pub enum Message {
     /// panel's frame must be. Re-read on every resize: moving a window to
     /// another display changes it.
     PresenterScale(f32),
+    /// The audience window's physical-pixel ratio, asked for on open and
+    /// re-read on every resize exactly as `PresenterScale` is: a 2× projector
+    /// otherwise gets an "exact output-sized" frame rendered at half
+    /// resolution and upscaled, which is the case this project exists to get
+    /// right.
+    AudienceScale(f32),
     SetMapping(NotesMapping),
     /// The left mouse button came up, anywhere. Ends a slider drag.
     PointerReleased,
@@ -377,6 +392,30 @@ pub enum Message {
     Transport(crate::widgets::event::TransportRequest),
     /// Something the reader asked of the open document.
     Read(crate::widgets::event::ReadCommand),
+    /// A bookmark the presenter just added has been confirmed by the
+    /// document worker: the ordinal names the row to reveal and open for
+    /// renaming. §79.1: this used to be parked in a field (`bookmark_added`)
+    /// because the reader pump that learned of it could not return a `Task`;
+    /// pushed to `App::deferred` and drained in `update` instead.
+    BookmarkAdded(usize),
+    /// The copy a marked-up print is spooled from has landed and this
+    /// document is still the one it was made from — see [`Message::WriteFormClipboard`]
+    /// for why the distinction matters.
+    SpoolPrint(PathBuf, crate::printing::PrintPlan),
+    /// The search input should take focus and select its contents, once the
+    /// view pass that mounts it has run.
+    FocusSearchInput,
+    /// A field's selection, copied out and on its way to the clipboard.
+    /// Distinct from [`Message::WriteAreaClipboard`] only in that a document
+    /// close cancels this one — the copy came from a field of the document
+    /// being put down — and leaves an area capture alone.
+    WriteFormClipboard(String),
+    /// The text a select band covered, on its way to the clipboard.
+    WriteAreaClipboard(String),
+    /// A Save As that stopped to let a field commit, or a print that did the
+    /// same: the commit has landed, so the review or the print dialog goes
+    /// on from here.
+    ResumeAfterFormCommit(AfterFormCommit),
     /// Something asked of the search pane, in whatever view it is placed.
     Find(crate::widgets::event::FindCommand),
     Panel(crate::widgets::event::PanelCommand),
@@ -1185,9 +1224,6 @@ pub struct App {
     /// Paired with the field it was typed in, so the removal half of a cut
     /// cannot be addressed to a field the caret has since moved to.
     pub form_clipboard: Option<(FormClipboard, Option<FormFocus>)>,
-    /// A field's selection, copied and waiting for a tick to write it out.
-    /// The worker pump that receives it has no `Task` to hand back.
-    pub form_clipboard_text: Option<String>,
     /// The required-and-empty fields found when a save was asked for, while
     /// the reader decides what to do about them.
     ///
@@ -1268,9 +1304,6 @@ pub struct App {
     /// only then go on. Writing first would put a file on disk, or paper in
     /// a tray, without the characters the reader can see.
     waits_for_form_commit: Option<AfterFormCommit>,
-    /// The commit came back and it can go on. Held rather than run: the
-    /// worker pump has no `Task` to hand back, so the next tick starts it.
-    resume_after_form_commit: Option<AfterFormCommit>,
     /// The print dialog, while it is open.
     pub print_dialog: Option<crate::printing::PrintDialog>,
     /// The scratch copy a marked-up print is being spooled from, while the
@@ -1284,12 +1317,6 @@ pub struct App {
     /// looking at, or a spooler reading the file. Nothing else may print
     /// while it is set.
     pub print_in_flight: bool,
-    /// A scratch copy that has landed and now has to be spooled.
-    ///
-    /// The reader pump has no `Task` to return — spooling is one now, since
-    /// it leaves the event loop — so the write is picked up on the next
-    /// tick, the way the Sign flow picks its own save up.
-    print_spool_pending: Option<(PathBuf, crate::printing::PrintPlan)>,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -1336,9 +1363,6 @@ pub struct App {
     /// a state this reports, not a reason to be absent, and the settings page
     /// needs it to say why and to offer the download.
     pub speech: crate::speech::Speech,
-    /// A page turn speech asked for, run by the next tick — which can carry
-    /// the iced task the turn needs, where speech's own callers cannot.
-    speech_nav: Option<pulpit_core::page::PageIndex>,
     /// Which language's voices are open in the settings list. One at a time:
     /// forty-six expanded groups is a list nobody can find anything in.
     pub expanded_speech_language: Option<pulpit_core::speech::LanguageTag>,
@@ -1374,6 +1398,11 @@ pub struct App {
     /// for, never assumed: it decides how wide a panel's frame has to be to
     /// look sharp, and guessing high is four times the pixels for nothing.
     presenter_scale: f32,
+    /// Physical pixels per logical pixel on the audience window's display,
+    /// asked for the same way `presenter_scale` is. Until the window reports
+    /// otherwise this stays `1.0`, which is only ever wrong on a scaled
+    /// display and only until the first answer arrives.
+    audience_scale: f32,
     pub now: Instant,
     watcher: Option<DocumentWatcher>,
     file_wakeup: Option<std::sync::Arc<crate::doc::watcher::FileWakeup>>,
@@ -1397,11 +1426,6 @@ pub struct App {
     /// what turns a rail row's flattened ordinal back into the tree path a
     /// [`pulpit_core::navigation::BookmarkCommand`] carries.
     reader_outline: pulpit_core::navigation::Outline,
-    /// The flattened ordinal of a bookmark the presenter just added, confirmed
-    /// by the worker and waiting for the tick's `Task`s to reveal its rail row
-    /// and open its title for editing. The pump that learns of it cannot
-    /// return a `Task`, so it parks the row here, like `sign_resume_pending`.
-    bookmark_added: Option<usize>,
     /// What the open document declares that pulpit will flatten or ignore.
     pub capabilities: std::collections::HashMap<u64, pulpit_render::DocumentCapabilities>,
     /// Overlay declarations, staging and the frames they produce.
@@ -1556,9 +1580,6 @@ pub struct App {
     /// two images racing to the clipboard would leave whichever finished last
     /// there, which is not the one they asked for.
     area_copy: Option<AreaCopy>,
-    /// Text a select band covered, on its way to the clipboard. Held here
-    /// because the answer arrives in the pump, which has no `Task` to return.
-    area_clipboard_text: Option<String>,
     /// The generation and page count the warming plan was made for.
     thumbnail_plan: Option<(pulpit_core::RenderGeneration, usize)>,
     /// The one width this document's thumbnails are rendered at, chosen when
@@ -1625,6 +1646,30 @@ pub struct App {
     /// is throttled to the tick rather than done per keystroke.
     settings_dirty: bool,
     settings_throttle: crate::session::SaveThrottle,
+    /// `PULPIT_CACHE_BUDGET_MIB`, read once in `new` rather than by
+    /// `size_the_cache_for_what_is_mounted` on every `update` (§79.2): the
+    /// environment does not change mid-session, so re-reading it once a
+    /// keypress was pure cost for an answer that could not change.
+    cache_budget_override: Option<u64>,
+    /// The helper thread `flush_settings` last spawned, if it may still be
+    /// running. §77.6: `quit()` used to write settings synchronously without
+    /// waiting for this one, so a late flush could win the rename race
+    /// against the write that was supposed to be final. Joined in `quit()`
+    /// before the authoritative synchronous save.
+    settings_writer: Option<std::thread::JoinHandle<()>>,
+    /// The helper thread `save_session` last spawned, if it may still be
+    /// running. Joined in `quit()` before `self.session.clear()`, so a late
+    /// write cannot recreate the snapshot a clean exit is trying to remove.
+    session_writer: Option<std::thread::JoinHandle<()>>,
+    /// Messages raised from somewhere with no `Task` to return — a bool-
+    /// returning pump, an answer handler nested under another dispatch —
+    /// drained once in `update` right after `dispatch` (§79.1, §83.6). This
+    /// is what `speech_nav`, `bookmark_added`, `sign_resume_pending`,
+    /// `print_spool_pending`, `form_clipboard_text`, `area_clipboard_text`,
+    /// `resume_after_form_commit` and `search_focus_pending` used to be:
+    /// eight fields each parking one value for `on_tick` to notice by hand,
+    /// costing a tick of latency and an `is_live` clause apiece.
+    deferred: Vec<Message>,
     /// The newest pointer move bound for an overlay, held until the tick.
     /// Moves arrive at device rate and only the latest position matters;
     /// forwarding each one flooded the worker pipe and the CDP connection.
@@ -1653,14 +1698,6 @@ pub struct App {
     /// explicit because widget focus alone cannot describe a selected row in
     /// a virtualised sidebar.
     keyboard_region: KeyboardRegion,
-    /// Ctrl-F mounts the Search widget during the same update that receives
-    /// the key. Focus it on the following tick, after the new widget tree has
-    /// been drawn, rather than racing an input that does not exist yet.
-    search_focus_pending: bool,
-    /// A Sign flow parked at `SavingFirst` whose save has just landed. Set
-    /// from the reader pump, which cannot return the `Task` the save picker
-    /// needs, and drained on the next tick.
-    sign_resume_pending: bool,
     /// When §31.1 step 3's write began, for the panel that covers it.
     ///
     /// The write is usually over in a few milliseconds and occasionally takes
@@ -1904,7 +1941,8 @@ fn non_empty(value: &str) -> Option<String> {
 /// §31.3 countersign disclosure gates on the latter, not on the shape of
 /// whichever target ends up chosen (an existing empty field is now also
 /// offered on unsigned documents, so the two are no longer equivalent).
-struct SignTargetCandidates {
+#[derive(Debug, Clone)]
+pub(crate) struct SignTargetCandidates {
     candidates: Vec<crate::signing::TargetChoice>,
     countersigning: bool,
 }
@@ -1955,6 +1993,35 @@ fn sweep_stale_claims(directories: &crate::platform::Directories) {
     }
 }
 
+/// Remove reader snapshot directories (`reader_snapshot_directory`) left by
+/// copies of pulpit that are no longer running.
+///
+/// `quit()` removes this process's own directory directly; this is for every
+/// other one, left by a copy that crashed rather than went through `quit()`
+/// (§77.6). Swept by pid liveness rather than by age, unlike
+/// `sweep_stale_claims`: a snapshot directory is not a claim two starting
+/// copies could race over, so nothing is gained by waiting a week to remove
+/// what may be a private document.
+fn sweep_stale_reader_snapshots(directories: &crate::platform::Directories) {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("pulpit-reader-"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() || owner_is_live(directories, pid) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
 impl App {
     pub fn new(
         initial: Option<PathBuf>,
@@ -1965,6 +2032,10 @@ impl App {
         // `main` already loaded the settings to configure logging; they are
         // passed in rather than read and parsed a second time.
         let store = SettingsStore::default();
+        // §79.2: read once here rather than by `size_the_cache_for_what_is_mounted`
+        // on every `update` — a machine's environment does not change mid-session,
+        // so re-reading it once a keypress was pure cost.
+        let cache_budget_override = Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB");
 
         // The desktop, behind its contracts. Everything the views ask about
         // capabilities comes from this snapshot, never from an OS name.
@@ -2131,8 +2202,7 @@ impl App {
             designer: None,
             layout_dialog: None,
             cache: FrameCache::new(
-                Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB")
-                    .unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
+                cache_budget_override.unwrap_or(settings.rendering.cache_budget_mib * 1024 * 1024),
             ),
             handles: std::collections::HashMap::new(),
             color_mode: crate::page_colors::ColorMode::default(),
@@ -2186,7 +2256,6 @@ impl App {
             signature_profile_removal: None,
             pending_form_goto: None,
             form_clipboard: None,
-            form_clipboard_text: None,
             pending_save_review: None,
             signing: None,
             signing_profile: None,
@@ -2199,12 +2268,10 @@ impl App {
             signature_panel_open: false,
             signature_panel_expanded: None,
             waits_for_form_commit: None,
-            resume_after_form_commit: None,
             print_dialog: None,
             print_scratch: None,
             print_pending: None,
             print_in_flight: false,
-            print_spool_pending: None,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -2218,7 +2285,6 @@ impl App {
             platform,
             toasts: Toasts::new(),
             speech,
-            speech_nav: None,
             expanded_speech_language: None,
             menu_open: false,
             recent_menu_open: false,
@@ -2235,6 +2301,7 @@ impl App {
             // render is asked for.
             presenter_size: Size::new(1422.0, 800.0),
             presenter_scale: 1.0,
+            audience_scale: 1.0,
             now,
             watcher: None,
             file_wakeup: None,
@@ -2246,7 +2313,6 @@ impl App {
             document_survey_requested: std::collections::HashSet::new(),
             navigation: std::collections::HashMap::new(),
             reader_outline: pulpit_core::navigation::Outline::default(),
-            bookmark_added: None,
             capabilities: std::collections::HashMap::new(),
             media: crate::media::MediaCoordinator::new(),
             // Unprobed: probing runs the candidate browsers' `--version`,
@@ -2295,7 +2361,6 @@ impl App {
             pending_auto_crop: None,
             thumbnail_requests: std::collections::HashSet::new(),
             area_copy: None,
-            area_clipboard_text: None,
             thumbnail_plan: None,
             thumbnail_plan_width: THUMBNAIL_WIDTH,
             thumbnail_plan_inputs: None,
@@ -2315,13 +2380,15 @@ impl App {
             motion_probe,
             settings_dirty: false,
             settings_throttle: crate::session::SaveThrottle::default(),
+            settings_writer: None,
+            session_writer: None,
+            deferred: Vec::new(),
+            cache_budget_override,
             pending_pointer_move: None,
             scrub_anchor_cache: std::cell::RefCell::new(None),
             reader: crate::reader::ReaderSession::new(),
             search: pulpit_core::search::SearchState::new(),
             keyboard_region: KeyboardRegion::Document,
-            search_focus_pending: false,
-            sign_resume_pending: false,
             signing_saving_since: None,
             opening_signed_copy: None,
             signing_temp: None,
@@ -2511,8 +2578,10 @@ impl App {
 
     /// Drain speech events and download progress.
     fn poll_speech(&mut self) {
-        let settings = self.settings.speech.clone();
-        let outgoing = self.speech.poll(&settings);
+        // §82.4: a disjoint field borrow, not a clone — `self.speech` and
+        // `self.settings.speech` are different fields, and this runs on
+        // every tick.
+        let outgoing = self.speech.poll(&self.settings.speech);
         if !outgoing.is_empty() {
             self.apply_speech(outgoing);
         }
@@ -2581,8 +2650,9 @@ impl App {
                             } else {
                                 "this document has no text layer to read"
                             };
-                            let settings = self.settings.speech.clone();
-                            let stopped = self.speech.cannot_speak(reason.into(), &settings);
+                            let stopped = self
+                                .speech
+                                .cannot_speak(reason.into(), &self.settings.speech);
                             for action in stopped {
                                 if let Outgoing::Toast(message) = action {
                                     self.toasts.push(Intent::Info, message, None, self.now);
@@ -2607,8 +2677,7 @@ impl App {
                         .map(|document| document.pdf_pages)
                         .unwrap_or_else(|| self.state.slide_count());
                     if page.get() >= pages {
-                        let settings = self.settings.speech.clone();
-                        let finished = self.speech.no_such_page(page, &settings);
+                        let finished = self.speech.no_such_page(page, &self.settings.speech);
                         // One level deep only: `no_such_page` ends the
                         // reading, and an ended reading asks for nothing more.
                         for action in finished {
@@ -2629,7 +2698,9 @@ impl App {
                     // speech is live, picks this up and runs the task
                     // properly; one tick of latency is nothing against the
                     // synthesis gap a page turn already carries.
-                    self.speech_nav = Some(page);
+                    self.deferred.push(Message::Read(
+                        crate::widgets::event::ReadCommand::GoToPage(page),
+                    ));
                 }
                 Outgoing::Toast(message) => {
                     self.diagnostics.note(message.clone());
@@ -2671,9 +2742,13 @@ impl App {
             || self.timer_controls.overtime_since.is_some()
             || self.outline_rail.is_animating(self.now)
             || self.search_pane.is_animating(self.now)
-            || self.search_focus_pending
-            || self.sign_resume_pending
-            || self.print_spool_pending.is_some()
+            // The one entry in `self.deferred` that still waits on an actual
+            // tick rather than draining in the same `update` (§79.1) — see
+            // `Message::FocusSearchInput`.
+            || self
+                .deferred
+                .iter()
+                .any(|message| matches!(message, Message::FocusSearchInput))
             // The panel over §31.1 step 3's write appears on a deadline
             // measured in a fraction of a second; the settled tick would
             // overshoot it and show the sheet after the write it explains had
@@ -2821,7 +2896,30 @@ impl App {
         write_variant_name(&mut name, &message);
 
         let started = Instant::now();
-        let task = self.dispatch(message);
+        let mut task = self.dispatch(message);
+        // §79.1, §83.6: work that became possible while handling the message
+        // above — an answer nested under this dispatch that has no `Task` of
+        // its own to return — is queued in `self.deferred` rather than
+        // parked in a field for `on_tick` to notice a tick later. Drained
+        // once, here, so it runs in the same `update` that made it possible.
+        //
+        // `Message::FocusSearchInput` is the one exception, left queued for
+        // `on_tick` to drain instead: Ctrl-F mounts the search input in this
+        // same `update`, and focusing it here would race the widget tree
+        // `view` has not yet been asked to rebuild.
+        if self
+            .deferred
+            .iter()
+            .any(|message| !matches!(message, Message::FocusSearchInput))
+        {
+            let (wait_for_a_tick, ready): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred)
+                .into_iter()
+                .partition(|message| matches!(message, Message::FocusSearchInput));
+            self.deferred = wait_for_a_tick;
+            let mut batch = vec![task];
+            batch.extend(ready.into_iter().map(|message| self.dispatch(message)));
+            task = Task::batch(batch);
+        }
         // After every message, not per handler: annotations mutate from a
         // dozen places, and the view must never draw a stale snapshot.
         self.sync_annotation_layers();
@@ -3304,10 +3402,9 @@ impl App {
                     && self.watcher.as_ref().is_some_and(DocumentWatcher::drain)
                 {
                     let actions = self.documents.on_file_event(self.now);
-                    self.run_document_actions(actions)
-                } else {
-                    Task::none()
+                    self.run_document_actions(actions);
                 }
+                Task::none()
             }
             Message::TopologySnapshot(snapshot) => {
                 if snapshot.same_topology(&self.coordinator.snapshot) {
@@ -3522,7 +3619,9 @@ impl App {
                             Message::StartupProbes
                         }),
                     ]),
-                    Role::Audience => native,
+                    Role::Audience => {
+                        Task::batch([window::scale_factor(id).map(Message::AudienceScale), native])
+                    }
                 }
             }
             Message::NativeId { role, native } => {
@@ -3536,20 +3635,19 @@ impl App {
                 }
                 if Some(id) == self.audience_window {
                     self.audience_window = None;
-                    self.audience_started = false;
-                    self.presenter_refocus_deadlines.clear();
-                    self.coordinator.set_native(Role::Audience, None);
-                    *self.coordinator.window_state_mut(Role::Audience) = WindowState::default();
-                    self.coordinator
-                        .reconciler
-                        .note_windows(&self.coordinator.windows);
-                    self.inhibitor.release(self.platform.services.as_ref());
+                    self.audience_gone();
                 }
                 Task::none()
             }
             Message::Resized { id, size } => {
                 if Some(id) == self.audience_window {
                     self.audience_size = size;
+                    // A resize is also how the audience window arrives on a
+                    // display with a different pixel ratio, exactly as for
+                    // the presenter: re-read it rather than trust startup.
+                    let scale = window::scale_factor(id).map(Message::AudienceScale);
+                    self.request_renders();
+                    scale
                 } else {
                     self.presenter_size = size;
                     self.preview_size = Size::new(size.width * 0.45, size.height * 0.45);
@@ -3564,16 +3662,14 @@ impl App {
                             (size.width - 560.0).max(200.0),
                             (size.height - 120.0).max(200.0),
                         );
-                        let designer = self.update(Message::Designer(
+                        let designer = self.dispatch(Message::Designer(
                             crate::designer::Msg::CanvasResized(canvas),
                         ));
                         return Task::batch([scale, designer]);
                     }
                     self.request_renders();
-                    return scale;
+                    scale
                 }
-                self.request_renders();
-                Task::none()
             }
             Message::PresenterScale(scale) => {
                 if (self.presenter_scale - scale).abs() > f32::EPSILON {
@@ -3581,6 +3677,16 @@ impl App {
                     self.presenter_scale = scale;
                     // Every panel frame is now the wrong size by definition:
                     // ask for the right ones rather than upscale for ever.
+                    self.request_renders();
+                }
+                Task::none()
+            }
+            Message::AudienceScale(scale) => {
+                if (self.audience_scale - scale).abs() > f32::EPSILON {
+                    tracing::debug!(scale, "audience pixel ratio");
+                    self.audience_scale = scale;
+                    // Every audience frame is now the wrong size by
+                    // definition: ask for the exact ones rather than upscale.
                     self.request_renders();
                 }
                 Task::none()
@@ -3650,6 +3756,43 @@ impl App {
                 Task::none()
             }
             Message::Read(command) => self.on_read_command(command),
+            Message::BookmarkAdded(ordinal) => {
+                let id = crate::widgets::document::model::OutlineItemId::Bookmark {
+                    source_ordinal: ordinal,
+                };
+                if self.reader.focus_outline_item(id.clone())
+                    && self.reader.begin_bookmark_rename(ordinal)
+                {
+                    let mut tasks = Vec::new();
+                    if let Some(index) = self.reader.outline_index_of(&id) {
+                        tasks.push(self.reveal_outline_selection(
+                            index,
+                            crate::widgets::scroll::RevealDirection::Nearest,
+                        ));
+                    }
+                    let input = crate::widgets::document::view::bookmark_rename_input_id();
+                    tasks.push(
+                        iced::widget::operation::focus(input.clone())
+                            .chain(iced::widget::operation::select_all(input)),
+                    );
+                    Task::batch(tasks)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::SpoolPrint(path, pending) => self.spool(&path, &pending, true),
+            Message::FocusSearchInput => {
+                let input = crate::widgets::search::view::input_id();
+                iced::widget::operation::focus(input.clone())
+                    .chain(iced::widget::operation::select_all(input))
+            }
+            Message::WriteFormClipboard(text) | Message::WriteAreaClipboard(text) => {
+                iced::clipboard::write(text)
+            }
+            Message::ResumeAfterFormCommit(after) => match after {
+                AfterFormCommit::Save => self.review_then_save_document(),
+                AfterFormCommit::Print => self.open_print_dialog(),
+            },
             Message::Find(command) => self.on_find_command(command),
             Message::Panel(command) => self.on_panel_command(command),
             Message::RestoreReaderEdits => self.restore_reader_edits(),
@@ -3660,6 +3803,9 @@ impl App {
                 Task::none()
             }
             Message::Sign(msg) => self.handle_sign(msg),
+            Message::SignCandidatesReady(credential, candidates) => {
+                self.sign_open_destination_picker_with(credential, candidates)
+            }
             Message::Print(msg) => self.handle_print(msg),
             Message::AcceptAppendOnly => {
                 self.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
@@ -3876,11 +4022,11 @@ impl App {
                 if crate::layout::PrimaryViewer::of(&self.active_layout)
                     == crate::layout::PrimaryViewer::Document
                 {
-                    let page = self.page_showing(slide);
+                    let page = self.page_of_slide(slide);
                     return self
                         .on_read_command(crate::widgets::event::ReadCommand::GoToPage(page));
                 }
-                self.update(Message::Nav(Nav::GoTo(slide)))
+                self.dispatch(Message::Nav(Nav::GoTo(slide)))
             }
             Message::Ignore => Task::none(),
             Message::ShowPresenter => {
@@ -4186,7 +4332,6 @@ impl App {
             }
             // ---- Speech (issue #20) ----
             Message::SpeakToggleScope(scope) => {
-                let settings = self.settings.speech.clone();
                 let page = self.speech_page();
                 // The page's key narrows to the selection when one is held
                 // (issue #9): the selection is lit up on the page, so the key
@@ -4198,21 +4343,21 @@ impl App {
                     _ => None,
                 };
                 let outgoing = match selected {
-                    Some(text) => self.speech.toggle_selection(text, page, &settings),
-                    None => self.speech.toggle(scope, page, &settings),
+                    Some(text) => self
+                        .speech
+                        .toggle_selection(text, page, &self.settings.speech),
+                    None => self.speech.toggle(scope, page, &self.settings.speech),
                 };
                 self.apply_speech(outgoing);
                 Task::none()
             }
             Message::SpeakStop => {
-                let settings = self.settings.speech.clone();
-                let outgoing = self.speech.stop(&settings);
+                let outgoing = self.speech.stop(&self.settings.speech);
                 self.apply_speech(outgoing);
                 Task::none()
             }
             Message::SpeakSkip(direction) => {
-                let settings = self.settings.speech.clone();
-                let outgoing = self.speech.skip(direction, &settings);
+                let outgoing = self.speech.skip(direction, &self.settings.speech);
                 self.apply_speech(outgoing);
                 Task::none()
             }
@@ -4227,8 +4372,7 @@ impl App {
             }
             Message::SetSpeechVoice(id) => {
                 self.settings.speech.voice = Some(id);
-                let settings = self.settings.speech.clone();
-                self.speech.reprobe(&settings);
+                self.speech.reprobe(&self.settings.speech);
                 self.refresh_speech_capability();
                 self.persist();
                 Task::none()
@@ -4238,8 +4382,7 @@ impl App {
                     Some(tag) => pulpit_core::speech::LanguageSetting::Explicit(tag),
                     None => pulpit_core::speech::LanguageSetting::Auto,
                 };
-                let settings = self.settings.speech.clone();
-                self.speech.reprobe(&settings);
+                self.speech.reprobe(&self.settings.speech);
                 self.persist();
                 Task::none()
             }
@@ -4257,18 +4400,16 @@ impl App {
                 Task::none()
             }
             Message::RemoveVoice(id) => {
-                let mut settings = self.settings.speech.clone();
-                let outgoing = self.speech.remove_voice(&id, &mut settings);
-                self.settings.speech = settings;
+                let outgoing = self.speech.remove_voice(&id, &mut self.settings.speech);
                 self.apply_speech(outgoing);
                 self.refresh_speech_capability();
                 self.persist();
                 Task::none()
             }
             Message::AnswerVoicePrompt(download) => {
-                let mut settings = self.settings.speech.clone();
-                let outgoing = self.speech.answer_prompt(download, &mut settings);
-                self.settings.speech = settings;
+                let outgoing = self
+                    .speech
+                    .answer_prompt(download, &mut self.settings.speech);
                 self.apply_speech(outgoing);
                 self.persist();
                 Task::none()
@@ -4443,7 +4584,7 @@ impl App {
                     }
                     crate::designer::Effect::Duplicate => {
                         let id = designer.layout().id.clone();
-                        return self.update(Message::DuplicateLayout(id));
+                        return self.dispatch(Message::DuplicateLayout(id));
                     }
                 }
                 Task::none()
@@ -5183,6 +5324,7 @@ impl App {
             Rung::ConfirmResetColors => self.confirm_reset_colors,
             Rung::PendingFormGoto => self.pending_form_goto.is_some(),
             Rung::PendingSaveReview => self.pending_save_review.is_some(),
+            Rung::SignDialog => self.signing.is_some(),
             Rung::AlarmRinging => self.alarm_controls.ringing.is_some(),
             Rung::TimerOvertime => self.timer_controls.overtime_since.is_some(),
             Rung::AlarmPopup => self.alarm_controls.open,
@@ -5325,6 +5467,17 @@ impl App {
                 self.cancel_signing_if_saving_first();
                 Task::none()
             }),
+            // §77.6: the dialog owns every key while it is open, not only
+            // Escape — the same reason `CapturedWidget` and `EditorPages` do
+            // — so a shortcut typed at a passphrase field cannot fire an
+            // action underneath it. Escape cancels, which §33 says is always
+            // safe.
+            Rung::SignDialog => Some(if key == Some("Escape") {
+                self.end_sign_flow();
+                Task::none()
+            } else {
+                Task::none()
+            }),
             Rung::AlarmRinging => (key == Some("Escape")).then(|| {
                 self.alarm_controls.dismiss();
                 Task::none()
@@ -5360,13 +5513,13 @@ impl App {
                 let was_overview = self.overview;
                 self.overview = false;
                 if was_overview {
-                    return self.update(Message::Nav(Nav::CancelPreview));
+                    return self.dispatch(Message::Nav(Nav::CancelPreview));
                 }
                 Task::none()
             }),
             Rung::EditorPages => {
                 if back_to_presenter_key(self.page, key, self.layout_dialog.is_some()) {
-                    return Some(self.update(Message::ShowPresenter));
+                    return Some(self.dispatch(Message::ShowPresenter));
                 }
                 Some(self.editor_key(key, mods))
             }
@@ -5395,7 +5548,7 @@ impl App {
                 .keymap
                 .resolve_with_mods(key, mods, press.scancode)
                 .or_else(|| crate::settings::Keymap::resolve_remote(key, mods))
-                .map(|action| self.update(Message::Do(action))),
+                .map(|action| self.dispatch(Message::Do(action))),
         }
     }
 
@@ -5420,7 +5573,7 @@ impl App {
                     Task::none()
                 }
                 "Enter" | "Return" if self.layout_dialog.is_some() => {
-                    self.update(Message::ConfirmLayoutDialog)
+                    self.dispatch(Message::ConfirmLayoutDialog)
                 }
                 _ => Task::none(),
             };
@@ -5440,7 +5593,7 @@ impl App {
             _ => None,
         };
         match message {
-            Some(message) => self.update(Message::Designer(message)),
+            Some(message) => self.dispatch(Message::Designer(message)),
             None => Task::none(),
         }
     }
@@ -5471,18 +5624,18 @@ impl App {
         match action {
             // Speech, routed through the same messages the settings page and
             // the menu use, so there is one path into the coordinator.
-            Action::SpeakToggle => self.update(Message::SpeakToggleScope(
+            Action::SpeakToggle => self.dispatch(Message::SpeakToggleScope(
                 pulpit_core::speech::Scope::Document,
             )),
             Action::SpeakPageToggle => {
-                self.update(Message::SpeakToggleScope(pulpit_core::speech::Scope::Page))
+                self.dispatch(Message::SpeakToggleScope(pulpit_core::speech::Scope::Page))
             }
-            Action::SpeakStop => self.update(Message::SpeakStop),
+            Action::SpeakStop => self.dispatch(Message::SpeakStop),
             Action::SpeakNextSentence => {
-                self.update(Message::SpeakSkip(pulpit_core::speech::Direction::Forward))
+                self.dispatch(Message::SpeakSkip(pulpit_core::speech::Direction::Forward))
             }
             Action::SpeakPreviousSentence => {
-                self.update(Message::SpeakSkip(pulpit_core::speech::Direction::Back))
+                self.dispatch(Message::SpeakSkip(pulpit_core::speech::Direction::Back))
             }
             Action::ToggleReader => self.toggle_reader(),
             // The rail collapses in place, wherever the layout put it, and a
@@ -5549,31 +5702,31 @@ impl App {
             Action::Previous => self.step_sequentially(false),
             Action::First => self.go_to_edge(false),
             Action::Last => self.go_to_edge(true),
-            Action::PreviewNext => self.update(Message::Nav(Nav::PreviewNext)),
-            Action::PreviewPrevious => self.update(Message::Nav(Nav::PreviewPrevious)),
+            Action::PreviewNext => self.dispatch(Message::Nav(Nav::PreviewNext)),
+            Action::PreviewPrevious => self.dispatch(Message::Nav(Nav::PreviewPrevious)),
             // Committing the preview is what Return ordinarily does; when a
             // link is focused it activates that instead, which is the only
             // reading a visible highlight leaves available.
             Action::CommitPreview if self.focused_link.is_some() => self
                 .follow_focused_link()
-                .unwrap_or_else(|| self.update(Message::Nav(Nav::CommitPreview))),
+                .unwrap_or_else(|| self.dispatch(Message::Nav(Nav::CommitPreview))),
             // Escape gives the focus back before it cancels anything else, so
             // there is always a way out of the link cycle.
             Action::CancelPreview if self.focused_link.is_some() => {
                 self.focused_link = None;
                 Task::none()
             }
-            Action::CommitPreview => self.update(Message::Nav(Nav::CommitPreview)),
-            Action::CancelPreview => self.update(Message::Nav(Nav::CancelPreview)),
+            Action::CommitPreview => self.dispatch(Message::Nav(Nav::CommitPreview)),
+            Action::CancelPreview => self.dispatch(Message::Nav(Nav::CancelPreview)),
             // One key, and the venue decides which colour it means. There is
             // no second key for the other colour: nothing anyone needs
             // mid-sentence is worth a key a hand can hit while reaching.
             Action::Blank => match self.settings.display.blank_color {
-                crate::settings::BlankColor::Black => self.update(Message::Nav(Nav::ToggleBlack)),
-                crate::settings::BlankColor::White => self.update(Message::Nav(Nav::ToggleWhite)),
+                crate::settings::BlankColor::Black => self.dispatch(Message::Nav(Nav::ToggleBlack)),
+                crate::settings::BlankColor::White => self.dispatch(Message::Nav(Nav::ToggleWhite)),
             },
-            Action::ToggleTimer => self.update(Message::Nav(Nav::ToggleTimer)),
-            Action::ResetTimer => self.update(Message::Nav(Nav::ResetTimer)),
+            Action::ToggleTimer => self.dispatch(Message::Nav(Nav::ToggleTimer)),
+            Action::ResetTimer => self.dispatch(Message::Nav(Nav::ResetTimer)),
             Action::SwapDisplays => {
                 self.coordinator.roles = self.coordinator.roles.swapped();
                 self.settings.display.roles = self.coordinator.roles.clone();
@@ -5627,17 +5780,18 @@ impl App {
                 self.persist();
                 self.reconcile()
             }
-            Action::OpenDocument => self.update(Message::OpenDialog),
+            Action::OpenDocument => self.dispatch(Message::OpenDialog),
             Action::Print => self.handle_print(PrintMsg::Open),
             Action::ReloadDocument => {
                 let now = self.now;
                 let actions = self.documents.open_initial(now);
-                self.run_document_actions(actions)
+                self.run_document_actions(actions);
+                Task::none()
             }
-            Action::ShowOverview => self.update(Message::ToggleOverview),
+            Action::ShowOverview => self.dispatch(Message::ToggleOverview),
             Action::CycleLayout => self.cycle_layout(),
-            Action::ShowLayouts => self.update(Message::ShowLibrary),
-            Action::ShowShortcuts => self.update(Message::ToggleShortcuts),
+            Action::ShowLayouts => self.dispatch(Message::ShowLibrary),
+            Action::ShowShortcuts => self.dispatch(Message::ToggleShortcuts),
             Action::AnnotateSelect => self.arm_from_key(AnnotationTool::Select),
             Action::AnnotateInk => self.arm_from_key(AnnotationTool::Ink),
             Action::AnnotateText => self.arm_from_key(AnnotationTool::Text),
@@ -5649,16 +5803,16 @@ impl App {
             // The key arms whichever of the two the pointer control is set
             // to, so the mode chosen in its options is the mode the key gives.
             Action::AnnotatePointer => self.arm_from_key(self.annotation_options().pointer_tool()),
-            Action::UndoAnnotation => self.update(Message::Annotate(
+            Action::UndoAnnotation => self.dispatch(Message::Annotate(
                 crate::widgets::event::AnnotationCommand::Undo,
             )),
-            Action::RedoAnnotation => self.update(Message::Annotate(
+            Action::RedoAnnotation => self.dispatch(Message::Annotate(
                 crate::widgets::event::AnnotationCommand::Redo,
             )),
-            Action::ClearAnnotations => self.update(Message::Annotate(
+            Action::ClearAnnotations => self.dispatch(Message::Annotate(
                 crate::widgets::event::AnnotationCommand::Clear,
             )),
-            Action::ToggleAnnotationAudience => self.update(Message::Annotate(
+            Action::ToggleAnnotationAudience => self.dispatch(Message::Annotate(
                 crate::widgets::event::AnnotationCommand::ToggleAudience,
             )),
             Action::FocusNextLink => self.step_link_focus(true),
@@ -5680,11 +5834,23 @@ impl App {
         // running finishes the sentence it was handed, so the window closes
         // and the room keeps hearing the document.
         self.speech.shutdown();
+        // §77.6: a flush thread still writing when this runs could win the
+        // rename race against the synchronous save below, so it is joined
+        // first rather than left to race process exit.
+        if let Some(writer) = self.settings_writer.take() {
+            let _ = writer.join();
+        }
         // Synchronous on purpose: a helper thread would race process exit
         // and the last settings change would be the one that vanished.
         self.settings_dirty = false;
         if let Err(e) = self.store.save(&self.settings) {
             tracing::warn!(error = %e, "cannot save settings");
+        }
+        // Joined before `clear()`, for the same reason: a session-writer
+        // thread still running could otherwise recreate the snapshot right
+        // after this removes it.
+        if let Some(writer) = self.session_writer.take() {
+            let _ = writer.join();
         }
         // A clean exit must never offer a restore, so the snapshot goes with
         // the process — and so does the document journal, for the same reason
@@ -5702,6 +5868,15 @@ impl App {
         // something the reader was working on, so it goes with the process
         // rather than waiting for the next run to overwrite it.
         self.discard_signing_scratch();
+        // §77.6: reader snapshot PDFs under the per-process scratch
+        // directory used to survive `quit()` — the last one a full copy of a
+        // possibly private document. `reset_reader_rendering` drops this
+        // process's in-memory reference to it, the directory itself is
+        // removed, and any directory a copy that crashed rather than quit
+        // left behind goes too.
+        self.reset_reader_rendering();
+        let _ = std::fs::remove_dir_all(reader_snapshot_directory());
+        sweep_stale_reader_snapshots(&claim_directories());
         iced::exit()
     }
 
@@ -5856,11 +6031,11 @@ impl App {
         // race.
         let session = self.session.clone();
         let to_write = snapshot.clone();
-        std::thread::spawn(move || {
+        self.session_writer = Some(std::thread::spawn(move || {
             if let Err(e) = session.save(&to_write) {
                 tracing::warn!(error = %e, "cannot save the session snapshot");
             }
-        });
+        }));
         self.last_session = Some(snapshot);
     }
 
@@ -5918,48 +6093,38 @@ impl App {
         // 1. Expire routine toasts. Failures stay until dismissed.
         self.toasts.tick(now);
 
+        // Ctrl-F mounted the Search widget during the `update` that opened
+        // it; the input is now in the tree `view` was asked to draw, so
+        // giving it focus is safe here rather than racing that draw the way
+        // doing it from the same `update` would.
+        if self
+            .deferred
+            .iter()
+            .any(|message| matches!(message, Message::FocusSearchInput))
+        {
+            let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred)
+                .into_iter()
+                .partition(|message| matches!(message, Message::FocusSearchInput));
+            self.deferred = rest;
+            tasks.extend(due.into_iter().map(|message| self.dispatch(message)));
+        }
+
         // 1a. Speech: engine events and download progress. Both are polled
         //     rather than given a doorbell because they are sentence- and
         //     chunk-scale — a tick's worth of latency is inaudible on one and
-        //     invisible on the other.
+        //     invisible on the other. A page turn speech asked for
+        //     (`Outgoing::ShowPage`) is queued to `self.deferred` and drained
+        //     by `update`, not run here: this method has no `Task` of its own
+        //     to hand the scroll it returns (§79.1).
         self.poll_speech();
-        // A page turn speech asked for is run here, where the task it
-        // returns — the scroll that moves the reader's column — has somewhere
-        // to go. See `Outgoing::ShowPage` in `apply_speech`.
-        if let Some(page) = self.speech_nav.take() {
-            tasks.push(self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(page)));
-        }
 
         // 1b. Collect what the document worker has said and ask for whatever
         //     the reader now needs drawn. On the tick rather than in a view
-        //     pass: a page render must not happen inside a draw.
+        //     pass: a page render must not happen inside a draw. A bookmark
+        //     the worker just confirmed reaches `self.deferred` the same way,
+        //     from the answer handler that heard it.
         if self.pump_reader() {
             tasks.push(Task::done(Message::ReaderReady));
-        }
-        // 1b-0. A bookmark the worker just confirmed. Without this the add
-        //       button has no visible answer at all: the row lands wherever
-        //       page order puts it, often below the fold. The rail scrolls
-        //       to it and its title opens for editing, primed and selected,
-        //       so Enter keeps the default name and typing replaces it.
-        if let Some(ordinal) = self.bookmark_added.take() {
-            let id = crate::widgets::document::model::OutlineItemId::Bookmark {
-                source_ordinal: ordinal,
-            };
-            if self.reader.focus_outline_item(id.clone())
-                && self.reader.begin_bookmark_rename(ordinal)
-            {
-                if let Some(index) = self.reader.outline_index_of(&id) {
-                    tasks.push(self.reveal_outline_selection(
-                        index,
-                        crate::widgets::scroll::RevealDirection::Nearest,
-                    ));
-                }
-                let input = crate::widgets::document::view::bookmark_rename_input_id();
-                tasks.push(
-                    iced::widget::operation::focus(input.clone())
-                        .chain(iced::widget::operation::select_all(input)),
-                );
-            }
         }
         // A page already in the cache answers its turn with no delivery to
         // drain, so the frame path alone would leave exactly the fastest
@@ -5968,55 +6133,6 @@ impl App {
         // measurement from being a record of cache misses only.
         self.remember_reader_frame();
         self.pump_search();
-
-        // Search replaces the outline in the view pass after Ctrl-F. By this
-        // tick the input is mounted, so focus and selection have a real
-        // target. The query itself lives only in this App instance: reopening
-        // offers the session's previous text for immediate replacement.
-        // §31.1 step 3's save has landed and the Sign flow can go on. Parked
-        // on a flag rather than run from the reader pump, which cannot return
-        // the `Task` the save picker needs.
-        if std::mem::take(&mut self.sign_resume_pending) {
-            tasks.push(Task::done(Message::Sign(
-                crate::signing::SignMsg::ResumeAfterSave,
-            )));
-        }
-
-        // The copy a marked-up print is spooled from has landed. Spooling
-        // leaves the event loop now, so it is a `Task`, and the pump that
-        // took the write had none to return.
-        if let Some((path, pending)) = self.print_spool_pending.take() {
-            tasks.push(self.spool(&path, &pending, true));
-        }
-
-        if std::mem::take(&mut self.search_focus_pending) {
-            let input = crate::widgets::search::view::input_id();
-            tasks.push(
-                iced::widget::operation::focus(input.clone())
-                    .chain(iced::widget::operation::select_all(input)),
-            );
-        }
-
-        // 1b-i. A field's selection, copied out and now on its way to the
-        //       clipboard. The pump has no `Task` to return, so the write
-        //       waits for this one.
-        if let Some(text) = self.form_clipboard_text.take() {
-            tasks.push(iced::clipboard::write(text));
-        }
-
-        // 1b-i-bis. The text a select band covered, waiting on a `Task` for
-        //           the same reason.
-        if let Some(text) = self.area_clipboard_text.take() {
-            tasks.push(iced::clipboard::write(text));
-        }
-
-        // 1b-ii. A Save As that stopped to let a field commit. The commit has
-        //        landed, so the review and the file picker go on from here.
-        match std::mem::take(&mut self.resume_after_form_commit) {
-            Some(AfterFormCommit::Save) => tasks.push(self.review_then_save_document()),
-            Some(AfterFormCommit::Print) => tasks.push(self.open_print_dialog()),
-            None => {}
-        }
 
         // 1c. Has the overview stopped moving? A grid that scrolls out from
         //     under its own selection is two objects rather than one, and
@@ -6125,10 +6241,10 @@ impl App {
         if self.settings.rendering.watch_document {
             if self.watcher.as_ref().is_some_and(|watcher| watcher.drain()) {
                 let actions = self.documents.on_file_event(now);
-                tasks.push(self.run_document_actions(actions));
+                self.run_document_actions(actions);
             }
             let actions = self.documents.tick(now, &RealFileProbe);
-            tasks.push(self.run_document_actions(actions));
+            self.run_document_actions(actions);
         }
 
         // 3. A pending reconciliation (a new frame, a role change).
@@ -6326,7 +6442,7 @@ impl App {
                         "the folder changed while it was being opened".into(),
                         self.now,
                     );
-                    let _ = self.run_document_actions(actions);
+                    self.run_document_actions(actions);
                     return;
                 }
                 let mut info = DocumentInfo::new(
@@ -6402,8 +6518,8 @@ impl App {
                     );
                     self.state.apply(Nav::SetNotesMapping(mapping), self.now);
                 }
-                let actions = self.documents.on_candidate_opened(info);
-                let _ = self.run_document_actions(actions);
+                let actions = self.documents.on_candidate_opened(info, self.now);
+                self.run_document_actions(actions);
             }
             RenderEvent::OpenFailed { document, reason } => {
                 let actions = self.documents.on_candidate_failed(
@@ -6411,7 +6527,7 @@ impl App {
                     reason,
                     self.now,
                 );
-                let _ = self.run_document_actions(actions);
+                self.run_document_actions(actions);
             }
             // The link annotations on a page, kept until the document is
             // replaced. A press on the current slide is hit-tested against
@@ -6629,18 +6745,6 @@ impl App {
                     self.frame_ready(key, handle);
                 }
                 self.pin_visible();
-
-                // The candidate document's first frame is what promotes it.
-                if let Some(active) = self.documents.active() {
-                    if active.id.0 != job.document {
-                        let info = DocumentInfo::new(
-                            pulpit_core::DocumentId(job.document),
-                            self.documents.path(),
-                            active.pdf_pages,
-                        );
-                        let _ = info;
-                    }
-                }
                 self.mark_audience_frame();
                 self.remember_audience_frame();
             }
@@ -6701,7 +6805,12 @@ impl App {
         }
     }
 
-    fn run_document_actions(&mut self, actions: Vec<DocAction>) -> Task<Message> {
+    /// §79.5: every `DocAction` is handled by mutation or by queuing a
+    /// `Message` — none of them hands back a `Task` of its own — so this
+    /// always returned `Task::none()`, and every caller either discarded the
+    /// result or batched a no-op alongside a real task. Returns nothing now;
+    /// callers that used to batch its output just no longer do.
+    fn run_document_actions(&mut self, actions: Vec<DocAction>) {
         // Actions an action produced, run after this batch rather than in the
         // middle of it: an image directory that has changed under a candidate
         // fails that candidate, and the remaining actions in the batch are
@@ -6743,14 +6852,6 @@ impl App {
                     if let Some(supervisor) = self.supervisor.as_mut() {
                         supervisor.open(document.0, &path.to_string_lossy());
                     }
-                }
-                DocAction::RenderFirstFrame { info, .. } => {
-                    // Promotion is immediate here because the state machine
-                    // already validated the candidate; the audience frame is
-                    // requested below and the previous frame stays visible
-                    // until it lands.
-                    let promoted = self.documents.on_first_frame(info);
-                    let _ = self.run_document_actions(promoted);
                 }
                 DocAction::Promote { info } => {
                     tracing::info!(path = %info.path.display(), pages = info.pdf_pages, "promoted document");
@@ -6867,10 +6968,8 @@ impl App {
                 }
             }
         }
-        if deferred.is_empty() {
-            Task::none()
-        } else {
-            self.run_document_actions(deferred)
+        if !deferred.is_empty() {
+            self.run_document_actions(deferred);
         }
     }
 
@@ -6889,7 +6988,12 @@ impl App {
         // (§31.3, A9).
         self.append_only = None;
         self.pending_append_only_offer = false;
-        self.signing = None;
+        // §77.6: this used to set only `self.signing = None`, leaving the
+        // other eight signing fields — `signing_saving_since` in particular,
+        // which keeps `is_live()` true forever — and the
+        // `.pulpit-signing-<pid>.pdf` scratch copy of the document being put
+        // down.
+        self.end_sign_flow();
         self.document_signatures.clear();
         self.reader.set_signed_fields(Vec::new());
         self.signature_panel_open = false;
@@ -6916,8 +7020,7 @@ impl App {
         // Speech was reading the document being put down; nothing about that
         // reading — the utterance, the language, a refusal, a pending
         // download prompt — carries over to the next one.
-        let speech_settings = self.settings.speech.clone();
-        self.speech.document_changed(&speech_settings);
+        self.speech.document_changed(&self.settings.speech);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -7042,7 +7145,8 @@ impl App {
 
         let preparation = self.prepare_document_task(path.clone(), self.document_serial);
         let actions = self.documents.open_initial(self.now);
-        Task::batch([self.run_document_actions(actions), preparation])
+        self.run_document_actions(actions);
+        preparation
     }
 
     fn prepare_document_task(&mut self, path: PathBuf, serial: u64) -> Task<Message> {
@@ -7302,8 +7406,7 @@ impl App {
         // A dead worker can never answer the page-text request speech is
         // waiting on; ending the reading now beats leaving it in
         // `AwaitingText` for ever.
-        let speech_settings = self.settings.speech.clone();
-        self.speech.document_changed(&speech_settings);
+        self.speech.document_changed(&self.settings.speech);
         self.reset_reader_rendering();
         self.reader_link = None;
         self.reader_wakeup = None;
@@ -7353,13 +7456,20 @@ impl App {
     fn forget_per_document_edit_state(&mut self) {
         self.form_flow.forget_document();
         self.reader_outline = pulpit_core::navigation::Outline::default();
-        self.bookmark_added = None;
+        // A bookmark row to reveal and rename, and a form selection to copy,
+        // both named against the document being put down: still queued, they
+        // would act on the outline or the field of whatever opens next.
+        self.deferred.retain(|message| {
+            !matches!(
+                message,
+                Message::BookmarkAdded(_) | Message::WriteFormClipboard(_)
+            )
+        });
         self.reader_patch_images.clear();
         self.reader_pending.clear();
         self.form_move.abandon();
         self.selection_query.abandon();
         self.form_clipboard = None;
-        self.form_clipboard_text = None;
         self.pending_form_goto = None;
         self.waits_for_form_commit = None;
         // A print whose scratch copy will now never be written. The dialog
@@ -7371,12 +7481,16 @@ impl App {
         if let Some(scratch) = self.print_scratch.take() {
             let _ = std::fs::remove_file(scratch);
         }
-        // A copy that landed and was waiting for the tick to spool it. The
-        // document it was made from is gone, so the paper would be a
-        // surprise; the file goes with it.
-        if let Some((path, _)) = self.print_spool_pending.take() {
+        // A copy that landed and was waiting to be spooled. The document it
+        // was made from is gone, so the paper would be a surprise; the file
+        // goes with it.
+        self.deferred.retain(|message| {
+            let Message::SpoolPrint(path, _) = message else {
+                return true;
+            };
             let _ = std::fs::remove_file(path);
-        }
+            false
+        });
         // `print_in_flight` is deliberately not cleared: a job already handed
         // to a thread is out of reach, and pretending otherwise would let a
         // second dialog open behind the first one. It clears when the
@@ -7598,7 +7712,9 @@ impl App {
                                 })
                             });
                         if let Some(path) = created {
-                            self.bookmark_added = self.reader_outline.flattened_of_path(path);
+                            if let Some(ordinal) = self.reader_outline.flattened_of_path(path) {
+                                self.deferred.push(Message::BookmarkAdded(ordinal));
+                            }
                         }
                     }
 
@@ -7623,12 +7739,35 @@ impl App {
                     // recorded like anything else, in revision order, so
                     // replay reproduces the history rather than only its
                     // surviving edits (§11.1).
-                    let entry = match pending.and_then(|pending| pending.transaction) {
-                        Some(transaction) => crate::reader_journal::JournalEntry::Applied {
+                    //
+                    // §76.2: for an undo or a redo, `applied.undo` is the
+                    // *inverse* of what was sent — the worker's own answer
+                    // for how to reverse this reversal, i.e. the redo of the
+                    // undo. Journalling that instead of `PendingEdit.reversal`
+                    // (the operation actually sent) made crash recovery
+                    // replay the redo of every undo, bringing back an edit
+                    // the user had just undone.
+                    let entry = match pending {
+                        Some(PendingEdit {
+                            transaction: Some(transaction),
+                            ..
+                        }) => crate::reader_journal::JournalEntry::Applied {
                             revision: applied.document_revision,
                             transaction,
                         },
-                        None => crate::reader_journal::JournalEntry::Reversed {
+                        Some(PendingEdit {
+                            reversal: Some((_, operation)),
+                            ..
+                        }) => crate::reader_journal::JournalEntry::Reversed {
+                            revision: applied.document_revision,
+                            operation,
+                        },
+                        // Recovery replay itself carries no `PendingEdit`
+                        // (see `restore_reader_edits`), so the operation it
+                        // sent is not known here; the worker's own reply
+                        // names it exactly, which is safe on replay because
+                        // it is not a second reversal of a reversal.
+                        _ => crate::reader_journal::JournalEntry::Reversed {
                             revision: applied.document_revision,
                             operation: Box::new(applied.undo.clone()),
                         },
@@ -7648,7 +7787,7 @@ impl App {
                     // is a save, not a hang: nothing was committed, so nothing
                     // is lost by going on to write what the document has.
                     if let Some(after) = self.waits_for_form_commit.take() {
-                        self.resume_after_form_commit = Some(after);
+                        self.deferred.push(Message::ResumeAfterFormCommit(after));
                     }
                     // Said once per document, not once per keystroke: a locked
                     // form refuses every letter typed at it, and a banner per
@@ -7702,14 +7841,13 @@ impl App {
                     self.reader.set_fields(fields);
                 }
                 crate::reader_link::Told::PageText { page, text } => {
-                    let mut settings = self.settings.speech.clone();
-                    let outgoing = self.speech.text_arrived(page, text, &mut settings);
-                    self.settings.speech = settings;
+                    let outgoing = self
+                        .speech
+                        .text_arrived(page, text, &mut self.settings.speech);
                     self.apply_speech(outgoing);
                 }
                 crate::reader_link::Told::CannotSpeak { reason } => {
-                    let settings = self.settings.speech.clone();
-                    let outgoing = self.speech.cannot_speak(reason, &settings);
+                    let outgoing = self.speech.cannot_speak(reason, &self.settings.speech);
                     self.apply_speech(outgoing);
                 }
                 crate::reader_link::Told::Selection { result, finalising } => {
@@ -7775,10 +7913,10 @@ impl App {
                         self.save_reviewed = false;
                         self.signing_source = Some(saved.path.clone());
                         // Resuming needs to open a file picker, and a picker
-                        // is a `Task` this reader pump has no way to return.
-                        // The tick picks the flag up on its next pass, the
-                        // same way a pending search focus is handled.
-                        self.sign_resume_pending = true;
+                        // is a `Task` this reader pump has no way to return
+                        // (§79.1).
+                        self.deferred
+                            .push(Message::Sign(crate::signing::SignMsg::ResumeAfterSave));
                         continue;
                     }
                     self.notify(format!("Saved {}", saved.path.display()));
@@ -7823,14 +7961,14 @@ impl App {
                     if let Some(journal) = self.reader_journal.as_mut() {
                         journal.finish();
                     }
-                    if matches!(self.signing, Some(crate::signing::SigningFlow::SavingFirst)) {
-                        self.signing_source = Some(saved.path.clone());
-                        // Resuming needs to open a file picker, and a picker
-                        // is a `Task` this reader pump has no way to return.
-                        // The tick picks the flag up on its next pass, the
-                        // same way a pending search focus is handled.
-                        self.sign_resume_pending = true;
-                    }
+                    // §79.5: a `SavingFirst` sign flow's own save always
+                    // writes to `self.signing_temp` — `signing_scratch_destination`
+                    // is the only way to reach this save with `self.signing`
+                    // at `SavingFirst`, and it always sets `signing_temp` to
+                    // the path being saved to — so a save that reaches this
+                    // point already took the `signing_temp` branch above and
+                    // `continue`d. `self.signing` cannot still be
+                    // `SavingFirst` here; a second check for it was dead.
                 }
                 crate::reader_link::Told::EditFailed { message, fatal } => {
                     // This answered one mutation, and only that one: the queue
@@ -8182,32 +8320,32 @@ impl App {
         let Some(supervisor) = self.supervisor.as_mut() else {
             return;
         };
-        if !obsolete.is_empty() {
-            let doomed: std::collections::HashSet<RequestId> = obsolete.iter().copied().collect();
-            self.pending
-                .retain(|(pending, _)| !doomed.contains(pending));
-            for id in obsolete {
-                supervisor.cancel(id);
-                self.submitted_at.remove(&id);
-            }
-        }
+        cancel_renders(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            &obsolete,
+        );
 
         for (key, priority, region) in jobs {
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: key.slide,
-                region,
-                width: key.width,
-                height: key.height,
-                priority,
-                with_annotations: true,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: key.slide,
+                    region,
+                    width: key.width,
+                    height: key.height,
+                    priority,
+                    with_annotations: true,
+                    region_name: String::new(),
+                },
+            );
         }
     }
 
@@ -8950,7 +9088,7 @@ impl App {
                 let still_there =
                     focus.is_none() || (answered_the_same_field && self.form_focus() == focus);
                 if !text.is_empty() {
-                    self.form_clipboard_text = Some(text);
+                    self.deferred.push(Message::WriteFormClipboard(text));
                     if intent == FormClipboard::Cut && still_there {
                         // The other half of a cut: what was taken is removed
                         // through the engine's own replacement, in one edit,
@@ -9064,11 +9202,11 @@ impl App {
         }
 
         // A Save As is waiting on this answer. Everything above has run — the
-        // commit is in the revision, in the undo history and in the field list
-        // — so the save can go on, and does on the next tick because this is
-        // the pump and there is no `Task` to hand back from here.
+        // commit is in the revision, in the undo history and in the field
+        // list — so the save can go on; queued because this is the pump and
+        // there is no `Task` to hand back from here (§79.1).
         if let Some(after) = self.waits_for_form_commit.take() {
-            self.resume_after_form_commit = Some(after);
+            self.deferred.push(Message::ResumeAfterFormCommit(after));
         }
     }
 
@@ -9355,21 +9493,34 @@ impl App {
             return Task::none();
         };
         let value = picker.time.format(&picker.pattern, self.date_language);
+        self.commit_picker_value(picker.field.clone(), value)
+    }
+
+    /// A date or a time chosen from a picker, committed as an ordinary field
+    /// edit: the same `SetField` an undo uses, so it goes through PDFium's
+    /// own editor, gets the field's format script run over it, and lands in
+    /// the shared undo history like any other change (§9.1). pulpit chooses
+    /// the *text*; PDFium still decides what it looks like in the field.
+    ///
+    /// §79.5: `PickDate` and `commit_focused_time` built this transaction by
+    /// hand, identically but for the field and the formatted value.
+    ///
+    /// The engine kills the focus as it takes the value — `SetField` runs
+    /// through PDFium's own editor, which force-kills the focus and lets the
+    /// form page go — and the answer comes back as an `Applied`, which
+    /// carries no `FormEventResult` and so refreshes nothing. Said here
+    /// rather than plumbed through a form-event reply: a commit is a document
+    /// mutation, and turning it into a form event to get a focus report back
+    /// would be a second editing path for one value (§9.1).
+    fn commit_picker_value(&mut self, field: String, value: String) -> Task<Message> {
         let transaction = pulpit_render::document::DocumentTransaction::one(
             pulpit_render::document::DocumentCommand::SetField {
-                name: picker.field.clone(),
+                name: field,
                 value,
                 // A date and a time are single values; nothing to select.
                 selected: Vec::new(),
             },
         );
-        // The engine kills the focus as it takes the value — `SetField` runs
-        // through PDFium's own editor, which force-kills the focus and lets
-        // the form page go — and the answer comes back as an `Applied`, which
-        // carries no `FormEventResult` and so refreshes nothing. Said here
-        // rather than plumbed through a form-event reply: a commit is a
-        // document mutation, and turning it into a form event to get a focus
-        // report back would be a second editing path for one value (§9.1).
         self.reader.form_focus_dropped();
         self.commit_to_document(transaction);
         Task::none()
@@ -9818,25 +9969,7 @@ impl App {
                     AppliedKind::Undo
                 };
                 let epoch = self.reader.history_epoch();
-                self.reader_pending.push_back(PendingEdit {
-                    kind,
-                    names: None,
-                    transaction: None,
-                    // Not knowable until the answer says what came back.
-                    urgency: crate::reader::RasterUrgency::Deferred,
-                    reversal: Some((epoch, Box::new(operation.clone()))),
-                });
-                if let Some(link) = self.reader_link.as_mut() {
-                    link.ask(crate::reader_link::Ask::Undo {
-                        expected_revision: expected,
-                        operation,
-                    });
-                } else {
-                    self.reader_pending.pop_back();
-                    // Nothing will answer, so the operation goes back where it
-                    // came from rather than being dropped on the floor.
-                    self.reader.restore_operation(kind, epoch, operation);
-                }
+                self.send_undo(kind, epoch, operation, expected);
                 Task::none()
             }
             ReadCommand::GoToField { page, name } => {
@@ -9981,32 +10114,11 @@ impl App {
                 unfocus()
             }
             ReadCommand::PickDate(date) => {
-                // A chosen day becomes an ordinary field edit: the same
-                // `SetField` an undo uses, so it goes through PDFium's own
-                // editor, gets the field's format script run over it, and
-                // lands in the shared undo history like any other change
-                // (§9.1). pulpit chooses the *text*; PDFium still decides what
-                // it looks like in the field.
                 let Some(picker) = self.reader.date_picker() else {
                     return Task::none();
                 };
                 let value = date.format(&picker.pattern, self.date_language);
-                let transaction = pulpit_render::document::DocumentTransaction::one(
-                    pulpit_render::document::DocumentCommand::SetField {
-                        name: picker.field.clone(),
-                        value,
-                        // A date and a time are single values; nothing to select.
-                        selected: Vec::new(),
-                    },
-                );
-                // The calendar comes down and the caret goes with it, for the
-                // reason spelled out in
-                // `commit_focused_time`: the engine force-kills the focus as
-                // it takes the value, and the `Applied` that answers carries
-                // no focus report to say so.
-                self.reader.form_focus_dropped();
-                self.commit_to_document(transaction);
-                Task::none()
+                self.commit_picker_value(picker.field.clone(), value)
             }
             ReadCommand::PickTime => self.commit_focused_time(),
             ReadCommand::PickOption(index) => {
@@ -10053,15 +10165,7 @@ impl App {
                 let Some(found) = self.reader.selected_editable() else {
                     return Task::none();
                 };
-                self.begin_composing(ComposingMark {
-                    page: found.page,
-                    at: found.at,
-                    tool: found.tool,
-                    text: found.text,
-                    typst: found.typst,
-                    editing: Some(found.id),
-                    font_size: found.font_size,
-                })
+                self.compose_found(found)
             }
             ReadCommand::PageDoubleClicked => {
                 // Whatever the armed tool is: opening what a mark says is not
@@ -10072,15 +10176,7 @@ impl App {
                 let Some(found) = self.reader.text_under_cursor() else {
                     return Task::none();
                 };
-                self.begin_composing(ComposingMark {
-                    page: found.page,
-                    at: found.at,
-                    tool: found.tool,
-                    text: found.text,
-                    typst: found.typst,
-                    editing: Some(found.id),
-                    font_size: found.font_size,
-                })
+                self.compose_found(found)
             }
             ReadCommand::PageReleased => {
                 // The release commits on the newest answer, so take up
@@ -10312,6 +10408,22 @@ impl App {
         }
     }
 
+    /// A mark found on the page — under a double-click, or already selected —
+    /// opened for editing. §79.5: `EditSelected` and `PageDoubleClicked` both
+    /// built the same [`ComposingMark`] from an [`crate::reader::EditableText`]
+    /// by hand; this is the one place that mapping happens now.
+    fn compose_found(&mut self, found: crate::reader::EditableText) -> Task<Message> {
+        self.begin_composing(ComposingMark {
+            page: found.page,
+            at: found.at,
+            tool: found.tool,
+            text: found.text,
+            typst: found.typst,
+            editing: Some(found.id),
+            font_size: found.font_size,
+        })
+    }
+
     /// Open the editor on a mark, new or being rewritten (§8.5).
     ///
     /// The buffer is rebuilt from the mark's text rather than cleared, so
@@ -10450,28 +10562,10 @@ impl App {
                 crate::reader_journal::JournalEntry::Reversed { operation, .. } => {
                     // Replayed as an undo, which is what it was. The revision
                     // it expects is whatever the replay has reached, not the
-                    // one it had in the run that recorded it.
+                    // one it had in the run that recorded it. `u64::MAX` is
+                    // not a stack epoch this replay owns; see `send_undo`.
                     let expected = self.expected_revision();
-                    self.reader_pending.push_back(PendingEdit {
-                        kind: AppliedKind::Undo,
-                        names: None,
-                        transaction: None,
-                        urgency: crate::reader::RasterUrgency::Deferred,
-                        // Replay takes nothing off a stack: the history is
-                        // being rebuilt by the answers, not read.
-                        reversal: None,
-                    });
-                    match self.reader_link.as_mut() {
-                        Some(link) => {
-                            link.ask(crate::reader_link::Ask::Undo {
-                                expected_revision: expected,
-                                operation: *operation,
-                            });
-                        }
-                        None => {
-                            self.reader_pending.pop_back();
-                        }
-                    }
+                    self.send_undo(AppliedKind::Undo, u64::MAX, *operation, expected);
                 }
             }
         }
@@ -11148,9 +11242,9 @@ impl App {
             let _ = std::fs::remove_file(&path);
             return;
         };
-        // Parked rather than spooled: the pump this lands on has no way
-        // to return the `Task` that spooling is now.
-        self.print_spool_pending = Some((path, pending));
+        // Queued rather than spooled directly: the pump this lands on has no
+        // way to return the `Task` that spooling is now (§79.1).
+        self.deferred.push(Message::SpoolPrint(path, pending));
     }
 
     /// Hand a file to the platform, on a thread, and say what came of it.
@@ -11901,15 +11995,19 @@ impl App {
         self.sign_open_destination_picker(credential)
     }
 
-    /// Decide what will be signed and how it will look, then ask the one
-    /// question that is genuinely the reader's: where to put the copy.
+    /// Decide what will be signed, once what preflight reports on the source
+    /// is known: the destination picker, or a refusal.
     ///
     /// The target and the appearance are settled *before* the picker opens,
     /// so a document with nothing to sign into is refused while there is
     /// still nothing to take back — never after a file name has been chosen.
-    fn sign_open_destination_picker(
+    /// Split from `sign_open_destination_picker` by §82.8: this is the half
+    /// that needs `&mut self`, run once the read and the preflight parses —
+    /// which do not — have already happened off the event loop.
+    fn sign_open_destination_picker_with(
         &mut self,
         credential: std::sync::Arc<pulpit_render::sign::Credential>,
+        candidates: SignTargetCandidates,
     ) -> Task<Message> {
         use crate::signing::{SignMsg, SigningFlow};
 
@@ -11917,7 +12015,7 @@ impl App {
             self.refuse_signing("There is no document open to sign.".to_string());
             return Task::none();
         };
-        let options = match self.sign_prepare_options() {
+        let options = match self.sign_prepare_options(candidates) {
             Ok(options) => options,
             Err(detail) => {
                 self.refuse_signing(detail);
@@ -11938,6 +12036,29 @@ impl App {
         })
     }
 
+    /// Decide what will be signed and how it will look, then ask the one
+    /// question that is genuinely the reader's: where to put the copy.
+    ///
+    /// §82.8: reading the whole source and running two preflight parses used
+    /// to happen synchronously, inside the message handler that reaches
+    /// this. That work is `Self::sign_target_candidates`, run here in a
+    /// `Task::perform` step; the answer comes back as
+    /// `SignMsg::CandidatesReady`, which finishes the job in
+    /// `sign_open_destination_picker_with`.
+    fn sign_open_destination_picker(
+        &mut self,
+        credential: std::sync::Arc<pulpit_render::sign::Credential>,
+    ) -> Task<Message> {
+        let Some((path, signed_at_open)) = self.signing_source_state() else {
+            self.refuse_signing("There is no document open to sign.".to_string());
+            return Task::none();
+        };
+        Task::perform(
+            Self::sign_target_candidates(path, signed_at_open),
+            move |candidates| Message::SignCandidatesReady(credential, candidates),
+        )
+    }
+
     /// What this signature will land on, and what mark it will leave —
     /// derived from the click, from preflight, and from the profile, with
     /// nothing left to ask.
@@ -11945,7 +12066,10 @@ impl App {
     /// The click wins outright or fails outright: a field the reader pointed
     /// at that preflight cannot offer is refused by name, never replaced with
     /// a preset corner of some other page.
-    fn sign_prepare_options(&self) -> Result<crate::signing::SigningOptions, String> {
+    fn sign_prepare_options(
+        &self,
+        candidates: SignTargetCandidates,
+    ) -> Result<crate::signing::SigningOptions, String> {
         use crate::signing::{
             pick_signing_target, prefill_missed_line, SigningOptions, TargetPick,
         };
@@ -11953,7 +12077,7 @@ impl App {
         let SignTargetCandidates {
             candidates,
             countersigning,
-        } = self.sign_target_candidates();
+        } = candidates;
         let target = match pick_signing_target(&candidates, self.signing_prefill_field.as_deref()) {
             TargetPick::Selected(choice) => choice,
             TargetPick::Missed { clicked } => return Err(prefill_missed_line(&clicked)),
@@ -12166,19 +12290,33 @@ impl App {
     /// several empty fields reports `AmbiguousSignatureField`, whose
     /// `candidates` all come back here for the Options step's target picker
     /// to offer, rather than silently picking the first one.
-    fn sign_target_candidates(&self) -> SignTargetCandidates {
-        use crate::signing::{AppendOnlyMode, TargetChoice};
-        use pulpit_render::verify::preflight::{preflight_certify, preflight_sign};
-
+    /// Everything `sign_target_candidates` needs from `self` before the read
+    /// and the preflight parses, which §82.8 moves off the event loop: a
+    /// full-length `std::fs::read` plus two preflight passes over the file
+    /// were running synchronously inside a message handler.
+    fn signing_source_state(&self) -> Option<(PathBuf, bool)> {
+        use crate::signing::AppendOnlyMode;
+        let path = self.signing_source_path()?;
         let signed_at_open = matches!(
             self.append_only,
             Some(AppendOnlyMode::AppendOnly) | Some(AppendOnlyMode::EditAnyway)
         );
-        // The source could not be read to preflight: this function is `&self`
-        // and has no way to tell the user why, so it degrades silently to
-        // the best guess `append_only` supports. The engine restates the
-        // real failure (unreadable file, encrypted document, …) at Sign
-        // time, when there is a place to show it.
+        Some((path, signed_at_open))
+    }
+
+    /// Read the source and run preflight, off the event loop (§82.8): a
+    /// `Task::perform` step feeds the answer back as
+    /// `SignMsg::CandidatesReady`. Free of `self` so it can run inside the
+    /// `async move` block Iced's executor drives independently.
+    async fn sign_target_candidates(path: PathBuf, signed_at_open: bool) -> SignTargetCandidates {
+        use crate::signing::TargetChoice;
+        use pulpit_render::verify::preflight::{preflight_certify, preflight_sign};
+
+        // The source could not be read to preflight: there is no way to tell
+        // the user why from here, so this degrades silently to the best
+        // guess `append_only` supports. The engine restates the real failure
+        // (unreadable file, encrypted document, …) at Sign time, when there
+        // is a place to show it.
         let unreadable_fallback = if signed_at_open {
             SignTargetCandidates {
                 candidates: Vec::new(),
@@ -12189,9 +12327,6 @@ impl App {
                 candidates: vec![TargetChoice::NewField],
                 countersigning: false,
             }
-        };
-        let Some(path) = self.signing_source_path() else {
-            return unreadable_fallback;
         };
         let Ok(bytes) = std::fs::read(&path) else {
             return unreadable_fallback;
@@ -12756,7 +12891,10 @@ impl App {
         self.search.begin_at(self.showing_page());
         self.search_pane.set(true, self.motion, self.now);
         self.keyboard_region = KeyboardRegion::SearchInput;
-        self.search_focus_pending = true;
+        // Queued rather than focused directly: the search input is not in
+        // the widget tree until the view pass that draws it with the pane
+        // now open has run (§79.1).
+        self.deferred.push(Message::FocusSearchInput);
         self.overview = false;
         Task::none()
     }
@@ -12764,7 +12902,8 @@ impl App {
     fn close_search(&mut self, restore_origin: bool) -> Task<Message> {
         self.search_pane.set(false, self.motion, self.now);
         self.keyboard_region = KeyboardRegion::Document;
-        self.search_focus_pending = false;
+        self.deferred
+            .retain(|message| !matches!(message, Message::FocusSearchInput));
         let origin = self.search_origin.take();
         if !restore_origin {
             return Task::none();
@@ -12927,7 +13066,7 @@ impl App {
         // In presentation mode the presenter moves and the audience does not:
         // finding a slide is looking for it, not showing it to the room.
         let slide = self.slide_showing(hit.page.get());
-        self.update(Message::Nav(pulpit_core::Command::PreviewGoTo(slide)))
+        self.dispatch(Message::Nav(pulpit_core::Command::PreviewGoTo(slide)))
     }
 
     /// Whether the presenter screen is currently reading a document rather
@@ -12961,7 +13100,7 @@ impl App {
         let task = if self.uses_document_viewer() {
             let page = match place {
                 pulpit_core::Place::Page(page) => pulpit_core::PageIndex(page),
-                pulpit_core::Place::Slide(slide) => self.page_showing(slide),
+                pulpit_core::Place::Slide(slide) => self.page_of_slide(slide),
             };
             self.on_read_command(crate::widgets::event::ReadCommand::GoToPage(page))
         } else {
@@ -12969,7 +13108,7 @@ impl App {
                 pulpit_core::Place::Slide(slide) => slide,
                 pulpit_core::Place::Page(page) => self.slide_showing(page),
             };
-            self.update(Message::Nav(Nav::GoTo(slide)))
+            self.dispatch(Message::Nav(Nav::GoTo(slide)))
         };
         self.navigating_history = false;
         task
@@ -13011,7 +13150,7 @@ impl App {
     /// and Back has to be able to undo it.
     fn go_to_edge(&mut self, last: bool) -> Task<Message> {
         if !self.uses_document_viewer() || !self.reader.is_open() {
-            return self.update(Message::Nav(if last { Nav::Last } else { Nav::First }));
+            return self.dispatch(Message::Nav(if last { Nav::Last } else { Nav::First }));
         }
         let count = self.reader.page_count();
         if count == 0 {
@@ -13048,7 +13187,7 @@ impl App {
             task
         } else {
             let command = if forward { Nav::Next } else { Nav::Previous };
-            self.update(Message::Nav(command))
+            self.dispatch(Message::Nav(command))
         }
     }
 
@@ -13196,10 +13335,15 @@ impl App {
 
     /// Which PDF page a given slide shows.
     ///
-    /// The inverse of `slide_showing`, and asked of the mapping for the same
-    /// reason: under a paired deck the grid's index and the reader's page are
-    /// not the same number.
-    fn page_showing(&self, slide: usize) -> pulpit_core::PageIndex {
+    /// The inverse of [`App::slide_of_page`], and asked of the mapping for
+    /// the same reason: under a paired deck the grid's index and the reader's
+    /// page are not the same number.
+    ///
+    /// §79.5: this, `showing_page`'s own tail (`page_of_slide` of the
+    /// committed slide) and `slide_showing` (`slide_of_page` with a fallback)
+    /// were four spellings of two lookups, two of them re-walking every slide
+    /// with `find` where `slide_showing` alone needed to.
+    fn page_of_slide(&self, slide: usize) -> pulpit_core::PageIndex {
         let pdf_pages = self
             .state
             .document()
@@ -13214,12 +13358,27 @@ impl App {
         pulpit_core::PageIndex(page)
     }
 
-    /// Which slide shows a given PDF page.
+    /// Which slide shows a given PDF page, if the current notes mapping shows
+    /// it at all.
     ///
     /// A search hit is a fact about a page; the presenter moves in slides, and
     /// under a paired notes mapping those are not the same number. Resolved by
     /// asking the mapping in force rather than by arithmetic on it, so a
     /// swapped or split deck lands on the slide the reader meant.
+    fn slide_of_page(&self, page: usize) -> Option<usize> {
+        let pdf_pages = self
+            .state
+            .document()
+            .map(|document| document.pdf_pages)
+            .unwrap_or(0);
+        let mapping = self.state.mapping();
+        (0..self.state.slide_count()).find(|slide| {
+            mapping
+                .audience_source(*slide, pdf_pages)
+                .is_some_and(|source| source.pdf_page == page)
+        })
+    }
+
     /// The physical page in front of the presenter, in whichever mode is up.
     ///
     /// The inverse of [`App::slide_showing`]: a deck slide is a page of the
@@ -13228,35 +13387,14 @@ impl App {
         if self.uses_document_viewer() {
             return self.reader.controls().page;
         }
-        let pdf_pages = self
-            .state
-            .document()
-            .map(|document| document.pdf_pages)
-            .unwrap_or(0);
-        let slide = self.state.committed();
-        let page = self
-            .state
-            .mapping()
-            .audience_source(slide, pdf_pages)
-            .map(|source| source.pdf_page)
-            .unwrap_or(slide);
-        pulpit_core::page::PageIndex(page)
+        self.page_of_slide(self.state.committed())
     }
 
+    /// A page with no slide under the current mapping is its own slide
+    /// index: the fallback every caller but [`App::slide_of_page`] itself
+    /// wants.
     fn slide_showing(&self, page: usize) -> usize {
-        let pdf_pages = self
-            .state
-            .document()
-            .map(|document| document.pdf_pages)
-            .unwrap_or(0);
-        let mapping = self.state.mapping();
-        (0..self.state.slide_count())
-            .find(|slide| {
-                mapping
-                    .audience_source(*slide, pdf_pages)
-                    .is_some_and(|source| source.pdf_page == page)
-            })
-            .unwrap_or(page)
+        self.slide_of_page(page).unwrap_or(page)
     }
 
     /// Ask for the next chunk of page text, if a search is running and the
@@ -13449,31 +13587,37 @@ impl App {
             supervisor.cancel(previous.request);
             self.submitted_at.remove(&previous.request);
         }
-        let id = supervisor.next_request_id();
-        supervisor.submit(RenderJob {
-            id,
-            generation,
-            document,
-            page: page.get(),
-            region,
-            width,
-            height,
-            // The reader is waiting on this with the pointer just up, so it
-            // outranks the pages being warmed in the margin.
-            priority: Priority::Presenter,
-            // The document's own marks are part of the page as the reader
-            // sees it. Copying a page and getting it back without the
-            // highlighting they put on it would be a picture of a different
-            // document.
-            with_annotations: true,
-            region_name: String::new(),
-        });
+        // Not registered in `self.pending`: this is a one-off tracked
+        // through `self.area_copy` rather than the general render plan.
+        let id = submit_render(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            None,
+            |id| RenderJob {
+                id,
+                generation,
+                document,
+                page: page.get(),
+                region,
+                width,
+                height,
+                // The reader is waiting on this with the pointer just up, so
+                // it outranks the pages being warmed in the margin.
+                priority: Priority::Presenter,
+                // The document's own marks are part of the page as the
+                // reader sees it. Copying a page and getting it back without
+                // the highlighting they put on it would be a picture of a
+                // different document.
+                with_annotations: true,
+                region_name: String::new(),
+            },
+        );
         self.area_copy = Some(AreaCopy {
             request: id,
             width,
             height,
         });
-        self.submitted_at.insert(id, Instant::now());
     }
 
     /// Ask the document worker for the text the region covers.
@@ -13526,9 +13670,9 @@ impl App {
             return;
         }
         let characters = text.chars().count();
-        // The pump has no `Task` to return, so the write waits for the tick,
-        // exactly as a field's copy does.
-        self.area_clipboard_text = Some(text);
+        // The pump has no `Task` to return, so the write is queued exactly
+        // as a field's copy is (§79.1).
+        self.deferred.push(Message::WriteAreaClipboard(text));
         if truncated {
             self.notify(format!(
                 "Copied the first {characters} characters; the region held more than pulpit \
@@ -14098,6 +14242,43 @@ impl App {
         revision
     }
 
+    /// Send one undo operation to the document worker and record that it is
+    /// pending. §79.5: the interactive Undo/Redo arm and journal replay
+    /// (`restore_reader_edits`) built the same `PendingEdit` by hand.
+    ///
+    /// `epoch` is the stack slot to put `operation` back on if it is refused
+    /// or never answered (see `Reader::restore_operation`) — the epoch
+    /// `Reader::history_epoch` reports for an interactive undo/redo, or
+    /// `u64::MAX` for replay, which owns no stack slot: `restore_operation`
+    /// is then a no-op rather than pushing onto a stack replay does not read.
+    fn send_undo(
+        &mut self,
+        kind: AppliedKind,
+        epoch: u64,
+        operation: pulpit_render::document::DocumentUndo,
+        expected: pulpit_render::document::DocumentRevision,
+    ) {
+        self.reader_pending.push_back(PendingEdit {
+            kind,
+            names: None,
+            transaction: None,
+            // Not knowable until the answer says what came back.
+            urgency: crate::reader::RasterUrgency::Deferred,
+            reversal: Some((epoch, Box::new(operation.clone()))),
+        });
+        if let Some(link) = self.reader_link.as_mut() {
+            link.ask(crate::reader_link::Ask::Undo {
+                expected_revision: expected,
+                operation,
+            });
+        } else {
+            self.reader_pending.pop_back();
+            // Nothing will answer, so the operation goes back where it came
+            // from rather than being dropped on the floor.
+            self.reader.restore_operation(kind, epoch, operation);
+        }
+    }
+
     /// Post one atomic user action to the document worker.
     ///
     /// One transaction is one revision and one undo entry, whatever it
@@ -14501,6 +14682,25 @@ impl App {
     /// desktop context active at that moment.
     fn stop_audience(&mut self) -> Task<Message> {
         let was_active = self.audience_started;
+        self.audience_gone();
+        if was_active {
+            self.notify_done("Audience stopped.".into());
+        }
+        self.audience_window
+            .take()
+            .map(window::close::<Message>)
+            .unwrap_or_else(Task::none)
+    }
+
+    /// Everything that must be true once the audience window is gone,
+    /// however it went — WM-closed out from under the app, or deliberately
+    /// stopped. §77.6: `Message::WindowClosed` used to reset only the window
+    /// state, leaving `audience_claim` held (so another copy could not use
+    /// the projector), `roles.audience_fullscreen` at whatever a one-run
+    /// "start windowed" left it, and `placement_retries` for a window that no
+    /// longer exists. This is what `stop_audience` already did, factored out
+    /// so both paths do it.
+    fn audience_gone(&mut self) {
         // The projector is free for another copy the moment this one stops
         // using it, not when this process ends.
         self.audience_claim = None;
@@ -14521,13 +14721,6 @@ impl App {
             .reconciler
             .note_windows(&self.coordinator.windows);
         self.inhibitor.release(self.platform.services.as_ref());
-        if was_active {
-            self.notify_done("Audience stopped.".into());
-        }
-        self.audience_window
-            .take()
-            .map(window::close::<Message>)
-            .unwrap_or_else(Task::none)
     }
 
     /// Create the audience hidden. Reconciliation places it and only reveals
@@ -14590,11 +14783,11 @@ impl App {
         }
         let store = self.store.clone();
         let settings = self.settings.clone();
-        std::thread::spawn(move || {
+        self.settings_writer = Some(std::thread::spawn(move || {
             if let Err(e) = store.save(&settings) {
                 tracing::warn!(error = %e, "cannot save settings");
             }
-        });
+        }));
     }
 
     fn invalidate_renders(&mut self) {
@@ -14708,7 +14901,7 @@ impl App {
     /// document's own links.
     fn arm_from_key(&mut self, tool: AnnotationTool) -> Task<Message> {
         let wanted = (self.annotations.tool != Some(tool)).then_some(tool);
-        self.update(Message::Annotate(
+        self.dispatch(Message::Annotate(
             crate::widgets::event::AnnotationCommand::Arm(wanted),
         ))
     }
@@ -15149,7 +15342,7 @@ impl App {
         // point of the menu, and closes it — the same thing a click on that
         // thumbnail does.
         if matches!(key?, "Enter" | "Return") {
-            return Some(self.update(Message::GoToFromOverview(current)));
+            return Some(self.dispatch(Message::GoToFromOverview(current)));
         }
         // How many whole rows are on screen at once, which is what a page
         // key moves by. Zero before the grid has ever been laid out; the
@@ -15166,7 +15359,7 @@ impl App {
             return Some(Task::none());
         };
         Some(Task::batch([
-            self.update(Message::Nav(Nav::PreviewGoTo(target))),
+            self.dispatch(Message::Nav(Nav::PreviewGoTo(target))),
             self.reveal_in_overview(target),
         ]))
     }
@@ -15186,7 +15379,7 @@ impl App {
             self.overview_scroll,
             self.overview_grid.get(),
         )?;
-        Some(self.update(Message::Nav(Nav::PreviewGoTo(target))))
+        Some(self.dispatch(Message::Nav(Nav::PreviewGoTo(target))))
     }
 
     /// Scroll the overview just far enough that `slide` is on screen.
@@ -15551,7 +15744,7 @@ impl App {
             // A click that lands on no link releases a `/FitR` zoom, so the
             // presenter always has a way back to the whole page.
             if self.state.zoom().is_some() {
-                return self.update(Message::Nav(Nav::SetZoom(None)));
+                return self.dispatch(Message::Nav(Nav::SetZoom(None)));
             }
             return Task::none();
         };
@@ -15567,13 +15760,13 @@ impl App {
     /// Act on one link, however it was chosen.
     fn follow(&mut self, link: pulpit_core::PageLink) -> Task<Message> {
         match link.target {
-            pulpit_core::LinkTarget::Page { page, zoom } => match self.slide_for_page(page) {
+            pulpit_core::LinkTarget::Page { page, zoom } => match self.slide_of_page(page) {
                 Some(slide) => {
                     // Navigate first — that clears any zoom in force — then
                     // apply the destination's own `/FitR` view, if any.
-                    let goto = self.update(Message::Nav(Nav::GoTo(slide)));
+                    let goto = self.dispatch(Message::Nav(Nav::GoTo(slide)));
                     if zoom.is_some() {
-                        Task::batch([goto, self.update(Message::Nav(Nav::SetZoom(zoom)))])
+                        Task::batch([goto, self.dispatch(Message::Nav(Nav::SetZoom(zoom)))])
                     } else {
                         goto
                     }
@@ -15599,18 +15792,6 @@ impl App {
                 Task::none()
             }
         }
-    }
-
-    /// The slide whose audience content is this physical PDF page, if the
-    /// current notes mapping shows it at all.
-    fn slide_for_page(&self, page: usize) -> Option<usize> {
-        let pages = self.state.pdf_pages();
-        (0..self.state.slide_count()).find(|slide| {
-            self.state
-                .mapping()
-                .audience_source(*slide, pages)
-                .is_some_and(|source| source.pdf_page == page)
-        })
     }
 
     fn take_pending(&mut self, id: RequestId) -> Option<FrameKey> {
@@ -15867,7 +16048,7 @@ impl App {
     /// A budget set by hand is obeyed either way — the only reason to set one
     /// is to find out what a smaller machine feels like.
     fn size_the_cache_for_what_is_mounted(&mut self, audience: bool) {
-        if Self::budget_from_env("PULPIT_CACHE_BUDGET_MIB").is_some() {
+        if self.cache_budget_override.is_some() {
             return;
         }
         let configured = self.settings.rendering.cache_budget_mib * 1024 * 1024;
@@ -15879,9 +16060,12 @@ impl App {
         self.cache.set_budget(wanted);
     }
 
-    /// The projector's output width in pixels.
+    /// The projector's output width in pixels: the logical width scaled by
+    /// its own pixel ratio, exactly as `presenter_scale_factor` is applied to
+    /// panel frames. Rendering at the logical width and upscaling is the
+    /// soft-on-a-2×-display case this project exists to get right.
     fn audience_width(&self) -> u32 {
-        self.audience_size.width.max(320.0) as u32
+        audience_pixel_width(self.audience_size.width, self.audience_scale())
     }
 
     /// The pages the presenter's slide panels actually draw, most urgent
@@ -16532,21 +16716,24 @@ impl App {
             let Some(supervisor) = self.supervisor.as_mut() else {
                 return;
             };
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: source.pdf_page,
-                region: source.region,
-                width,
-                height,
-                priority,
-                with_annotations: false,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            let id = submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: source.pdf_page,
+                    region: source.region,
+                    width,
+                    height,
+                    priority,
+                    with_annotations: false,
+                    region_name: String::new(),
+                },
+            );
             self.thumbnail_requests.insert(id);
             room -= 1;
         }
@@ -16711,33 +16898,34 @@ impl App {
         let Some(supervisor) = self.supervisor.as_mut() else {
             return;
         };
-        // One retain over `pending` for the whole batch, not one per id.
-        if !obsolete.is_empty() {
-            let doomed: std::collections::HashSet<RequestId> = obsolete.iter().copied().collect();
-            self.pending
-                .retain(|(pending, _)| !doomed.contains(pending));
+        for id in &obsolete {
+            self.thumbnail_requests.remove(id);
         }
-        for id in obsolete {
-            supervisor.cancel(id);
-            self.thumbnail_requests.remove(&id);
-            self.submitted_at.remove(&id);
-        }
+        cancel_renders(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            &obsolete,
+        );
         for (key, source, priority, width, height, document) in jobs {
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: source.pdf_page,
-                region: source.region,
-                width,
-                height,
-                priority,
-                with_annotations: false,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: source.pdf_page,
+                    region: source.region,
+                    width,
+                    height,
+                    priority,
+                    with_annotations: false,
+                    region_name: String::new(),
+                },
+            );
         }
 
         // The outline and the unsupported-feature report are per document, so
@@ -16926,8 +17114,12 @@ impl App {
 
     fn audience_scale(&self) -> f32 {
         // One physical pixel per logical pixel until the window reports
-        // otherwise; an overlay that guesses high wastes a browser's time.
-        1.0
+        // otherwise, exactly as `presenter_scale_factor` falls back.
+        if self.audience_scale.is_finite() && self.audience_scale > 0.0 {
+            self.audience_scale
+        } else {
+            1.0
+        }
     }
 
     /// Drain the media supervisor, holding every complete frame.
@@ -18287,6 +18479,83 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
         cache.contains(&key)
     } else {
         cache.satisfies(key.generation, key.slide, key.kind, key.width)
+    }
+}
+
+/// The projector's exact output width in pixels: the logical width, floored
+/// at a sane minimum, scaled by the window's own physical-pixel ratio. §76.1:
+/// this used to ignore `scale` entirely, so a 2× projector's "exact
+/// output-sized" audience frame was rendered at half resolution and upscaled.
+fn audience_pixel_width(logical_width: f32, scale: f32) -> u32 {
+    (logical_width.max(320.0) * scale) as u32
+}
+
+/// Allocate a request id, submit the job under it, and record when it was
+/// submitted — and, unless `key` is `None`, that it is pending against that
+/// key. §79.3: this triple used to be hand-copied at every submission site;
+/// `key` is `None` only for `copy_area_as_image`'s one-off request, which is
+/// tracked through `App::area_copy` instead of the general `pending` list.
+/// `job` builds the job from the id `next_request_id` allocated, since the id
+/// is not known until this runs.
+fn submit_render(
+    supervisor: &mut RendererSupervisor,
+    pending: &mut Vec<(RequestId, FrameKey)>,
+    submitted_at: &mut std::collections::HashMap<RequestId, Instant>,
+    key: Option<FrameKey>,
+    job: impl FnOnce(RequestId) -> RenderJob,
+) -> RequestId {
+    let id = supervisor.next_request_id();
+    supervisor.submit(job(id));
+    if let Some(key) = key {
+        pending.push((id, key));
+    }
+    submitted_at.insert(id, Instant::now());
+    id
+}
+
+/// Cancel a batch of in-flight requests: drop them from `pending` in one
+/// retain rather than one per id, cancel each with the supervisor, and drop
+/// their submission stamps. Shared by both render planners (§79.3): "a
+/// request is in exactly these maps" is the invariant this keeps in one
+/// place instead of copied by hand. Callers with a third map keyed by
+/// request id (`App::thumbnail_requests`) still clear their own entries —
+/// this only owns the two maps every submission goes through.
+fn cancel_renders(
+    supervisor: &mut RendererSupervisor,
+    pending: &mut Vec<(RequestId, FrameKey)>,
+    submitted_at: &mut std::collections::HashMap<RequestId, Instant>,
+    ids: &[RequestId],
+) {
+    if ids.is_empty() {
+        return;
+    }
+    let doomed: std::collections::HashSet<RequestId> = ids.iter().copied().collect();
+    pending.retain(|(pending, _)| !doomed.contains(pending));
+    for id in ids {
+        supervisor.cancel(*id);
+        submitted_at.remove(id);
+    }
+}
+
+#[cfg(test)]
+mod audience_scale_tests {
+    use super::audience_pixel_width;
+
+    /// §76.1: a 2× audience scale MUST double the render width the app asks
+    /// for, not silently render at the logical size and upscale.
+    #[test]
+    fn doubling_the_audience_scale_doubles_the_requested_width() {
+        let at_one = audience_pixel_width(1920.0, 1.0);
+        let at_two = audience_pixel_width(1920.0, 2.0);
+        assert_eq!(at_one, 1920);
+        assert_eq!(at_two, 3840);
+        assert_eq!(at_two, at_one * 2);
+    }
+
+    #[test]
+    fn the_width_never_drops_below_the_floor() {
+        assert_eq!(audience_pixel_width(10.0, 1.0), 320);
+        assert_eq!(audience_pixel_width(10.0, 2.0), 640);
     }
 }
 

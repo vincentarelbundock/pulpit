@@ -234,6 +234,13 @@ pub struct Journal {
     written: usize,
     /// Set once the bound is reached, so the warning is given once.
     full: bool,
+    /// What `start` wrote into the header, kept so `finish` can re-create the
+    /// file with the same header rather than leaving the journal silently
+    /// stopped (§76.3). Unchanged for the life of the journal: pulpit only
+    /// ever writes copies, never the source, so the fingerprint recorded at
+    /// open is still the fingerprint of the file on disk after a save.
+    source: PathBuf,
+    fingerprint: DocumentFingerprint,
 }
 
 impl std::fmt::Debug for Journal {
@@ -257,23 +264,37 @@ impl Journal {
         fingerprint: DocumentFingerprint,
     ) -> std::io::Result<Journal> {
         let path = path.into();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::File::create(&path)?;
-        let header = JournalHeader {
-            schema: JOURNAL_SCHEMA,
-            source: source.to_path_buf(),
-            fingerprint,
-        };
-        writeln!(file, "{}", serde_json::to_string(&header)?)?;
-        file.sync_all()?;
+        let source = source.to_path_buf();
+        let file = Self::create(&path, &source, &fingerprint)?;
         Ok(Journal {
             path,
             file: Some(file),
             written: 0,
             full: false,
+            source,
+            fingerprint,
         })
+    }
+
+    /// Write a fresh journal file with its header at `path`, for `start` and
+    /// for `finish` re-creating one after a save.
+    fn create(
+        path: &Path,
+        source: &Path,
+        fingerprint: &DocumentFingerprint,
+    ) -> std::io::Result<std::fs::File> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::File::create(path)?;
+        let header = JournalHeader {
+            schema: JOURNAL_SCHEMA,
+            source: source.to_path_buf(),
+            fingerprint: fingerprint.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&header)?)?;
+        file.sync_all()?;
+        Ok(file)
     }
 
     /// Where this journal is, for a diagnostic that has to name it.
@@ -306,8 +327,16 @@ impl Journal {
             self.full = true;
             return Ok(());
         }
+        // §76.3: a journal with no file is not a journal that quietly
+        // accepts everything — `finish` used to leave it in exactly that
+        // state after the first Save As, so every edit made for the rest of
+        // the session went unrecorded and unwarned-about. An `Err` here is
+        // what tells the caller a save is needed before this edit is
+        // protected, the same way a full journal does via `is_full`.
         let Some(file) = self.file.as_mut() else {
-            return Ok(());
+            return Err(std::io::Error::other(
+                "the journal was closed by a save and has not been re-opened",
+            ));
         };
         writeln!(file, "{}", serde_json::to_string(entry)?)?;
         file.sync_all()?;
@@ -320,16 +349,28 @@ impl Journal {
         self.full
     }
 
-    /// The document has been saved, so nothing in the journal is unsaved any
-    /// more. The file goes.
+    /// The document has been saved, so nothing recorded so far is unsaved any
+    /// more. The file is replaced with a fresh, empty one rather than simply
+    /// removed: pulpit keeps editing the same in-memory document after a Save
+    /// As, and every edit made from here on is exactly as unsaved as one made
+    /// before it — the journal's job for the rest of the session, not only up
+    /// to the first save.
     ///
-    /// Not "the edits are gone": they are in the file the user just wrote,
-    /// which is the point. A journal kept past a save would offer to replay
-    /// edits onto a document that already has them.
+    /// §76.3: this used to drop the file and leave it dropped, so `append`
+    /// silently no-op'd for the rest of the session and nothing after a save
+    /// was protected against a crash. The source and fingerprint are
+    /// unchanged, because pulpit only ever writes copies of the source file,
+    /// never the source itself.
+    ///
+    /// A failure to re-create the file is not surfaced here — there is
+    /// nothing to hand it to on the save path — but leaves `self.file` unset,
+    /// so the next `append` reports it as an `Err` rather than a silent
+    /// success.
     pub fn finish(&mut self) {
-        self.file = None;
         let _ = std::fs::remove_file(&self.path);
         self.written = 0;
+        self.full = false;
+        self.file = Self::create(&self.path, &self.source, &self.fingerprint).ok();
     }
 
     /// Read a journal back, if there is one worth reading.
@@ -599,7 +640,12 @@ mod tests {
     }
 
     #[test]
-    fn saving_ends_the_journal_because_nothing_is_unsaved_any_more() {
+    fn saving_clears_what_was_recorded_but_keeps_journalling() {
+        // §76.3: `finish` used to drop the file and leave it dropped, so
+        // every edit made for the rest of the session went unrecorded and
+        // `is_full` never warned. It now re-creates an empty journal with the
+        // same header, so the edits made after a Save As are exactly as
+        // protected as the ones made before it.
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("journal.jsonl");
         let mut journal =
@@ -608,8 +654,30 @@ mod tests {
         assert!(path.exists());
 
         journal.finish();
-        assert!(!path.exists(), "a journal kept past a save replays twice");
+        assert!(
+            path.exists(),
+            "a journal that stops after the first save protects nothing after it"
+        );
         assert!(journal.is_empty());
+
+        // The post-save edit is recorded, and is all `recover` offers back:
+        // the pre-save edit is in the file the user just saved.
+        journal.append(&entry(2, 60.0)).unwrap();
+        let recovered = Journal::recover(&path).unwrap();
+        assert_eq!(recovered.entries, vec![entry(2, 60.0)]);
+    }
+
+    #[test]
+    fn a_journal_with_no_file_refuses_to_append_rather_than_silently_dropping_it() {
+        // §76.3: `append` on a closed journal used to report `Ok` and record
+        // nothing, so nothing ever warned that edits had stopped being
+        // protected.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal =
+            Journal::start(&path, Path::new("/tmp/paper.pdf"), fingerprint()).unwrap();
+        journal.file = None;
+        assert!(journal.append(&entry(1, 10.0)).is_err());
     }
 
     #[test]
@@ -768,6 +836,223 @@ mod tests {
             "the fill came back as something else: {:?}",
             recovered.entries
         );
+    }
+
+    /// The pulpit executable this test run built, beside the test binary
+    /// itself — the same trick `crates/pulpit/tests/document_worker.rs` uses,
+    /// since a document worker is a role of *this* binary (§5.1) and
+    /// `std::env::current_exe()` from a unit test is the test binary.
+    fn worker_executable() -> Option<PathBuf> {
+        let test_binary = std::env::current_exe().ok()?;
+        let candidate = test_binary.parent()?.parent()?.join(if cfg!(windows) {
+            "pulpit.exe"
+        } else {
+            "pulpit"
+        });
+        candidate.is_file().then_some(candidate)
+    }
+
+    fn worker_command(
+        source: &Path,
+    ) -> Option<pulpit_render::document::session::DocumentWorkerCommand> {
+        let program = worker_executable()?;
+        if std::env::var_os("PULPIT_PDFIUM_PATH").is_none() {
+            let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lib");
+            std::env::set_var("PULPIT_PDFIUM_PATH", lib);
+        }
+        Some(
+            pulpit_render::document::session::DocumentWorkerCommand::Explicit {
+                program,
+                args: vec![format!("--document-worker={}", source.display())],
+            },
+        )
+    }
+
+    fn ink_stroke() -> DocumentTransaction {
+        DocumentTransaction::from_annotations([AnnotationCommand::Create(AnnotationDraft::Ink(
+            InkDraft {
+                page: PageIndex(0),
+                points: vec![InkPoint::new(72.0, 72.0), InkPoint::new(180.0, 140.0)],
+                style: MarkStyle::default(),
+            },
+        ))])
+    }
+
+    /// §76.2, end to end against a real document worker: draw, undo, crash,
+    /// recover — the mark MUST stay absent.
+    ///
+    /// This is the seam §83.1 asks for: it drives the journal (this module)
+    /// and the document worker (`pulpit-render`) together, the same two
+    /// halves that disagreed about which operation a `Reversed` entry means.
+    /// `PendingEdit.reversal` in `app.rs` — the fix this test is a regression
+    /// guard for — is exactly the operation captured here as `sent_as_undo`:
+    /// the one actually sent to the worker's `Ask::Undo`, not
+    /// `Applied.undo` from the *answer* to that undo, which is the redo of
+    /// it. Journalling the latter (the bug) is reproduced below and shown to
+    /// bring the mark back; journalling the former (the fix) does not.
+    #[test]
+    fn drawing_then_undoing_then_recovering_leaves_the_mark_absent() {
+        use pulpit_render::document::protocol::{DocumentRequest, DocumentResponse};
+        use pulpit_render::document::session::DocumentSession;
+        use pulpit_render::document::{DocumentRevision, DocumentUndo};
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.pdf");
+        if pulpit_render::pdf::synth::write_pdf(&source, 1, None).is_err() {
+            eprintln!("skipping: cannot write a synthetic PDF");
+            return;
+        }
+        let Some(command) = worker_command(&source) else {
+            eprintln!("skipping: the pulpit executable was not built beside this test");
+            return;
+        };
+
+        let mut session = match DocumentSession::start(&command, &source) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("skipping the recovery test: {error}");
+                return;
+            }
+        };
+
+        let annotations = |session: &mut DocumentSession| {
+            let DocumentResponse::Annotations(list) = session
+                .request(DocumentRequest::ListAnnotations { page: PageIndex(0) })
+                .expect("the worker answers")
+            else {
+                panic!("expected an annotation list")
+            };
+            list.len()
+        };
+        assert_eq!(annotations(&mut session), 0);
+
+        // Draw. `sent_as_undo` is what `PendingEdit.reversal` holds in the
+        // real application: the operation that will be sent to reverse this,
+        // captured at the moment the mark was applied — not derived from
+        // whatever answer comes back later.
+        let response = session
+            .request(DocumentRequest::Apply {
+                expected_revision: DocumentRevision::INITIAL,
+                transaction: ink_stroke(),
+            })
+            .expect("the stroke commits");
+        let DocumentResponse::Applied(applied) = response else {
+            panic!("expected an applied transaction, got {response:?}")
+        };
+        let sent_as_undo: DocumentUndo = applied.undo.clone();
+        assert_eq!(annotations(&mut session), 1);
+
+        // Undo. The answer's own `.undo` is the *inverse of the undo* — the
+        // redo — which is the value §76.2 found being journalled by mistake.
+        let response = session
+            .request(DocumentRequest::Undo {
+                expected_revision: applied.document_revision,
+                operation: sent_as_undo.clone(),
+            })
+            .expect("the undo commits");
+        let DocumentResponse::Applied(undone) = response else {
+            panic!("expected an applied undo, got {response:?}")
+        };
+        let redo_of_the_undo: DocumentUndo = undone.undo.clone();
+        assert_eq!(annotations(&mut session), 0, "the undo removed the mark");
+        session.close();
+
+        // Recover with the fix: journal the operation that was sent.
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = Journal::start(
+            &path,
+            &source,
+            DocumentFingerprint {
+                path: source.clone(),
+                size: None,
+                modified_unix: None,
+            },
+        )
+        .unwrap();
+        journal
+            .append(&JournalEntry::Applied {
+                revision: applied.document_revision,
+                transaction: ink_stroke(),
+            })
+            .unwrap();
+        journal
+            .append(&JournalEntry::Reversed {
+                revision: undone.document_revision,
+                operation: Box::new(sent_as_undo.clone()),
+            })
+            .unwrap();
+        let recovered = Journal::recover(&path).expect("the journal recovers");
+
+        let mut replay = DocumentSession::start(&command, &source).unwrap();
+        let mut revision = DocumentRevision::INITIAL;
+        for entry in recovered.in_order() {
+            match entry {
+                JournalEntry::Applied { transaction, .. } => {
+                    let DocumentResponse::Applied(applied) = replay
+                        .request(DocumentRequest::Apply {
+                            expected_revision: revision,
+                            transaction,
+                        })
+                        .unwrap()
+                    else {
+                        panic!("expected an applied transaction")
+                    };
+                    revision = applied.document_revision;
+                }
+                JournalEntry::Reversed { operation, .. } => {
+                    let DocumentResponse::Applied(applied) = replay
+                        .request(DocumentRequest::Undo {
+                            expected_revision: revision,
+                            operation: *operation,
+                        })
+                        .unwrap()
+                    else {
+                        panic!("expected an applied undo")
+                    };
+                    revision = applied.document_revision;
+                }
+            }
+        }
+        assert_eq!(
+            annotations(&mut replay),
+            0,
+            "§76.2: journalling the operation that was sent leaves the undo undone"
+        );
+        replay.close();
+
+        // And the bug this replaces: journalling the *answer's* `.undo`
+        // (the redo) instead brings the mark back, which is the defect
+        // §76.2 records and this test exists to keep fixed.
+        let mut buggy_replay = DocumentSession::start(&command, &source).unwrap();
+        let mut revision = DocumentRevision::INITIAL;
+        let DocumentResponse::Applied(applied) = buggy_replay
+            .request(DocumentRequest::Apply {
+                expected_revision: revision,
+                transaction: ink_stroke(),
+            })
+            .unwrap()
+        else {
+            panic!("expected an applied transaction")
+        };
+        revision = applied.document_revision;
+        let DocumentResponse::Applied(applied) = buggy_replay
+            .request(DocumentRequest::Undo {
+                expected_revision: revision,
+                // The bug: the *answer's* undo, i.e. `redo_of_the_undo`.
+                operation: redo_of_the_undo,
+            })
+            .unwrap()
+        else {
+            panic!("expected an applied undo")
+        };
+        let _ = applied;
+        assert_eq!(
+            annotations(&mut buggy_replay),
+            1,
+            "the bug this test guards against: replaying the redo of the \
+             undo brings the mark back"
+        );
+        buggy_replay.close();
     }
 
     #[test]

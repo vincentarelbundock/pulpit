@@ -1,10 +1,14 @@
 //! Failure-safe document reload.
 //!
 //! A file-watch event is a *hint*, never proof that a complete new PDF
-//! exists. The manager debounces, waits for the file to stop changing,
-//! attempts to open a candidate, and promotes it only once the candidate's
-//! first audience frame has rendered. Until then the working document and the
-//! last valid audience frame stay exactly where they are.
+//! exists. The manager debounces, waits for the file to stop changing, and
+//! attempts to open a candidate. It promotes the candidate the moment the
+//! renderer confirms it opened and validates (page count > 0): there is no
+//! further "first audience frame" step the state machine waits through — the
+//! frame itself is asked for as part of promotion, and the previous frame
+//! stays on the projector until it lands (rule 3). Until promotion, the
+//! working document and the last valid audience frame stay exactly where
+//! they are.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -96,13 +100,7 @@ pub enum Action {
         document: DocumentId,
         attempt: u32,
     },
-    /// The candidate opened and validated: render its current audience page
-    /// before anything is promoted.
-    RenderFirstFrame {
-        document: DocumentId,
-        info: DocumentInfo,
-    },
-    /// The first frame is ready: this is now the active document.
+    /// The candidate opened and validated: this is now the active document.
     Promote { info: DocumentInfo },
     /// Give up on this candidate and let go of its resources.
     DiscardCandidate { document: DocumentId },
@@ -118,7 +116,6 @@ enum State {
     /// Changes are arriving; wait for quiet.
     Debouncing {
         quiet_at: Instant,
-        last_stamp: Option<SourceStamp>,
     },
     /// Quiet, but the stamp must repeat before we trust it.
     Stabilising {
@@ -129,10 +126,6 @@ enum State {
     Opening {
         document: DocumentId,
         attempt: u32,
-    },
-    /// Opened and validated; waiting for its first audience frame.
-    AwaitingFirstFrame {
-        document: DocumentId,
     },
     /// Failed; retry after a delay.
     Backoff {
@@ -210,32 +203,21 @@ impl DocumentManager {
     }
 
     /// A file-watch hint arrived. Hints are cheap and may be duplicated.
+    ///
+    /// Whatever the previous state — idle, already debouncing, mid-open —
+    /// this restarts the debounce window; an in-flight candidate finishes or
+    /// is discarded when it lands, exactly as before.
     pub fn on_file_event(&mut self, now: Instant) -> Vec<Action> {
-        let quiet_at = now + self.policy.debounce;
-        match &self.state {
-            // A change during an open or a wait means the build is still
-            // running: restart the debounce and let the in-flight candidate
-            // finish or be discarded when it lands.
-            State::Debouncing { last_stamp, .. } => {
-                self.state = State::Debouncing {
-                    quiet_at,
-                    last_stamp: *last_stamp,
-                };
-            }
-            _ => {
-                self.state = State::Debouncing {
-                    quiet_at,
-                    last_stamp: None,
-                }
-            }
-        }
+        self.state = State::Debouncing {
+            quiet_at: now + self.policy.debounce,
+        };
         Vec::new()
     }
 
     /// Drive timers. Call regularly (a subscription tick is enough).
     pub fn tick(&mut self, now: Instant, probe: &dyn FileProbe) -> Vec<Action> {
         match self.state.clone() {
-            State::Idle | State::Opening { .. } | State::AwaitingFirstFrame { .. } => Vec::new(),
+            State::Idle | State::Opening { .. } => Vec::new(),
             State::Debouncing { quiet_at, .. } if now < quiet_at => Vec::new(),
             State::Debouncing { .. } => {
                 let stamp = probe.probe(&self.path);
@@ -296,9 +278,28 @@ impl DocumentManager {
         }
     }
 
-    /// The renderer opened the candidate and reported its page count.
-    pub fn on_candidate_opened(&mut self, info: DocumentInfo) -> Vec<Action> {
+    /// The renderer opened the candidate and reported its page count: this
+    /// is the only path that replaces the working document, and it promotes
+    /// as soon as the candidate validates. There is no further state to wait
+    /// through — see the module doc.
+    ///
+    /// §79.6, and robustness against §76.7 (the render supervisor is fixed
+    /// separately to stop replaying a worker restart's `Open` as a second
+    /// `Opened`, but the manager does not trust that): a reply naming the
+    /// document that is *already* active — this is not `State::Opening` for
+    /// it, because it was already promoted — is a duplicate answer, not a
+    /// late one for something abandoned. It is dropped rather than turned
+    /// into `DiscardCandidate`, which would tell the caller to close the
+    /// document that is on screen.
+    pub fn on_candidate_opened(&mut self, info: DocumentInfo, now: Instant) -> Vec<Action> {
         let State::Opening { document, .. } = self.state else {
+            if self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == info.id)
+            {
+                return Vec::new();
+            }
             // A late reply for a candidate we already gave up on.
             return vec![Action::DiscardCandidate { document: info.id }];
         };
@@ -306,24 +307,7 @@ impl DocumentManager {
             return vec![Action::DiscardCandidate { document: info.id }];
         }
         if info.pdf_pages == 0 {
-            return self.on_candidate_failed(
-                info.id,
-                "the document reports no pages".into(),
-                Instant::now(),
-            );
-        }
-        self.state = State::AwaitingFirstFrame { document };
-        vec![Action::RenderFirstFrame { document, info }]
-    }
-
-    /// The candidate's first audience frame rendered: promote it. This is the
-    /// only path that replaces the working document.
-    pub fn on_first_frame(&mut self, info: DocumentInfo) -> Vec<Action> {
-        let State::AwaitingFirstFrame { document } = self.state else {
-            return vec![Action::DiscardCandidate { document: info.id }];
-        };
-        if info.id != document {
-            return vec![Action::DiscardCandidate { document: info.id }];
+            return self.on_candidate_failed(info.id, "the document reports no pages".into(), now);
         }
         let previous = self.active.replace(info.clone());
         self.state = State::Idle;
@@ -343,7 +327,7 @@ impl DocumentManager {
         actions
     }
 
-    /// The candidate failed to open, or its first frame failed to render.
+    /// The candidate failed to open.
     pub fn on_candidate_failed(
         &mut self,
         document: DocumentId,
@@ -352,7 +336,6 @@ impl DocumentManager {
     ) -> Vec<Action> {
         let attempt = match self.state {
             State::Opening { attempt, .. } | State::Backoff { attempt, .. } => attempt,
-            State::AwaitingFirstFrame { .. } => 1,
             _ => return vec![Action::DiscardCandidate { document }],
         };
         let backoff = self
@@ -378,8 +361,14 @@ impl DocumentManager {
 
     /// Adopt a document that was opened outside the reload path (the very
     /// first load, or an explicit "open file" action).
+    ///
+    /// Reserves the id: a later reload's own allocation must never reuse it,
+    /// which `self.active.id == info.id` in `on_candidate_opened` now relies
+    /// on to tell a duplicate answer for the active document apart from a
+    /// genuinely stale one (§79.6, §76.7).
     #[allow(dead_code)] // reached by its tests, not by the application
     pub fn adopt(&mut self, info: DocumentInfo) {
+        self.next_document = self.next_document.max(info.id);
         self.path = info.path.clone();
         self.active = Some(info);
         self.state = State::Idle;
@@ -600,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_is_promoted_only_after_its_first_frame() {
+    fn a_candidate_is_promoted_as_soon_as_it_validates() {
         let start = Instant::now();
         let mut manager = manager();
         manager.adopt(info(DocumentId(1), 20));
@@ -609,15 +598,7 @@ mod tests {
         let document = open_candidate(&mut manager, &probe, start);
 
         let candidate = info(document, 25);
-        let actions = manager.on_candidate_opened(candidate.clone());
-        assert!(matches!(actions[0], Action::RenderFirstFrame { .. }));
-        assert_eq!(
-            manager.active().unwrap().id,
-            DocumentId(1),
-            "opening is not promoting: the projector still shows the old frame"
-        );
-
-        let actions = manager.on_first_frame(candidate.clone());
+        let actions = manager.on_candidate_opened(candidate.clone(), start);
         assert!(actions.contains(&Action::Promote {
             info: candidate.clone()
         }));
@@ -636,7 +617,7 @@ mod tests {
         let probe = FakeProbe::with(vec![stamp(500)]);
         let document = open_candidate(&mut manager, &probe, start);
 
-        let actions = manager.on_candidate_opened(info(document, 0));
+        let actions = manager.on_candidate_opened(info(document, 0), start);
         assert!(actions
             .iter()
             .any(|a| matches!(a, Action::DiscardCandidate { .. })));
@@ -645,9 +626,10 @@ mod tests {
 
     #[test]
     fn a_late_reply_for_an_abandoned_candidate_is_discarded() {
+        let start = Instant::now();
         let mut manager = manager();
         manager.adopt(info(DocumentId(1), 20));
-        let actions = manager.on_candidate_opened(info(DocumentId(99), 5));
+        let actions = manager.on_candidate_opened(info(DocumentId(99), 5), start);
         assert_eq!(
             actions,
             vec![Action::DiscardCandidate {
@@ -655,13 +637,31 @@ mod tests {
             }]
         );
         assert_eq!(manager.active().unwrap().id, DocumentId(1));
+    }
 
-        let actions = manager.on_first_frame(info(DocumentId(99), 5));
+    /// §79.6, §76.7: a render-worker restart can replay the `Opened` answer
+    /// for the document that is already active — the manager has moved on
+    /// to `State::Idle`, so this is not `State::Opening` for anything. It
+    /// MUST NOT be read as a late reply for an abandoned candidate: that
+    /// would discard the very document on screen.
+    #[test]
+    fn a_second_opened_for_the_active_document_does_not_discard_it() {
+        let start = Instant::now();
+        let mut manager = manager();
+        manager.adopt(info(DocumentId(1), 20));
+
+        let replayed = manager.on_candidate_opened(info(DocumentId(1), 20), start);
+        assert!(
+            replayed.is_empty(),
+            "a duplicate answer for the active document is not a reason to discard it: \
+             {replayed:?}"
+        );
+        assert_eq!(manager.active().unwrap().id, DocumentId(1));
+        assert_eq!(manager.active().unwrap().pdf_pages, 20);
         assert_eq!(
-            actions,
-            vec![Action::DiscardCandidate {
-                document: DocumentId(99)
-            }]
+            manager.reload_count(),
+            0,
+            "nothing was promoted a second time"
         );
     }
 
@@ -696,8 +696,7 @@ mod tests {
             panic!("expected another attempt")
         };
         let candidate = info(document, 22);
-        manager.on_candidate_opened(candidate.clone());
-        let actions = manager.on_first_frame(candidate);
+        let actions = manager.on_candidate_opened(candidate, now);
         assert!(
             actions.contains(&Action::ClearFailure),
             "the user is told it recovered"
@@ -732,7 +731,7 @@ mod tests {
         // than promoted over a file that has since changed again.
         let stale = info(document, 21);
         assert_eq!(
-            manager.on_candidate_opened(stale.clone()),
+            manager.on_candidate_opened(stale.clone(), start),
             vec![Action::DiscardCandidate { document }]
         );
         assert_eq!(
@@ -755,9 +754,8 @@ mod tests {
         }
         let document = opened.expect("expected the newer build to be opened");
         let candidate = info(document, 21);
-        manager.on_candidate_opened(candidate.clone());
         assert!(manager
-            .on_first_frame(candidate)
+            .on_candidate_opened(candidate, now)
             .iter()
             .any(|a| matches!(a, Action::Promote { .. })));
     }
