@@ -219,7 +219,6 @@ pub fn iced_mode(mode: WindowMode) -> window::Mode {
     match mode {
         WindowMode::Windowed => window::Mode::Windowed,
         WindowMode::Fullscreen => window::Mode::Fullscreen,
-        WindowMode::Hidden => window::Mode::Hidden,
     }
 }
 

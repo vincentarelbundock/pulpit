@@ -3494,11 +3494,10 @@ impl App {
                 }
                 let window = self.coordinator.window_state_mut(role);
                 window.visible = role == Role::Presenter;
-                window.mode = if role == Role::Presenter {
-                    WindowMode::Windowed
-                } else {
-                    WindowMode::Hidden
-                };
+                // `WindowMode` has no `Hidden` variant (§81): `visible` is
+                // what actually gates whether the audience window is shown,
+                // and its mode is meaningless until the first `Place`.
+                window.mode = WindowMode::Windowed;
                 if role == Role::Audience {
                     self.schedule_presenter_refocus();
                 }
@@ -14257,9 +14256,7 @@ impl App {
             DisplayAction::Place { role, mode, .. } => {
                 *role == Role::Audience && *mode != self.coordinator.windows.audience.mode
             }
-            DisplayAction::Show { role } | DisplayAction::Unfullscreen { role } => {
-                *role == Role::Audience
-            }
+            DisplayAction::Show { role } => *role == Role::Audience,
         });
 
         let mut tasks = Vec::new();
@@ -14366,11 +14363,6 @@ impl App {
                                 verifying: false,
                             });
                         }
-                    }
-                }
-                DisplayAction::Unfullscreen { role } => {
-                    if let Some(id) = self.window_id(*role) {
-                        tasks.push(window::set_mode::<Message>(id, window::Mode::Windowed));
                     }
                 }
             }
