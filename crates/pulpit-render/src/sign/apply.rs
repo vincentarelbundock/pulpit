@@ -50,9 +50,9 @@ use crate::sign::{
     build_cms, digest_algorithm_for, estimate_cms_size, Credential, DigestAlgorithm, SigningError,
     SigningProfile,
 };
-use crate::verify::preflight::{preflight_sign, PreflightRefusal};
+use crate::verify::preflight::{preflight_sign_with, PreflightRefusal};
 use crate::verify::{
-    self, find_catalog_ref, SignatureCoverage, SignatureVerification, VerifyError,
+    self, find_catalog_ref_with, SignatureCoverage, SignatureVerification, VerifyError,
 };
 
 /// Which signature field the revision targets.
@@ -377,7 +377,15 @@ fn sign_document_file_inner(
         source: e,
     })?;
 
-    let plan = plan_revision(&source_bytes, request)?;
+    // §78.3: one resolver for the whole pass. `ObjectResolver::new` used to
+    // run about ten times per signing — in `plan_revision`, `preflight_sign`,
+    // `find_field_object`, `find_catalog_ref`, three `parse_object_dictionary`
+    // calls, `page_object_at` and twice inside `check_page_index` — each
+    // rebuilding the cross-reference chain and redecoding every object
+    // stream it touches. Building it once here and threading it through the
+    // `_with` variants of all of those makes it one pass instead of ten.
+    let resolver = verify::ObjectResolver::new(&source_bytes);
+    let plan = plan_revision(&resolver, &source_bytes, request)?;
 
     // Assemble, sign, and if the reservation was too tight do it once more
     // with double the room. Two attempts, never more (§23.5).
@@ -394,7 +402,8 @@ fn sign_document_file_inner(
     let mut attempts = 0usize;
     let (mut candidate, cms_len) = loop {
         attempts += 1;
-        let assembled = assemble_revision(&source_bytes, request, &plan, bytes_reserved)?;
+        let assembled =
+            assemble_revision(&resolver, &source_bytes, request, &plan, bytes_reserved)?;
         match sign_assembled(assembled, credential, request, digest_algorithm) {
             Ok((bytes, cms_len)) => break (bytes, cms_len),
             Err(SignApplyError::Signing(SigningError::SignatureTooLarge { .. }))
@@ -551,30 +560,39 @@ struct RevisionPlan {
     field_name: String,
     previous_signatures: usize,
     seed_value_ignored: bool,
-    existing_field: Option<u32>,
+    existing_field: Option<(u32, u16)>,
 }
 
-fn plan_revision(source: &[u8], request: &SignRequest) -> Result<RevisionPlan, SignApplyError> {
+/// §78.3: `sign_document_file_inner` builds one [`crate::verify::ObjectResolver`]
+/// for the whole signing pass and passes it here, so this and everything it
+/// calls read through it instead of each rebuilding one — the cross-reference
+/// chain and every decoded object stream, walked again per call otherwise.
+fn plan_revision(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    source: &[u8],
+    request: &SignRequest,
+) -> Result<RevisionPlan, SignApplyError> {
     // Every target reaches this point, but only the ExistingField branch runs
     // `preflight_sign`, so the refusal has to sit here to cover creating a new
     // field as well. We append plaintext and carry no encryption layer
     // (§23.2), so signing an encrypted document could only ever produce a file
     // no reader accepts.
-    if crate::verify::is_encrypted(source) {
+    if resolver.is_encrypted() {
         return Err(PreflightRefusal::EncryptedDocument.into());
     }
 
-    let previous_signatures = count_signatures(source)?;
+    let previous_signatures = count_signatures_with(resolver, source)?;
 
     match &request.field {
         SignTarget::ExistingField(name) => {
-            let ok = preflight_sign(source, Some(name.as_str()))?;
-            let field_obj = find_field_object(source, &ok.target_field)?.ok_or_else(|| {
-                SignApplyError::Unsupported(format!(
-                    "signature field '{}' could not be located",
-                    ok.target_field
-                ))
-            })?;
+            let ok = preflight_sign_with(resolver, source, Some(name.as_str()))?;
+            let field_obj = find_field_object_with(resolver, source, &ok.target_field)?
+                .ok_or_else(|| {
+                    SignApplyError::Unsupported(format!(
+                        "signature field '{}' could not be located",
+                        ok.target_field
+                    ))
+                })?;
             Ok(RevisionPlan {
                 field_name: ok.target_field,
                 previous_signatures,
@@ -596,7 +614,7 @@ fn plan_revision(source: &[u8], request: &SignRequest) -> Result<RevisionPlan, S
             // Check 2 still applies: a prior certification may forbid signing
             // outright. A document with no signature at all has no /Perms, so
             // this is cheap insurance rather than a common path.
-            let taken = existing_field_names(source)?;
+            let taken = existing_field_names_with(resolver, source)?;
             let field_name = match name {
                 Some(name) => {
                     if taken.iter().any(|t| t == name) {
@@ -627,9 +645,14 @@ fn plan_revision(source: &[u8], request: &SignRequest) -> Result<RevisionPlan, S
     }
 }
 
-fn count_signatures(bytes: &[u8]) -> Result<usize, SignApplyError> {
+/// Reads through a resolver the caller already built — see the module note
+/// on [`plan_revision`] (§78.3).
+fn count_signatures_with(
+    resolver: &verify::ObjectResolver<'_>,
+    bytes: &[u8],
+) -> Result<usize, SignApplyError> {
     let revisions = verify::RevisionMap::build(bytes)?;
-    Ok(verify::discover_signatures(bytes, &revisions)?.len())
+    Ok(verify::discover_signatures_with(resolver, bytes, &revisions)?.len())
 }
 
 // --- Assembly -------------------------------------------------------------
@@ -640,7 +663,10 @@ struct Assembled {
     offsets: PlaceholderOffsets,
 }
 
+/// §78.3: reads through the resolver `sign_document_file_inner` built once
+/// for the whole pass — see the note on [`plan_revision`].
 fn assemble_revision(
+    resolver: &crate::verify::ObjectResolver<'_>,
     source: &[u8],
     request: &SignRequest,
     plan: &RevisionPlan,
@@ -697,10 +723,10 @@ fn assemble_revision(
     let mut appearance_size: Option<(f64, f64)> = None;
 
     match plan.existing_field {
-        Some(field_object) => {
+        Some((field_object, field_gen)) => {
             // The minimal content-change line of §31.3: the only object that
             // changes meaning is the field, which gains a /V.
-            let mut entries = parse_object_dictionary(source, field_object)?;
+            let mut entries = parse_object_dictionary_with(resolver, field_object)?;
             set_entry(
                 &mut entries,
                 "V",
@@ -721,7 +747,7 @@ fn assemble_revision(
                         // The widget stays on its own page — only the box
                         // moves — but a page the document does not have is
                         // still a mistake worth naming.
-                        check_page_index(source, *page_index)?;
+                        check_page_index_with(resolver, source, *page_index)?;
                         set_entry(
                             &mut entries,
                             "Rect",
@@ -733,11 +759,14 @@ fn assemble_revision(
                 appearance_size = Some(rect_size(rect));
                 point_widget_at_appearance(&mut entries, xobject_num);
             }
-            objects.push((field_object, 0, PdfObject::Dictionary(entries)));
+            // §77.9: `field_object` is a re-emitted *existing* object; its
+            // own generation, not an assumed 0, is what the xref row and
+            // header must agree with the trailer's other references to it.
+            objects.push((field_object, field_gen, PdfObject::Dictionary(entries)));
         }
         None => {
-            let catalog = find_catalog_ref(source)?;
-            let mut catalog_entries = parse_object_dictionary(source, catalog.0)?;
+            let catalog = find_catalog_ref_with(resolver, source)?;
+            let mut catalog_entries = parse_object_dictionary_with(resolver, catalog.0)?;
             // The widget joins the /Annots of the page the appearance names.
             // Without an appearance the field is invisible and page 0 is as
             // good a home as any, which is where it has always gone.
@@ -748,18 +777,25 @@ fn assemble_revision(
                 }) => *page_index,
                 _ => 0,
             };
-            let page_object = page_object_at(source, &catalog_entries, target_page)?;
+            let (page_object, page_gen) =
+                page_object_at_with(resolver, &catalog_entries, target_page)?;
             let field_object = allocate(&mut next_object);
 
             // AcroForm: reuse the existing one when it is indirect, promote a
-            // direct one to its own object, otherwise create it.
-            let (acroform_object, mut acroform_entries) =
+            // direct one to its own object, otherwise create it. Reusing an
+            // existing object keeps its generation; a freshly allocated one
+            // is always gen 0.
+            let (acroform_object, acroform_gen, mut acroform_entries) =
                 match entry(&catalog_entries, "AcroForm").cloned() {
-                    Some(PdfObject::IndirectRef { obj_num, .. }) => {
-                        (obj_num, parse_object_dictionary(source, obj_num)?)
+                    Some(PdfObject::IndirectRef { obj_num, gen_num }) => (
+                        obj_num,
+                        gen_num,
+                        parse_object_dictionary_with(resolver, obj_num)?,
+                    ),
+                    Some(PdfObject::Dictionary(entries)) => {
+                        (allocate(&mut next_object), 0, entries)
                     }
-                    Some(PdfObject::Dictionary(entries)) => (allocate(&mut next_object), entries),
-                    Some(_) | None => (allocate(&mut next_object), Vec::new()),
+                    Some(_) | None => (allocate(&mut next_object), 0, Vec::new()),
                 };
 
             let mut fields = match entry(&acroform_entries, "Fields") {
@@ -782,11 +818,11 @@ fn assemble_revision(
                 "AcroForm",
                 PdfObject::IndirectRef {
                     obj_num: acroform_object,
-                    gen_num: 0,
+                    gen_num: acroform_gen,
                 },
             );
 
-            let mut page_entries = parse_object_dictionary(source, page_object)?;
+            let mut page_entries = parse_object_dictionary_with(resolver, page_object)?;
             let mut annots = match entry(&page_entries, "Annots") {
                 Some(PdfObject::Array(items)) => items.clone(),
                 _ => Vec::new(),
@@ -830,7 +866,7 @@ fn assemble_revision(
                     "P".into(),
                     PdfObject::IndirectRef {
                         obj_num: page_object,
-                        gen_num: 0,
+                        gen_num: page_gen,
                     },
                 ),
             ];
@@ -850,9 +886,17 @@ fn assemble_revision(
                 point_widget_at_appearance(&mut field_entries, xobject_num);
             }
 
-            objects.push((catalog.0, 0, PdfObject::Dictionary(catalog_entries)));
-            objects.push((acroform_object, 0, PdfObject::Dictionary(acroform_entries)));
-            objects.push((page_object, 0, PdfObject::Dictionary(page_entries)));
+            // §77.9: the catalog, the AcroForm (when reused) and the page
+            // are re-emitted existing objects; each keeps its own
+            // generation rather than being written as `"{n} 0 obj"` while
+            // the trailer's references to it still say otherwise.
+            objects.push((catalog.0, catalog.1, PdfObject::Dictionary(catalog_entries)));
+            objects.push((
+                acroform_object,
+                acroform_gen,
+                PdfObject::Dictionary(acroform_entries),
+            ));
+            objects.push((page_object, page_gen, PdfObject::Dictionary(page_entries)));
             objects.push((field_object, 0, PdfObject::Dictionary(field_entries)));
         }
     }
@@ -1630,12 +1674,28 @@ const MAX_PAGE_TREE_NODES: usize = 50_000;
 /// producer that omits it still expects the node to be a page. The walk is
 /// bounded in depth and node count and refuses to revisit a node, so a cycle
 /// is a refusal rather than a hang.
+/// Every page's object number *and generation* (§77.9: a page kept from the
+/// source is a re-emitted existing object, and a reference or xref row that
+/// silently assumed generation 0 for it disagreed with a `/Kids` entry that
+/// may say otherwise).
+///
+/// Builds its own resolver — §78.3: prefer [`page_objects_with`] when the
+/// caller already has one; this is a thin wrapper kept for callers (e.g.
+/// `pdfoutline`) making only this one read.
 pub(crate) fn page_objects(
     bytes: &[u8],
     catalog_entries: &[(String, PdfObject)],
-) -> Result<Vec<u32>, SignApplyError> {
-    let root = match entry(catalog_entries, "Pages") {
-        Some(PdfObject::IndirectRef { obj_num, .. }) => *obj_num,
+) -> Result<Vec<(u32, u16)>, SignApplyError> {
+    page_objects_with(&crate::verify::ObjectResolver::new(bytes), catalog_entries)
+}
+
+/// [`page_objects`], against a resolver the caller already built.
+pub(crate) fn page_objects_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    catalog_entries: &[(String, PdfObject)],
+) -> Result<Vec<(u32, u16)>, SignApplyError> {
+    let (root, root_gen) = match entry(catalog_entries, "Pages") {
+        Some(PdfObject::IndirectRef { obj_num, gen_num }) => (*obj_num, *gen_num),
         _ => {
             return Err(SignApplyError::Unsupported(
                 "the catalog has no indirect /Pages tree".into(),
@@ -1645,13 +1705,9 @@ pub(crate) fn page_objects(
 
     let mut pages = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![(root, 0usize)];
+    let mut stack = vec![(root, root_gen, 0usize)];
     let mut budget = MAX_PAGE_TREE_NODES;
-    // One resolver for the walk: building one rebuilds the whole
-    // cross-reference chain, and this loop visits up to MAX_PAGE_TREE_NODES
-    // nodes.
-    let resolver = crate::verify::ObjectResolver::new(bytes);
-    while let Some((node, depth)) = stack.pop() {
+    while let Some((node, gen, depth)) = stack.pop() {
         if depth > MAX_PAGE_TREE_DEPTH {
             return Err(SignApplyError::Unsupported(format!(
                 "the page tree is deeper than {MAX_PAGE_TREE_DEPTH} levels"
@@ -1668,28 +1724,28 @@ pub(crate) fn page_objects(
             // way it has already contributed its pages.
             continue;
         }
-        let entries = parse_object_dictionary_with(&resolver, node)?;
+        let entries = parse_object_dictionary_with(resolver, node)?;
         match entry(&entries, "Kids") {
             Some(PdfObject::Array(kids)) => {
                 for kid in kids.iter().rev() {
-                    if let PdfObject::IndirectRef { obj_num, .. } = kid {
-                        stack.push((*obj_num, depth + 1));
+                    if let PdfObject::IndirectRef { obj_num, gen_num } = kid {
+                        stack.push((*obj_num, *gen_num, depth + 1));
                     }
                 }
             }
-            _ => pages.push(node),
+            _ => pages.push((node, gen)),
         }
     }
     Ok(pages)
 }
 
-/// The object number of page `index`, zero-based.
-fn page_object_at(
-    bytes: &[u8],
+/// The object number and generation of page `index`, zero-based.
+fn page_object_at_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
     catalog_entries: &[(String, PdfObject)],
     index: usize,
-) -> Result<u32, SignApplyError> {
-    let pages = page_objects(bytes, catalog_entries)?;
+) -> Result<(u32, u16), SignApplyError> {
+    let pages = page_objects_with(resolver, catalog_entries)?;
     pages
         .get(index)
         .copied()
@@ -1698,10 +1754,14 @@ fn page_object_at(
 
 /// Check that `index` names a page this document has, without caring which
 /// object it is — the existing-field path needs the refusal, not the page.
-fn check_page_index(bytes: &[u8], index: usize) -> Result<(), SignApplyError> {
-    let catalog = find_catalog_ref(bytes)?;
-    let catalog_entries = parse_object_dictionary(bytes, catalog.0)?;
-    let pages = page_objects(bytes, &catalog_entries)?;
+fn check_page_index_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+    index: usize,
+) -> Result<(), SignApplyError> {
+    let catalog = find_catalog_ref_with(resolver, bytes)?;
+    let catalog_entries = parse_object_dictionary_with(resolver, catalog.0)?;
+    let pages = page_objects_with(resolver, &catalog_entries)?;
     if index >= pages.len() {
         return Err(out_of_range(index, pages.len()));
     }
@@ -1746,27 +1806,43 @@ fn field_name_of(entries: &[(String, PdfObject)]) -> Option<String> {
     }
 }
 
-/// The object number of the field named `name`, if the AcroForm lists it.
-fn find_field_object(bytes: &[u8], name: &str) -> Result<Option<u32>, SignApplyError> {
-    let resolver = crate::verify::ObjectResolver::new(bytes);
-    let catalog = crate::verify::find_catalog_ref_with(&resolver, bytes)?;
-    for (obj_num, _) in crate::verify::find_fields_array_with(&resolver, catalog)? {
-        let entries = parse_object_dictionary_with(&resolver, obj_num)?;
+/// The object number and generation of the field named `name`, if the
+/// AcroForm lists it. §77.9: the field this returns is re-emitted as an
+/// existing object when it is signed, and needs its real generation for
+/// that, not an assumed 0.
+#[cfg(test)]
+fn find_field_object(bytes: &[u8], name: &str) -> Result<Option<(u32, u16)>, SignApplyError> {
+    find_field_object_with(&crate::verify::ObjectResolver::new(bytes), bytes, name)
+}
+
+/// [`find_field_object`], against a resolver the caller already built.
+fn find_field_object_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+    name: &str,
+) -> Result<Option<(u32, u16)>, SignApplyError> {
+    let catalog = crate::verify::find_catalog_ref_with(resolver, bytes)?;
+    for (obj_num, gen_num) in crate::verify::find_fields_array_with(resolver, catalog)? {
+        let entries = parse_object_dictionary_with(resolver, obj_num)?;
         // Compare decoded names: the caller's `name` is UTF-8 from the
         // application, the document's is not.
         if field_name_of(&entries).as_deref() == Some(name) {
-            return Ok(Some(obj_num));
+            return Ok(Some((obj_num, gen_num)));
         }
     }
     Ok(None)
 }
 
-fn existing_field_names(bytes: &[u8]) -> Result<Vec<String>, SignApplyError> {
-    let resolver = crate::verify::ObjectResolver::new(bytes);
-    let catalog = crate::verify::find_catalog_ref_with(&resolver, bytes)?;
+/// Reads through a resolver the caller already built — see the module note
+/// on [`plan_revision`] (§78.3).
+fn existing_field_names_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+) -> Result<Vec<String>, SignApplyError> {
+    let catalog = crate::verify::find_catalog_ref_with(resolver, bytes)?;
     let mut names = Vec::new();
-    for (obj_num, _) in crate::verify::find_fields_array_with(&resolver, catalog)? {
-        let entries = parse_object_dictionary_with(&resolver, obj_num)?;
+    for (obj_num, _) in crate::verify::find_fields_array_with(resolver, catalog)? {
+        let entries = parse_object_dictionary_with(resolver, obj_num)?;
         // `/T` is document bytes, not our own text. Matching `String` here
         // once silently matched nothing, so this returned an empty list for
         // every document and both collision checks in `plan_revision` went
@@ -2086,5 +2162,111 @@ mod tests {
             }
             other => panic!("expected nesting depth error, got {:?}", other),
         }
+    }
+
+    // --- §77.9: generation numbers are not silently dropped ----------------
+    //
+    // A `5 1 R` reference is not the same object as `5 0 R`; only PDFium and
+    // most producers happen to use generation 0 everywhere, which is exactly
+    // why fixtures across this crate mostly do too and would not have caught
+    // `page_objects`/`find_field_object` discarding a non-zero generation.
+    // These fixtures write one on purpose.
+    #[allow(dead_code)]
+    mod builder {
+        include!("../../tests/testkit/builder.rs");
+    }
+    use self::builder::Pdf;
+
+    #[test]
+    fn page_objects_reports_each_pages_own_generation() {
+        // Object 3, the page, is referenced as generation 1 from both the
+        // `/Kids` array and (indirectly, through this test's assertion) the
+        // catalog's `/Pages` pointer.
+        let mut pdf = Pdf::new();
+        pdf.add("<</Type /Catalog /Pages 2 0 R>>");
+        pdf.add("<</Type /Pages /Kids [3 1 R] /Count 1>>");
+        pdf.add("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>");
+        let bytes = pdf.build();
+
+        let catalog = crate::verify::find_catalog_ref(&bytes).expect("catalog");
+        let catalog_entries = parse_object_dictionary(&bytes, catalog.0).expect("catalog dict");
+        let pages = page_objects(&bytes, &catalog_entries).expect("page tree");
+        assert_eq!(
+            pages,
+            vec![(3, 1)],
+            "the page's own generation (1, from the /Kids entry) must survive, not be \
+             reported as 0"
+        );
+    }
+
+    #[test]
+    fn find_field_object_reports_the_fields_own_generation() {
+        // Object 5, the signature field, is referenced as generation 2 from
+        // the AcroForm's /Fields array.
+        let mut pdf = Pdf::new();
+        pdf.add("<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>");
+        pdf.add("<</Type /Pages /Kids [3 0 R] /Count 1>>");
+        pdf.add("<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>");
+        pdf.add("<</Fields [5 2 R] /SigFlags 3>>");
+        pdf.add("<</FT /Sig /T (Sig1)>>");
+        let bytes = pdf.build();
+
+        let found = find_field_object(&bytes, "Sig1")
+            .expect("lookup succeeds")
+            .expect("field is found");
+        assert_eq!(
+            found,
+            (5, 2),
+            "the field's own generation (2, from the /Fields entry) must survive, not be \
+             reported as 0"
+        );
+    }
+
+    #[test]
+    fn append_objects_writes_the_generation_the_caller_gives_it() {
+        // A direct check of the writer underneath `assemble_revision`: an
+        // object re-emitted with a non-zero generation must be headed
+        // `"N G obj"`, and its classic-xref row must say the same
+        // generation, not 0.
+        let mut pdf = Pdf::new();
+        pdf.add("<</Type /Catalog /Pages 2 0 R>>");
+        pdf.add("<</Type /Pages /Kids [] /Count 0>>");
+        let bytes = pdf.build();
+
+        let writer =
+            crate::pdfwrite::IncrementalWriter::open(&bytes).expect("a minimal PDF is openable");
+        let objects = vec![(
+            1u32,
+            3u16,
+            crate::pdfwrite::PdfObject::Dictionary(vec![(
+                "Type".to_string(),
+                crate::pdfwrite::PdfObject::Name("Catalog".to_string()),
+            )]),
+        )];
+        let mut out = Vec::new();
+        writer
+            .append_objects(&mut std::io::Cursor::new(&mut out), &objects, &[7u8; 16])
+            .expect("append_objects succeeds");
+        let text = String::from_utf8_lossy(&out);
+
+        assert!(
+            text.contains("1 3 obj"),
+            "the object header must carry the caller's generation, got: {text}"
+        );
+        // The *new* xref section: the original document's own xref, still
+        // present in the preserved bytes this incremental update was built
+        // on, is the first "xref\n0 1\n" in the file (searching for "xref"
+        // alone also matches "startxref").
+        let xref_section = &text[text
+            .rfind("xref\n0 1\n")
+            .expect("an xref section was written")..];
+        assert!(
+            xref_section.contains("00003 n"),
+            "the xref row for object 1 must say generation 3, got: {xref_section}"
+        );
+        assert!(
+            !xref_section.contains("00000 n"),
+            "the xref row for object 1 must not say the default generation 0, got: {xref_section}"
+        );
     }
 }
