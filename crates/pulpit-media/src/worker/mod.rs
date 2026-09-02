@@ -19,13 +19,13 @@ use crate::protocol::RuntimeId;
 /// The flag value that selects each in-process worker role.
 ///
 /// Kept beside the roles themselves so the spawning side and the dispatching
-/// side cannot drift apart.
-pub fn role_flag(runtime: RuntimeId) -> Option<&'static str> {
+/// side cannot drift apart. Every runtime this build knows about is a role
+/// of this executable — none links an optional system library — so this is
+/// total rather than partial.
+pub fn role_flag(runtime: RuntimeId) -> &'static str {
     match runtime {
-        RuntimeId::ExternalChromium => Some("chromium"),
-        RuntimeId::LibMpv => Some("libmpv"),
-        // Everything else is a separate executable by design.
-        _ => None,
+        RuntimeId::ExternalChromium => "chromium",
+        RuntimeId::LibMpv => "libmpv",
     }
 }
 
@@ -184,24 +184,14 @@ mod tests {
 
     #[test]
     fn the_in_process_roles_are_exactly_the_ones_that_link_nothing_optional() {
-        assert_eq!(role_flag(RuntimeId::ExternalChromium), Some("chromium"));
-        // The system webviews would link optional system libraries, so they
-        // must stay out of the application's own executable.
-        for runtime in [
-            RuntimeId::WebKitGtk,
-            RuntimeId::WebView2,
-            RuntimeId::WkWebView,
-        ] {
-            assert_eq!(role_flag(runtime), None, "{runtime} must stay separate");
-        }
+        assert_eq!(role_flag(RuntimeId::ExternalChromium), "chromium");
+        assert_eq!(role_flag(RuntimeId::LibMpv), "libmpv");
     }
 
     #[test]
     fn every_role_flag_is_one_run_role_understands() {
         for runtime in RuntimeId::ALL {
-            let Some(flag) = role_flag(runtime) else {
-                continue;
-            };
+            let flag = role_flag(runtime);
             assert_ne!(flag, "", "{runtime} has an empty flag");
         }
         assert!(!run_role("nonesuch"), "an unknown role must be refused");

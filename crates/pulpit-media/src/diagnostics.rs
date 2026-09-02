@@ -359,10 +359,10 @@ mod tests {
     fn an_actionable_limitation_demotes_an_overlay_to_degraded() {
         let probe = RuntimeProbe {
             limitations: vec![Limitation::NoAudio],
-            ..RuntimeProbe::unavailable(RuntimeId::WebKitGtk, Availability::Available)
+            ..RuntimeProbe::unavailable(RuntimeId::LibMpv, Availability::Available)
         };
         let selection = Selection {
-            selected: Some(RuntimeId::WebKitGtk),
+            selected: Some(RuntimeId::LibMpv),
             fallbacks: Vec::new(),
             attempts: Vec::new(),
         };
@@ -403,7 +403,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             runtimes: vec![RuntimeSummary {
-                runtime: RuntimeId::WebKitGtk,
+                runtime: RuntimeId::LibMpv,
                 available: false,
                 detail: "not built into this package".into(),
                 version: None,
@@ -412,7 +412,7 @@ mod tests {
             }],
         };
         let report = preflight.to_report();
-        assert!(report.contains("webkitgtk"));
+        assert!(report.contains("libmpv"));
         assert!(report.contains("not built into this package"));
         assert!(report.contains("external-chromium"));
         assert!(report.contains("overlay#1"));

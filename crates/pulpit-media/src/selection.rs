@@ -40,8 +40,7 @@ impl RuntimePolicy {
 ///
 /// An installed Chromium-family browser plays all three content kinds, so it
 /// appears in every order — leading for web, and behind libmpv for plain
-/// media, which libmpv decodes far more cheaply. The system-webview adapters
-/// remain as HTML fallbacks for machines without a browser.
+/// media, which libmpv decodes far more cheaply.
 pub fn default_order(kind: ContentKind) -> Vec<RuntimeId> {
     match kind {
         // Plain media prefers an installed ffmpeg: it decodes straight to
@@ -50,12 +49,7 @@ pub fn default_order(kind: ContentKind) -> Vec<RuntimeId> {
         // the fallback that already decodes everything.
         ContentKind::AnimatedImage => vec![RuntimeId::LibMpv, RuntimeId::ExternalChromium],
         ContentKind::Video => vec![RuntimeId::LibMpv, RuntimeId::ExternalChromium],
-        ContentKind::Web => vec![
-            RuntimeId::ExternalChromium,
-            RuntimeId::WebKitGtk,
-            RuntimeId::WebView2,
-            RuntimeId::WkWebView,
-        ],
+        ContentKind::Web => vec![RuntimeId::ExternalChromium],
     }
 }
 
@@ -280,11 +274,8 @@ mod tests {
 
     #[test]
     fn prefer_moves_one_candidate_up_without_removing_the_rest() {
-        let order = candidate_order(
-            ContentKind::Web,
-            RuntimePolicy::Prefer(RuntimeId::WebKitGtk),
-        );
-        assert_eq!(order[0], RuntimeId::WebKitGtk);
+        let order = candidate_order(ContentKind::Web, RuntimePolicy::Prefer(RuntimeId::LibMpv));
+        assert_eq!(order[0], RuntimeId::LibMpv);
         assert!(
             order.contains(&RuntimeId::ExternalChromium),
             "preferring must not discard the default leader"
@@ -293,48 +284,38 @@ mod tests {
 
     #[test]
     fn require_tries_exactly_one_candidate() {
-        let order = candidate_order(
-            ContentKind::Web,
-            RuntimePolicy::Require(RuntimeId::WebKitGtk),
-        );
-        assert_eq!(order, vec![RuntimeId::WebKitGtk]);
+        let order = candidate_order(ContentKind::Web, RuntimePolicy::Require(RuntimeId::LibMpv));
+        assert_eq!(order, vec![RuntimeId::LibMpv]);
     }
 
     #[test]
     fn selection_picks_the_first_capable_candidate_and_keeps_the_rest_as_fallbacks() {
         let selection = select(
-            ContentKind::Web,
+            ContentKind::Video,
             RuntimePolicy::Auto,
-            &CapabilityRequest::for_kind(ContentKind::Web),
+            &CapabilityRequest::for_kind(ContentKind::Video),
             everything_works,
         );
-        assert_eq!(selection.selected, Some(RuntimeId::ExternalChromium));
-        assert_eq!(
-            selection.fallbacks,
-            vec![
-                RuntimeId::WebKitGtk,
-                RuntimeId::WebView2,
-                RuntimeId::WkWebView
-            ]
-        );
+        assert_eq!(selection.selected, Some(RuntimeId::LibMpv));
+        assert_eq!(selection.fallbacks, vec![RuntimeId::ExternalChromium]);
         assert!(!selection.is_static_fallback());
     }
 
     #[test]
     fn an_incapable_leader_is_skipped_with_a_reason_and_the_next_wins() {
         let selection = select(
-            ContentKind::Web,
+            ContentKind::Video,
             RuntimePolicy::Auto,
-            &CapabilityRequest::for_kind(ContentKind::Web),
+            &CapabilityRequest::for_kind(ContentKind::Video),
             |id| {
-                if id == RuntimeId::ExternalChromium {
+                if id == RuntimeId::LibMpv {
                     nothing_works(id)
                 } else {
                     everything_works(id)
                 }
             },
         );
-        assert_eq!(selection.selected, Some(RuntimeId::WebKitGtk));
+        assert_eq!(selection.selected, Some(RuntimeId::ExternalChromium));
         assert!(matches!(
             selection.attempts[0].outcome,
             AttemptOutcome::Skipped(UnmetRequirement::Unavailable { .. })
@@ -362,10 +343,10 @@ mod tests {
     fn require_falls_back_statically_rather_than_to_another_runtime() {
         let selection = select(
             ContentKind::Web,
-            RuntimePolicy::Require(RuntimeId::WebKitGtk),
+            RuntimePolicy::Require(RuntimeId::LibMpv),
             &CapabilityRequest::for_kind(ContentKind::Web),
             |id| {
-                if id == RuntimeId::WebKitGtk {
+                if id == RuntimeId::LibMpv {
                     nothing_works(id)
                 } else {
                     everything_works(id)
@@ -443,9 +424,13 @@ mod tests {
             Some(RuntimePolicy::Prefer(RuntimeId::ExternalChromium))
         );
         assert_eq!(
-            RuntimePolicy::parse("!webkitgtk"),
-            Some(RuntimePolicy::Require(RuntimeId::WebKitGtk))
+            RuntimePolicy::parse("!libmpv"),
+            Some(RuntimePolicy::Require(RuntimeId::LibMpv))
         );
         assert_eq!(RuntimePolicy::parse("nonesuch"), None);
+        // A retired runtime slug (e.g. from an old settings file) parses to
+        // nothing rather than a runtime that no longer exists; the caller
+        // treats that the same as any other unrecognised slug.
+        assert_eq!(RuntimePolicy::parse("webkitgtk"), None);
     }
 }

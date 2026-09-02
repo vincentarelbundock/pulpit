@@ -30,21 +30,17 @@ use pulpit_media::{MediaConfig, RuntimeId, WorkerCommand};
 
 /// How to start the worker for one runtime.
 ///
-/// Every shipped runtime is a role of *this* executable, re-executed with a
-/// flag — so it cannot be missing from a build or a package, which is a
-/// mistake this made once already. A runtime with no role is one that would
-/// need a worker pulpit does not ship; selection never reaches those, and
-/// naming the missing binary makes the launch fail and fall through rather
-/// than start something else.
+/// Every runtime this build knows about is a role of *this* executable,
+/// re-executed with a flag — so it cannot be missing from a build or a
+/// package, which is a mistake this made once already, back when a runtime
+/// with no such role existed and had to fall back to naming a worker binary
+/// pulpit never shipped.
 pub fn worker_command(runtime: RuntimeId) -> WorkerCommand {
-    match pulpit_media::worker::role_flag(runtime) {
-        Some(role) => WorkerCommand::CurrentExe {
-            arg: format!("--media-worker={role}"),
-        },
-        None => WorkerCommand::Explicit {
-            program: PathBuf::from(runtime.worker_binary()),
-            args: Vec::new(),
-        },
+    WorkerCommand::CurrentExe {
+        arg: format!(
+            "--media-worker={}",
+            pulpit_media::worker::role_flag(runtime)
+        ),
     }
 }
 
@@ -79,7 +75,7 @@ mod tests {
         // Not a stylistic preference: as separate binaries these were never
         // built by `cargo run`, so media silently never played. A role cannot
         // be missing from a build or a package.
-        for runtime in [RuntimeId::ExternalChromium] {
+        for runtime in RuntimeId::ALL {
             match worker_command(runtime) {
                 WorkerCommand::CurrentExe { arg } => {
                     assert!(
@@ -89,23 +85,6 @@ mod tests {
                 }
                 other => panic!("{runtime} should be a role, got {other:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn a_runtime_pulpit_ships_no_worker_for_is_never_run_as_this_executable() {
-        // Re-executing ourselves with an unknown role flag would start the
-        // *application* again, on stage. Naming a program we do not ship
-        // fails the launch instead, and selection falls through.
-        for runtime in [
-            RuntimeId::WebKitGtk,
-            RuntimeId::WebView2,
-            RuntimeId::WkWebView,
-        ] {
-            let WorkerCommand::Explicit { program, .. } = worker_command(runtime) else {
-                panic!("{runtime} has no worker role and must not re-execute this binary");
-            };
-            assert!(program.to_string_lossy().starts_with("pulpit-"));
         }
     }
 
@@ -122,14 +101,14 @@ mod tests {
     fn settings_choose_a_runtime_policy() {
         use pulpit_media::RuntimePolicy;
         let config = config_from_settings(
-            Some("webkitgtk"),
+            Some("libmpv"),
             Some("!external-chromium"),
             Some("external-chromium"),
             Some(PathBuf::from("/usr/bin/google-chrome")),
         );
         assert_eq!(
             config.image_runtime,
-            RuntimePolicy::Prefer(RuntimeId::WebKitGtk)
+            RuntimePolicy::Prefer(RuntimeId::LibMpv)
         );
         assert_eq!(
             config.video_runtime,
@@ -139,6 +118,17 @@ mod tests {
             config.browser_path,
             Some(PathBuf::from("/usr/bin/google-chrome"))
         );
+    }
+
+    #[test]
+    fn a_retired_runtime_slug_falls_back_to_automatic_selection() {
+        // An old settings file may still name a runtime that has since been
+        // removed (e.g. one of the never-implemented system webviews). That
+        // must be treated the same as any other unrecognised slug — fall
+        // back to automatic selection — rather than fail to load.
+        use pulpit_media::RuntimePolicy;
+        let config = config_from_settings(Some("webkitgtk"), None, None, None);
+        assert_eq!(config.image_runtime, RuntimePolicy::Auto);
     }
 
     #[test]
