@@ -462,6 +462,17 @@ pub struct ReaderSession {
     /// release, and only reappears after the snapshot round trip — the gap
     /// that made the tools feel like they "eventually work".
     retained: Vec<RetainedMark>,
+    /// How many of `retained`'s marks each in-flight commit is waiting to
+    /// have stamped, oldest commit first.
+    ///
+    /// One entry per [`ReaderSession::retain_commit`] call, in the order
+    /// commits were sent — the same order their answers arrive in
+    /// ([`ReaderSession::applied`] only ever pops the front). Without this,
+    /// an answer would have to guess which unstamped preview is its own; two
+    /// strokes in flight at once share the "no id yet" state, and stamping
+    /// every one of them for the first answer back would take the second
+    /// stroke's preview down when a frame that does not contain it arrives.
+    pending_stamp_counts: std::collections::VecDeque<usize>,
     /// What is on each page that has been looked at, for hit-testing.
     ///
     /// A cache of the document's answer rather than a second store of the
@@ -558,17 +569,6 @@ pub struct PlannedRender {
     /// pixels are spent on what is on the sheet instead of on margins that
     /// are not drawn.
     pub region: pulpit_core::notes::Region,
-}
-
-/// Whether the document asks for this field and has nothing in it (§6.4).
-///
-/// Kept as a free function so the rule lives in one place and can be tested
-/// on a field alone, without a session around it.
-fn is_unfilled_required(field: &pulpit_render::document::FormField) -> bool {
-    // Reachable, not merely editable: a required field the document hides is
-    // one nobody can fill, and listing it before a save would be asking the
-    // reader to go and type into something that is not on the page.
-    field.required && field.is_reachable() && field.value.is_empty() && field.selected.is_empty()
 }
 
 // A few readers of this state are the recovery path's, which §11 has yet to
@@ -754,7 +754,7 @@ impl ReaderSession {
         }
         self.fields
             .iter()
-            .filter(|field| is_unfilled_required(field))
+            .filter(|field| field.is_unfilled_required())
             .map(|field| field.name.clone())
             .collect()
     }
@@ -1710,14 +1710,17 @@ impl ReaderSession {
                     mark.id = Some(summary.id.clone());
                 }
             }
-            // Every preview still waiting belongs to this answer: commits are
-            // answered in order, so anything older is already stamped. The
-            // stamp does not depend on the effects — a preview that never got
-            // one would never come down.
+            // Stamp only the marks *this* commit left waiting — not every
+            // unstamped preview, which would also catch a second stroke
+            // still in flight behind this one. Commits are answered in
+            // order, so the oldest `count` unstamped marks are always this
+            // answer's, regardless of what its effects did or did not name.
+            let count = self.pending_stamp_counts.pop_front().unwrap_or(0);
             for mark in self
                 .retained
                 .iter_mut()
                 .filter(|mark| mark.revision.is_none())
+                .take(count)
             {
                 mark.revision = Some(applied.document_revision);
             }
@@ -1775,6 +1778,11 @@ impl ReaderSession {
         use pulpit_core::annotate::AnnotationCommand;
 
         let mut urgency = RasterUrgency::Deferred;
+        // How many marks this commit leaves waiting for a revision: a fresh
+        // preview from `Create`, or an existing one `Replace` just moved and
+        // therefore unstamped again. `applied` stamps exactly this many of
+        // the oldest still-waiting marks when this commit's answer arrives.
+        let mut pending = 0usize;
         for command in &transaction.0 {
             // A bookmark edit changes no page at all, so nothing needs
             // re-rendering for it.
@@ -1792,12 +1800,15 @@ impl ReaderSession {
             };
             match command {
                 AnnotationCommand::Create(draft) => match preview_of(draft) {
-                    Some((page, preview)) => self.retained.push(RetainedMark {
-                        page,
-                        preview,
-                        revision: None,
-                        id: None,
-                    }),
+                    Some((page, preview)) => {
+                        self.retained.push(RetainedMark {
+                            page,
+                            preview,
+                            revision: None,
+                            id: None,
+                        });
+                        pending += 1;
+                    }
                     // Nothing can predraw it, so the page is wrong until the
                     // renderer has drawn it.
                     None => urgency = RasterUrgency::Prompt,
@@ -1833,12 +1844,14 @@ impl ReaderSession {
                             // the worker says which, it must not be taken down
                             // by a frame at the old one.
                             mark.revision = None;
+                            pending += 1;
                         }
                         _ => urgency = RasterUrgency::Prompt,
                     }
                 }
             }
         }
+        self.pending_stamp_counts.push_back(pending);
         urgency
     }
 
@@ -1881,15 +1894,21 @@ impl ReaderSession {
         self.retained.len()
     }
 
-    /// A commit was refused or lost: the oldest unstamped retained mark is a
-    /// mark the document will never contain, and keeping it drawn would show
-    /// an edit that did not happen.
+    /// A commit was refused or lost: the oldest unstamped retained marks are
+    /// marks the document will never contain, and keeping them drawn would
+    /// show an edit that did not happen. All of the refused commit's marks
+    /// go — not just one, or a commit that created two previews would leave
+    /// the second stranded with no answer ever coming to stamp or drop it.
     pub fn commit_refused(&mut self) {
-        if let Some(waiting) = self
-            .retained
-            .iter()
-            .position(|mark| mark.revision.is_none())
-        {
+        let count = self.pending_stamp_counts.pop_front().unwrap_or(0);
+        for _ in 0..count {
+            let Some(waiting) = self
+                .retained
+                .iter()
+                .position(|mark| mark.revision.is_none())
+            else {
+                break;
+            };
             self.retained.remove(waiting);
         }
         // A refused delete is a mark that is still in the document, so it
@@ -2355,10 +2374,10 @@ impl ReaderSession {
         // mark follows it — all of it, or one corner — is the handle's to say.
         if let (
             Some(origin),
-            Some(pulpit_core::annotate::Gesture::Transforming {
+            Some(&pulpit_core::annotate::Gesture::Transforming {
                 original, handle, ..
             }),
-        ) = (self.transform_origin, self.interaction.gesture().cloned())
+        ) = (self.transform_origin, self.interaction.gesture())
         {
             let (dx, dy) = (at.x - origin.x, at.y - origin.y);
             self.interaction
@@ -3700,6 +3719,33 @@ impl ReaderSession {
         self.column.pages.get(wanted).map(|placed| placed.top)
     }
 
+    /// [`Session::relayout`], keeping `anchor` the page at the top of the
+    /// column afterwards — or leaving the offset wherever `relayout` put it,
+    /// on the rare page that no longer exists in the new column.
+    ///
+    /// The one place a relayout is followed by "and put this page back
+    /// where it was": a spread change, a view rotation, taking or clearing a
+    /// crop, and an anchored zoom all rebuild the column out from under the
+    /// reader and then need the page they were reading found again in it
+    /// (§80.5). `relayout` itself always ends by clamping `offset_x` against
+    /// the column it just laid out, so every caller here gets that clamp for
+    /// free and none needs a second copy of it — the sideways offset stays
+    /// in bounds exactly as consistently as the vertical one, in every
+    /// caller alike.
+    fn relayout_anchored(&mut self, anchor: PageIndex) {
+        self.relayout();
+        if let Some(offset) = self.column.offset_of(anchor) {
+            self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
+            // Read back through the offset rather than assuming the page
+            // counter is `anchor`: a spread change can pair the anchor with
+            // an earlier page as one row, and the counter names the row's
+            // first page, not whichever half was being read before.
+            if let Some(page) = self.column.current(self.controls.offset, self.cell.1) {
+                self.controls.page = page;
+            }
+        }
+    }
+
     /// Recompute the scale and the column from the pages and the zoom.
     fn relayout(&mut self) {
         // Every page as it is read through the crop, which is every page
@@ -3876,11 +3922,7 @@ impl ReaderSession {
                 // column they were scrolled down is not the column they are
                 // about to read, so the offset is recovered from the page
                 // rather than kept as a number of points.
-                let page = self.controls.page;
-                self.relayout();
-                if let Some(offset) = self.column.offset_of(page) {
-                    self.scroll_to(offset);
-                }
+                self.relayout_anchored(self.controls.page);
                 true
             }
             ReadCommand::RotateView => {
@@ -3889,11 +3931,7 @@ impl ReaderSession {
                 // same promise a spread change makes: the turned column is
                 // not the column they were scrolled down, so the offset is
                 // recovered from the page rather than kept as points.
-                let page = self.controls.page;
-                self.relayout();
-                if let Some(offset) = self.column.offset_of(page) {
-                    self.scroll_to(offset);
-                }
+                self.relayout_anchored(self.controls.page);
                 true
             }
             ReadCommand::SetOutlineView(view) => {
@@ -4294,22 +4332,21 @@ impl ReaderSession {
                     self.controls.offset,
                     self.controls.offset_x,
                 ));
-                self.controls.crop = CropState::Cropped(region);
-                // The page the crop was drawn on stays the page being read:
-                // every page has just changed size, and a reader who cropped
-                // a figure should still be looking at that figure.
-                let anchor = self.controls.page;
-                self.relayout();
-                if let Some(offset) = self.column.offset_of(anchor) {
-                    self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
-                    self.controls.page = anchor;
-                }
-                self.controls.offset_x = self
-                    .column
-                    .clamp_offset_x(self.controls.offset_x, self.cell.0);
+                self.crop_to(region);
                 true
             }
         }
+    }
+
+    /// Land in `CropState::Cropped(region)`, keeping the page being read in
+    /// view: every page has just changed size, and a reader who cropped a
+    /// figure should still be looking at that figure. The shared tail of
+    /// [`Session::take_crop`]'s `Pages` choice and [`Session::auto_crop`]
+    /// (§80.5); what differs between the two — when the restore point behind
+    /// the crop is (re)recorded — stays with each caller.
+    fn crop_to(&mut self, region: pulpit_core::notes::Region) {
+        self.controls.crop = CropState::Cropped(region);
+        self.relayout_anchored(self.controls.page);
     }
 
     /// Take `region` — measured from the deck's own pictures rather than
@@ -4340,18 +4377,7 @@ impl ReaderSession {
                 self.controls.offset_x,
             ));
         }
-        self.controls.crop = CropState::Cropped(region);
-        // The page being read stays the page being read: every page has
-        // just changed size, exactly as in `take_crop`.
-        let anchor = self.controls.page;
-        self.relayout();
-        if let Some(offset) = self.column.offset_of(anchor) {
-            self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
-            self.controls.page = anchor;
-        }
-        self.controls.offset_x = self
-            .column
-            .clamp_offset_x(self.controls.offset_x, self.cell.0);
+        self.crop_to(region);
         true
     }
 
@@ -4425,11 +4451,7 @@ impl ReaderSession {
         // before rebuilding a mixed-size document.
         self.controls.page = anchor;
         self.controls.zoom = zoom;
-        self.relayout();
-        if let Some(offset) = self.column.offset_of(anchor) {
-            self.controls.offset = self.column.clamp_offset(offset, self.cell.1);
-            self.controls.page = anchor;
-        }
+        self.relayout_anchored(anchor);
         // A zoom changes the column's coordinates, not because the reader is
         // scrolling. If the new offset were compared with the old column's
         // offset, the next plan would ask only for a coarse moving preview;
@@ -7629,6 +7651,43 @@ mod tests {
         // …and the frame that contains it takes it down.
         session.frame_landed(PageIndex(0), DocumentRevision(2));
         assert!(!shown(&session), "the preview outlived its frame");
+    }
+
+    #[test]
+    fn a_second_in_flight_stroke_is_not_stamped_by_the_first_strokes_answer() {
+        // Two strokes committed back to back, neither answered yet: both
+        // previews carry `revision: None` and are otherwise indistinguishable
+        // from the outside. The first stroke's answer must stamp only what it
+        // created — stamping every unstamped preview would also claim the
+        // second stroke, and the frame the first answer's revision names does
+        // not contain it (§77.9).
+        let mut session = open(1);
+        let first = commit_stroke(&mut session, (60.0, 60.0), (100.0, 90.0));
+        let _ = session.retain_commit(&first);
+        let second = commit_stroke(&mut session, (300.0, 300.0), (340.0, 330.0));
+        let _ = session.retain_commit(&second);
+        assert_eq!(session.retained_count(), 2, "both strokes are held");
+
+        // The first commit's answer lands and stamps its mark…
+        let _ = session.applied(&applied(DocumentRevision(2)), AppliedKind::Edit);
+        // …so the frame it names takes down only the first stroke, leaving
+        // the second's still-unanswered preview drawn.
+        session.frame_landed(PageIndex(0), DocumentRevision(2));
+        assert_eq!(
+            session.retained_count(),
+            1,
+            "the second stroke's preview must survive a frame that does not contain it"
+        );
+
+        // The second commit's own answer arrives, and only now does its
+        // frame take it down too.
+        let _ = session.applied(&applied(DocumentRevision(3)), AppliedKind::Edit);
+        session.frame_landed(PageIndex(0), DocumentRevision(3));
+        assert_eq!(
+            session.retained_count(),
+            0,
+            "the second stroke is now answered for"
+        );
     }
 
     #[test]

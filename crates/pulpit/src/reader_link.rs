@@ -778,9 +778,7 @@ fn handle(session: &mut DocumentSession, ask: Ask) -> Vec<Told> {
                 let unfilled_required = match session.request(DocumentRequest::ListFields) {
                     Ok(DocumentResponse::Fields(fields)) => fields
                         .into_iter()
-                        .filter(|field| {
-                            field.required && field.value.is_empty() && field.selected.is_empty()
-                        })
+                        .filter(pulpit_render::document::FormField::is_unfilled_required)
                         .map(|field| field.name)
                         .collect(),
                     _ => Vec::new(),
