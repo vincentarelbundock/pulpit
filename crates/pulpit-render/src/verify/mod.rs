@@ -38,7 +38,7 @@
 //!   (`a_classic_files_coverage_is_classified_against_its_real_container_end`)
 //!
 //! * **A nested dictionary in a trailer no longer truncates the scan.** Both
-//!   this module's `parse_xref_extent` and `pdfwrite::IncrementalWriter::open`
+//!   `objects::xref_section_object_numbers` and `pdfwrite::IncrementalWriter::open`
 //!   count dictionary depth, so `/Root`, `/Size`, `/ID` and `/XRefStm` written
 //!   after an inline `/Info` are seen. `open` therefore now *succeeds* on
 //!   documents it used to open with an empty trailer — and hybrid files it
@@ -216,16 +216,26 @@ impl RevisionMap {
                 return Err(VerifyError::TruncatedFile(current_startxref));
             }
 
-            // Parse xref and detect hybrid
-            let (xref_start, xref_end, has_hybrid) = parse_xref_extent(bytes, current_startxref)?;
+            // Parse the whole cross-reference section once: its entries,
+            // its own container end, and its `/Prev`/`/XRefStm` in one pass
+            // through the real parser, rather than a second token search for
+            // the extent and a third for `/Prev` that could each read the
+            // trailer differently than this one does.
+            let section =
+                objects::xref_section_object_numbers(bytes, current_startxref, &mut budget)?;
 
-            if has_hybrid {
+            if section.xref_stm.is_some() {
                 return Err(VerifyError::HybridXrefNotSupported);
             }
 
-            // Parse xref entries to get object numbers
-            let obj_numbers =
-                objects::xref_section_object_numbers(bytes, current_startxref, &mut budget)?;
+            let xref_start = current_startxref;
+            let xref_end = section.end;
+            let obj_numbers = section
+                .entries
+                .into_iter()
+                .map(|(number, _)| number)
+                .collect();
+            let prev = section.prev;
 
             let rev_info = RevisionInfo {
                 startxref: current_startxref,
@@ -254,7 +264,7 @@ impl RevisionMap {
             // newer and dropped out of the coverage comparison. Order is now
             // `chain_position`, which is the chain itself. See
             // `RevisionInfo::chain_position`.
-            if let Some(prev_startxref) = find_prev(bytes, current_startxref)? {
+            if let Some(prev_startxref) = prev {
                 current_startxref = prev_startxref;
                 chain_position += 1;
             } else {
@@ -310,235 +320,6 @@ fn find_startxref(bytes: &[u8]) -> Result<u64> {
         return Err(VerifyError::FileTooSmall);
     }
     crate::pdfwrite::find_startxref_offset(bytes).ok_or(VerifyError::StartxrefNotFound)
-}
-
-/// Parse xref extent: find where the xref section starts and ends.
-/// Returns (xref_start, xref_end, has_xref_stm), as **absolute file offsets**.
-///
-/// `xref_end` is what §28.2 means by where a revision's cross-reference
-/// container ends: past the classic `trailer` dictionary, or past the `endobj`
-/// of a cross-reference stream. It is compared against a signature's coverage
-/// end, so an offset that is relative to `startxref` rather than to the file
-/// silently under-reports and lets a signature that does not cover its own
-/// cross-reference data pass as if it did.
-fn parse_xref_extent(bytes: &[u8], startxref: u64) -> Result<(u64, u64, bool)> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(VerifyError::TruncatedFile(startxref));
-    }
-
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Check if classic xref table or xref stream
-    let first_token = tokenizer
-        .next_token()
-        .map_err(|_| VerifyError::XrefParseError("failed to read first token".to_string()))?;
-
-    if first_token.as_deref() == Some(b"xref") {
-        // Classic xref table: scan forward until "trailer"
-        let mut found_trailer = false;
-        let mut trailer_start = 0;
-
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            let pos = tokenizer.position();
-            if token == b"trailer" {
-                found_trailer = true;
-                trailer_start = pos;
-                break;
-            }
-        }
-
-        if !found_trailer {
-            return Err(VerifyError::XrefParseError(
-                "trailer keyword not found".to_string(),
-            ));
-        }
-
-        // Scan the trailer dictionary for /XRefStm and its own closing `>>`.
-        //
-        // Depth matters, and stopping at the first `>>` was a hole in two
-        // directions at once: a nested dictionary — an inline `/Info`, or one
-        // planted for the purpose — truncated `xref_end` to somewhere inside
-        // the trailer, and it hid every key that followed. `/XRefStm` among
-        // them, so a hybrid file was read as plain classic and slipped past
-        // the refusal below, while `ObjectResolver` went on following the
-        // `/XRefStm` it could still see. Two halves of verification reading
-        // different documents is the divergence this exists to prevent.
-        let mut has_xref_stm = false;
-        let mut dict_end = None;
-        let mut dict_depth = 0i32;
-
-        tokenizer.seek(trailer_start);
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"<<" {
-                dict_depth += 1;
-            } else if token == b">>" {
-                dict_depth -= 1;
-                if dict_depth <= 0 {
-                    dict_end = Some(tokenizer.position());
-                    break;
-                }
-            } else if token == b"/XRefStm" && dict_depth == 1 {
-                // Only at the trailer's own level: a `/XRefStm` inside some
-                // nested dictionary is not the hybrid marker of §7.5.8.4.
-                has_xref_stm = true;
-            }
-        }
-
-        let Some(dict_end) = dict_end else {
-            return Err(VerifyError::XrefParseError(
-                "the classic cross-reference table's trailer dictionary is never closed"
-                    .to_string(),
-            ));
-        };
-
-        let xref_start = xref_pos as u64;
-        let xref_end = (xref_pos + dict_end) as u64;
-        if xref_end <= xref_start {
-            return Err(VerifyError::XrefParseError(
-                "the classic cross-reference table's container has no extent".to_string(),
-            ));
-        }
-
-        Ok((xref_start, xref_end, has_xref_stm))
-    } else {
-        // A cross-reference stream: `obj_num gen obj << … >> stream … endobj`.
-        //
-        // The scan must stop at the dictionary's closing `>>`. Past it lies
-        // the stream body, which is compressed binary — tokenising it yields
-        // whatever `<<` and `>>` byte pairs the deflate output happens to
-        // contain, and a run to end-of-file therefore reported a container
-        // end somewhere in the middle of a later revision. `/XRefStm` is a
-        // classic-trailer key. `/XRefStm` is still looked for *inside* the
-        // dictionary: this branch is also reached when `startxref` does not
-        // point at a cross-reference section at all, and the trailer of a
-        // hybrid file may then be the dictionary that gets scanned. Refusing
-        // such a file is right; misreading it is not.
-        let mut dict_depth = 0i32;
-        let mut dict_end = None;
-        let mut has_xref_stm = false;
-
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"<<" {
-                dict_depth += 1;
-            } else if token == b">>" {
-                dict_depth -= 1;
-                if dict_depth == 0 {
-                    dict_end = Some(tokenizer.position());
-                    break;
-                }
-            } else if token == b"/XRefStm" {
-                has_xref_stm = true;
-            }
-        }
-
-        let Some(dict_end) = dict_end else {
-            return Err(VerifyError::XrefParseError(
-                "the cross-reference stream's dictionary is never closed".to_string(),
-            ));
-        };
-
-        // The container is the whole indirect object, so its end is past
-        // `endobj` — and finding that `endobj` is the lexer's job, not a byte
-        // search's. Searching for the literal `endobj` from the dictionary's
-        // end runs *through* the stream body, which is attacker-controlled: an
-        // `endobj` planted in it moved the container end backwards, and a
-        // signature that stops short of its own cross-reference stream then
-        // classified as EntireRevision. `parse_indirect_object` steps over the
-        // body by its declared and validated extent, so the end it reports is
-        // the real one.
-        //
-        // This branch is also reached when `startxref` does not point at an
-        // indirect object at all; a parse that fails then falls back to the
-        // dictionary's end, which is the most that can honestly be claimed.
-        let xref_start = xref_pos as u64;
-        let dict_end_abs = xref_pos + dict_end;
-        let mut lexer = objects::Lexer::new(bytes, xref_pos);
-        let xref_end = match lexer.parse_indirect_object() {
-            Ok((_, _, _, end)) if end >= dict_end_abs => end as u64,
-            _ => dict_end_abs as u64,
-        };
-        if xref_end <= xref_start {
-            return Err(VerifyError::XrefParseError(
-                "the cross-reference stream's container has no extent".to_string(),
-            ));
-        }
-
-        Ok((xref_start, xref_end, has_xref_stm))
-    }
-}
-
-/// Find the /Prev value in the trailer dictionary at the given startxref offset.
-fn find_prev(bytes: &[u8], startxref: u64) -> Result<Option<u64>> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(VerifyError::TruncatedFile(startxref));
-    }
-
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Skip to "trailer" keyword if classic xref
-    let first_token = tokenizer
-        .next_token()
-        .map_err(|_| VerifyError::XrefParseError("failed to read first token".to_string()))?;
-
-    if first_token.as_deref() == Some(b"xref") {
-        // Classic xref: scan for trailer
-        while let Ok(Some(token)) = tokenizer.next_token() {
-            if token == b"trailer" {
-                break;
-            }
-        }
-    }
-
-    // Parse the trailer dictionary for /Prev.
-    //
-    // Depth is tracked for two separate reasons, and only one of them used to
-    // be honoured. Exiting on the trailer's *own* `>>` rather than the first
-    // one keeps a nested dictionary from truncating the scan. Matching `/Prev`
-    // only at depth 1 keeps a nested one from being mistaken for the
-    // trailer's: `/Info << /Prev 999 >> /Prev 100` is a trailer whose previous
-    // revision is at 100, and reading 999 out of it walks a different chain
-    // than `ObjectResolver` does, which parses the trailer into a dictionary
-    // and can only see the top-level key.
-    //
-    // That divergence is the one the `/XRefStm` scan above exists to prevent,
-    // reached by another door — and it fails in the dangerous direction. A
-    // revision missing from the map cannot be one that `classify_coverage`
-    // finds extending past a signature, so losing revisions can only *raise*
-    // how completely a signature appears to cover the file.
-    let mut key: Option<String> = None;
-    let mut dict_depth: i32 = 0;
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        // Track nesting depth for << and >>
-        if token == b"<<" {
-            dict_depth += 1;
-        } else if token == b">>" {
-            dict_depth = dict_depth.saturating_sub(1);
-            // Only break when we exit the trailer dictionary (depth becomes 0)
-            if dict_depth == 0 {
-                break;
-            }
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                if k == "Prev" && dict_depth == 1 {
-                    if let Ok(num_str) = std::str::from_utf8(&token) {
-                        if let Ok(num) = num_str.parse::<u64>() {
-                            return Ok(Some(num));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 /// Result of structural verification for a single signature.
@@ -1059,6 +840,12 @@ pub fn is_encrypted(bytes: &[u8]) -> bool {
 }
 
 /// Extract a signature field from field reference.
+///
+/// `field` already carries `/FT`, `/T` and `/V` resolved with inheritance by
+/// [`find_field_tree_with`]; a second tokenizer pass over the node's own
+/// dictionary to "refine" those same three keys could only ever produce a
+/// second, possibly disagreeing, answer (§78.3) — so this reads them from
+/// `field` alone.
 fn extract_signature_field(
     resolver: &ObjectResolver<'_>,
     bytes: &[u8],
@@ -1066,92 +853,21 @@ fn extract_signature_field(
     revisions: &RevisionMap,
 ) -> Result<Option<StructuralReport>> {
     let field_ref = field.obj;
-    // /FT, /T and /V arrive already resolved through the parent chain; the
-    // tokenizer pass below only refines them from the node's own dictionary.
-    let mut field_type: Option<String> = field.field_type.clone();
-    let mut field_name: Option<String> = field.qualified_name.clone();
-    let mut sig_dict_ref: Option<(u32, u16)> = field.value_ref;
 
-    // The field dictionary may live in an object stream even in a signed
-    // document — only its `/V` signature dictionary is pinned to a file
-    // offset, because its `/Contents` has to be addressable by `/ByteRange`.
-    let (field_obj_definition, _) = resolver.object_bytes(field_ref.0)?;
-    let field_obj_slice = field_obj_definition.as_slice();
-    if field_obj_slice.is_empty() {
-        // Field object exists but is empty: this is a broken /Sig field that should
-        // be reported, not dropped. Return error to trigger broken-report path.
-        return Err(VerifyError::MalformedPdf(
-            "signature field object is empty".to_string(),
-        ));
-    }
-
-    let mut tokenizer = PdfTokenizer::new(field_obj_slice);
-
-    let mut key: Option<String> = None;
-
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"endobj" {
-            break;
-        }
-
-        // Keys are matched on bytes. A `/T` whose value is a UTF-16BE string
-        // is not valid UTF-8, and a pass that skipped the whole token on that
-        // ground also failed to consume the key — so the *next* key was eaten
-        // as this one's value and `/V` went unseen, which reads a signed
-        // field as unsigned.
-        // Only treat '/' names as keys if we don't already have a key
-        if key.is_none() && token.starts_with(b"/") {
-            key = Some(String::from_utf8_lossy(&token[1..]).into_owned());
-        } else if let Some(k) = key.take() {
-            match k.as_str() {
-                "FT" => {
-                    if let Some(ft_name) = token.strip_prefix(b"/".as_slice()) {
-                        field_type = Some(String::from_utf8_lossy(ft_name).into_owned());
-                    }
-                }
-                // The qualified name from the field tree wins: it carries
-                // the ancestors' /T, which this local pass cannot see.
-                "T" if field_name.is_none() => {
-                    if let Some(name_val) = parse_pdf_string(&token) {
-                        field_name = Some(name_val);
-                    }
-                }
-                "V" => {
-                    if let Ok(ref_str) = std::str::from_utf8(&token) {
-                        if let Ok(num) = ref_str.parse::<u32>() {
-                            if let Ok(Some(gen_token)) = tokenizer.next_token() {
-                                if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
-                                    if let Ok(gen) = gen_str.parse::<u16>() {
-                                        if let Ok(Some(r_token)) = tokenizer.next_token() {
-                                            if r_token == b"R" {
-                                                sig_dict_ref = Some((num, gen));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Check if this is actually a signature field.
-    // If /FT is not /Sig, this is a non-signature field: skip it (return Ok(None)).
-    if field_type.as_deref() != Some("Sig") {
+    // If /FT is not /Sig, this is a non-signature field: skip it.
+    if field.field_type.as_deref() != Some("Sig") {
         return Ok(None);
     }
-
-    // At this point, the field IS /Sig but may have no /V (never signed).
-    // An empty signature field is legal PDF and should be skipped.
-    if sig_dict_ref.is_none() {
+    // The field IS /Sig but may have no /V (never signed). An empty
+    // signature field is legal PDF and should be skipped.
+    let Some(sig_dict_ref) = field.value_ref else {
         return Ok(None);
-    }
+    };
 
-    let field_name = field_name.unwrap_or_else(|| format!("Field_{}", field_ref.0));
-    let sig_dict_ref = sig_dict_ref.unwrap();
+    let field_name = field
+        .qualified_name
+        .clone()
+        .unwrap_or_else(|| format!("Field_{}", field_ref.0));
 
     // Extract the signature dictionary, as a span in the file: `/ByteRange`
     // describes file offsets, so the `/Contents` extent has to be one too.
@@ -1177,19 +893,34 @@ fn extract_signature_field(
     let sig_dict_slice = bytes
         .get(start..end)
         .ok_or(VerifyError::SignatureObjectNotFound)?;
-    let (sub_filter, mod_date) = extract_subfilter_and_mod_date(sig_dict_slice);
     if sig_dict_slice.is_empty() {
         // Signature dictionary exists but is empty: broken signature.
         return Err(VerifyError::MalformedPdf(
             "signature dictionary object is empty".to_string(),
         ));
     }
-
-    // Find the absolute position of sig_dict_slice in bytes
     let sig_dict_offset = start as u64;
-    // If extraction fails, propagate the error instead of silently skipping.
-    // This ensures tampered signatures are reported as broken, not dropped.
-    let (br, ce, mdp) = extract_sig_dict_info(sig_dict_slice, sig_dict_offset)?;
+
+    let (sig_dict_value, _) = resolver.resolve(sig_dict_ref.0)?;
+    let Some(sig_dict) = sig_dict_value.as_dict() else {
+        return Err(VerifyError::MalformedPdf(
+            "signature dictionary object is not a dictionary".to_string(),
+        ));
+    };
+
+    let sub_filter = resolver
+        .dict_get(sig_dict, "SubFilter")
+        .and_then(|v| v.as_name().map(str::to_string));
+    let mod_date = match sig_dict.get("M") {
+        Some(PdfValue::Str(s)) => Some(crate::pdftext::decode_text_string(s)),
+        _ => None,
+    };
+
+    let br = extract_byte_range(sig_dict)
+        .ok_or_else(|| VerifyError::MalformedPdf("missing or malformed /ByteRange".to_string()))?;
+    let ce = contents_extent(sig_dict_slice, sig_dict_offset)
+        .ok_or_else(|| VerifyError::MalformedPdf("missing or malformed /Contents".to_string()))?;
+    let mdp = extract_docmdp_level(resolver, sig_dict);
 
     let sig_dict_rev = revisions.last_changed_revision(sig_dict_ref.0).unwrap_or(0);
 
@@ -1209,195 +940,75 @@ fn extract_signature_field(
     }))
 }
 
-/// Extract the signature dictionary's `/SubFilter` name (without its leading
-/// slash) and its `/M` date string. Both are transcription for the status
-/// model (§28.5): `/SubFilter` names the profile, `/M` the claimed time.
+/// Read `/ByteRange` from an already-parsed signature dictionary.
+fn extract_byte_range(sig_dict: &Dict) -> Option<ByteRange> {
+    let values = sig_dict.get("ByteRange")?.as_array()?;
+    if values.len() != 4 {
+        return None;
+    }
+    let mut out = [0u64; 4];
+    for (slot, v) in out.iter_mut().zip(values) {
+        *slot = u64::try_from(v.as_i64()?).ok()?;
+    }
+    Some(ByteRange {
+        z: out[0],
+        len1: out[1],
+        start2: out[2],
+        len2: out[3],
+    })
+}
+
+/// Find the file byte extent of a signature dictionary's `/Contents` value.
 ///
-/// A dedicated pass rather than a branch of [`extract_sig_dict_info`], because
-/// the value of `/SubFilter` is itself a name token and would otherwise be
-/// mistaken for the next key.
-fn extract_subfilter_and_mod_date(sig_dict_slice: &[u8]) -> (Option<String>, Option<String>) {
+/// This is the one thing [`objects::Lexer`] does not yet record a span for
+/// (§78.2): every other signature-dictionary key is read through
+/// `ObjectResolver`/`PdfValue`, and this is a narrow, single-purpose scan for
+/// `/Contents` alone rather than a second general-purpose parser.
+/// `sig_dict_offset` is where `sig_dict_slice` starts in the file.
+fn contents_extent(sig_dict_slice: &[u8], sig_dict_offset: u64) -> Option<ContentsExtent> {
     let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
-    let mut sub_filter = None;
-    let mut mod_date = None;
-    let mut pending: Option<String> = None;
-
+    let mut key: Option<String> = None;
     while let Ok(Some(token)) = tokenizer.next_token() {
         if token == b"endobj" {
             break;
         }
-        match pending.take() {
-            Some(key) if key == "SubFilter" => {
-                if let Some(name) = token.strip_prefix(b"/".as_slice()) {
-                    sub_filter = Some(String::from_utf8_lossy(name).into_owned());
-                    continue;
-                }
-            }
-            Some(key) if key == "M" => {
-                // `/M` is a text string like any other, so it goes through the
-                // same decode rather than assuming the bytes are UTF-8.
-                if let Some(date) = parse_pdf_string(&token) {
-                    mod_date = Some(date);
-                    continue;
-                }
-            }
-            _ => {}
+        if token.starts_with(b"/") {
+            key = Some(String::from_utf8_lossy(&token[1..]).into_owned());
+            continue;
         }
-        if let Some(name) = token.strip_prefix(b"/".as_slice()) {
-            pending = Some(String::from_utf8_lossy(name).into_owned());
+        if key.take().as_deref() == Some("Contents")
+            && token.starts_with(b"<")
+            && token.ends_with(b">")
+        {
+            let token_end_pos = tokenizer.position();
+            if token_end_pos >= token.len() {
+                let contents_start = sig_dict_offset + (token_end_pos - token.len()) as u64;
+                let contents_end = contents_start + token.len() as u64;
+                return Some(ContentsExtent {
+                    c_start: contents_start,
+                    c_end: contents_end,
+                });
+            }
         }
     }
-
-    (sub_filter, mod_date)
+    None
 }
 
-/// Extract /ByteRange, /Contents extent, and /Reference info from signature dictionary.
-/// sig_dict_offset: absolute file position where sig_dict_slice starts
-fn extract_sig_dict_info(
-    sig_dict_slice: &[u8],
-    sig_dict_offset: u64,
-) -> Result<(ByteRange, ContentsExtent, Option<MdpPerm>)> {
-    let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
-
-    // The DocMDP level is a property of the dictionary, not of any token in
-    // it, so it is read once here rather than from inside the loop below.
-    let docmdp = extract_docmdp_level(sig_dict_slice).unwrap_or(None);
-    let mut byte_range_values: Vec<u64> = Vec::new();
-    let mut contents_extent: Option<ContentsExtent> = None;
-    let mut declared_docmdp: Option<MdpPerm> = None;
-
-    let mut key: Option<String> = None;
-    let mut in_byte_range = false;
-    let mut in_reference = false;
-
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"endobj" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "ByteRange" => {
-                        if token == b"[" {
-                            in_byte_range = true;
-                        }
-                    }
-                    "Contents" => {
-                        if token.starts_with(b"<") && token.ends_with(b">") {
-                            // Record the exact byte extent using the tokenizer's position.
-                            // The tokenizer's position() is the byte offset after reading the token,
-                            // so the token starts at (position - token.len()).
-                            let token_end_pos = tokenizer.position();
-                            if token_end_pos >= token.len() {
-                                let contents_start_rel = token_end_pos - token.len();
-                                // Convert to absolute file position
-                                let contents_start = sig_dict_offset + contents_start_rel as u64;
-                                let contents_end = contents_start + token.len() as u64;
-                                contents_extent = Some(ContentsExtent {
-                                    c_start: contents_start,
-                                    c_end: contents_end,
-                                });
-                            }
-                        }
-                    }
-                    "Reference" if token == b"[" => {
-                        in_reference = true;
-                    }
-                    _ => {}
-                }
-            } else if in_byte_range {
-                if token == b"]" {
-                    in_byte_range = false;
-                } else if let Ok(num_str) = std::str::from_utf8(&token) {
-                    if let Ok(num) = num_str.parse::<u64>() {
-                        byte_range_values.push(num);
-                    }
-                }
-            } else if in_reference {
-                if token == b"]" {
-                    in_reference = false;
-                } else {
-                    // Computed once, above: its argument is the whole slice,
-                    // so it cannot depend on the token being looked at. It used
-                    // to be called here, which re-tokenized the entire
-                    // dictionary for every token inside `/Reference` to arrive
-                    // at the same answer each time.
-                    declared_docmdp = docmdp;
-                }
-            }
-        }
+/// Extract the DocMDP permission level from a signature dictionary's
+/// `/Reference` array (§78.3): each element is its own independent signature
+/// reference dictionary, and the first one naming `/DocMDP` decides the
+/// level.
+fn extract_docmdp_level(resolver: &ObjectResolver<'_>, sig_dict: &Dict) -> Option<MdpPerm> {
+    let sig_ref = objects::parse_reference_array(resolver, sig_dict)
+        .into_iter()
+        .find(|r| r.transform_method.as_deref() == Some("DocMDP"))?;
+    let level = sig_ref.transform_params.as_ref()?.get("P")?.as_i64()?;
+    match level {
+        1 => Some(MdpPerm::NoChanges),
+        2 => Some(MdpPerm::FillForms),
+        3 => Some(MdpPerm::Annotate),
+        _ => None,
     }
-
-    if byte_range_values.len() == 4 {
-        let br = ByteRange {
-            z: byte_range_values[0],
-            len1: byte_range_values[1],
-            start2: byte_range_values[2],
-            len2: byte_range_values[3],
-        };
-
-        if let Some(ce) = contents_extent {
-            return Ok((br, ce, declared_docmdp));
-        }
-    }
-
-    Err(VerifyError::MalformedPdf(format!(
-        "missing or malformed /ByteRange or /Contents (BR vals: {}, has contents: {})",
-        byte_range_values.len(),
-        contents_extent.is_some()
-    )))
-}
-
-/// Extract DocMDP level from /Reference array.
-fn extract_docmdp_level(sig_dict_slice: &[u8]) -> Result<Option<MdpPerm>> {
-    let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
-
-    let mut in_reference = false;
-    let mut in_transform_params = false;
-    let mut key: Option<String> = None;
-
-    while let Ok(Some(token)) = tokenizer.next_token() {
-        if token == b"endobj" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if let Some(name) = token_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                if k == "Reference" && token == b"[" {
-                    in_reference = true;
-                }
-                if in_reference && k == "TransformParams" && token == b"<<" {
-                    in_transform_params = true;
-                }
-                if in_transform_params && k == "P" {
-                    if let Ok(level_str) = std::str::from_utf8(&token) {
-                        if let Ok(level) = level_str.parse::<u8>() {
-                            return match level {
-                                1 => Ok(Some(MdpPerm::NoChanges)),
-                                2 => Ok(Some(MdpPerm::FillForms)),
-                                3 => Ok(Some(MdpPerm::Annotate)),
-                                _ => Ok(None),
-                            };
-                        }
-                    }
-                }
-            }
-        }
-
-        if token == b"]" {
-            in_reference = false;
-        }
-        if token == b">>" {
-            in_transform_params = false;
-        }
-    }
-
-    Ok(None)
 }
 
 /// Parse a PDF string token — `(…)` or `<…>` — into UTF-8.
@@ -1507,15 +1118,25 @@ mod tests {
         // that was let through would be read against the wrong fields and
         // report coverage the signature never had, which is the one kind of
         // wrong answer verification must not give.
+        fn parse_dict(bytes: &[u8]) -> Dict {
+            match objects::Lexer::new(bytes, 0)
+                .parse_value(0)
+                .expect("the fixture parses")
+            {
+                PdfValue::Dict(d) => d,
+                other => panic!("fixture is not a dictionary: {other:?}"),
+            }
+        }
+
         for values in ["[0 100 200]", "[0 100]", "[0 100 200 50 400 20]", "[]"] {
             let dictionary = format!(
                 "<</Type /Sig /ByteRange {values} \
                  /Contents <00000000000000000000000000000000>>>"
             );
-            let result = extract_sig_dict_info(dictionary.as_bytes(), 0);
+            let dict = parse_dict(dictionary.as_bytes());
             assert!(
-                matches!(result, Err(VerifyError::MalformedPdf(_))),
-                "/ByteRange {values} was not refused: {result:?}"
+                extract_byte_range(&dict).is_none(),
+                "/ByteRange {values} was not refused"
             );
         }
 
@@ -1523,7 +1144,7 @@ mod tests {
         // above are about the length and not about the fixture.
         let good = "<</Type /Sig /ByteRange [0 100 200 50] \
                     /Contents <00000000000000000000000000000000>>>";
-        let (br, _, _) = extract_sig_dict_info(good.as_bytes(), 0)
+        let br = extract_byte_range(&parse_dict(good.as_bytes()))
             .expect("a four-element /ByteRange should be accepted");
         assert_eq!((br.z, br.len1, br.start2, br.len2), (0, 100, 200, 50));
     }
@@ -1571,7 +1192,12 @@ mod tests {
 
     #[test]
     fn test_hybrid_xref_refused() {
-        let pdf = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n60\n%%EOF";
+        // `startxref` names the real offset of the `xref` keyword (43): the
+        // old token-search parser tolerated a bogus offset here by scanning
+        // forward for `<<`/`>>`/`/XRefStm` through whatever bytes it landed
+        // on, which is exactly the leniency §78 removes. The real lexer
+        // requires the offset to name a genuine cross-reference section.
+        let pdf = b"%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<<\n/Size 2\n/Root 1 0 R\n/XRefStm 3\n>>\nstartxref\n43\n%%EOF";
 
         let result = RevisionMap::build(pdf);
         assert!(matches!(result, Err(VerifyError::HybridXrefNotSupported)));
@@ -2435,7 +2061,7 @@ mod tests {
     /// The test above pins that nesting does not *truncate* the scan. This
     /// pins the other half: the scan must not pick a key up out of the nested
     /// dictionary either. `ObjectResolver` parses the trailer into a real
-    /// dictionary and can only ever see the top-level key, so a `find_prev`
+    /// dictionary and can only ever see the top-level key, so a `/Prev` reader
     /// that reads the nested one walks a different revision chain than the
     /// rest of verification does — and it fails in the dangerous direction,
     /// because a revision missing from the map cannot be one the classifier
@@ -2466,8 +2092,11 @@ mod tests {
         pdf.extend_from_slice(format!("{second}\n").as_bytes());
         pdf.extend_from_slice(b"%%EOF");
 
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(&pdf, second as u64, &mut budget)
+            .expect("the trailer parses");
         assert_eq!(
-            find_prev(&pdf, second as u64).expect("the trailer parses"),
+            section.prev,
             Some(first as u64),
             "the trailer's own /Prev is the one at depth 1, not the one in /Info"
         );
@@ -2483,7 +2112,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // `parse_xref_extent` against real bytes.
+    // `objects::xref_section_object_numbers` against real bytes.
     //
     // Every `classify_coverage` test above hand-builds a `RevisionInfo`, so
     // nothing pinned the offsets the classifier is actually fed. These do.
@@ -2509,11 +2138,12 @@ mod tests {
     fn a_classic_tables_container_end_is_an_absolute_file_offset() {
         let pdf = build_classic_pdf(&[obj(1, 0, b"<</Type /Catalog>>")], "");
         let startxref = find_startxref(&pdf).expect("the fixture has a startxref");
-        let (xref_start, xref_end, hybrid) =
-            parse_xref_extent(&pdf, startxref).expect("the classic table parses");
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(&pdf, startxref, &mut budget)
+            .expect("the classic table parses");
+        let (xref_end, hybrid) = (section.end, section.xref_stm.is_some());
 
         assert!(!hybrid);
-        assert_eq!(xref_start, startxref, "the container starts at startxref");
 
         // The trailer's closing `>>` is the last one before `startxref`.
         let startxref_at = pdf
@@ -2637,8 +2267,10 @@ mod tests {
             .expect("the object closes");
         assert!(planted < real, "the decoy must precede the real `endobj`");
 
-        let (_start, xref_end, _hybrid) =
-            parse_xref_extent(&pdf, xref_at as u64).expect("the cross-reference stream parses");
+        let mut budget = objects::DecodeBudget::new();
+        let xref_end = objects::xref_section_object_numbers(&pdf, xref_at as u64, &mut budget)
+            .expect("the cross-reference stream parses")
+            .end;
         assert_eq!(
             xref_end,
             (real + b"endobj".len()) as u64,
@@ -2709,8 +2341,10 @@ mod tests {
             .unwrap()
             .replace(" /XRefStm 9", "");
         let plain = plain.as_bytes();
-        let (_start, xref_end, hybrid) =
-            parse_xref_extent(plain, xref_at as u64).expect("the classic table parses");
+        let mut budget = objects::DecodeBudget::new();
+        let section = objects::xref_section_object_numbers(plain, xref_at as u64, &mut budget)
+            .expect("the classic table parses");
+        let (xref_end, hybrid) = (section.end, section.xref_stm.is_some());
         assert!(!hybrid);
         let nested_close = plain
             .windows(2)

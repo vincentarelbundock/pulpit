@@ -85,12 +85,12 @@ pub const MAX_XREF_DECODED_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// Threaded rather than global: a budget that outlived a call would make the
 /// second verification of the same document behave differently from the first.
-pub(super) struct DecodeBudget {
+pub(crate) struct DecodeBudget {
     remaining: usize,
 }
 
 impl DecodeBudget {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         DecodeBudget {
             remaining: MAX_XREF_DECODED_BYTES,
         }
@@ -715,11 +715,29 @@ impl XrefIndex {
     }
 }
 
-struct XrefSection {
-    entries: Vec<(u32, XrefEntry)>,
-    trailer: Dict,
-    prev: Option<u64>,
-    xref_stm: Option<u64>,
+pub(crate) struct XrefSection {
+    pub(crate) entries: Vec<(u32, XrefEntry)>,
+    pub(crate) trailer: Dict,
+    pub(crate) prev: Option<u64>,
+    pub(crate) xref_stm: Option<u64>,
+    /// The absolute file offset past this section's own container: past the
+    /// classic trailer dictionary's closing `>>`, or past the cross-reference
+    /// stream object's `endobj`. Compared against a signature's coverage end
+    /// by `classify_coverage` — see the caller in `verify::mod` for why this
+    /// must be an absolute offset and not one relative to the section start.
+    pub(crate) end: u64,
+    /// Whether this section is a classic `xref` table or a cross-reference
+    /// stream — decided once, here, by the same dispatch that parsed it,
+    /// rather than by a second, independent classic-vs-stream probe at the
+    /// same offset that could disagree with this one.
+    pub(crate) kind: XrefSectionKind,
+}
+
+/// Which of the two cross-reference container shapes a section is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum XrefSectionKind {
+    Table,
+    Stream,
 }
 
 /// Find the offset the file's last `startxref` names.
@@ -748,22 +766,22 @@ fn parse_xref_section(bytes: &[u8], offset: u64, budget: &mut DecodeBudget) -> R
     }
 }
 
-/// Return the object numbers defined by exactly one cross-reference section.
+/// Parse exactly one cross-reference section: its entries, trailer, `/Prev`,
+/// `/XRefStm` and container end.
 ///
 /// Revision accounting needs the membership of each section independently,
 /// rather than the merged newest-wins index built by [`XrefIndex`]. Keeping
 /// that accounting on this parser also means xref streams are decoded with
-/// the same filter support and resource bounds as ordinary object resolution.
-pub(super) fn xref_section_object_numbers(
+/// the same filter support and resource bounds as ordinary object resolution,
+/// and that the container end — needed to compare a signature's coverage
+/// against a revision's true extent — comes from the one real parser rather
+/// than a second, token-searching one that can disagree with it.
+pub(crate) fn xref_section_object_numbers(
     bytes: &[u8],
     offset: u64,
     budget: &mut DecodeBudget,
-) -> Result<std::collections::HashSet<u32>> {
-    Ok(parse_xref_section(bytes, offset, budget)?
-        .entries
-        .into_iter()
-        .map(|(number, _)| number)
-        .collect())
+) -> Result<XrefSection> {
+    parse_xref_section(bytes, offset, budget)
 }
 
 fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
@@ -829,6 +847,12 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
         PdfValue::Dict(d) => d,
         _ => Dict::new(),
     };
+    // `lex.pos` lands exactly past the trailer dictionary's own closing `>>`:
+    // `parse_dict_or_stream` breaks out of its loop the instant it consumes
+    // that byte pair, so nested dictionaries — an inline `/Info`, or one
+    // planted for the purpose — cannot end the scan early the way a
+    // depth-tracking token search could get wrong.
+    let end = lex.pos as u64;
     let prev = trailer
         .get("Prev")
         .and_then(|v| v.as_i64())
@@ -842,6 +866,8 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
         trailer,
         prev,
         xref_stm,
+        end,
+        kind: XrefSectionKind::Table,
     })
 }
 
@@ -859,7 +885,7 @@ fn parse_xref_stream_section(
     budget: &mut DecodeBudget,
 ) -> Result<XrefSection> {
     let mut lex = Lexer::new(bytes, pos);
-    let (_num, _gen, value, _end) = lex.parse_indirect_object()?;
+    let (_num, _gen, value, end) = lex.parse_indirect_object()?;
     let PdfValue::Stream {
         ref dict,
         body_start,
@@ -1044,6 +1070,8 @@ fn parse_xref_stream_section(
         trailer: dict.clone(),
         prev,
         xref_stm: None,
+        end: end as u64,
+        kind: XrefSectionKind::Stream,
     })
 }
 
@@ -1686,6 +1714,78 @@ fn back_parse_object_header(bytes: &[u8], obj_pos: usize) -> Option<(usize, u32,
         return None;
     }
     Some((i, num, gen))
+}
+
+// ---------------------------------------------------------------------------
+// `/Reference` — signature reference dictionaries (§12.8.1 Table 253)
+// ---------------------------------------------------------------------------
+
+/// One element of a signature dictionary's `/Reference` array, parsed on its
+/// own.
+///
+/// §77.9 / §78.3: `/Reference` is an array of *independent* signature
+/// reference dictionaries — a certifying signature's `/DocMDP` entry and a
+/// `/FieldMDP` lock in the same array is ordinary, not malformed. A flat set
+/// of variables shared across the whole array let whichever element parsed
+/// last decide the outcome; each element is now its own [`SigRef`].
+#[derive(Debug, Clone, Default)]
+pub(super) struct SigRef {
+    /// `/TransformMethod`, without its leading slash.
+    pub(super) transform_method: Option<String>,
+    /// `/TransformParams`, dereferenced if indirect.
+    ///
+    /// Kept as the raw dictionary rather than pre-extracted fields: a DocMDP
+    /// reader and a FieldMDP reader want different keys out of it (`/P`
+    /// against `/Action` and `/Fields`) and disagree on how strictly a
+    /// missing or malformed value should be treated — one is a display value,
+    /// the other a signing gate that must fail closed. Deciding that here
+    /// would force one policy on both.
+    pub(super) transform_params: Option<Dict>,
+}
+
+/// Parse `dict`'s `/Reference` array, one element at a time.
+///
+/// An element may be a direct dictionary or an indirect reference to one;
+/// `resolver.dict_get` follows either. An element that is neither a
+/// dictionary nor a resolvable reference contributes nothing, the same way
+/// an unrecognised `/TransformMethod` does.
+pub(super) fn parse_reference_array(resolver: &ObjectResolver<'_>, dict: &Dict) -> Vec<SigRef> {
+    let Some(refs) = resolver
+        .dict_get(dict, "Reference")
+        .and_then(|v| v.as_array().map(<[PdfValue]>::to_vec))
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(refs.len());
+    for item in refs {
+        let resolved_item;
+        let item_dict = match &item {
+            PdfValue::Dict(d) => Some(d),
+            PdfValue::Ref(n, _) => {
+                resolved_item = resolver.resolve(*n).ok();
+                resolved_item.as_ref().and_then(|(v, _)| v.as_dict())
+            }
+            _ => None,
+        };
+        let Some(item_dict) = item_dict else {
+            continue;
+        };
+
+        let transform_method = item_dict
+            .get("TransformMethod")
+            .and_then(|v| v.as_name())
+            .map(str::to_string);
+        let transform_params = resolver
+            .dict_get(item_dict, "TransformParams")
+            .and_then(|v| v.as_dict().cloned());
+
+        out.push(SigRef {
+            transform_method,
+            transform_params,
+        });
+    }
+    out
 }
 
 #[cfg(test)]

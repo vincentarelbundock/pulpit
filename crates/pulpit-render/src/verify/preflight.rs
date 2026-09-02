@@ -19,20 +19,9 @@
 //! This module provides specialized READ-side checks on an opened document.
 //! The sign module must not depend on preflight, and preflight must not depend on sign.
 
+use super::objects::{self, PdfValue};
 use super::{find_catalog_ref_with, find_field_tree_with, FieldEntry, MdpPerm, ObjectResolver};
-use crate::pdfwrite::PdfTokenizer;
 use thiserror::Error;
-
-/// Read one object's definition through the pass's resolver.
-///
-/// Every read in this module goes through here so that a pre-flight pass
-/// builds the cross-reference index once. Calling the free `object_definition`
-/// per field rebuilt it — re-inflating every cross-reference stream in the
-/// chain — on every lookup, which a document with a long chain turns into
-/// hours of work in the process that owns the user interface.
-fn definition(resolver: &ObjectResolver<'_>, obj_num: u32) -> super::Result<Vec<u8>> {
-    resolver.object_bytes(obj_num).map(|(bytes, _)| bytes)
-}
 
 /// Preflight check failures.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -84,13 +73,6 @@ pub enum PreflightRefusal {
 fn undetermined(context: &str, e: impl std::fmt::Display) -> PreflightRefusal {
     PreflightRefusal::InvalidState(format!(
         "could not determine whether the document is locked: {context}: {e}"
-    ))
-}
-
-/// Map a tokenizer failure the same way.
-fn tokenizer_failed(context: &str, e: crate::pdfwrite::PdfWriteError) -> PreflightRefusal {
-    PreflightRefusal::Unsupported(format!(
-        "could not determine whether the document is locked: {context} could not be tokenized: {e}"
     ))
 }
 
@@ -367,155 +349,65 @@ fn extract_docmdp_perm_level(
 ) -> Result<Option<MdpPerm>> {
     let catalog_ref = find_catalog_ref_with(resolver, bytes)
         .map_err(|e| undetermined("the catalog could not be found", e))?;
-    let catalog_obj_definition = definition(resolver, catalog_ref.0)
+    let (catalog_value, _) = resolver
+        .resolve(catalog_ref.0)
         .map_err(|e| undetermined("the catalog object could not be read", e))?;
-    let catalog_obj_slice = catalog_obj_definition.as_slice();
-    if catalog_obj_slice.is_empty() {
+    let Some(catalog) = catalog_value.as_dict() else {
         return Ok(None);
-    }
+    };
 
     // Root /Perms: absent means no certification. Present means its value
-    // decides whether signing is permitted, so it must be understood.
-    let mut tokenizer = PdfTokenizer::new(catalog_obj_slice);
-    let perms = match find_dict_value(&mut tokenizer, "Perms", "the catalog")? {
-        None => return Ok(None),
-        Some(v) => v,
+    // decides whether signing is permitted, so it must be understood — and,
+    // unlike an ordinary lookup, an indirect /Perms that fails to resolve is
+    // not "absent": `dict_get` would fold that failure into `None` here,
+    // reading a dangling /Perms reference as "unlocked" instead of
+    // "undetermined". `resolver.resolve` propagates the failure instead.
+    let Some(perms_raw) = catalog.get("Perms") else {
+        return Ok(None);
     };
-
-    let perms_slice = match perms {
-        DictValue::Reference(num) => Some(
-            definition(resolver, num)
-                .map_err(|e| undetermined("the /Perms dictionary could not be read", e))?,
-        ),
-        DictValue::Dictionary => None,
-        DictValue::Other(token) => {
-            return Err(PreflightRefusal::Unsupported(format!(
-                "Root /Perms is neither a dictionary nor an indirect reference (found {}); \
-                 could not determine whether the document is locked",
-                String::from_utf8_lossy(&token)
-            )))
-        }
-    };
-
-    // Either open the referenced object, or continue in the catalog's own
-    // token stream when /Perms was written inline.
-    let docmdp = match perms_slice {
-        Some(slice) => {
-            if slice.is_empty() {
-                return Ok(None);
-            }
-            let mut perms_tokenizer = PdfTokenizer::new(slice.as_slice());
-            find_dict_value(&mut perms_tokenizer, "DocMDP", "the /Perms dictionary")?
-        }
-        None => find_dict_value(&mut tokenizer, "DocMDP", "the inline /Perms dictionary")?,
-    };
-
-    match docmdp {
-        None => Ok(None),
-        Some(DictValue::Reference(num)) => extract_docmdp_p_level(resolver, num),
-        Some(other) => Err(PreflightRefusal::Unsupported(format!(
-            "/Perms /DocMDP is not an indirect reference to a signature dictionary ({}); \
-             could not determine whether the document is locked",
-            other.describe()
-        ))),
-    }
-}
-
-/// A dictionary value, only as far as this module needs to tell values apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DictValue {
-    /// `N G R`.
-    Reference(u32),
-    /// `<<` — an inline dictionary; the tokenizer is left just inside it.
-    Dictionary,
-    /// Anything else, kept so that a refusal can name it.
-    Other(Vec<u8>),
-}
-
-impl DictValue {
-    fn describe(&self) -> String {
-        match self {
-            DictValue::Reference(n) => format!("reference to object {n}"),
-            DictValue::Dictionary => "inline dictionary".to_string(),
-            DictValue::Other(t) => String::from_utf8_lossy(t).into_owned(),
-        }
-    }
-}
-
-/// Scan `tokenizer` for `key` and return its value.
-///
-/// Every tokenizer failure is propagated: a scan that stopped early would
-/// report "key absent" for a document that may well carry it.
-fn find_dict_value(
-    tokenizer: &mut PdfTokenizer<'_>,
-    key: &str,
-    context: &str,
-) -> Result<Option<DictValue>> {
-    let mut pending: Option<String> = None;
-
-    while let Some(token) = tokenizer
-        .next_token()
-        .map_err(|e| tokenizer_failed(context, e))?
-    {
-        if token == b"endobj" {
-            break;
-        }
-
-        let token_str = match std::str::from_utf8(&token) {
-            Ok(s) => s,
-            Err(_) => {
-                pending = None;
-                continue;
-            }
-        };
-
-        let this_key = match pending.take() {
-            None => {
-                if let Some(name) = token_str.strip_prefix('/') {
-                    pending = Some(name.to_string());
+    let perms_owned;
+    let perms = match perms_raw {
+        PdfValue::Dict(d) => d,
+        PdfValue::Ref(n, _) => {
+            let (v, _) = resolver
+                .resolve(*n)
+                .map_err(|e| undetermined("the /Perms dictionary could not be read", e))?;
+            perms_owned = v;
+            match perms_owned.as_dict() {
+                Some(d) => d,
+                None => {
+                    return Err(PreflightRefusal::Unsupported(
+                        "Root /Perms does not resolve to a dictionary; could not determine \
+                         whether the document is locked"
+                            .to_string(),
+                    ))
                 }
-                continue;
             }
-            Some(k) => k,
-        };
-
-        // A name in value position starts the next key/value pair instead.
-        if this_key != key {
-            if let Some(name) = token_str.strip_prefix('/') {
-                pending = Some(name.to_string());
-            }
-            continue;
         }
-
-        if token == b"<<" {
-            return Ok(Some(DictValue::Dictionary));
+        _ => {
+            return Err(PreflightRefusal::Unsupported(
+                "Root /Perms is neither a dictionary nor an indirect reference to one; could \
+                 not determine whether the document is locked"
+                    .to_string(),
+            ))
         }
-        let number: u32 = match token_str.parse() {
-            Ok(n) => n,
-            Err(_) => return Ok(Some(DictValue::Other(token))),
-        };
-        // Confirm the `G R` that makes it an indirect reference.
-        let generation = tokenizer
-            .next_token()
-            .map_err(|e| tokenizer_failed(context, e))?;
-        let r_token = tokenizer
-            .next_token()
-            .map_err(|e| tokenizer_failed(context, e))?;
-        let generation_ok = generation
-            .as_deref()
-            .and_then(|g| std::str::from_utf8(g).ok())
-            .and_then(|g| g.parse::<u16>().ok())
-            .is_some();
-        if generation_ok && r_token.as_deref() == Some(b"R".as_slice()) {
-            return Ok(Some(DictValue::Reference(number)));
-        }
-        return Err(PreflightRefusal::Unsupported(format!(
-            "/{key} in {context} is a number that is not an indirect reference; \
-             could not determine whether the document is locked"
-        )));
-    }
+    };
 
-    Ok(None)
+    let Some(docmdp) = perms.get("DocMDP") else {
+        return Ok(None);
+    };
+    // §25.4: /DocMDP must be an indirect reference to the certifying
+    // signature dictionary — its own /Reference array is what carries the
+    // permission level, and only an indirect signature object has file
+    // offsets a signature can cover.
+    let Some((sig_dict_num, _gen)) = docmdp.as_ref_pair() else {
+        return Err(PreflightRefusal::Unsupported(
+            "/Perms /DocMDP is not an indirect reference to a signature dictionary; could not \
+             determine whether the document is locked"
+                .to_string(),
+        ));
+    };
+    extract_docmdp_p_level(resolver, sig_dict_num)
 }
 
 /// Extract /P value from DocMDP signature dictionary.
@@ -523,78 +415,44 @@ fn extract_docmdp_p_level(
     resolver: &ObjectResolver<'_>,
     sig_dict_num: u32,
 ) -> Result<Option<MdpPerm>> {
-    let sig_dict_definition = definition(resolver, sig_dict_num).map_err(|e| {
+    let (value, _) = resolver.resolve(sig_dict_num).map_err(|e| {
         undetermined(
             &format!("the DocMDP signature dictionary (object {sig_dict_num}) could not be read"),
             e,
         )
     })?;
-    let sig_dict_slice = sig_dict_definition.as_slice();
-    if sig_dict_slice.is_empty() {
+    let Some(dict) = value.as_dict() else {
         return Ok(None);
+    };
+
+    let Some(sig_ref) = objects::parse_reference_array(resolver, dict)
+        .into_iter()
+        .find(|r| r.transform_method.as_deref() == Some("DocMDP"))
+    else {
+        return Ok(None);
+    };
+    let Some(p_value) = sig_ref.transform_params.as_ref().and_then(|tp| tp.get("P")) else {
+        return Ok(None);
+    };
+
+    // /P decides whether signing is permitted at all. An unreadable or
+    // out-of-range value is refused, never read as "no restriction".
+    let level = p_value.as_i64().ok_or_else(|| {
+        PreflightRefusal::InvalidState(
+            "DocMDP /P is not a readable number; could not determine whether the document is \
+             locked"
+                .to_string(),
+        )
+    })?;
+    match level {
+        1 => Ok(Some(MdpPerm::NoChanges)),
+        2 => Ok(Some(MdpPerm::FillForms)),
+        3 => Ok(Some(MdpPerm::Annotate)),
+        other => Err(PreflightRefusal::Unsupported(format!(
+            "DocMDP /P value {other} is not one of 1, 2 or 3; could not determine whether the \
+             document is locked"
+        ))),
     }
-
-    let context = "the DocMDP signature dictionary";
-    let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
-    let mut key: Option<String> = None;
-    let mut in_transform_params = false;
-
-    while let Some(token) = tokenizer
-        .next_token()
-        .map_err(|e| tokenizer_failed(context, e))?
-    {
-        if token == b"endobj" {
-            break;
-        }
-
-        if let Ok(token_str) = std::str::from_utf8(&token) {
-            if key.is_none() && token_str.starts_with('/') {
-                if let Some(name) = token_str.strip_prefix('/') {
-                    key = Some(name.to_string());
-                }
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "TransformParams" if token == b"<<" => {
-                        in_transform_params = true;
-                    }
-                    "P" if in_transform_params => {
-                        // /P decides whether signing is permitted at all. An
-                        // unreadable or out-of-range value is refused, never
-                        // read as "no restriction".
-                        let level_str = std::str::from_utf8(&token).map_err(|_| {
-                            PreflightRefusal::InvalidState(
-                                "DocMDP /P is not a readable number; could not determine \
-                                 whether the document is locked"
-                                    .to_string(),
-                            )
-                        })?;
-                        let level: u8 = level_str.parse().map_err(|_| {
-                            PreflightRefusal::InvalidState(format!(
-                                "DocMDP /P value '{level_str}' is not an integer; could not \
-                                 determine whether the document is locked"
-                            ))
-                        })?;
-                        return match level {
-                            1 => Ok(Some(MdpPerm::NoChanges)),
-                            2 => Ok(Some(MdpPerm::FillForms)),
-                            3 => Ok(Some(MdpPerm::Annotate)),
-                            other => Err(PreflightRefusal::Unsupported(format!(
-                                "DocMDP /P value {other} is not one of 1, 2 or 3; could not \
-                                 determine whether the document is locked"
-                            ))),
-                        };
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if token == b">>" {
-            in_transform_params = false;
-        }
-    }
-
-    Ok(None)
 }
 
 /// Check that no prior signature's FieldMDP locks the target field (Check 3).
@@ -655,209 +513,74 @@ enum FieldMdpAction {
 /// Extract every FieldMDP lock a signature dictionary's /Reference array
 /// carries.
 ///
-/// §77.9 / §12.8.1 Table 253: `/Reference` is an array of *signature
-/// reference dictionaries* — a document with a DocMDP-certifying signature
-/// and an independent FieldMDP lock in the same `/Reference` array is
-/// ordinary, not malformed. Each element is now parsed and evaluated on its
-/// own, returning every FieldMDP lock found rather than just one.
+/// §77.9 / §78.3: `/Reference` is an array of *independent* signature
+/// reference dictionaries (§12.8.1 Table 253) — a document with a
+/// DocMDP-certifying signature and an independent FieldMDP lock in the same
+/// `/Reference` array is ordinary, not malformed. Each element is parsed by
+/// [`objects::parse_reference_array`] and evaluated on its own, returning
+/// every FieldMDP lock found rather than just one.
 fn extract_field_mdp_locks(
     resolver: &ObjectResolver<'_>,
     sig_dict_num: u32,
 ) -> Result<Vec<(Vec<String>, FieldMdpAction)>> {
-    let sig_dict_definition = definition(resolver, sig_dict_num).map_err(|e| {
+    let (value, _) = resolver.resolve(sig_dict_num).map_err(|e| {
         undetermined(
             &format!("signature dictionary object {sig_dict_num} could not be read"),
             e,
         )
     })?;
-    let sig_dict_slice = sig_dict_definition.as_slice();
-    if sig_dict_slice.is_empty() {
+    let Some(dict) = value.as_dict() else {
         return Ok(Vec::new());
-    }
-    extract_fieldmdp_from_sig_dict(sig_dict_slice)
-}
+    };
 
-/// Extract every FieldMDP lock from a signature dictionary's /Reference
-/// array.
-///
-/// Before this, `/TransformMethod`, `/Action` and `/Fields` were tracked as
-/// one flat set of variables shared across the *whole* `/Reference` array:
-/// a second element (a DocMDP entry, most often) simply overwrote what an
-/// earlier FieldMDP element had set, so a FieldMDP lock beside a DocMDP
-/// entry was read only when the FieldMDP element happened to come last.
-/// Each array element is now parsed as its own signature reference
-/// dictionary by [`parse_one_sig_ref`], and evaluated independently.
-fn extract_fieldmdp_from_sig_dict(
-    sig_dict_slice: &[u8],
-) -> Result<Vec<(Vec<String>, FieldMdpAction)>> {
-    let context = "a signature dictionary's /Reference array";
-    let mut tokenizer = PdfTokenizer::new(sig_dict_slice);
-    let mut key: Option<String> = None;
     let mut locks = Vec::new();
-
-    while let Some(token) = tokenizer
-        .next_token()
-        .map_err(|e| tokenizer_failed(context, e))?
-    {
-        if token == b"endobj" {
-            break;
-        }
-
-        if key.is_none() && token.starts_with(b"/") {
-            if let Ok(name) = std::str::from_utf8(&token[1..]) {
-                key = Some(name.to_string());
-            }
+    for sig_ref in objects::parse_reference_array(resolver, dict) {
+        if sig_ref.transform_method.as_deref() != Some("FieldMDP") {
             continue;
         }
-        let Some(k) = key.take() else { continue };
+        let transform_params = sig_ref.transform_params.as_ref();
 
-        if k == "Reference" && token == b"[" {
-            while let Some(element) = tokenizer
-                .next_token()
-                .map_err(|e| tokenizer_failed(context, e))?
-            {
-                if element == b"]" {
-                    break;
-                }
-                if element == b"<<" {
-                    if let Some(lock) = parse_one_sig_ref(&mut tokenizer, context)? {
-                        locks.push(lock);
-                    }
-                }
-                // An element that is neither `<<` nor `]` (an indirect
-                // reference to a SigRef dictionary, say) is not a construct
-                // this build interprets as a lock; it contributes nothing,
-                // the same way an unrecognised /TransformMethod does below.
+        // A FieldMDP transform with no readable /Action leaves the lock
+        // undetermined; refuse rather than treat the field as free.
+        let action_value = transform_params.and_then(|tp| tp.get("Action"));
+        let action = match action_value.and_then(|v| v.as_name()) {
+            Some("All") => FieldMdpAction::All,
+            Some("Include") => FieldMdpAction::Include,
+            Some("Exclude") => FieldMdpAction::Exclude,
+            Some(other) => {
+                return Err(PreflightRefusal::Unsupported(format!(
+                    "FieldMDP /Action '{other}' is not one of /All, /Include or /Exclude; \
+                     could not determine whether the field is locked"
+                )))
             }
-        }
-    }
+            None => {
+                return Err(PreflightRefusal::Unsupported(
+                    "a prior signature carries a /FieldMDP transform with no /Action; could \
+                     not determine whether the field is locked"
+                        .to_string(),
+                ))
+            }
+        };
 
+        // A locked field's name is a text string too, and it is compared
+        // against the decoded target name. A non-string element contributes
+        // nothing, the same way it did in the token-search reader.
+        let locked_fields = transform_params
+            .and_then(|tp| tp.get("Fields"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| match f {
+                        PdfValue::Str(s) => Some(crate::pdftext::decode_text_string(s)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        locks.push((locked_fields, action));
+    }
     Ok(locks)
-}
-
-/// Parse one `/Reference` array element — a signature reference dictionary
-/// (§12.8.1 Table 253) — starting just past its opening `<<`, and return its
-/// FieldMDP lock if `/TransformMethod` names one.
-fn parse_one_sig_ref(
-    tokenizer: &mut PdfTokenizer<'_>,
-    context: &str,
-) -> Result<Option<(Vec<String>, FieldMdpAction)>> {
-    let mut depth = 1usize;
-    let mut key: Option<String> = None;
-    let mut transform_method: Option<String> = None;
-    let mut action: Option<FieldMdpAction> = None;
-    let mut locked_fields = Vec::new();
-    // The depth `/TransformParams`' own `<<` opened, so the flag can be
-    // cleared precisely when that dictionary (and not some other nested one)
-    // closes, however `/Action`/`/Fields` are ordered relative to it.
-    let mut transform_params_depth: Option<usize> = None;
-
-    while let Some(token) = tokenizer
-        .next_token()
-        .map_err(|e| tokenizer_failed(context, e))?
-    {
-        if token == b"<<" {
-            // This `<<` is a value, so it has to be recognised as
-            // `/TransformParams`' *before* `key` is cleared and depth
-            // incremented below — the two checks used to run in the other
-            // order, so this branch never saw the key that named it.
-            if depth == 1 && key.as_deref() == Some("TransformParams") {
-                transform_params_depth = Some(depth + 1);
-            }
-            key = None;
-            depth += 1;
-            continue;
-        }
-        if token == b">>" {
-            if transform_params_depth == Some(depth) {
-                transform_params_depth = None;
-            }
-            depth -= 1;
-            key = None;
-            if depth == 0 {
-                break;
-            }
-            continue;
-        }
-        if depth == 0 {
-            break;
-        }
-
-        if key.is_none() && token.starts_with(b"/") {
-            if let Ok(name) = std::str::from_utf8(&token[1..]) {
-                key = Some(name.to_string());
-            }
-            continue;
-        }
-        let Some(k) = key.take() else { continue };
-
-        match k.as_str() {
-            "TransformMethod" if depth == 1 => {
-                if let Ok(method_str) = std::str::from_utf8(&token) {
-                    transform_method = method_str.strip_prefix('/').map(|m| m.to_string());
-                }
-            }
-            "Action" if transform_params_depth == Some(depth) => {
-                // An /Action this build does not know is not "no lock": its
-                // meaning decides whether the target field may be filled, so
-                // it is Unsupported.
-                let action_str = std::str::from_utf8(&token).map_err(|_| {
-                    PreflightRefusal::Unsupported(
-                        "FieldMDP /Action is not a readable name; could not determine whether \
-                         the field is locked"
-                            .to_string(),
-                    )
-                })?;
-                let action_name = action_str.strip_prefix('/').ok_or_else(|| {
-                    PreflightRefusal::Unsupported(format!(
-                        "FieldMDP /Action value '{action_str}' is not a name; could not \
-                         determine whether the field is locked"
-                    ))
-                })?;
-                action = Some(match action_name {
-                    "All" => FieldMdpAction::All,
-                    "Include" => FieldMdpAction::Include,
-                    "Exclude" => FieldMdpAction::Exclude,
-                    other => {
-                        return Err(PreflightRefusal::Unsupported(format!(
-                            "FieldMDP /Action '{other}' is not one of /All, /Include or \
-                             /Exclude; could not determine whether the field is locked"
-                        )))
-                    }
-                });
-            }
-            "Fields" if transform_params_depth == Some(depth) && token == b"[" => {
-                while let Some(field_token) = tokenizer
-                    .next_token()
-                    .map_err(|e| tokenizer_failed(context, e))?
-                {
-                    if field_token == b"]" {
-                        break;
-                    }
-                    // A locked field's name is a text string too, and it is
-                    // compared against the decoded target name.
-                    if let Some(field_name) = super::parse_pdf_string(&field_token) {
-                        locked_fields.push(field_name);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if transform_method.as_deref() != Some("FieldMDP") {
-        return Ok(None);
-    }
-    // A FieldMDP transform with no readable /Action leaves the lock
-    // undetermined; refuse rather than treat the field as free.
-    let action = action.ok_or_else(|| {
-        PreflightRefusal::Unsupported(
-            "a prior signature carries a /FieldMDP transform with no /Action; could not \
-             determine whether the field is locked"
-                .to_string(),
-        )
-    })?;
-    Ok(Some((locked_fields, action)))
 }
 
 /// Check if a field is locked by a FieldMDP transform.
@@ -1565,6 +1288,49 @@ mod tests {
                 existing_signatures: 1
             }),
             "a signed hierarchical field must still block certification"
+        );
+    }
+
+    /// §78.4: discovery and preflight enumerate signature fields two
+    /// different ways — `discover_signatures` walks `find_field_tree_with`
+    /// and calls `extract_signature_field` per node, while preflight walks
+    /// the same tree through `fields_with`/`extract_field_info` — and both
+    /// used to disagree about a hierarchical field before §76.6. Pinning
+    /// that they read the same set, rather than only that each individually
+    /// sees the field (the two tests above), is what actually closes the
+    /// "two readers disagree" class §78.1 names.
+    #[test]
+    fn discovery_and_preflight_see_the_same_hierarchical_signature_fields() {
+        let pdf = create_pdf_with_hierarchical_signed_field();
+
+        let resolver = ObjectResolver::new(&pdf);
+        let field_entries = fields_with(&resolver, &pdf).expect("the field tree resolves");
+        let mut preflight_names: Vec<String> = field_entries
+            .iter()
+            .filter_map(|entry| extract_field_info(&resolver, entry).ok().flatten())
+            .filter(|info| info.field_type == "Sig" && info.has_signature)
+            .map(|info| info.field_name)
+            .collect();
+        preflight_names.sort();
+
+        let revisions = crate::verify::RevisionMap::build(&pdf).expect("the revision map builds");
+        let mut discovery_names: Vec<String> = crate::verify::discover_signatures(&pdf, &revisions)
+            .expect("discovery succeeds")
+            .into_iter()
+            .map(|report| report.field_name)
+            .collect();
+        discovery_names.sort();
+
+        assert_eq!(
+            preflight_names, discovery_names,
+            "discovery and preflight must read the same set of signature fields from a \
+             hierarchical field tree"
+        );
+        assert_eq!(
+            preflight_names,
+            vec!["form.Sig1".to_string()],
+            "the fixture's one signed field, sanity-checked so the assertion above cannot \
+             pass by both sides being empty"
         );
     }
 

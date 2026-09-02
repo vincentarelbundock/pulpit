@@ -921,9 +921,24 @@ pub fn find_startxref_offset(bytes: &[u8]) -> Option<u64> {
     let window = std::cmp::min(bytes.len(), STARTXREF_SEARCH_WINDOW);
     let start = bytes.len().saturating_sub(window);
     let pos = bytes[start..].windows(9).rposition(|w| w == b"startxref")?;
-    let mut tokenizer = PdfTokenizer::new(&bytes[start + pos + 9..]);
-    let token = tokenizer.next_token().ok()??;
-    std::str::from_utf8(&token).ok()?.parse().ok()
+    // The value is a single integer literal, not general PDF syntax, so a
+    // full tokenizer pass is more machinery than this needs (§78.2): skip
+    // whitespace, then read the run of digits that follows.
+    let mut i = start + pos + 9;
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0)) {
+        i += 1;
+    }
+    let digits_start = i;
+    while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    if i == digits_start {
+        return None;
+    }
+    std::str::from_utf8(&bytes[digits_start..i])
+        .ok()?
+        .parse()
+        .ok()
 }
 
 fn find_startxref(bytes: &[u8]) -> Result<u64> {
@@ -932,164 +947,64 @@ fn find_startxref(bytes: &[u8]) -> Result<u64> {
 }
 
 /// Parse the trailer dictionary and detect xref kind.
+///
+/// §78.3: reads through `verify::objects`'s cross-reference section parser
+/// instead of tokenizing the bytes a fourth time. The classic/stream
+/// dispatch, the nested-dictionary depth tracking a deflated xref stream's
+/// `/DecodeParms <</Predictor 12 …>>` routinely needs, and the
+/// `/Prev`/`/XRefStm` reads are exactly what `RevisionMap::build` already
+/// does with the same bytes — this was the fifth trailer reader named in
+/// §78.1, and the one most likely to describe a different document than the
+/// other four, since `IncrementalWriter::open` is what decides where new
+/// objects land.
+///
+/// One behaviour change: `/Info` is now actually read. The token loop this
+/// replaces initialised `TrailerDict::info` to `None` and never matched an
+/// `"Info"` key, so an extended document's `/Info` dictionary was silently
+/// dropped from every revision this writer produced.
 fn parse_trailer(bytes: &[u8], startxref: u64) -> Result<(XRefKind, TrailerDict)> {
-    let xref_pos = startxref as usize;
-    if xref_pos >= bytes.len() {
-        return Err(PdfWriteError::ParseError(
-            "invalid startxref position".to_string(),
-        ));
-    }
+    let mut budget = crate::verify::objects::DecodeBudget::new();
+    let section =
+        crate::verify::objects::xref_section_object_numbers(bytes, startxref, &mut budget)
+            .map_err(|e| PdfWriteError::ParseError(e.to_string()))?;
 
-    let xref_slice = &bytes[xref_pos..];
-    let mut tokenizer = PdfTokenizer::new(xref_slice);
-
-    // Check if it's a classic xref table or an xref stream
-    // Classic table starts with "xref" keyword
-    // Stream starts with an object number
-    let first_token = tokenizer.next_token()?;
-    let xref_kind = if first_token.as_deref() == Some(b"xref") {
-        XRefKind::Table
-    } else {
-        XRefKind::Stream
+    let xref_kind = match section.kind {
+        crate::verify::objects::XrefSectionKind::Table => XRefKind::Table,
+        crate::verify::objects::XrefSectionKind::Stream => XRefKind::Stream,
     };
 
-    // Parse trailer dictionary (simplified)
-    let mut trailer_dict = TrailerDict {
-        root: None,
-        info: None,
-        size: 0,
-        prev: None,
-        id: None,
-        has_xref_stm: false,
-    };
+    let dict = section.trailer;
+    let root = dict.get("Root").and_then(|v| v.as_ref_pair());
+    let info = dict.get("Info").and_then(|v| v.as_ref_pair());
+    let size = dict
+        .get("Size")
+        .and_then(|v| v.as_i64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let id = dict
+        .get("ID")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| match v {
+                    crate::verify::objects::PdfValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty());
 
-    // Look for "trailer" keyword (classic xref only)
-    if xref_kind == XRefKind::Table {
-        loop {
-            match tokenizer.next_token()? {
-                Some(token) if token == b"trailer" => break,
-                None => break,
-                _ => continue,
-            }
-        }
-    }
-
-    // Parse the trailer dictionary.
-    //
-    // The nesting depth is tracked because a cross-reference stream's
-    // dictionary routinely contains a nested one: `/DecodeParms <</Predictor
-    // 12 /Columns 5>>` is what every producer that deflates its xref stream
-    // writes. Treating the *first* `>>` as the end of the trailer stopped the
-    // scan inside `/DecodeParms`, so every key after it — `/ID` among them —
-    // went unseen. Entries are only read at depth 1, so a nested dictionary's
-    // keys can never be mistaken for the trailer's own.
-    let mut key: Option<String> = None;
-    let mut depth = 0usize;
-
-    while let Some(token) = tokenizer.next_token()? {
-        if token == b"<<" {
-            depth += 1;
-            continue;
-        }
-        if token == b">>" {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                break;
-            }
-            // A nested dictionary just ended; its value is consumed.
-            key = None;
-            continue;
-        }
-        if depth != 1 {
-            continue;
-        }
-
-        if let Ok(key_str) = std::str::from_utf8(&token) {
-            if let Some(name) = key_str.strip_prefix('/') {
-                key = Some(name.to_string());
-            } else if let Some(k) = key.take() {
-                match k.as_str() {
-                    "XRefStm" => {
-                        trailer_dict.has_xref_stm = true;
-                    }
-                    "Root" => {
-                        if let Ok(num_str) = std::str::from_utf8(&token) {
-                            if let Ok(num) = num_str.parse::<u32>() {
-                                if let Some(gen_token) = tokenizer.next_token()? {
-                                    if let Ok(gen_str) = std::str::from_utf8(&gen_token) {
-                                        if let Ok(gen) = gen_str.parse::<u16>() {
-                                            if let Some(r_token) = tokenizer.next_token()? {
-                                                if r_token == b"R" {
-                                                    trailer_dict.root = Some((num, gen));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "Size" => {
-                        if let Ok(num_str) = std::str::from_utf8(&token) {
-                            if let Ok(num) = num_str.parse::<u32>() {
-                                trailer_dict.size = num;
-                            }
-                        }
-                    }
-                    "Prev" => {
-                        if let Ok(num_str) = std::str::from_utf8(&token) {
-                            if let Ok(num) = num_str.parse::<u64>() {
-                                trailer_dict.prev = Some(num);
-                            }
-                        }
-                    }
-                    // The value token is already in hand: the dispatch above
-                    // only runs for a token that is not a `/Name`, so `token`
-                    // *is* the `[` opening the array. Reading one more token
-                    // and testing that for `[` consumed the first hex string
-                    // and never matched, which is why every revision this
-                    // writer produced dropped the `/ID` of the file it was
-                    // extending.
-                    "ID" if token == b"[" => {
-                        {
-                            let mut id_array = Vec::new();
-                            while let Some(id_token) = tokenizer.next_token()? {
-                                if id_token == b"]" {
-                                    break;
-                                }
-                                if let Ok(id_str) = std::str::from_utf8(&id_token) {
-                                    if let Some(hex) =
-                                        id_str.strip_prefix('<').and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        // Parse hex string
-                                        let mut bytes = Vec::new();
-                                        for i in (0..hex.len()).step_by(2) {
-                                            if i + 1 < hex.len() {
-                                                if let Ok(b) =
-                                                    u8::from_str_radix(&hex[i..i + 2], 16)
-                                                {
-                                                    bytes.push(b);
-                                                }
-                                            }
-                                        }
-                                        if !bytes.is_empty() {
-                                            id_array.push(bytes);
-                                        }
-                                    }
-                                }
-                            }
-                            if !id_array.is_empty() {
-                                trailer_dict.id = Some(id_array);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok((xref_kind, trailer_dict))
+    Ok((
+        xref_kind,
+        TrailerDict {
+            root,
+            info,
+            size,
+            prev: section.prev,
+            id,
+            has_xref_stm: section.xref_stm.is_some(),
+        },
+    ))
 }
 
 #[cfg(test)]
