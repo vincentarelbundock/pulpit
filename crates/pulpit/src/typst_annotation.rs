@@ -193,12 +193,36 @@ pub fn rasterise(
     Ok(RasterisedText {
         pixel_width: pixmap.width(),
         pixel_height: pixmap.height(),
-        // `tiny_skia` hands back premultiplied RGBA; `take` gives the bytes in
-        // the order a PDF image wants them.
-        rgba: pixmap.take(),
+        // `tiny_skia` hands back premultiplied RGBA (§7.4); `take` gives the
+        // bytes in the order a PDF image wants them, but not the *values* —
+        // the PDF writer composites straight alpha, and handing it
+        // premultiplied values fringes every mark's edge with the colour the
+        // alpha was supposed to be fading it into.
+        rgba: straighten_alpha(pixmap.take()),
         width_pt,
         height_pt,
     })
+}
+
+/// Undo `tiny_skia`'s premultiplication: `straight = premultiplied * 255 /
+/// alpha`, per RGBA pixel, rounded to the nearest byte. A fully transparent
+/// pixel has no colour to recover — premultiplication already collapsed it
+/// to (0, 0, 0, 0) — so it is left black rather than divided by zero; nothing
+/// draws it either way.
+fn straighten_alpha(mut rgba: Vec<u8>) -> Vec<u8> {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        let unmultiply = |channel: u8| -> u8 {
+            ((u16::from(channel) * 255 + u16::from(a) / 2) / u16::from(a)).min(255) as u8
+        };
+        pixel[0] = unmultiply(r);
+        pixel[1] = unmultiply(g);
+        pixel[2] = unmultiply(b);
+    }
+    rgba
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -549,5 +573,27 @@ mod tests {
     fn rejects_files_from_annotation_source() {
         let error = render("#read(\"/etc/passwd\")", 360.0, 24.0, (0, 0, 0)).unwrap_err();
         assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn straighten_alpha_undoes_premultiplication_on_a_half_transparent_pixel() {
+        // Solid red at 50% coverage, as `tiny_skia` would hand it back:
+        // premultiplied, so the red channel is scaled down by alpha along
+        // with everything else. A PDF image composites straight alpha, so
+        // handing it this value as-is would draw a dim, fringed red rather
+        // than a half-transparent solid one.
+        let alpha = 128u8;
+        let premultiplied = (255u16 * u16::from(alpha) / 255) as u8;
+        let straightened = straighten_alpha(vec![premultiplied, 0, 0, alpha]);
+        assert_eq!(straightened, vec![255, 0, 0, alpha], "{straightened:?}");
+
+        // Fully opaque and fully transparent pixels are already straight
+        // (opaque) or have nothing to recover (transparent): both pass
+        // through unchanged.
+        assert_eq!(
+            straighten_alpha(vec![10, 20, 30, 255]),
+            vec![10, 20, 30, 255]
+        );
+        assert_eq!(straighten_alpha(vec![0, 0, 0, 0]), vec![0, 0, 0, 0]);
     }
 }
