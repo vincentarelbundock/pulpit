@@ -631,15 +631,28 @@ pub fn classify_coverage(
 /// Discover signatures in the document and perform initial structural checks.
 /// Returns a vector of StructuralReport for each /Sig field with non-null /V.
 pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<StructuralReport>> {
-    // An encrypted document cannot be read structurally, and appending to one
-    // would silently produce a broken file. Report it instead of guessing.
     // One resolver for the whole pass. Building it decodes every
     // cross-reference stream in the chain and caches every object stream it
     // touches, so building one per field lookup — which is what calling the
     // free functions in a loop did — re-did all of that up to MAX_FIELD_NODES
     // times. A crafted 1.3 MB document with 32 chained cross-reference streams
     // took hours; with one resolver it is a single pass.
-    let resolver = ObjectResolver::new(bytes);
+    discover_signatures_with(&ObjectResolver::new(bytes), bytes, revisions)
+}
+
+/// [`discover_signatures`], against a resolver the caller already built.
+///
+/// §78.3: the signing path calls this (through [`count_signatures`]) as one
+/// of about ten `ObjectResolver::new` calls per signing pass, each redoing
+/// the same cross-reference chain and object-stream decoding. Sharing one
+/// resolver end to end removes this one from that count.
+pub fn discover_signatures_with(
+    resolver: &ObjectResolver<'_>,
+    bytes: &[u8],
+    revisions: &RevisionMap,
+) -> Result<Vec<StructuralReport>> {
+    // An encrypted document cannot be read structurally, and appending to one
+    // would silently produce a broken file. Report it instead of guessing.
     if resolver.is_encrypted() {
         return Err(VerifyError::EncryptedPdf);
     }
@@ -647,14 +660,14 @@ pub fn discover_signatures(bytes: &[u8], revisions: &RevisionMap) -> Result<Vec<
     let mut reports = Vec::new();
 
     // Find catalog
-    let catalog_ref = find_catalog_ref_with(&resolver, bytes)?;
+    let catalog_ref = find_catalog_ref_with(resolver, bytes)?;
 
     // Walk the whole field tree, with /FT and /T resolved through parents.
-    let fields = find_field_tree_with(&resolver, catalog_ref)?;
+    let fields = find_field_tree_with(resolver, catalog_ref)?;
 
     // Enumerate fields in document order
     for field in &fields {
-        match extract_signature_field(&resolver, bytes, field, revisions) {
+        match extract_signature_field(resolver, bytes, field, revisions) {
             Ok(Some(sig_report)) => {
                 reports.push(sig_report);
             }

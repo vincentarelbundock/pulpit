@@ -83,7 +83,12 @@ pub fn with_outline(bytes: &[u8], outline: &Outline) -> Result<Vec<u8>, OutlineW
     // revision's cross-reference wins — so the trailer's `/Root` needs no
     // change at all.
     set_entry(&mut catalog_entries, "Outlines", reference(root));
-    objects.push((catalog.0, 0, PdfObject::Dictionary(catalog_entries)));
+    // §77.9: the catalog is a re-emitted *existing* object, not a freshly
+    // allocated one — an incremental update keeps an object's existing
+    // generation (§7.5.6), and writing this under gen 0 while the trailer's
+    // `/Root` still says `catalog.1` would point the newest revision's xref
+    // at a generation nothing in this update actually wrote.
+    objects.push((catalog.0, catalog.1, PdfObject::Dictionary(catalog_entries)));
 
     // The classic xref path requires its input sorted by object number.
     objects.sort_by_key(|(number, _, _)| *number);
@@ -118,7 +123,7 @@ fn emit_level(
     entries: &[OutlineEntry],
     numbered: &[Numbered],
     parent: u32,
-    pages: &[u32],
+    pages: &[(u32, u16)],
     objects: &mut Vec<(u32, u16, PdfObject)>,
 ) {
     for (index, (entry, own)) in entries.iter().zip(numbered).enumerate() {
@@ -149,11 +154,18 @@ fn emit_level(
             LinkTarget::Page { page, .. } => {
                 // A page the document no longer has orders nothing; the title
                 // survives, the way a dangling authored bookmark's would.
-                if let Some(&page_object) = pages.get(*page) {
+                if let Some(&(page_object, page_gen)) = pages.get(*page) {
+                    // §77.9: the page is an existing object; a `/Dest` that
+                    // named it as generation 0 regardless of its real
+                    // generation could point at the wrong (or a
+                    // never-written) object.
                     item.push((
                         "Dest".to_string(),
                         PdfObject::Array(vec![
-                            reference(page_object),
+                            PdfObject::IndirectRef {
+                                obj_num: page_object,
+                                gen_num: page_gen,
+                            },
                             PdfObject::Name("XYZ".to_string()),
                             PdfObject::Null,
                             PdfObject::Null,

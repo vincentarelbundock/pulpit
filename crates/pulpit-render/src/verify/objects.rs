@@ -25,7 +25,7 @@
 //! caller can tell a resolved object from a guessed one.
 
 use super::{Result, VerifyError};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::rc::Rc;
@@ -801,6 +801,17 @@ fn parse_classic_section(bytes: &[u8], mut pos: usize) -> Result<XrefSection> {
             let kind = lex.read_keyword();
             let num = first.saturating_add(i);
             if kind == b"n" && num <= u32::MAX as u64 && gen <= u16::MAX as u64 {
+                // §76.15: the per-subsection `count` is bounded above by
+                // MAX_XREF_ENTRIES, but a file can chain many subsections
+                // together, each individually under the cap, to make this
+                // `Vec` grow past it anyway. Cap the running total from
+                // inside the push loop rather than only checking each
+                // subsection's declared count in isolation.
+                if entries.len() >= MAX_XREF_ENTRIES {
+                    return Err(VerifyError::XrefParseError(
+                        "too many cross-reference entries in one section".into(),
+                    ));
+                }
                 entries.push((
                     num as u32,
                     XrefEntry::InFile {
@@ -992,6 +1003,18 @@ fn parse_xref_stream_section(
             let num = first.saturating_add(i);
             if num > u32::MAX as u64 {
                 continue;
+            }
+            // §76.15: `count` is capped per `/Index` pair above, but
+            // `/Index` can list up to MAX_XREF_SUBSECTIONS pairs, each
+            // individually under that cap — a one-byte row (`/W [0 1 0]`)
+            // and enough pairs each declaring MAX_XREF_ENTRIES rows turns a
+            // few hundred KB of deflated zeros into tens of millions of
+            // pushes. Cap the running total across the whole section from
+            // inside the loop, not just each pair's own declared count.
+            if entries.len() >= MAX_XREF_ENTRIES {
+                return Err(VerifyError::XrefParseError(
+                    "too many cross-reference entries in one section".into(),
+                ));
             }
             match kind {
                 1 if fields[2] <= u16::MAX as u64 => entries.push((
@@ -1198,6 +1221,11 @@ pub struct ObjectResolver<'a> {
     /// Repair scan, built lazily and only when the xref cannot answer.
     scan: RefCell<Option<Rc<ScanIndex>>>,
     objstm: RefCell<ObjStmCache>,
+    /// §76.15: the earliest offset from which `object_end`'s `endobj`
+    /// fallback search is known to find nothing, so a resolver asked to
+    /// repair many damaged objects in a row does not re-scan to EOF for
+    /// each one. See the identical reasoning in `scan_object_definitions`.
+    no_endobj_from: Cell<Option<usize>>,
 }
 
 impl<'a> ObjectResolver<'a> {
@@ -1210,6 +1238,7 @@ impl<'a> ObjectResolver<'a> {
             index: XrefIndex::build(bytes).ok(),
             scan: RefCell::new(None),
             objstm: RefCell::new(HashMap::new()),
+            no_endobj_from: Cell::new(None),
         }
     }
 
@@ -1221,6 +1250,7 @@ impl<'a> ObjectResolver<'a> {
             index: Some(index),
             scan: RefCell::new(None),
             objstm: RefCell::new(HashMap::new()),
+            no_endobj_from: Cell::new(None),
         })
     }
 
@@ -1308,7 +1338,30 @@ impl<'a> ObjectResolver<'a> {
         let mut lex = Lexer::new(self.bytes, start);
         match lex.parse_indirect_object() {
             Ok((_, _, _, end)) => Some(end),
-            Err(_) => find_bytes_from(self.bytes, start, b"endobj").map(|p| p + b"endobj".len()),
+            Err(_) => {
+                // §76.15: once a search for `endobj` starting at some offset
+                // comes back empty, it is absent everywhere from there to
+                // EOF, so a later request starting at or after that offset
+                // is refused without re-scanning. Repairing many damaged
+                // objects in one document would otherwise cost O(n^2) byte
+                // compares.
+                if self
+                    .no_endobj_from
+                    .get()
+                    .is_some_and(|known| start >= known)
+                {
+                    return None;
+                }
+                match find_bytes_from(self.bytes, start, b"endobj") {
+                    Some(p) => Some(p + b"endobj".len()),
+                    None => {
+                        let known = self.no_endobj_from.get();
+                        self.no_endobj_from
+                            .set(Some(known.map_or(start, |k| k.min(start))));
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -1533,6 +1586,16 @@ impl<'a> ObjectResolver<'a> {
 pub fn scan_object_definitions(bytes: &[u8]) -> ScanIndex {
     let mut out: BTreeMap<u32, (usize, u16)> = BTreeMap::new();
     let mut at = 0usize;
+    // §76.15: a file of many objects that each fail to parse (no `endobj`
+    // anywhere after them, e.g. a run of `N 0 obj }`) used to make the
+    // fallback below scan from its object's start all the way to EOF, every
+    // time, for O(n^2) byte compares on an n-byte file. Once one such scan
+    // comes back empty, `endobj` is known to be absent from that offset to
+    // the end of the file, and since `at` (and therefore every later
+    // `start`) only moves forward, it is absent for every later object too.
+    // Remembering the earliest offset a failed scan started at turns every
+    // later failure into an O(1) check instead of a repeat scan.
+    let mut no_endobj_from: Option<usize> = None;
     while let Some(p) = find_bytes_from(bytes, at, b"obj") {
         at = p + 3;
         // `obj` must be a standalone keyword.
@@ -1548,7 +1611,20 @@ pub fn scan_object_definitions(bytes: &[u8]) -> ScanIndex {
         let mut lex = Lexer::new(bytes, start);
         let end = match lex.parse_indirect_object() {
             Ok((_, _, _, end)) => Some(end),
-            Err(_) => find_bytes_from(bytes, start, b"endobj").map(|e| e + b"endobj".len()),
+            Err(_) => {
+                if no_endobj_from.is_some_and(|known| start >= known) {
+                    None
+                } else {
+                    match find_bytes_from(bytes, start, b"endobj") {
+                        Some(e) => Some(e + b"endobj".len()),
+                        None => {
+                            no_endobj_from =
+                                Some(no_endobj_from.map_or(start, |known| known.min(start)));
+                            None
+                        }
+                    }
+                }
+            }
         };
         if let Some(end) = end {
             at = std::cmp::max(at, end);
@@ -1648,6 +1724,32 @@ mod tests {
         let src = "[".repeat(MAX_VALUE_DEPTH + 5);
         let mut lex = Lexer::new(src.as_bytes(), 0);
         assert!(lex.parse_value(0).is_err());
+    }
+
+    /// §76.15: a file of many objects that each fail to parse and have no
+    /// `endobj` anywhere after them used to make `scan_object_definitions`'s
+    /// repair fallback re-scan from each object's start to EOF, an O(n^2)
+    /// cost in the number of such objects. A ~10 MB file of them must still
+    /// return in bounded time, memoised failure or not.
+    #[test]
+    fn a_file_of_many_unterminated_objects_scans_in_bounded_time() {
+        let mut bytes = Vec::from(&b"%PDF-1.4\n"[..]);
+        // Every one of these bodies fails to parse (`}` is not a value) and
+        // has no `endobj` anywhere after it, which is exactly the case that
+        // used to force a full-file scan per object.
+        let unit_len = b"1 0 obj\n}\n".len();
+        let count = (10 * 1024 * 1024) / unit_len;
+        for n in 1..=count {
+            bytes.extend_from_slice(format!("{n} 0 obj\n}}\n").as_bytes());
+        }
+
+        let started = std::time::Instant::now();
+        let _ = scan_object_definitions(&bytes);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "scanning {count} unterminated objects must be near-linear, took {elapsed:?}"
+        );
     }
 }
 
@@ -2088,5 +2190,43 @@ mod xref_stream_tests {
 
         let decoded = decode_stream(&deflated, &dict).expect("predictor decoding succeeds");
         assert_eq!(decoded, original.concat());
+    }
+
+    /// §76.15: a single `/Index` pair whose declared `count` exceeds
+    /// `MAX_XREF_ENTRIES` was already refused before this pair's rows are
+    /// read at all. What was not caught is several pairs, each individually
+    /// under the cap, whose rows sum past it — a real producer's `/W [0 1
+    /// 0]` (one byte per row) and a `/Index` of a few dozen such pairs turns
+    /// a modest stream into tens of millions of pushes. Three pairs here,
+    /// each comfortably under the per-pair cap but summing well past it,
+    /// must be refused from inside the loop, not accepted.
+    #[test]
+    fn cumulative_entries_across_index_pairs_are_capped() {
+        let per_pair = MAX_XREF_ENTRIES / 3 + 1;
+        let body = vec![0u8; per_pair * 3]; // one byte per row (/W [0 1 0])
+        let mut pdf = Vec::from(&b"%PDF-1.5\n"[..]);
+        let at = pdf.len();
+        pdf.extend_from_slice(
+            format!(
+                "3 0 obj\n<</Type /XRef /Size {size} /W [0 1 0] \
+                 /Index [0 {per_pair} {per_pair} {per_pair} {two_pair} {per_pair}] \
+                 /Root 1 0 R /Length {len}>>\nstream\n",
+                size = per_pair * 3 + 1,
+                per_pair = per_pair,
+                two_pair = per_pair * 2,
+                len = body.len(),
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&body);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(format!("startxref\n{at}\n%%EOF").as_bytes());
+
+        let result = XrefIndex::build(&pdf);
+        assert!(
+            result.is_err(),
+            "cumulative rows across several /Index pairs, each under the per-pair cap, \
+             must still be refused once their sum exceeds MAX_XREF_ENTRIES"
+        );
     }
 }
