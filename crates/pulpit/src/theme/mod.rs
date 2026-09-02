@@ -825,6 +825,39 @@ mod tests {
     use crate::platform::appearance::{Appearance, SystemAppearance};
     use crate::theme::tokens::contrast;
 
+    /// Every view module the convention tests below check, named once.
+    ///
+    /// §80.9: three hand-maintained copies of roughly this list had drifted
+    /// — `annotations`, `media` and `chrome` were missing from two of the
+    /// three, which is exactly where the convention breaks they exist to
+    /// catch (`media::SPACING` off the spacing scale, the media transport's
+    /// glyphs typed as text) were living unnoticed. One roster, shared.
+    const THEMED_VIEWS: &[(&str, &str)] = &[
+        ("shell", include_str!("../view.rs")),
+        ("designer", include_str!("../designer_view.rs")),
+        ("layout renderer", include_str!("../layout_renderer.rs")),
+        (
+            "annotation widgets",
+            include_str!("../widgets/annotations/view.rs"),
+        ),
+        ("chrome widgets", include_str!("../widgets/chrome/view.rs")),
+        ("common widgets", include_str!("../widgets/common/view.rs")),
+        (
+            "document widgets",
+            include_str!("../widgets/document/view.rs"),
+        ),
+        ("media widgets", include_str!("../widgets/media/view.rs")),
+        (
+            "navigation widgets",
+            include_str!("../widgets/navigation/view.rs"),
+        ),
+        ("notes widgets", include_str!("../widgets/notes/view.rs")),
+        ("search widgets", include_str!("../widgets/search/view.rs")),
+        ("slide widgets", include_str!("../widgets/slides/view.rs")),
+        ("status widgets", include_str!("../widgets/status/view.rs")),
+        ("timing widgets", include_str!("../widgets/timing/view.rs")),
+    ];
+
     #[test]
     fn every_appearance_resolves_to_a_palette_with_a_reason() {
         let state = ThemeState::new(
@@ -948,20 +981,39 @@ mod tests {
 
     #[test]
     fn views_do_not_construct_their_own_colours() {
-        let themed_views = [
-            ("designer", include_str!("../designer_view.rs")),
-            ("layout renderer", include_str!("../layout_renderer.rs")),
-            ("common widgets", include_str!("../widgets/common/view.rs")),
-            (
-                "navigation widgets",
-                include_str!("../widgets/navigation/view.rs"),
-            ),
-            ("notes widgets", include_str!("../widgets/notes/view.rs")),
-            ("slide widgets", include_str!("../widgets/slides/view.rs")),
-            ("status widgets", include_str!("../widgets/status/view.rs")),
-            ("timing widgets", include_str!("../widgets/timing/view.rs")),
-        ];
-        for (name, source) in themed_views {
+        for (name, source) in THEMED_VIEWS {
+            // The shell contains the audience output as well as application
+            // chrome. Exact black and white blanking are its only
+            // literal-color exception; PDF/image pixels are data rather than
+            // theme colors.
+            if *name == "shell" {
+                // Counted as literal colour *constructions*, not as any
+                // identifier ending in `Color::` — `BlankColor::White` names
+                // a setting, not a colour the shell mixed for itself.
+                let constructed = source.matches("Color::WHITE").count()
+                    + source.matches("Color::BLACK").count()
+                    + source.matches("Color::TRANSPARENT").count();
+                assert_eq!(constructed, 2);
+                assert!(source.contains("Blank::White => Color::WHITE"));
+                assert!(source.contains("_ => Color::BLACK"));
+                assert!(!source.contains("from_rgb"));
+                assert!(!source.contains("Color { r:"));
+                continue;
+            }
+            // The annotation canvas draws the presenter's own ink, and the
+            // outline panel's mark swatch repeats it — a colour the
+            // presenter picked, converted from `InkColor` for the renderer,
+            // plus the shadow behind a stamp or a highlight wash. All of
+            // that is marks on (or about) the slide, the same "PDF/image
+            // pixels are data" exception the shell gets, not the seven
+            // chrome roles.
+            if ["annotation widgets", "document widgets"].contains(name) {
+                assert!(
+                    !source.contains("Color::WHITE") && !source.contains("Color::TRANSPARENT"),
+                    "{name}: chrome colours, not ink, stay on the seven roles"
+                );
+                continue;
+            }
             for forbidden in ["Color::", "Color { r:", "from_rgb", "from_rgba"] {
                 assert!(
                     !source.contains(forbidden),
@@ -969,39 +1021,11 @@ mod tests {
                 );
             }
         }
-
-        // The shell contains the audience output as well as application
-        // chrome. Exact black and white blanking are its only literal-color
-        // exception; PDF/image pixels are data rather than theme colors.
-        let shell = include_str!("../view.rs");
-        // Counted as literal colour *constructions*, not as any identifier
-        // ending in `Color::` — `BlankColor::White` names a setting, not a
-        // colour the shell mixed for itself.
-        let constructed = shell.matches("Color::WHITE").count()
-            + shell.matches("Color::BLACK").count()
-            + shell.matches("Color::TRANSPARENT").count();
-        assert_eq!(constructed, 2);
-        assert!(shell.contains("Blank::White => Color::WHITE"));
-        assert!(shell.contains("_ => Color::BLACK"));
-        assert!(!shell.contains("from_rgb"));
-        assert!(!shell.contains("Color { r:"));
     }
 
     #[test]
     fn views_use_tokens_for_non_optical_type_spacing_and_padding() {
-        let views = [
-            ("shell", include_str!("../view.rs")),
-            ("designer", include_str!("../designer_view.rs")),
-            ("common", include_str!("../widgets/common/view.rs")),
-            ("document", include_str!("../widgets/document/view.rs")),
-            ("navigation", include_str!("../widgets/navigation/view.rs")),
-            ("notes", include_str!("../widgets/notes/view.rs")),
-            ("search", include_str!("../widgets/search/view.rs")),
-            ("slides", include_str!("../widgets/slides/view.rs")),
-            ("status", include_str!("../widgets/status/view.rs")),
-            ("timing", include_str!("../widgets/timing/view.rs")),
-        ];
-        for (name, source) in views {
+        for (name, source) in THEMED_VIEWS {
             for method in [".size(", ".spacing(", ".padding("] {
                 for suffix in source.split(method).skip(1) {
                     let literal: String = suffix
@@ -1031,24 +1055,7 @@ mod tests {
             '✕', '✖', '×', '☰', '↺', '↻', '▾', '▴', '✎', '←', '→', '↑', '↓', '‹', '›', '▲', '▼',
             '✓',
         ];
-        let views = [
-            ("shell", include_str!("../view.rs")),
-            ("designer", include_str!("../designer_view.rs")),
-            (
-                "annotation widgets",
-                include_str!("../widgets/annotations/view.rs"),
-            ),
-            ("common widgets", include_str!("../widgets/common/view.rs")),
-            (
-                "navigation widgets",
-                include_str!("../widgets/navigation/view.rs"),
-            ),
-            ("notes widgets", include_str!("../widgets/notes/view.rs")),
-            ("slide widgets", include_str!("../widgets/slides/view.rs")),
-            ("status widgets", include_str!("../widgets/status/view.rs")),
-            ("timing widgets", include_str!("../widgets/timing/view.rs")),
-        ];
-        for (name, source) in views {
+        for (name, source) in THEMED_VIEWS {
             for line in source.lines() {
                 // Comments and test fixtures may say "200×112.5"; only a
                 // string handed to a widget is a glyph the user would see.
@@ -1198,6 +1205,17 @@ pub mod ambient {
     }
     pub fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
         super::selected_button(palette())(theme, status)
+    }
+    /// [`selected_button`] or [`tool_button`], by whether this control is
+    /// the one currently chosen — the `if selected { selected_button } else
+    /// { tool_button }` written out at each toggling control's call site,
+    /// named once (§80.10).
+    pub fn toggle_button(selected: bool) -> fn(&Theme, button::Status) -> button::Style {
+        if selected {
+            selected_button
+        } else {
+            tool_button
+        }
     }
     pub fn focus_button(theme: &Theme, status: button::Status) -> button::Style {
         super::focus_button(palette())(theme, status)

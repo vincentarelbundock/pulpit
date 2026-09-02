@@ -165,6 +165,11 @@ pub enum Icon {
     Monitor,
     /// Reading aloud: `volume-2`.
     Volume,
+    /// Audio exists on this media and is silenced: `volume-x`.
+    Mute,
+    /// Project media across the whole slide area, on both screens:
+    /// `maximize`.
+    Maximize,
 }
 
 impl Icon {
@@ -231,6 +236,8 @@ impl Icon {
             Icon::Compass => include_bytes!("../../assets/icons/compass.svg"),
             Icon::Monitor => include_bytes!("../../assets/icons/monitor.svg"),
             Icon::Volume => include_bytes!("../../assets/icons/volume-2.svg"),
+            Icon::Mute => include_bytes!("../../assets/icons/volume-x.svg"),
+            Icon::Maximize => include_bytes!("../../assets/icons/maximize.svg"),
         }
     }
 
@@ -243,7 +250,7 @@ impl Icon {
             .expect("every Icon is listed in ALL")
     }
 
-    const ALL: [Icon; 60] = [
+    const ALL: [Icon; 62] = [
         Icon::Pen,
         Icon::Highlighter,
         Icon::Underline,
@@ -304,6 +311,8 @@ impl Icon {
         Icon::Compass,
         Icon::Monitor,
         Icon::Volume,
+        Icon::Mute,
+        Icon::Maximize,
     ];
 
     /// The handle for this icon, built once per process.
@@ -330,9 +339,9 @@ impl Icon {
 /// which is how the shape tools shipped once. A free const rather than an
 /// associated one: the compiler only evaluates an associated const somebody
 /// reads, which is how the old anchor sat stale on `Reset` while `ScanText`
-/// shipped past it without a murmur. `Volume` is the last variant; move this
-/// with it.
-const _COMPLETE: () = assert!(Icon::ALL.len() == Icon::Volume as usize + 1);
+/// shipped past it without a murmur. `Maximize` is the last variant; move
+/// this with it.
+const _COMPLETE: () = assert!(Icon::ALL.len() == Icon::Maximize as usize + 1);
 
 /// An icon at `size` points square, in the palette's text colour.
 pub fn icon<'a, Message: 'a>(icon: Icon, size: f32) -> Element<'a, Message> {

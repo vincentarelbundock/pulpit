@@ -9,13 +9,12 @@ use iced::widget::{button, container, responsive, row, slider, text};
 use iced::{Element, Length, Padding};
 
 use crate::theme;
+use crate::theme::Icon;
 use crate::theme::{target, type_scale};
 use crate::widgets::event::{TransportRequest, WidgetEvent};
 use crate::widgets::media::model::Transport;
 use crate::widgets::view_context::WidgetViewContext;
 use crate::widgets::{Widget, WidgetKind};
-
-const SPACING: f32 = 10.0;
 
 pub fn view<'ctx, 'a, Message: Clone + 'static>(
     ctx: &WidgetViewContext<'ctx, 'a, Message>,
@@ -65,10 +64,11 @@ fn transport_row<Message: Clone + 'static>(
 
         let action = transport.action;
         let mut play = button(
-            text(action.glyph())
-                .size((height * 0.42).clamp(12.0, 22.0))
-                .center()
-                .width(Length::Fill),
+            container(theme::icon::icon(
+                action.icon(),
+                (height * 0.42).clamp(12.0, 22.0),
+            ))
+            .center(Length::Fill),
         )
         .width(Length::Fixed(height))
         .height(Length::Fixed(height))
@@ -90,7 +90,9 @@ fn transport_row<Message: Clone + 'static>(
             })
             .wrapping(iced::widget::text::Wrapping::None);
 
-        let mut controls = row![play].spacing(SPACING).align_y(iced::Alignment::Center);
+        let mut controls = row![play]
+            .spacing(theme::space::M)
+            .align_y(iced::Alignment::Center);
 
         // The scrub bar takes whatever the row does not need. Without a
         // duration there is nothing to scrub, so the readout simply moves
@@ -121,11 +123,13 @@ fn transport_row<Message: Clone + 'static>(
 
         if transport.mutable {
             let muted = transport.muted;
+            let sound_icon = if muted { Icon::Mute } else { Icon::Volume };
             let mut sound = button(
-                text(if muted { "\u{1F507}" } else { "\u{1F509}" })
-                    .size((height * 0.36).clamp(11.0, 18.0))
-                    .center()
-                    .width(Length::Fill),
+                container(theme::icon::icon(
+                    sound_icon,
+                    (height * 0.36).clamp(11.0, 18.0),
+                ))
+                .center(Length::Fill),
             )
             .width(Length::Fixed(height))
             .height(Length::Fixed(height))
@@ -144,10 +148,11 @@ fn transport_row<Message: Clone + 'static>(
         // button is the state's most visible record on the presenter side.
         let fullscreen = transport.fullscreen;
         let mut project = button(
-            text("\u{26F6}")
-                .size((height * 0.36).clamp(11.0, 18.0))
-                .center()
-                .width(Length::Fill),
+            container(theme::icon::icon(
+                Icon::Maximize,
+                (height * 0.36).clamp(11.0, 18.0),
+            ))
+            .center(Length::Fill),
         )
         .width(Length::Fixed(height))
         .height(Length::Fixed(height))

@@ -55,8 +55,6 @@ pub fn view<'ctx, 'a, Message: Clone + 'static>(
     }
 }
 
-const SPACING: f32 = 8.0;
-
 /// Back and forward: equal halves of one control, labels measured to fit the
 /// button they sit in so they can never wrap onto a second line.
 fn buttons<Message: Clone + 'static>(
@@ -67,7 +65,7 @@ fn buttons<Message: Clone + 'static>(
     on: fn(WidgetEvent) -> Message,
 ) -> Element<'static, Message> {
     let halves = f32::from(u8::from(options.back) + u8::from(options.forward)).max(1.0);
-    let button_width = ((width - SPACING) / halves - 20.0).max(1.0);
+    let button_width = ((width - theme::space::S) / halves - 20.0).max(1.0);
     let longest = if options.labels { "Forward" } else { "" };
     let label_size = fitted_size(
         Size::new(button_width, height),
@@ -80,7 +78,7 @@ fn buttons<Message: Clone + 'static>(
     let show_words = options.labels && label_size >= 12.0;
     let label_size = label_size.max(11.0);
 
-    let mut row = Row::new().spacing(SPACING).width(Length::Fill);
+    let mut row = Row::new().spacing(theme::space::S).width(Length::Fill);
     if options.back {
         let label = text("Back")
             .size(label_size)
@@ -172,7 +170,7 @@ fn scrubber<Message: Clone + 'static>(
             .style(theme::ambient::tool_button)
             .on_press_maybe(mode.interactive().then(|| on(WidgetEvent::ShowOverview))),
         ]
-        .spacing(SPACING)
+        .spacing(theme::space::S)
         .align_y(iced::Alignment::Center)
         .into()
     })

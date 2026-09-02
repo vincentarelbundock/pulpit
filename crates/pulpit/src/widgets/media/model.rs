@@ -17,11 +17,11 @@ pub enum Action {
 
 impl Action {
     /// A symbol, not a word: the pane is small, and these two are the least
-    /// ambiguous glyphs in the interface.
-    pub fn glyph(self) -> &'static str {
+    /// ambiguous drawings in the interface.
+    pub fn icon(self) -> crate::theme::Icon {
         match self {
-            Action::Play => "\u{25B6}",
-            Action::Pause => "\u{23F8}",
+            Action::Play => crate::theme::Icon::Play,
+            Action::Pause => crate::theme::Icon::Pause,
         }
     }
 }
