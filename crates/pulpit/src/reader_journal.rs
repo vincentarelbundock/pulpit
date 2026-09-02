@@ -366,10 +366,19 @@ impl Journal {
     /// nothing to hand it to on the save path — but leaves `self.file` unset,
     /// so the next `append` reports it as an `Err` rather than a silent
     /// success.
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self, saved: Option<(PathBuf, DocumentFingerprint)>) {
         let _ = std::fs::remove_file(&self.path);
         self.written = 0;
         self.full = false;
+        // The edits so far are in the copy the user just wrote, so from here
+        // on the journal is relative to that copy: replaying it onto the
+        // original would leave out everything the save already holds. Only
+        // when the copy cannot be fingerprinted does the journal stay with
+        // the source it had.
+        if let Some((source, fingerprint)) = saved {
+            self.source = source;
+            self.fingerprint = fingerprint;
+        }
         self.file = Self::create(&self.path, &self.source, &self.fingerprint).ok();
     }
 
@@ -653,7 +662,7 @@ mod tests {
         journal.append(&entry(1, 10.0)).unwrap();
         assert!(path.exists());
 
-        journal.finish();
+        journal.finish(None);
         assert!(
             path.exists(),
             "a journal that stops after the first save protects nothing after it"
@@ -664,6 +673,33 @@ mod tests {
         // the pre-save edit is in the file the user just saved.
         journal.append(&entry(2, 60.0)).unwrap();
         let recovered = Journal::recover(&path).unwrap();
+        assert_eq!(recovered.entries, vec![entry(2, 60.0)]);
+    }
+
+    #[test]
+    fn a_save_as_points_the_journal_at_the_saved_copy() {
+        // §76.3: the edits before the save are in the copy the user wrote,
+        // so a journal replayed after a crash must be replayed onto that
+        // copy, not onto an original that lacks them.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let original = Path::new("/tmp/paper.pdf");
+        let copy = PathBuf::from("/tmp/paper-signed.pdf");
+        let before = fingerprint();
+        let after = DocumentFingerprint {
+            path: copy.clone(),
+            size: before.size.map(|size| size + 1),
+            ..before.clone()
+        };
+        let mut journal = Journal::start(&path, original, before.clone()).unwrap();
+        journal.append(&entry(1, 10.0)).unwrap();
+
+        journal.finish(Some((copy.clone(), after.clone())));
+        journal.append(&entry(2, 60.0)).unwrap();
+
+        let recovered = Journal::recover(&path).unwrap();
+        assert!(recovered.applies_to(&copy, &after));
+        assert!(!recovered.applies_to(original, &before));
         assert_eq!(recovered.entries, vec![entry(2, 60.0)]);
     }
 

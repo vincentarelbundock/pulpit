@@ -7956,10 +7956,13 @@ impl App {
                         self.persist();
                     }
                     // Nothing is unsaved any more: the edits are in the file
-                    // the user just wrote. A journal kept past a save would
-                    // offer to replay edits a document already has.
+                    // the user just wrote, so the journal starts over relative
+                    // to that file (§76.3). Replaying onto the original would
+                    // leave out what the save already holds.
                     if let Some(journal) = self.reader_journal.as_mut() {
-                        journal.finish();
+                        let saved_copy = crate::session::fingerprint(&saved.path)
+                            .map(|fingerprint| (saved.path.clone(), fingerprint));
+                        journal.finish(saved_copy);
                     }
                     // §79.5: a `SavingFirst` sign flow's own save always
                     // writes to `self.signing_temp` — `signing_scratch_destination`
