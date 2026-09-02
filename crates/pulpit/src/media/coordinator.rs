@@ -351,10 +351,12 @@ impl MediaCoordinator {
             let live: std::collections::HashSet<OverlayId> =
                 self.index.all().iter().map(|overlay| overlay.id).collect();
 
-            // An id that is live both before and after the rebuild but now
-            // points at different content or a different region is not the
-            // same overlay any more: its session is an orphan and must
-            // close, not keep running against stale content.
+            // An id this rebuild removed, or one that is live both before and
+            // after but now points at different content or a different
+            // region, no longer names the overlay its session was opened for:
+            // the session is an orphan and must close, not keep running
+            // against stale content (§77.7). Ids are numbered by occurrence in
+            // page order, so they shift as pages arrive.
             let reused: Vec<OverlayId> = self
                 .sessions
                 .keys()
@@ -363,7 +365,8 @@ impl MediaCoordinator {
                         (Some(before), Some(after)) => {
                             before.content != after.content || before.region != after.region
                         }
-                        _ => false,
+                        (_, None) => true,
+                        (None, Some(_)) => false,
                     },
                 )
                 .copied()
