@@ -189,25 +189,6 @@ pub enum EditError {
     ReadOnly,
 }
 
-/// What mounting a layout asks of the reading surface, beyond its tree.
-///
-/// A layout is a widget tree and nothing else, but two of the reader's states
-/// are as much a part of "which layout am I in" as the tree is: whether the
-/// chrome is hidden and how the page is fitted. Keeping them here rather than
-/// as a hard-coded exception for one built-in id means a user's copy of a
-/// layout opens the way its original does, which is what §2.3 already
-/// promises for the mode a layout belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-pub struct OnMount {
-    /// Mount with the reader's chrome hidden and the page on the screen.
-    #[serde(default)]
-    pub fullscreen: bool,
-    /// The fit to put the page in when the layout is mounted. `None` leaves
-    /// the reader in whatever fit it was already using.
-    #[serde(default)]
-    pub zoom: Option<crate::widgets::document::model::Zoom>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub id: LayoutId,
@@ -216,9 +197,6 @@ pub struct Layout {
     /// The ratio the layout was designed at, kept for the review notice.
     #[serde(default)]
     pub design_ratio: AspectRatio,
-    /// What mounting this layout asks of the reading surface.
-    #[serde(default)]
-    pub on_mount: OnMount,
     pub root: Node,
     /// Next node id to hand out.
     #[serde(default = "default_next_id")]
@@ -243,7 +221,6 @@ impl Layout {
             name,
             origin,
             design_ratio,
-            on_mount: OnMount::default(),
             root,
             next_id: 0,
         };
@@ -258,7 +235,6 @@ impl Layout {
             name: name.to_string(),
             origin: Origin::Custom,
             design_ratio: AspectRatio::default(),
-            on_mount: OnMount::default(),
             root: Node::Leaf(Cell::new(NodeId(0))),
             next_id: 1,
         }
