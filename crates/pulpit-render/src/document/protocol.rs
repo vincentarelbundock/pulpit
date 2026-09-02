@@ -442,6 +442,18 @@ impl DocumentRenderRequest {
                 });
             }
         }
+        // §77.8: `MAX_DIMENSION` alone allows a request whose frame the wire
+        // itself refuses — 16384² RGBA is a gigabyte, and `write_message`
+        // caps a message at `MAX_MESSAGE_BYTES`. Without this, an in-bounds
+        // request reaches the worker, renders successfully, and then kills it
+        // when the answer cannot be written, instead of being `Refused`
+        // before any of that work runs.
+        if self.rgba_bytes() > u64::from(crate::protocol::MAX_MESSAGE_BYTES) {
+            return Err(LimitExceeded {
+                what: "a render whose frame cannot fit the message wire",
+                limit: crate::protocol::MAX_MESSAGE_BYTES as usize,
+            });
+        }
         Ok(())
     }
 }
@@ -1188,6 +1200,35 @@ mod tests {
             serde_json::from_str(r#"{"page":0,"width":100,"height":50}"#)
                 .expect("a request without the fields still parses");
         assert_eq!(older.full_size(), None);
+    }
+
+    /// §77.8: `MAX_DIMENSION` alone allows requests whose frame the wire
+    /// cannot carry — 16384² RGBA is a gigabyte against an 80 MiB message
+    /// ceiling. Such a request must be `Refused` by `validate`, not accepted
+    /// and only discovered to be too large after the worker has rendered it.
+    #[test]
+    fn a_render_too_large_for_the_wire_is_refused_before_it_is_drawn() {
+        let huge = DocumentRenderRequest {
+            page: PageIndex(0),
+            width: DocumentRenderRequest::MAX_DIMENSION,
+            height: DocumentRenderRequest::MAX_DIMENSION,
+            region: pulpit_core::notes::Region::FULL,
+            full_width: 0,
+            full_height: 0,
+        };
+        assert!(
+            huge.rgba_bytes() > u64::from(crate::protocol::MAX_MESSAGE_BYTES),
+            "the test must exercise a request the wire really cannot carry"
+        );
+        assert!(huge.validate().is_err());
+
+        // An ordinary page render, nowhere near either bound, still passes.
+        let ordinary = DocumentRenderRequest {
+            width: 1920,
+            height: 1080,
+            ..huge
+        };
+        assert!(ordinary.validate().is_ok());
     }
 
     #[test]

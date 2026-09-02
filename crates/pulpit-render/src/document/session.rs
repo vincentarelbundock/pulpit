@@ -18,6 +18,8 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::protocol::{read_message, write_message, ProtocolError};
 
@@ -108,16 +110,32 @@ impl SessionError {
     }
 }
 
+/// How long [`DocumentSession::request`] waits for an answer before
+/// concluding the worker is wedged rather than merely slow (§77.8).
+///
+/// A `while(true){}` field script under V8, run through `form_event`, never
+/// returns; without a bound the reader thread — and every request queued
+/// behind it — waits forever for a process that will never answer. This is
+/// generous next to the render supervisor's 10 s silence deadline
+/// (`supervisor.rs`) because a document request can carry real PDFium work
+/// (opening a large form, applying a signature), not just a redraw.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A running document worker, and the pipe to it.
 pub struct DocumentSession {
     child: Child,
     to_worker: BufWriter<std::process::ChildStdin>,
-    from_worker: BufReader<std::process::ChildStdout>,
+    /// Answers arrive over a channel fed by a dedicated reader thread rather
+    /// than a direct blocking read on `request`'s own stack, which is what
+    /// makes the bounded wait below possible: `recv_timeout` gives up on
+    /// waiting without needing to interrupt a blocked `read` on the pipe.
+    responses: mpsc::Receiver<Result<DocumentResponse, ProtocolError>>,
     source: PathBuf,
     /// Set once a request has failed in a way that means the worker is gone.
     /// A session does not resurrect itself: whoever owns the journal decides
     /// what may be replayed (§11.5).
     lost: bool,
+    request_timeout: Duration,
 }
 
 impl std::fmt::Debug for DocumentSession {
@@ -151,12 +169,27 @@ impl DocumentSession {
             });
         }
 
+        // The reader runs on its own thread so a wedged worker only ever
+        // blocks that thread's `read`, never the caller of `request`: the
+        // caller waits on a channel it can time out on instead.
+        let (sender, responses) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("document-session-reader".into())
+            .spawn(move || loop {
+                let message = read_message::<DocumentResponse>(&mut from_worker);
+                let failed = message.is_err();
+                if sender.send(message).is_err() || failed {
+                    break;
+                }
+            });
+
         Ok(DocumentSession {
             child,
             to_worker,
-            from_worker,
+            responses,
             source: source.to_path_buf(),
             lost: false,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         })
     }
 
@@ -167,6 +200,14 @@ impl DocumentSession {
     /// Has this session lost its worker?
     pub fn is_lost(&self) -> bool {
         self.lost
+    }
+
+    /// Override how long [`Self::request`] waits for an answer. Production
+    /// code has no reason to call this — [`DEFAULT_REQUEST_TIMEOUT`] is the
+    /// real bound — but a test proving a wedged worker is caught cannot wait
+    /// 30 real seconds to see it.
+    pub fn set_request_timeout(&mut self, timeout: Duration) {
+        self.request_timeout = timeout;
     }
 
     /// Send one request and wait for its answer.
@@ -189,11 +230,27 @@ impl DocumentSession {
             self.lost = true;
             return Err(error.into());
         }
-        let response: DocumentResponse = match read_message(&mut self.from_worker) {
-            Ok(response) => response,
-            Err(error) => {
+        let response: DocumentResponse = match self.responses.recv_timeout(self.request_timeout) {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
                 self.lost = true;
                 return Err(error.into());
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.lost = true;
+                return Err(SessionError::WorkerGone);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // The worker has not answered within the bound — a wedged
+                // field script, most plausibly. Waiting longer only wedges
+                // every request queued behind this one, so the session gives
+                // up on it and takes the process down rather than trusting
+                // an answer that might still arrive after the caller has
+                // moved on.
+                self.lost = true;
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(SessionError::WorkerGone);
             }
         };
         if let Err(limit) = response.validate() {
@@ -214,7 +271,7 @@ impl DocumentSession {
     pub fn close(mut self) {
         if !self.lost {
             let _ = write_message(&mut self.to_worker, &DocumentRequest::Close);
-            let _ = read_message::<DocumentResponse>(&mut self.from_worker);
+            let _ = self.responses.recv_timeout(self.request_timeout);
         }
         let _ = self.child.wait();
     }
@@ -249,6 +306,52 @@ pub fn serve_stdio(
 mod tests {
     use super::*;
     use pulpit_core::ipc::WORKER_MARKER;
+
+    /// §77.8: a worker that never answers — the shape of a `while(true){}`
+    /// field script wedged inside `form_event` — must not be able to hang
+    /// `request` forever. This drives the timeout mechanism directly rather
+    /// than through a real document worker's handshake: the point under test
+    /// is the bound in `request`/`close`, not PDFium.
+    #[test]
+    fn a_wedged_worker_is_dropped_after_the_bounded_wait() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawning the stand-in process");
+        let to_worker = BufWriter::new(child.stdin.take().expect("piped stdin"));
+        // Nothing ever sends on this channel, which is exactly what a reader
+        // thread blocked on a wedged worker's `read` looks like from here.
+        let (_sender, responses) = mpsc::channel();
+        let mut session = DocumentSession {
+            child,
+            to_worker,
+            responses,
+            source: PathBuf::from("/tmp/wedged.pdf"),
+            lost: false,
+            request_timeout: Duration::from_millis(50),
+        };
+
+        let started = std::time::Instant::now();
+        let result = session.request(DocumentRequest::Info);
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SessionError::WorkerGone)),
+            "a request that never answers must be reported as a lost worker"
+        );
+        assert!(session.is_lost());
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the wait must actually be bounded, took {elapsed:?}"
+        );
+        assert!(
+            session.child.try_wait().ok().flatten().is_some(),
+            "the wedged process must be killed, not left running"
+        );
+    }
 
     #[test]
     fn a_worker_cannot_spawn_a_worker() {
