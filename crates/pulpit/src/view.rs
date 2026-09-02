@@ -132,18 +132,18 @@ pub fn view(app: &App, window: window::Id) -> Element<'_, Message> {
         // widget (see `widgets::document::view::tools`'s note) because the
         // panel is `App` state, not `ReadCommand` state.
         layer(
-            !app.document_signatures.is_empty() && !app.signature_panel_open,
+            !app.sign.document_signatures.is_empty() && !app.sign.signature_panel_open,
             || signature_panel_toggle(app),
         ),
-        layer(app.signature_panel_open, || signature_panel(app)),
+        layer(app.sign.signature_panel_open, || signature_panel(app)),
         // §31.3, A9: offered before anything can mutate a document that
         // already carries a signature. Above the page, non-dismissable
         // except its own two buttons — declining silently would leave the
         // reader guessing which mode they are in.
-        layer(app.pending_append_only_offer, append_only_offer_dialog),
+        layer(app.sign.pending_append_only_offer, append_only_offer_dialog),
         // The Sign flow (SPEC-signing.md §31.1), one dialog for whichever
         // step it is on.
-        match app.signing.as_ref() {
+        match app.sign.flow.as_ref() {
             Some(flow) => sign_dialog(app, flow),
             None => blank(),
         },
@@ -3748,7 +3748,7 @@ fn save_review_dialog(review: &crate::app::SaveReview) -> Element<'static, Messa
 
 /// The always-present corner affordance that opens the signature panel.
 fn signature_panel_toggle(app: &App) -> Element<'_, Message> {
-    let count = app.document_signatures.len();
+    let count = app.sign.document_signatures.len();
     let label = if count == 1 {
         "1 signature".to_string()
     } else {
@@ -3777,7 +3777,7 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
     ]
     .spacing(gap::M);
 
-    for (index, entry) in app.document_signatures.iter().enumerate() {
+    for (index, entry) in app.sign.document_signatures.iter().enumerate() {
         let line = crate::signing::signature_line_for_verification(entry);
         let mut row_body = column![row![
             theme::typography::body(line.summary_text()),
@@ -3791,7 +3791,7 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
         .spacing(gap::S),]
         .spacing(gap::S);
 
-        if app.signature_panel_expanded == Some(index) {
+        if app.sign.signature_panel_expanded == Some(index) {
             if let pulpit_render::verify::SignatureVerification::Checked(status) = entry {
                 row_body = row_body.push(
                     column![
@@ -3873,6 +3873,7 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
     // file. Offered in one direction only: turning editing back off would
     // not un-edit anything, so it would promise a safety it cannot deliver.
     if app
+        .sign
         .append_only
         .is_some_and(crate::signing::AppendOnlyMode::blocks_mutation)
     {
@@ -3897,7 +3898,7 @@ fn signature_panel(app: &App) -> Element<'_, Message> {
     body = body.push(theme::typography::caption(
         crate::signing::IDENTITY_DISCLOSURE,
     ));
-    if app.document_signatures.len() > 1 {
+    if app.sign.document_signatures.len() > 1 {
         body = body.push(theme::typography::caption(
             crate::signing::COUNTERSIGN_DISCLOSURE,
         ));
@@ -3991,7 +3992,8 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
             // glitch. So the ground goes down at once and stays invisible
             // until the wait is long enough to be worth a word.
             let waited = app
-                .signing_saving_since
+                .sign
+                .saving_since
                 .map(|since| app.now.saturating_duration_since(since))
                 .unwrap_or_default();
             if waited < SAVING_FIRST_EXPLAIN_AFTER {
@@ -4009,7 +4011,7 @@ fn sign_dialog<'a>(app: &'a App, flow: &'a crate::signing::SigningFlow) -> Eleme
                 theme::typography::body("Preparing your edits to be signed…"),
             ]
             .spacing(gap::M);
-            if !app.document_signatures.is_empty() {
+            if !app.sign.document_signatures.is_empty() {
                 // This goes through a full rewrite, not an append (§28.4), so
                 // it does not carry the document's existing signatures
                 // forward — and the signed copy is made from it.
