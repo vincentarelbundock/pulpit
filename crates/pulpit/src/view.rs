@@ -764,11 +764,7 @@ fn thumbnail_cell<'a>(
     // The filled cell is the one Return would pick; the accented number is
     // the page the audience is looking at. They are the same cell until the
     // arrow keys move away from it.
-    .style(if selected {
-        theme::ambient::selected_button
-    } else {
-        theme::ambient::tool_button
-    })
+    .style(theme::ambient::toggle_button(selected))
     .on_press(Message::GoToFromOverview(slide))
     .into()
 }
@@ -3150,11 +3146,7 @@ fn alarms_dialog(app: &App) -> Element<'_, Message> {
             theme::ambient::muted()
         }))
         .padding(gap::S)
-        .style(if chosen {
-            theme::ambient::selected_button
-        } else {
-            theme::ambient::tool_button
-        });
+        .style(theme::ambient::toggle_button(chosen));
         if ambiguous {
             control = control.on_press(Message::Alarm(AlarmCommand::SetAfternoon(afternoon)));
         }
@@ -3349,11 +3341,7 @@ fn timer_dialog(app: &App) -> Element<'_, Message> {
         let chosen = controls.count_down == count_down;
         button(theme::typography::label(label))
             .padding(gap::S)
-            .style(if chosen {
-                theme::ambient::selected_button
-            } else {
-                theme::ambient::tool_button
-            })
+            .style(theme::ambient::toggle_button(chosen))
             .on_press(Message::Timer(TimerCommand::SetCountDown(count_down)))
     };
     let step = |label: &'static str, delta: i32| {
@@ -3576,11 +3564,7 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
             pages = pages.push(
                 button(theme::typography::label(choice.label()))
                     .padding(gap::S)
-                    .style(if chosen {
-                        theme::ambient::selected_button
-                    } else {
-                        theme::ambient::tool_button
-                    })
+                    .style(theme::ambient::toggle_button(chosen))
                     .on_press(Message::Print(crate::app::PrintMsg::ChoosePages(choice))),
             );
         }
@@ -3601,11 +3585,7 @@ fn print_dialog(app: &App) -> Element<'_, Message> {
         marks = marks.push(
             button(theme::typography::label(kind.label()))
                 .padding(gap::S)
-                .style(if chosen {
-                    theme::ambient::selected_button
-                } else {
-                    theme::ambient::tool_button
-                })
+                .style(theme::ambient::toggle_button(chosen))
                 .on_press(Message::Print(crate::app::PrintMsg::ChooseMarks(kind))),
         );
     }
@@ -4290,42 +4270,19 @@ fn editor_page(app: &App) -> Element<'_, Message> {
 }
 
 /// Seconds since local midnight, for the clock widget.
+///
+/// §76.13: this used to cache a UTC offset primed once from a `date +%z`
+/// subprocess, which is a shell builtin (so it fails outright) on Windows,
+/// and which never refreshed across a DST change during a session.
+/// `chrono::Local` reads the platform timezone database directly and
+/// re-derives the offset on every call, so both problems are gone at the
+/// same time. This is still a view module reading a clock — the right home
+/// for the read is `App`, which already threads other timestamps into the
+/// view; hoisting it there is deferred to a later phase and is not part of
+/// this fix.
 pub fn seconds_of_day() -> u32 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    ((now as i64 + local_offset_seconds()).rem_euclid(86_400)) as u32
-}
-
-/// Offset from UTC in seconds, primed once from `date +%z`. Falls back to
-/// UTC until then, which is honest rather than wrong by an unknown amount.
-fn local_offset_seconds() -> i64 {
-    OFFSET.get().copied().unwrap_or(0)
-}
-
-static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-
-/// Spawn `date +%z` and cache what it says. Called from a startup helper
-/// thread, deliberately not from the first clock widget to draw: priming is
-/// a `PATH` walk and a subprocess, which is nothing the first frame — or the
-/// event loop at all — should be paying for.
-pub fn prime_local_offset() {
-    let _ = OFFSET.get_or_init(|| {
-        std::process::Command::new("date")
-            .arg("+%z")
-            .output()
-            .ok()
-            .and_then(|output| {
-                let text = String::from_utf8(output.stdout).ok()?;
-                let text = text.trim();
-                let sign = if text.starts_with('-') { -1 } else { 1 };
-                let hours: i64 = text.get(1..3)?.parse().ok()?;
-                let minutes: i64 = text.get(3..5)?.parse().ok()?;
-                Some(sign * (hours * 3600 + minutes * 60))
-            })
-            .unwrap_or(0)
-    });
+    use chrono::Timelike;
+    chrono::Local::now().num_seconds_from_midnight()
 }
 
 #[cfg(test)]

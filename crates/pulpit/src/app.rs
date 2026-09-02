@@ -5091,14 +5091,14 @@ impl App {
         }));
 
         // The full capability snapshot, over the conservative one the first
-        // frame was built from — this is the bus-answering version. The UTC
-        // offset rides on the same thread: it is primed by spawning `date`,
-        // which was being paid before the window existed.
+        // frame was built from — this is the bus-answering version.
+        // (§76.13: the UTC offset used to be primed here too, by spawning
+        // `date` on this same thread; `crate::view::seconds_of_day` now
+        // reads `chrono::Local` directly and needs no priming.)
         let services = self.platform.services.clone();
         tasks.push(Task::future(async move {
             let (sender, receiver) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
-                crate::view::prime_local_offset();
                 let _ = sender.send(services.capabilities());
             });
             match receiver.await {

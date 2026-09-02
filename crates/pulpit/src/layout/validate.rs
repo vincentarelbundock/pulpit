@@ -92,6 +92,15 @@ pub fn validate(layout: &Layout, area: Frame) -> Vec<Issue> {
         }
     }
 
+    // A structural defect (a non-canonical tree, or an instance-limit
+    // violation) means the tree cannot be trusted to walk safely: geometry
+    // below assumes `sizes` has one entry per child, which a hand-edited
+    // file need not honour. Stop here rather than feed a broken tree into
+    // `compute`.
+    if is_blocked(&issues) {
+        return issues;
+    }
+
     // ---- operability, warnings ------------------------------------------
     let widgets = layout.widgets();
 
@@ -379,6 +388,37 @@ mod tests {
             min_child: 0.05,
         };
         *layout.root.find_mut(ids[0]).unwrap() = crate::layout::tree::Node::Split(inner);
+
+        let issues = validate(&layout, area());
+        assert!(is_blocked(&issues));
+        assert!(messages(&issues)
+            .iter()
+            .any(|m| m.contains("not canonical")));
+    }
+
+    #[test]
+    fn mismatched_sizes_block_without_panicking() {
+        // §76.12: a hand-edited file can carry a `sizes` array shorter than
+        // `children`. That is caught by `is_canonical` and MUST block before
+        // `validate` ever reaches `compute`, which indexes `sizes` per
+        // child and would otherwise panic on this exact tree.
+        let mut layout = Layout::empty("Mismatched");
+        let root = layout.root.id();
+        layout.split_cell(root, Direction::Horizontal).unwrap();
+        let ids: Vec<NodeId> = layout.cells().iter().map(|cell| cell.id).collect();
+        let broken = crate::layout::tree::Split {
+            id: NodeId(90),
+            name: None,
+            direction: Direction::Vertical,
+            children: vec![
+                crate::layout::tree::Node::Leaf(crate::layout::tree::Cell::new(NodeId(91))),
+                crate::layout::tree::Node::Leaf(crate::layout::tree::Cell::new(NodeId(92))),
+            ],
+            sizes: vec![1.0],
+            gap: 8.0,
+            min_child: 0.05,
+        };
+        *layout.root.find_mut(ids[0]).unwrap() = crate::layout::tree::Node::Split(broken);
 
         let issues = validate(&layout, area());
         assert!(is_blocked(&issues));

@@ -610,7 +610,8 @@ fn layout_node(
     let flexible_total: f32 = visible
         .iter()
         .zip(fixed.iter())
-        .filter_map(|(index, extent)| extent.is_none().then_some(split.sizes[*index]))
+        .filter(|(_, extent)| extent.is_none())
+        .map(|(index, _)| split.sizes.get(*index).copied().unwrap_or(0.0))
         .sum();
     let flexible_span = (usable - fixed_total).max(0.0);
 
@@ -622,7 +623,7 @@ fn layout_node(
     for (position, index) in visible.iter().enumerate() {
         let length = fixed[position].unwrap_or_else(|| {
             if flexible_total > 0.0 {
-                flexible_span * split.sizes[*index] / flexible_total
+                flexible_span * split.sizes.get(*index).copied().unwrap_or(0.0) / flexible_total
             } else {
                 0.0
             }
