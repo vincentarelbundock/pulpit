@@ -6335,7 +6335,6 @@ impl App {
                     self.documents.path(),
                     opened.page_count,
                 )
-                .with_first_page_size(opened.first_page_size)
                 .with_page_sizes(opened.page_sizes.clone(), opened.page_sizes_sampled)
                 .with_text_notes(
                     opened
@@ -16921,7 +16920,7 @@ impl App {
         let base = self
             .state
             .document()
-            .and_then(|document| document.first_page_size)
+            .and_then(|document| document.first_page_size())
             .map(|size| size.aspect_ratio())
             .unwrap_or(16.0 / 9.0);
         match self.state.audience_source() {

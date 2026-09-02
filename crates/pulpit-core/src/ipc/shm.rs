@@ -32,7 +32,12 @@ pub fn base_directory() -> PathBuf {
 /// Returns `None` for an unsafe name; the caller turns that into its own
 /// protocol error, since the two crates word theirs differently.
 pub fn path_for(name: &str) -> Option<PathBuf> {
-    if name.is_empty() || name.len() > 256 || name.contains(['/', '\\', '\0']) {
+    if name.is_empty()
+        || name.len() > 256
+        || name.contains(['/', '\\', '\0'])
+        || name == "."
+        || name == ".."
+    {
         return None;
     }
     Some(base_directory().join(name))
@@ -128,8 +133,8 @@ pub(crate) fn sweep(base: &Path, current_pid: u32) {
         if pid == current_pid {
             continue;
         }
-        // Elsewhere there is no reliable liveness check, and removing a live
-        // process's region would be far worse than leaving a dead one's.
+        // On Linux, `/proc/<pid>` says outright whether the owner is still
+        // alive, so a live owner's region is never touched.
         #[cfg(target_os = "linux")]
         {
             if Path::new(&format!("/proc/{pid}")).exists() {
@@ -137,8 +142,34 @@ pub(crate) fn sweep(base: &Path, current_pid: u32) {
             }
             let _ = std::fs::remove_file(&path);
         }
+        // Elsewhere there is no reliable liveness check (§77.9), so a region
+        // is reclaimed by age instead: one untouched for a day is either
+        // abandoned by a dead process or stale enough that relying on it
+        // further would be worse than losing it. This is what keeps a crash
+        // off Linux from leaking rings forever, the way the Linux-only check
+        // used to.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let stale = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > STALE_REGION_AGE);
+            if stale {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }
+
+/// How long an off-Linux region may sit untouched before the sweep reclaims
+/// it in place of the liveness check Linux gets from `/proc`.
+///
+/// A day, not a session: a region can legitimately outlive a short suspend,
+/// and the sweep only runs once per process anyway, so there is no cost to
+/// erring toward patience.
+#[cfg(not(target_os = "linux"))]
+const STALE_REGION_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 #[cfg(test)]
 mod tests {
@@ -184,6 +215,10 @@ mod tests {
         assert!(path_for("with/slash").is_none());
         assert!(path_for(&"x".repeat(257)).is_none());
         assert!(path_for("pulpit-1-0").is_some());
+        // §77.9: a bare "." or ".." names the region directory itself, or
+        // its parent, rather than a region inside it.
+        assert!(path_for(".").is_none());
+        assert!(path_for("..").is_none());
     }
 
     #[test]
@@ -213,6 +248,38 @@ mod tests {
         }
         for path in &live {
             assert!(path.exists(), "{path:?} belongs to us and must stay");
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn off_linux_a_stale_owners_region_is_reclaimed_by_age() {
+        // §77.9: without `/proc` there is no liveness check, so a dead
+        // owner's region must still go, just on a different signal — age
+        // rather than a live PID.
+        let base = base_directory();
+        let current_pid = std::process::id();
+        let dead_pid = 4194305u32;
+
+        let old = base.join(format!("pulpit-{dead_pid}-old"));
+        let fresh = base.join(format!("pulpit-{dead_pid}-fresh"));
+        let live = base.join(format!("pulpit-{current_pid}-sweeptest"));
+        for path in [&old, &fresh, &live] {
+            std::fs::write(path, b"region").unwrap();
+        }
+        let long_ago = std::time::SystemTime::now() - (STALE_REGION_AGE * 2);
+        std::fs::File::open(&old)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        sweep(&base, current_pid);
+
+        assert!(!old.exists(), "old enough, and its owner is gone");
+        assert!(fresh.exists(), "too fresh to assume the owner is gone");
+        assert!(live.exists(), "belongs to us and must stay");
+        for path in [&fresh, &live] {
             let _ = std::fs::remove_file(path);
         }
     }

@@ -307,29 +307,39 @@ pub enum ActivationPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageOverlay {
     pub id: OverlayId,
-    /// The first physical PDF page this overlay appears on (zero-based).
-    pub page: usize,
     /// Every physical page it appears on, ascending and contiguous.
     pub pages: Vec<usize>,
     pub region: Region,
     pub z_index: i32,
     pub activation: ActivationPolicy,
-    pub poster: Option<AssetRef>,
     pub content: OverlayContent,
     pub warnings: Vec<OverlayWarning>,
 }
 
 impl PageOverlay {
+    /// The first physical PDF page this overlay appears on (zero-based).
+    ///
+    /// Derived from `pages` rather than stored: `pages` is the source of
+    /// truth and the two MUST NOT be able to disagree (§81).
+    pub fn page(&self) -> usize {
+        self.pages.first().copied().unwrap_or(0)
+    }
+
+    /// The poster asset, if the content declares one.
+    ///
+    /// Derived from `content` rather than stored, for the same reason as
+    /// [`Self::page`] (§81).
+    pub fn poster(&self) -> Option<&AssetRef> {
+        self.content.poster()
+    }
+
     pub fn covers_page(&self, page: usize) -> bool {
         self.pages.contains(&page)
     }
 
     /// Does a normalised page point fall inside this overlay?
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.region.x
-            && x <= self.region.x + self.region.width
-            && y >= self.region.y
-            && y <= self.region.y + self.region.height
+        self.region.contains(x, y)
     }
 
     /// Overlays are interactive only when the content can consume input.
@@ -419,8 +429,12 @@ pub fn is_media_uri(uri: &str) -> bool {
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    (value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix))
-        .then(|| &value[prefix.len()..])
+    let n = prefix.len();
+    value
+        .as_bytes()
+        .get(..n)
+        .filter(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+        .map(|_| &value[n..])
 }
 
 fn parse_pulpit_uri(rest: &str, region: Region) -> Result<OverlayDeclaration, UriError> {
@@ -686,13 +700,15 @@ fn decode(value: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                let hex = &value[index + 1..index + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
+                let hex = bytes
+                    .get(index + 1..index + 3)
+                    .and_then(|hex| std::str::from_utf8(hex).ok());
+                match hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                    Some(byte) => {
                         out.push(byte);
                         index += 3;
                     }
-                    Err(_) => {
+                    None => {
                         out.push(b'%');
                         index += 1;
                     }
@@ -817,7 +833,7 @@ impl OverlayIndex {
                 } else {
                     open.get(&key).copied().filter(|&index| {
                         let existing: &PageOverlay = &overlays[index];
-                        let last = *existing.pages.last().unwrap_or(&existing.page);
+                        let last = *existing.pages.last().unwrap_or(&existing.page());
                         last + 1 == page
                             && same_region(&existing.region, &declaration.region)
                             && labels.continuous(last, page)
@@ -833,12 +849,10 @@ impl OverlayIndex {
                         *occurrence += 1;
                         overlays.push(PageOverlay {
                             id,
-                            page,
                             pages: vec![page],
                             region: declaration.region,
                             z_index: declaration.z_index,
                             activation: declaration.activation,
-                            poster: declaration.content.poster().cloned(),
                             content: declaration.content.clone(),
                             warnings: declaration.warnings.clone(),
                         });
@@ -1261,7 +1275,7 @@ mod tests {
         assert_eq!(index.len(), 1);
         let overlay = &index.all()[0];
         assert_eq!(overlay.pages, vec![4, 5, 6]);
-        assert_eq!(overlay.page, 4);
+        assert_eq!(overlay.page(), 4);
         for page in 4..=6 {
             assert_eq!(index.on_page(page).len(), 1);
             assert_eq!(index.on_page(page)[0].id, overlay.id);
@@ -1528,5 +1542,24 @@ mod tests {
         assert_eq!(spec.viewport.map(|v| v.width), Some(1280));
         assert_eq!(spec.persistence, PersistencePolicy::PageSession);
         assert!(spec.requirements.keyboard);
+    }
+
+    #[test]
+    fn a_multibyte_character_in_the_uri_does_not_panic() {
+        // §76.4: byte-offset slicing on a `str` panics when the offset lands
+        // inside a multibyte character. `is_media_uri` MUST answer, not panic.
+        assert!(!is_media_uri("https://école.fr"));
+        assert!(!is_media_uri("é"));
+        assert!(!is_media_uri("ru"));
+    }
+
+    #[test]
+    fn a_truncated_percent_escape_next_to_a_multibyte_character_does_not_panic() {
+        // §76.4: `decode` used to slice `&value[index+1..index+3]` on the
+        // `str`, which panics when those byte offsets are not char
+        // boundaries. A trailing incomplete escape next to non-ASCII bytes
+        // MUST decode without panicking, leaving the literal `%` in place.
+        assert_eq!(decode("%aé"), "%aé");
+        assert_eq!(decode("%2é"), "%2é");
     }
 }

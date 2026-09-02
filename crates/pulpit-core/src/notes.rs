@@ -55,6 +55,15 @@ impl Region {
             && (self.height - 1.0).abs() < f32::EPSILON
     }
 
+    /// Does a normalised point fall inside this region?
+    ///
+    /// The one owner of point-in-region hit-testing (§80.6): a link, an
+    /// overlay and a selection band all asked this question with their own
+    /// copy of the same four comparisons.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
+    }
+
     pub fn is_valid(&self) -> bool {
         self.width > 0.0
             && self.height > 0.0

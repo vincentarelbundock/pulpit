@@ -71,10 +71,7 @@ pub struct PageLink {
 impl PageLink {
     /// Does a normalised page point fall inside this link?
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.rect.x
-            && x <= self.rect.x + self.rect.width
-            && y >= self.rect.y
-            && y <= self.rect.y + self.rect.height
+        self.rect.contains(x, y)
     }
 }
 
@@ -123,8 +120,6 @@ pub struct DocumentInfo {
     pub path: PathBuf,
     /// Number of physical PDF pages.
     pub pdf_pages: usize,
-    /// Size of the first page; used for aspect fit before any render lands.
-    pub first_page_size: Option<PageSize>,
     /// Measured size of pages `0..page_sizes.len()`. A deck whose pages differ
     /// — a 4:3 appendix glued onto a 16:9 talk — is common enough that the
     /// first page cannot be trusted to describe the rest.
@@ -146,7 +141,6 @@ impl DocumentInfo {
             id,
             path: path.as_ref().to_path_buf(),
             pdf_pages,
-            first_page_size: None,
             page_sizes: Vec::new(),
             page_sizes_sampled: false,
             text_notes: None,
@@ -158,20 +152,19 @@ impl DocumentInfo {
         self
     }
 
-    pub fn with_first_page_size(mut self, size: PageSize) -> Self {
-        self.first_page_size = Some(size);
-        self
-    }
-
-    /// Record measured page sizes. The first of them is also the first page
-    /// size, so the two views of the geometry can never disagree.
+    /// Record measured page sizes.
     pub fn with_page_sizes(mut self, sizes: Vec<PageSize>, sampled: bool) -> Self {
-        if let Some(first) = sizes.first().copied() {
-            self.first_page_size = Some(first);
-        }
         self.page_sizes = sizes;
         self.page_sizes_sampled = sampled;
         self
+    }
+
+    /// Size of the first page; used for aspect fit before any render lands.
+    ///
+    /// Derived from `page_sizes` rather than stored separately, so the two
+    /// can never disagree (§81).
+    pub fn first_page_size(&self) -> Option<PageSize> {
+        self.page_sizes.first().copied()
     }
 
     /// Size of one page, falling back to the first page for any page that was
@@ -181,8 +174,7 @@ impl DocumentInfo {
         self.page_sizes
             .get(page)
             .copied()
-            .or(self.first_page_size)
-            .or_else(|| self.page_sizes.first().copied())
+            .or_else(|| self.first_page_size())
     }
 
     /// Aspect ratio of one page, with the same fallback as
@@ -228,7 +220,7 @@ mod tests {
     #[test]
     fn page_sizes_set_the_first_page_size_too() {
         let info = document(vec![size(960.0, 540.0), size(720.0, 540.0)]);
-        assert_eq!(info.first_page_size, Some(size(960.0, 540.0)));
+        assert_eq!(info.first_page_size(), Some(size(960.0, 540.0)));
     }
 
     #[test]
@@ -254,7 +246,7 @@ mod tests {
     #[test]
     fn only_the_first_page_size_still_answers_for_every_page() {
         let info = DocumentInfo::new(DocumentId(1), "/decks/talk.pdf", 10)
-            .with_first_page_size(size(960.0, 540.0));
+            .with_page_sizes(vec![size(960.0, 540.0)], true);
         assert_eq!(info.page_size(7), Some(size(960.0, 540.0)));
     }
 

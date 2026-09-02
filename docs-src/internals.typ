@@ -1862,12 +1862,23 @@ combinations stay free. Stored keymaps that spell the old conflated flag
 load as primary, which is what it always meant in practice.
 
 Two hardware-alias decisions are made knowingly. The volume, media and
-browser keys, and `F1`, resolve to navigation and blanking because presenter
-remotes emit them and identify themselves no further; a laptop's own volume
-keys therefore page the deck while pulpit is focused. The aliases sit on
-the ladder's bottom rung, apply only unmodified, and never appear in the
-reference. If this trade ever turns out wrong in rooms, the remedy is a
-setting that disables `Keymap::resolve_remote`, not per-device guessing.
+browser keys, `F1`, and the vertical arrows resolve to navigation and
+blanking because presenter remotes emit them and identify themselves no
+further; a laptop's own volume and arrow keys therefore page the deck while
+pulpit is focused. The arrows are there because a common class of remote —
+the Targus P068 is the measured example — sends `Down` and `Up` for its two
+big buttons and nothing else, so without the alias its only navigation
+buttons are dead. They are aliases rather than bindings for the same reason
+the volume keys are: `Down` and `Up` beside `Right` and `PageDown` would be
+keycaps in the reference for keys nobody needs told about. The aliases sit
+on the ladder's bottom rung, apply only unmodified — so `Shift+Down` never
+inherits the sentence-at-a-time speech `Shift+Right` carries — and never
+appear in the reference. Bottom-rung placement is what keeps the arrows
+honest: the overview grid, the document viewer and any captured widget all
+claim them first, so `Down` only means "next page" when nothing more
+specific wanted it. If this trade ever turns out wrong in rooms, the remedy
+is a setting that disables `Keymap::resolve_remote`, not per-device
+guessing.
 
 What the open document _is_ — its properties — is a section of the settings
 page rather than a rail view or a dialog of its own: the rail holds per-page

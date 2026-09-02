@@ -1029,15 +1029,23 @@ impl Keymap {
         match key? {
             key if key.eq_ignore_ascii_case("F1") => Some(Action::Blank),
             key if key.eq_ignore_ascii_case("MediaPlayPause") => Some(Action::Blank),
+            // The vertical arrows are aliases rather than bindings: remotes
+            // that send them — the Targus P068 among them — send nothing else
+            // for their two big buttons, while a keyboard's own Down and Up
+            // are far too ordinary to earn keycaps beside Right and PageDown
+            // in the reference. Bare only, so Shift+Down never inherits the
+            // sentence-at-a-time speech that Shift+Right carries.
             key if key.eq_ignore_ascii_case("MediaTrackNext")
                 || key.eq_ignore_ascii_case("BrowserForward")
-                || key.eq_ignore_ascii_case("AudioVolumeUp") =>
+                || key.eq_ignore_ascii_case("AudioVolumeUp")
+                || key.eq_ignore_ascii_case("Down") =>
             {
                 Some(Action::Next)
             }
             key if key.eq_ignore_ascii_case("MediaTrackPrevious")
                 || key.eq_ignore_ascii_case("BrowserBack")
-                || key.eq_ignore_ascii_case("AudioVolumeDown") =>
+                || key.eq_ignore_ascii_case("AudioVolumeDown")
+                || key.eq_ignore_ascii_case("Up") =>
             {
                 Some(Action::Previous)
             }
@@ -1366,6 +1374,8 @@ mod tests {
             "AudioVolumeDown",
             "MediaPlayPause",
             "F1",
+            "Down",
+            "Up",
         ] {
             assert_eq!(
                 keymap.resolve(Some(key), None),
@@ -1602,6 +1612,9 @@ mod tests {
                 "{key}"
             );
         }
+        // Down and Up page the deck, but as remote aliases rather than
+        // bindings, so they stay out of the keymap and the reference —
+        // `keyboard_and_remote_aliases_are_separate` covers that half.
         for key in ["h", "Down", "Up", "Space", "Backspace"] {
             assert_eq!(keymap.resolve(Some(key), None), None, "{key} is excessive");
         }
