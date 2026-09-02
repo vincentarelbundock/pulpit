@@ -68,8 +68,15 @@ impl Outline {
     }
 
     /// Total number of entries at every depth.
+    ///
+    /// Counted by walking the tree rather than through [`Self::flattened`],
+    /// which would allocate a `Vec` of up to [`MAX_OUTLINE_ENTRIES`]
+    /// references just to measure it (§82.8).
     pub fn len(&self) -> usize {
-        self.flattened().len()
+        fn count(entries: &[OutlineEntry]) -> usize {
+            entries.iter().map(|entry| 1 + count(&entry.children)).sum()
+        }
+        count(&self.entries)
     }
 
     /// Every entry in reading order: an entry, then its subtree, then its
@@ -167,14 +174,40 @@ impl std::fmt::Display for BookmarkEditError {
 impl std::error::Error for BookmarkEditError {}
 
 impl Outline {
-    /// The entry at `path`, when the tree has one.
-    pub fn entry_at(&self, path: &[usize]) -> Option<&OutlineEntry> {
-        let (&last, parents) = path.split_last()?;
+    /// The sibling list a chain of child indices leads to, from the root.
+    ///
+    /// The one owner of the outline parent-path walk (§80.6): every reader
+    /// or editor of a [`BookmarkPath`] descends `parents` to reach the level
+    /// the last component names, and used to do it with its own copy of this
+    /// loop.
+    fn level(&self, parents: &[usize]) -> Option<&Vec<OutlineEntry>> {
         let mut level = &self.entries;
         for &index in parents {
             level = &level.get(index)?.children;
         }
-        level.get(last)
+        Some(level)
+    }
+
+    /// The mutable twin of [`Self::level`], refusing rather than panicking
+    /// when a path component names an entry the tree does not have.
+    fn level_mut(
+        &mut self,
+        parents: &[usize],
+    ) -> Result<&mut Vec<OutlineEntry>, BookmarkEditError> {
+        let mut level = &mut self.entries;
+        for &index in parents {
+            level = &mut level
+                .get_mut(index)
+                .ok_or(BookmarkEditError::NoSuchEntry)?
+                .children;
+        }
+        Ok(level)
+    }
+
+    /// The entry at `path`, when the tree has one.
+    pub fn entry_at(&self, path: &[usize]) -> Option<&OutlineEntry> {
+        let (&last, parents) = path.split_last()?;
+        self.level(parents)?.get(last)
     }
 
     /// Insert `entry` so it becomes the entry at `path`; the sibling that held
@@ -198,13 +231,7 @@ impl Outline {
         if self.len() + subtree_len(&entry) > MAX_OUTLINE_ENTRIES {
             return Err(BookmarkEditError::TooMany);
         }
-        let mut level = &mut self.entries;
-        for &index in parents {
-            level = &mut level
-                .get_mut(index)
-                .ok_or(BookmarkEditError::NoSuchEntry)?
-                .children;
-        }
+        let level = self.level_mut(parents)?;
         if last > level.len() {
             return Err(BookmarkEditError::NoSuchEntry);
         }
@@ -245,13 +272,7 @@ impl Outline {
         let Some((&last, parents)) = path.split_last() else {
             return Err(BookmarkEditError::NoSuchEntry);
         };
-        let mut level = &mut self.entries;
-        for &index in parents {
-            level = &mut level
-                .get_mut(index)
-                .ok_or(BookmarkEditError::NoSuchEntry)?
-                .children;
-        }
+        let level = self.level_mut(parents)?;
         if last >= level.len() {
             return Err(BookmarkEditError::NoSuchEntry);
         }
@@ -264,13 +285,7 @@ impl Outline {
         let Some((&last, parents)) = path.split_last() else {
             return Err(BookmarkEditError::NoSuchEntry);
         };
-        let mut level = &mut self.entries;
-        for &index in parents {
-            level = &mut level
-                .get_mut(index)
-                .ok_or(BookmarkEditError::NoSuchEntry)?
-                .children;
-        }
+        let level = self.level_mut(parents)?;
         let entry = level.get_mut(last).ok_or(BookmarkEditError::NoSuchEntry)?;
         let title = truncate_title(title);
         if title.is_empty() {

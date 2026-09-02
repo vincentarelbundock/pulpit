@@ -84,6 +84,36 @@ impl PagePoint {
     pub fn distance_to(self, other: PagePoint) -> f32 {
         (self.x - other.x).hypot(self.y - other.y)
     }
+
+    /// Squared distance from this point to the segment `start..end`.
+    ///
+    /// Squared because callers almost always compare against a squared
+    /// radius; the one owner of this arithmetic (§80.6), so a hit-test
+    /// tolerance change or a bug fix here does not need to be repeated at
+    /// every call site.
+    pub fn distance_to_segment_squared(self, start: PagePoint, end: PagePoint) -> f32 {
+        let segment = PagePoint::new(end.x - start.x, end.y - start.y);
+        let length_squared = segment.x * segment.x + segment.y * segment.y;
+        let nearest = if length_squared <= f32::EPSILON {
+            start
+        } else {
+            let offset = PagePoint::new(self.x - start.x, self.y - start.y);
+            let projection =
+                ((offset.x * segment.x + offset.y * segment.y) / length_squared).clamp(0.0, 1.0);
+            PagePoint::new(
+                start.x + segment.x * projection,
+                start.y + segment.y * projection,
+            )
+        };
+        let dx = self.x - nearest.x;
+        let dy = self.y - nearest.y;
+        dx * dx + dy * dy
+    }
+
+    /// Distance from this point to the segment `start..end`.
+    pub fn distance_to_segment(self, start: PagePoint, end: PagePoint) -> f32 {
+        self.distance_to_segment_squared(start, end).sqrt()
+    }
 }
 
 /// An axis-aligned rectangle in canonical page space, with `top < bottom`
