@@ -28,7 +28,7 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use crate::backend::{BackendError, DisplayBackend, NativeWindow, PlacementOutcome};
-use crate::identity::MonitorIdentity;
+use crate::identity::{self, MonitorIdentity};
 use crate::reconcile::{Capabilities, WindowMode};
 use crate::snapshot::{DisplaySnapshot, Monitor, Rect};
 
@@ -159,6 +159,17 @@ unsafe fn toggle_fullscreen(window: Id) {
     send(window, selector("toggleFullScreen:"), std::ptr::null_mut());
 }
 
+/// `[window frame]` — the window's current frame, in AppKit's own
+/// coordinate space (bottom-left origin, `y` up). Used to verify a placement
+/// the async `toggleFullScreen:` transition may not have completed yet.
+///
+/// # Safety
+/// `window` must be a live `NSWindow*`.
+unsafe fn window_frame(window: Id) -> CgRect {
+    let send: extern "C" fn(Id, Sel) -> CgRect = msg_send_fn();
+    send(window, selector("frame"))
+}
+
 /// `[window makeKeyAndOrderFront:nil]`.
 ///
 /// # Safety
@@ -254,29 +265,22 @@ impl MacosBackend {
             // frequently zero on panels that do not report one, so it is only
             // trusted when present: "same model on the same Mac" is a weaker
             // claim and belongs one rung down the ladder.
-            let identity = if serial != 0 {
-                MonitorIdentity::Stable {
-                    id: format!("CG-{vendor:08X}-{model:08X}-{serial:08X}"),
-                }
-            } else {
-                MonitorIdentity::Geometric {
-                    make: format!("{vendor:08X}"),
-                    model: format!("{model:08X}"),
-                    width_mm: size_mm.width.round().max(0.0) as u32,
-                    height_mm: size_mm.height.round().max(0.0) as u32,
-                    x: bounds.origin.x as i32,
-                    y: bounds.origin.y as i32,
-                }
-            };
-            let fallback = Some(MonitorIdentity::Geometric {
+            let geometric = MonitorIdentity::Geometric {
                 make: format!("{vendor:08X}"),
                 model: format!("{model:08X}"),
                 width_mm: size_mm.width.round().max(0.0) as u32,
                 height_mm: size_mm.height.round().max(0.0) as u32,
                 x: bounds.origin.x as i32,
                 y: bounds.origin.y as i32,
-            })
-            .filter(|f| f != &identity);
+            };
+            let identity = if serial != 0 {
+                MonitorIdentity::Stable {
+                    id: format!("CG-{vendor:08X}-{model:08X}-{serial:08X}"),
+                }
+            } else {
+                geometric.clone()
+            };
+            let (identity, fallback) = identity::ladder(identity, geometric);
 
             out.push(RawMonitor {
                 monitor: Monitor {
@@ -345,6 +349,27 @@ fn flip_to_appkit(rect: CgRect, main_height: f64) -> CgRect {
     }
 }
 
+/// Whether a window ended up on the monitor it was sent to.
+///
+/// Majority overlap rather than an exact match, for the same reason the X11
+/// adapter uses one: a rounded size or an in-flight animation frame is not
+/// evidence of a refused placement. Both rectangles are assumed to be in the
+/// same (CoreGraphics) coordinate space.
+fn landed_on(window: &CgRect, target: &CgRect) -> bool {
+    let window_area = window.size.width * window.size.height;
+    if window_area <= 0.0 {
+        return false;
+    }
+    let x0 = window.origin.x.max(target.origin.x);
+    let y0 = window.origin.y.max(target.origin.y);
+    let x1 = (window.origin.x + window.size.width).min(target.origin.x + target.size.width);
+    let y1 = (window.origin.y + window.size.height).min(target.origin.y + target.size.height);
+    if x1 <= x0 || y1 <= y0 {
+        return false;
+    }
+    (x1 - x0) * (y1 - y0) * 2.0 > window_area
+}
+
 // ---------------------------------------------------------------------------
 // The backend
 // ---------------------------------------------------------------------------
@@ -399,10 +424,10 @@ impl DisplayBackend for MacosBackend {
             Ok(monitors) => monitors,
             Err(e) => return PlacementOutcome::Failed(e.to_string()),
         };
-        let Some(target) = monitors.iter().find(|raw| {
-            &raw.monitor.identity == identity
-                || raw.monitor.fallback_identity.as_ref() == Some(identity)
-        }) else {
+        let Some(target) = monitors
+            .iter()
+            .find(|raw| raw.monitor.matches_exactly(identity))
+        else {
             return PlacementOutcome::Disappeared;
         };
 
@@ -425,7 +450,17 @@ impl DisplayBackend for MacosBackend {
                     }
                     set_frame(ns_window, flip_to_appkit(target.bounds, main_height), true);
                     toggle_fullscreen(ns_window);
-                    PlacementOutcome::Applied
+                    // `toggleFullScreen:` kicks off an asynchronous Space
+                    // transition and returns immediately: nothing here knows
+                    // whether it actually landed (a fast subsequent request,
+                    // a full-screen-hostile app, or the animation simply not
+                    // having finished can all leave AppKit to restore the
+                    // frame just set above once the transition settles).
+                    // `Applied` cannot be claimed from an async result that
+                    // has not been observed to complete; the X11 adapter
+                    // models this the same way. (§77.1, unverified on real
+                    // hardware — this crate cannot be compiled here.)
+                    PlacementOutcome::Pending
                 }
                 WindowMode::Windowed => {
                     if fullscreen_now {
@@ -447,8 +482,45 @@ impl DisplayBackend for MacosBackend {
                     set_frame(ns_window, flip_to_appkit(inset, main_height), true);
                     PlacementOutcome::Applied
                 }
-                WindowMode::Hidden => PlacementOutcome::Unsupported,
             }
+        }
+    }
+
+    fn verify_placement(
+        &self,
+        window: NativeWindow,
+        identity: &MonitorIdentity,
+        final_attempt: bool,
+    ) -> PlacementOutcome {
+        let Some(ns_window) = resolve_window(window) else {
+            return PlacementOutcome::Disappeared;
+        };
+        let monitors = match self.enumerate_raw() {
+            Ok(monitors) => monitors,
+            Err(e) => return PlacementOutcome::Failed(e.to_string()),
+        };
+        let Some(target) = monitors
+            .iter()
+            .find(|raw| raw.monitor.matches_exactly(identity))
+        else {
+            return PlacementOutcome::Disappeared;
+        };
+
+        // SAFETY: no arguments.
+        let main_bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+        // SAFETY: `ns_window` was just resolved live.
+        let observed_appkit = unsafe { window_frame(ns_window) };
+        // `flip_to_appkit` is its own inverse (see the module tests), so
+        // applying it a second time turns the observed AppKit frame back
+        // into the CoreGraphics space `target.bounds` is in.
+        let observed = flip_to_appkit(observed_appkit, main_bounds.size.height);
+
+        if landed_on(&observed, &target.bounds) {
+            PlacementOutcome::Applied
+        } else if final_attempt {
+            PlacementOutcome::Refused
+        } else {
+            PlacementOutcome::Pending
         }
     }
 }
@@ -502,6 +574,56 @@ mod tests {
             flip_to_appkit(main, 1200.0).origin,
             CgPoint { x: 0.0, y: 0.0 }
         );
+    }
+
+    #[test]
+    fn a_window_on_the_requested_monitor_counts_as_placed() {
+        let target = CgRect {
+            origin: CgPoint { x: 1920.0, y: 0.0 },
+            size: CgSize {
+                width: 1920.0,
+                height: 1080.0,
+            },
+        };
+        assert!(landed_on(&target, &target));
+    }
+
+    #[test]
+    fn a_window_left_on_the_other_monitor_counts_as_refused() {
+        let target = CgRect {
+            origin: CgPoint { x: 1920.0, y: 0.0 },
+            size: CgSize {
+                width: 1920.0,
+                height: 1080.0,
+            },
+        };
+        let elsewhere = CgRect {
+            origin: CgPoint { x: 0.0, y: 0.0 },
+            size: CgSize {
+                width: 1920.0,
+                height: 1200.0,
+            },
+        };
+        assert!(!landed_on(&elsewhere, &target));
+    }
+
+    #[test]
+    fn a_zero_sized_window_is_not_evidence_of_placement() {
+        let target = CgRect {
+            origin: CgPoint { x: 0.0, y: 0.0 },
+            size: CgSize {
+                width: 1920.0,
+                height: 1080.0,
+            },
+        };
+        let empty = CgRect {
+            origin: CgPoint { x: 0.0, y: 0.0 },
+            size: CgSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        };
+        assert!(!landed_on(&empty, &target));
     }
 
     #[test]

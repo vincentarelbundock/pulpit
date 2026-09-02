@@ -184,7 +184,11 @@ impl Monitor {
         false
     }
 
-    fn matches_exactly(&self, identity: &MonitorIdentity) -> bool {
+    /// Exact identity match: `identity` or `fallback_identity` equals
+    /// `identity` by value, with none of [`Monitor::matches`]'s
+    /// cross-backend leniency. Shared by every adapter's `place()`/
+    /// `verify_placement()` re-resolution and by [`DisplaySnapshot::resolve`].
+    pub fn matches_exactly(&self, identity: &MonitorIdentity) -> bool {
         std::iter::once(&self.identity)
             .chain(self.fallback_identity.iter())
             .any(|mine| mine == identity)
@@ -254,7 +258,8 @@ impl DisplaySnapshot {
     }
 
     pub fn resolve(&self, record: &IdentityRecord) -> Resolution {
-        for identity in record.candidates() {
+        let candidates: Vec<&MonitorIdentity> = record.candidates().collect();
+        for (rank, identity) in candidates.iter().enumerate() {
             let exact: Vec<usize> = self
                 .monitors
                 .iter()
@@ -265,7 +270,9 @@ impl DisplaySnapshot {
             match exact.len() {
                 0 => {}
                 1 => return Resolution::Unique(exact[0]),
-                _ => return self.disambiguate(exact, identity),
+                _ => {
+                    return self.narrow_or_disambiguate(exact, &candidates, rank, identity);
+                }
             }
             let loose: Vec<usize> = self
                 .monitors
@@ -277,10 +284,44 @@ impl DisplaySnapshot {
             match loose.len() {
                 0 => continue,
                 1 => return Resolution::Unique(loose[0]),
-                _ => return self.disambiguate(loose, identity),
+                _ => {
+                    return self.narrow_or_disambiguate(loose, &candidates, rank, identity);
+                }
             }
         }
         Resolution::Missing
+    }
+
+    /// Several monitors matched `identity` equally well. Rather than giving
+    /// up as `Ambiguous` immediately, try the next (weaker) candidate on the
+    /// record: twins that share a placeholder EDID serial often differ on
+    /// connector or geometry, which is exactly what the fallback carries.
+    /// Only once every candidate has been tried does this fall back to
+    /// position as a last tie-breaker, and then to reporting the ambiguity.
+    fn narrow_or_disambiguate(
+        &self,
+        candidates_at_rank: Vec<usize>,
+        all_candidates: &[&MonitorIdentity],
+        rank: usize,
+        identity: &MonitorIdentity,
+    ) -> Resolution {
+        if let Some(next) = all_candidates.get(rank + 1) {
+            // Exact match only: the loose match (`Monitor::matches`)
+            // deliberately ignores position for a `Geometric` identity, which
+            // is exactly the field that separates two otherwise identical
+            // twins, so it cannot be what narrows them.
+            let narrowed: Vec<usize> = candidates_at_rank
+                .iter()
+                .copied()
+                .filter(|&i| self.monitors[i].matches_exactly(next))
+                .collect();
+            match narrowed.len() {
+                1 => return Resolution::Unique(narrowed[0]),
+                n if n > 1 => return self.disambiguate(narrowed, identity),
+                _ => {}
+            }
+        }
+        self.disambiguate(candidates_at_rank, identity)
     }
 
     /// Position is the last tie-breaker between otherwise identical monitors;
@@ -462,6 +503,26 @@ mod tests {
         moved.geometry = Rect::new(-1280, 200, 1280, 720);
         moved.scale_factor = 2.0;
         let snapshot = DisplaySnapshot::new(vec![laptop(), moved], 3);
+        assert_eq!(snapshot.resolve(&record), Resolution::Unique(1));
+    }
+
+    #[test]
+    fn a_shared_placeholder_identity_is_narrowed_by_the_fallback() {
+        // Twins whose EDID serial descriptor is the placeholder "0" report
+        // the same primary identity, but their fallback (connector +
+        // geometry) still tells them apart. Resolution must try that
+        // fallback before giving up as Ambiguous.
+        let a = monitor("DP-1", "Twin", Rect::new(0, 0, 1920, 1080));
+        let b = monitor("DP-2", "Twin", Rect::new(1920, 0, 1920, 1080));
+        let shared = MonitorIdentity::Stable { id: "0".into() };
+        let mut live_a = a.clone();
+        live_a.identity = shared.clone();
+        let mut live_b = b.clone();
+        live_b.identity = shared.clone();
+        let snapshot = DisplaySnapshot::new(vec![live_a, live_b], 1);
+
+        let record =
+            IdentityRecord::new(shared).with_fallback(b.fallback_identity.clone().unwrap());
         assert_eq!(snapshot.resolve(&record), Resolution::Unique(1));
     }
 

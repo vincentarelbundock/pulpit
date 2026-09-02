@@ -55,7 +55,6 @@ impl Capabilities {
 pub enum WindowMode {
     Windowed,
     Fullscreen,
-    Hidden,
 }
 
 /// What the caller believes a window currently is. Rebuilt from real window
@@ -75,7 +74,11 @@ impl Default for WindowState {
     fn default() -> Self {
         Self {
             monitor: None,
-            mode: WindowMode::Hidden,
+            // Neither mode is meaningful before the window has ever been
+            // placed; `visible: false` and `monitor: None` are what a caller
+            // actually checks. `Windowed` is arbitrary but must be one of the
+            // two real modes now that there is no `Hidden` sentinel (§81).
+            mode: WindowMode::Windowed,
             visible: false,
             has_frame: false,
         }
@@ -120,16 +123,12 @@ pub enum Action {
     },
     /// Show a window that already has a valid frame and a resolved placement.
     Show { role: Role },
-    /// Leave fullscreen (only emitted where unfullscreening is safe).
-    Unfullscreen { role: Role },
 }
 
 impl Action {
     pub fn role(&self) -> Role {
         match self {
-            Action::Place { role, .. } | Action::Show { role } | Action::Unfullscreen { role } => {
-                *role
-            }
+            Action::Place { role, .. } | Action::Show { role } => *role,
         }
     }
 }
@@ -272,7 +271,10 @@ fn automatic_roles(
     let mut audience = audience;
 
     if presenter.is_none() {
-        let builtin = snapshot.builtin().filter(|index| Some(*index) != audience);
+        let builtin = snapshot
+            .builtin()
+            .map(|index| logical_target(snapshot, index))
+            .filter(|index| Some(*index) != audience);
         // Keep the presenter where it already is when that is still a real
         // display: moving it for no reason is user-hostile.
         let current = windows
@@ -365,8 +367,21 @@ pub fn reconcile(
         });
     }
 
-    let explicit_presenter = resolve_role(snapshot, roles, Role::Presenter, &mut warnings);
-    let explicit_audience = resolve_role(snapshot, roles, Role::Audience, &mut warnings);
+    // Explicit selections resolve to a raw snapshot index (`resolve_role`
+    // calls `DisplaySnapshot::resolve`, which knows nothing about mirror
+    // groups). Map to the logical (mirror-collapsed) index *before* handing
+    // it to `automatic_roles`, which compares it against `logical_targets()`
+    // and `external_targets()` — both already logical. Comparing a raw index
+    // against those lists silently fails to exclude it: with A(0) and B(1)
+    // mirroring each other and C(2) free, an explicit audience = B (raw 1)
+    // would never match logical target 0 (A/B's representative), so the
+    // presenter could be handed that same display and only then, when this
+    // used to be mapped a second time below, collapse onto the audience —
+    // even though C was free the whole time (§77.2).
+    let explicit_presenter = resolve_role(snapshot, roles, Role::Presenter, &mut warnings)
+        .map(|i| logical_target(snapshot, i));
+    let explicit_audience = resolve_role(snapshot, roles, Role::Audience, &mut warnings)
+        .map(|i| logical_target(snapshot, i));
     let (presenter, audience) = automatic_roles(
         snapshot,
         windows,
@@ -374,9 +389,6 @@ pub fn reconcile(
         explicit_audience,
         &mut warnings,
     );
-
-    let presenter = presenter.map(|i| logical_target(snapshot, i));
-    let audience = audience.map(|i| logical_target(snapshot, i));
 
     let shared = match (presenter, audience) {
         (Some(p), Some(a)) => p == a,
@@ -540,14 +552,7 @@ pub fn apply_outcome(windows: &mut Windows, outcome: &Outcome) {
                 window.mode = *mode;
             }
             Action::Show { role } => {
-                let window = windows.get_mut(*role);
-                window.visible = true;
-                if window.mode == WindowMode::Hidden {
-                    window.mode = WindowMode::Windowed;
-                }
-            }
-            Action::Unfullscreen { role } => {
-                windows.get_mut(*role).mode = WindowMode::Windowed;
+                windows.get_mut(*role).visible = true;
             }
         }
     }

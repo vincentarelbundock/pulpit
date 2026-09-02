@@ -15,7 +15,7 @@
 //!   monitor eDP-1 builtin 1920x1200+0+0 @1 make=LEN model=Panel id=LEN-0001
 //! ```
 
-use crate::identity::MonitorIdentity;
+use crate::identity::{self, MonitorIdentity};
 use crate::snapshot::{is_builtin_connector, DisplaySnapshot, Monitor, Rect};
 
 /// One named topology in a script.
@@ -128,16 +128,16 @@ pub fn format_monitor(monitor: &Monitor) -> String {
     parts.push(format!("@{}", monitor.scale_factor));
     if let Some(make) = &monitor.make {
         if !make.is_empty() {
-            parts.push(format!("make={make}"));
+            parts.push(format!("make={}", quote_if_needed(make)));
         }
     }
     if let Some(model) = &monitor.model {
         if !model.is_empty() {
-            parts.push(format!("model={model}"));
+            parts.push(format!("model={}", quote_if_needed(model)));
         }
     }
     if let MonitorIdentity::Stable { id } = &monitor.identity {
-        parts.push(format!("id={id}"));
+        parts.push(format!("id={}", quote_if_needed(id)));
     }
     if let Some((width, height)) = monitor.physical_size_mm {
         parts.push(format!("mm={width}x{height}"));
@@ -148,13 +148,68 @@ pub fn format_monitor(monitor: &Monitor) -> String {
     parts.join(" ")
 }
 
+/// Quote a value if it needs it — i.e. if it contains whitespace, which
+/// would otherwise be split into a second token by [`tokenize`]. Wayland
+/// reports full vendor strings ("Dell Inc."), so this is not a hypothetical:
+/// without it, `pulpit-topology` on Wayland writes a file `Scenario::parse`
+/// then rejects, defeating the capture loop (§77.5).
+fn quote_if_needed(value: &str) -> String {
+    if value.chars().any(char::is_whitespace) {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Split a line into tokens on whitespace, except inside a `"..."` span
+/// (with `\"` and `\\` recognised as escapes), which is kept as one token
+/// with its quotes stripped. This is what lets `make="Dell Inc."` round-trip
+/// as the single value `Dell Inc.` rather than splitting into `make="Dell`
+/// and `Inc."`.
+fn tokenize(text: &str, line: usize) -> Result<Vec<String>, ParseError> {
+    let error = |reason: String| ParseError { line, reason };
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut current));
+                in_token = false;
+            }
+            continue;
+        }
+        in_token = true;
+        if c == '"' {
+            loop {
+                match chars.next() {
+                    Some('\\') if matches!(chars.peek(), Some('"') | Some('\\')) => {
+                        current.push(chars.next().expect("peeked"));
+                    }
+                    Some('"') => break,
+                    Some(other) => current.push(other),
+                    None => return Err(error("unterminated quote".into())),
+                }
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if in_token {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
 fn parse_monitor(text: &str, line: usize) -> Result<Monitor, ParseError> {
     let error = |reason: String| ParseError { line, reason };
-    let mut tokens = text.split_whitespace();
+    let tokens = tokenize(text, line)?;
+    let mut tokens = tokens.into_iter();
     let connector = tokens
         .next()
-        .ok_or_else(|| error("a monitor needs a connector name".into()))?
-        .to_string();
+        .ok_or_else(|| error("a monitor needs a connector name".into()))?;
 
     let mut builtin = is_builtin_connector(&connector);
     let mut primary = false;
@@ -166,6 +221,7 @@ fn parse_monitor(text: &str, line: usize) -> Result<Monitor, ParseError> {
     let mut millimetres = None;
 
     for token in tokens {
+        let token = token.as_str();
         if token == "builtin" {
             builtin = true;
         } else if token == "primary" {
@@ -208,11 +264,14 @@ fn parse_monitor(text: &str, line: usize) -> Result<Monitor, ParseError> {
             model: model.clone().unwrap_or_default(),
         },
     };
-    let fallback = stable.is_some().then(|| MonitorIdentity::Connector {
-        connector: connector.clone(),
-        make: make.clone().unwrap_or_default(),
-        model: model.clone().unwrap_or_default(),
-    });
+    let (identity, fallback) = identity::ladder(
+        identity,
+        MonitorIdentity::Connector {
+            connector: connector.clone(),
+            make: make.clone().unwrap_or_default(),
+            model: model.clone().unwrap_or_default(),
+        },
+    );
 
     Ok(Monitor {
         identity,
@@ -318,6 +377,41 @@ step unplugged
         let monitor = &scenario.steps[0].monitors[0];
         assert_eq!(monitor.geometry, Rect::new(-3840, -200, 3840, 2160));
         assert_eq!(monitor.scale_factor, 2.0);
+    }
+
+    #[test]
+    fn a_make_with_whitespace_round_trips() {
+        // Wayland reports full vendor strings ("Dell Inc.", not "DEL"), so a
+        // capture on Wayland must survive parsing its own output (§77.5).
+        let scenario = Scenario::parse(
+            "step s\n  monitor DP-1 1920x1080+0+0 @1 make=\"Dell Inc.\" model=U2412M\n",
+        )
+        .unwrap();
+        let monitor = &scenario.steps[0].monitors[0];
+        assert_eq!(monitor.make.as_deref(), Some("Dell Inc."));
+        assert_eq!(monitor.model.as_deref(), Some("U2412M"));
+
+        let text = scenario.to_text();
+        assert!(
+            text.contains("make=\"Dell Inc.\""),
+            "a make with whitespace must be quoted on output: {text:?}"
+        );
+        let reparsed = Scenario::parse(&text).unwrap();
+        assert_eq!(scenario, reparsed);
+    }
+
+    #[test]
+    fn quoted_values_survive_escaped_quotes_and_backslashes() {
+        let scenario = Scenario::parse(
+            "step s\n  monitor DP-1 1920x1080+0+0 @1 make=\"Weird \\\"Vendor\\\\\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            scenario.steps[0].monitors[0].make.as_deref(),
+            Some("Weird \"Vendor\\")
+        );
+        let reparsed = Scenario::parse(&scenario.to_text()).unwrap();
+        assert_eq!(scenario, reparsed);
     }
 
     #[test]

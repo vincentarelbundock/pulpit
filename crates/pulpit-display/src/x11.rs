@@ -10,16 +10,14 @@
 use std::sync::Mutex;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::randr::{
-    self, ConnectionExt as _, GetOutputInfoReply, NotifyMask, Output, ScreenSize,
-};
+use x11rb::protocol::randr::{self, ConnectionExt as _, NotifyMask, Output};
 use x11rb::protocol::xproto::{
     self, Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, StackMode, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
 use crate::backend::{BackendError, DisplayBackend, NativeWindow, PlacementOutcome};
-use crate::identity::MonitorIdentity;
+use crate::identity::{self, MonitorIdentity};
 use crate::reconcile::{Capabilities, WindowMode};
 use crate::snapshot::{is_builtin_connector, DisplaySnapshot, Monitor, Rect};
 
@@ -197,12 +195,14 @@ impl X11Backend {
                     model: String::new(),
                 },
             };
-            let fallback = Some(MonitorIdentity::Connector {
-                connector: connector.clone(),
-                make: make.clone().unwrap_or_default(),
-                model: model.clone().unwrap_or_default(),
-            })
-            .filter(|f| f != &identity);
+            let (identity, fallback) = identity::ladder(
+                identity,
+                MonitorIdentity::Connector {
+                    connector: connector.clone(),
+                    make: make.clone().unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                },
+            );
 
             monitors.push(Monitor {
                 identity,
@@ -217,7 +217,13 @@ impl X11Backend {
                     crtc.height as u32,
                 ),
                 scale_factor: self.scale_factor,
-                physical_size_mm: Some((info.mm_width, info.mm_height)),
+                // An EDID-less output (or one whose driver zeroes the field)
+                // reports 0×0mm, which is not "a monitor with no physical
+                // size" but "no data"; the other adapters already map that
+                // case to `None`, and geometric-identity disambiguation
+                // depends on this field meaning something when it is `Some`.
+                physical_size_mm: (info.mm_width > 0 && info.mm_height > 0)
+                    .then_some((info.mm_width, info.mm_height)),
                 builtin: is_builtin_connector(&connector),
                 primary: primary == Some(output),
                 handle: output as u64,
@@ -333,15 +339,17 @@ impl DisplayBackend for X11Backend {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Claiming a placement that never happens is the one failure the
-        // display contract exists to prevent, so a manager observed to discard
-        // requests is reported as what it is: one that owns layout. Until
-        // something has actually been placed, the ordinary case is assumed —
-        // a first attempt is what produces the evidence.
-        match *self.trust.lock().unwrap() {
-            PlacementTrust::Ignored => Capabilities::TILING,
-            PlacementTrust::Untested | PlacementTrust::Honoured => Capabilities::X11,
-        }
+        // `capabilities()` is read once at connect and reconcile excludes it
+        // from its "unchanged" check (§77.4), so flipping this to `TILING`
+        // after a refused placement is invisible to the caller: every later
+        // topology change still emits a `Place` that `place()` below then
+        // refuses on sight, and the app has no way to notice the capability
+        // changed underneath it. `Refused` is already the signal a tiling
+        // window manager produces; `place()`'s own `PlacementTrust` short
+        // circuit (below) is what avoids repeating a known-futile request,
+        // so nothing is lost by reporting X11's ordinary capabilities here
+        // unconditionally.
+        Capabilities::X11
     }
 
     fn focus(&self, window: NativeWindow) -> PlacementOutcome {
@@ -391,7 +399,7 @@ impl DisplayBackend for X11Backend {
         let Some(monitor) = snapshot
             .monitors
             .iter()
-            .find(|m| &m.identity == identity || m.fallback_identity.as_ref() == Some(identity))
+            .find(|m| m.matches_exactly(identity))
         else {
             return PlacementOutcome::Disappeared;
         };
@@ -415,7 +423,6 @@ impl DisplayBackend for X11Backend {
             match mode {
                 WindowMode::Fullscreen => self.set_fullscreen(window, true)?,
                 WindowMode::Windowed => self.set_fullscreen(window, false)?,
-                WindowMode::Hidden => {}
             }
             self.connection
                 .flush()
@@ -424,12 +431,6 @@ impl DisplayBackend for X11Backend {
 
         if let Err(e) = result {
             return PlacementOutcome::Failed(e.to_string());
-        }
-
-        // A hidden window has no position to observe, and asking for one would
-        // latch a verdict from no evidence.
-        if mode == WindowMode::Hidden {
-            return PlacementOutcome::Applied;
         }
 
         // Verification is deliberately deferred. Sleeping here held the UI
@@ -451,10 +452,7 @@ impl DisplayBackend for X11Backend {
         let Some(target) = snapshot
             .monitors
             .iter()
-            .find(|monitor| {
-                &monitor.identity == identity
-                    || monitor.fallback_identity.as_ref() == Some(identity)
-            })
+            .find(|monitor| monitor.matches_exactly(identity))
             .map(|monitor| monitor.geometry)
         else {
             return PlacementOutcome::Disappeared;
@@ -592,17 +590,25 @@ fn parse_edid(edid: &[u8]) -> (Option<String>, Option<String>, Option<String>) {
     }
     let model = model.or_else(|| Some(format!("{product:04X}")));
     let serial = match (&serial_text, serial_number) {
-        (Some(text), _) if !text.is_empty() => Some(format!("{make}-{text}")),
+        (Some(text), _) if !text.is_empty() && !is_placeholder_serial(text) => {
+            Some(format!("{make}-{text}"))
+        }
         (_, 0) => None,
         (_, number) => Some(format!("{make}-{product:04X}-{number:08X}")),
     };
     (Some(make), model, serial)
 }
 
-/// Unused import guard: `ScreenSize` and `GetOutputInfoReply` document the
-/// shape of the XRandR replies this module relies on.
-#[allow(dead_code)]
-fn _randr_types(_: Option<ScreenSize>, _: Option<GetOutputInfoReply>) {}
+/// Whether a serial descriptor string is a placeholder rather than a real
+/// identity: all-zero digits (`"0"`, `"00000000"`), or `"1"`, both of which
+/// firmware uses in practice to mean "no serial programmed". A placeholder
+/// text descriptor turned identical panels (twins on the same model) into
+/// the same `Stable` identity, defeating the fallback disambiguation that
+/// would otherwise separate them by connector.
+fn is_placeholder_serial(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || trimmed == "1" || trimmed.chars().all(|c| c == '0')
+}
 
 #[cfg(test)]
 mod tests {
@@ -635,6 +641,34 @@ mod tests {
     fn garbage_edid_is_rejected() {
         assert_eq!(parse_edid(&[0u8; 128]), (None, None, None));
         assert_eq!(parse_edid(&[]), (None, None, None));
+    }
+
+    #[test]
+    fn placeholder_serial_text_is_recognised() {
+        assert!(is_placeholder_serial("0"));
+        assert!(is_placeholder_serial("00000000"));
+        assert!(is_placeholder_serial("1"));
+        assert!(is_placeholder_serial(""));
+        assert!(is_placeholder_serial("   "));
+        assert!(!is_placeholder_serial("A1B2C3D4"));
+        assert!(!is_placeholder_serial("10"));
+    }
+
+    #[test]
+    fn a_placeholder_serial_descriptor_does_not_become_a_stable_identity() {
+        let mut edid = synthetic_edid();
+        // Overwrite the descriptor block after the monitor-name one with a
+        // serial descriptor (0xFF) whose text is the placeholder "0".
+        let start = 54 + 18;
+        edid[start + 3] = 0xFF;
+        edid[start + 5] = b'0';
+        for byte in &mut edid[start + 6..start + 18] {
+            *byte = b' ';
+        }
+        let (_, _, serial) = parse_edid(&edid);
+        // Falls through to the binary serial number, which the synthetic
+        // EDID sets to a real (non-zero) value.
+        assert_eq!(serial.as_deref(), Some("ACM-1234-DEADBEEF"));
     }
 
     const PROJECTOR: Rect = Rect {
