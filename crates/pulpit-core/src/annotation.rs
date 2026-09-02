@@ -801,7 +801,7 @@ pub struct Annotations {
     /// be oldest by then — misnaming a later stroke and leaving the erased
     /// one stuck in the document forever (§76.14).
     #[serde(skip)]
-    pending_stroke_names: std::collections::VecDeque<bool>,
+    pending_stroke_names: std::collections::VecDeque<PendingName>,
     /// Bumped by every visible change, so a consumer holding a rendered copy
     /// can tell "changed" from "same" without a deep comparison.
     #[serde(skip)]
@@ -963,7 +963,7 @@ impl Annotations {
             // once, not about what the file holds.
             let dropped = self.strokes.remove(0);
             if dropped.id.is_none() {
-                mark_pending_stroke_erased(&mut self.pending_stroke_names, 0);
+                mark_pending_stroke(&mut self.pending_stroke_names, 0, PendingName::Dropped);
             }
         }
         self.strokes.push(InkStroke {
@@ -975,7 +975,7 @@ impl Annotations {
             // commit, which cannot have happened before the pen is up.
             id: None,
         });
-        self.pending_stroke_names.push_back(false);
+        self.pending_stroke_names.push_back(PendingName::Live);
         self.gesture = Gesture::Stroke;
         self.bump();
         true
@@ -1042,7 +1042,11 @@ impl Annotations {
                     // which eventually arrives for it becomes an immediate
                     // delete instead of being handed to a different stroke
                     // (§76.14).
-                    mark_pending_stroke_erased(&mut self.pending_stroke_names, unnamed_seen);
+                    mark_pending_stroke(
+                        &mut self.pending_stroke_names,
+                        unnamed_seen,
+                        PendingName::Erased,
+                    );
                 }
             }
             if unnamed {
@@ -1161,8 +1165,11 @@ impl Annotations {
     /// (§76.14).
     pub fn name_stroke(&mut self, id: crate::annotate::AnnotationId) {
         match self.pending_stroke_names.pop_front() {
-            Some(true) => self.erased.push(id),
-            Some(false) | None => {
+            Some(PendingName::Erased) => self.erased.push(id),
+            // A stroke the view cap dropped stays in the file; its name is
+            // consumed so it cannot be handed to a younger stroke.
+            Some(PendingName::Dropped) => {}
+            Some(PendingName::Live) | None => {
                 if let Some(stroke) = self.strokes.iter_mut().find(|stroke| stroke.id.is_none()) {
                     stroke.id = Some(id);
                 }
@@ -1731,17 +1738,35 @@ fn distance_squared(left: (f32, f32), right: (f32, f32)) -> f32 {
     x * x + y * y
 }
 
-/// Mark the `index`-th still-live (`false`) entry of a stroke-naming queue
-/// as erased-before-naming.
+/// What a stroke whose commit is still in flight is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingName {
+    /// Still on screen; the arriving id names it.
+    Live,
+    /// Erased before it was named; the arriving id is deleted at once.
+    Erased,
+    /// Dropped from the view by the stroke cap; the arriving id is consumed
+    /// and the mark stays in the file.
+    Dropped,
+}
+
+/// Mark the `index`-th still-live entry of a stroke-naming queue.
 ///
-/// `index` counts only over entries not yet marked erased, because those
-/// already-erased entries have no counterpart left in `Annotations::strokes`
-/// to be confused with (§76.14). A free function, not a method, so it can be
-/// called from inside a `retain` closure that already borrows
-/// `self.strokes` and `self.erased` under Rust's disjoint-field capture.
-fn mark_pending_stroke_erased(queue: &mut std::collections::VecDeque<bool>, index: usize) {
-    if let Some(entry) = queue.iter_mut().filter(|erased| !**erased).nth(index) {
-        *entry = true;
+/// `index` counts only over `Live` entries, because the others have no
+/// counterpart left in `Annotations::strokes` to be confused with (§76.14).
+/// A free function, not a method, so it can be called from inside a `retain`
+/// closure that already borrows `self.strokes` and `self.erased`.
+fn mark_pending_stroke(
+    queue: &mut std::collections::VecDeque<PendingName>,
+    index: usize,
+    state: PendingName,
+) {
+    if let Some(entry) = queue
+        .iter_mut()
+        .filter(|entry| **entry == PendingName::Live)
+        .nth(index)
+    {
+        *entry = state;
     }
 }
 
