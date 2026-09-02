@@ -8323,32 +8323,32 @@ impl App {
         let Some(supervisor) = self.supervisor.as_mut() else {
             return;
         };
-        if !obsolete.is_empty() {
-            let doomed: std::collections::HashSet<RequestId> = obsolete.iter().copied().collect();
-            self.pending
-                .retain(|(pending, _)| !doomed.contains(pending));
-            for id in obsolete {
-                supervisor.cancel(id);
-                self.submitted_at.remove(&id);
-            }
-        }
+        cancel_renders(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            &obsolete,
+        );
 
         for (key, priority, region) in jobs {
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: key.slide,
-                region,
-                width: key.width,
-                height: key.height,
-                priority,
-                with_annotations: true,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: key.slide,
+                    region,
+                    width: key.width,
+                    height: key.height,
+                    priority,
+                    with_annotations: true,
+                    region_name: String::new(),
+                },
+            );
         }
     }
 
@@ -13599,31 +13599,37 @@ impl App {
             supervisor.cancel(previous.request);
             self.submitted_at.remove(&previous.request);
         }
-        let id = supervisor.next_request_id();
-        supervisor.submit(RenderJob {
-            id,
-            generation,
-            document,
-            page: page.get(),
-            region,
-            width,
-            height,
-            // The reader is waiting on this with the pointer just up, so it
-            // outranks the pages being warmed in the margin.
-            priority: Priority::Presenter,
-            // The document's own marks are part of the page as the reader
-            // sees it. Copying a page and getting it back without the
-            // highlighting they put on it would be a picture of a different
-            // document.
-            with_annotations: true,
-            region_name: String::new(),
-        });
+        // Not registered in `self.pending`: this is a one-off tracked
+        // through `self.area_copy` rather than the general render plan.
+        let id = submit_render(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            None,
+            |id| RenderJob {
+                id,
+                generation,
+                document,
+                page: page.get(),
+                region,
+                width,
+                height,
+                // The reader is waiting on this with the pointer just up, so
+                // it outranks the pages being warmed in the margin.
+                priority: Priority::Presenter,
+                // The document's own marks are part of the page as the
+                // reader sees it. Copying a page and getting it back without
+                // the highlighting they put on it would be a picture of a
+                // different document.
+                with_annotations: true,
+                region_name: String::new(),
+            },
+        );
         self.area_copy = Some(AreaCopy {
             request: id,
             width,
             height,
         });
-        self.submitted_at.insert(id, Instant::now());
     }
 
     /// Ask the document worker for the text the region covers.
@@ -16704,21 +16710,24 @@ impl App {
             let Some(supervisor) = self.supervisor.as_mut() else {
                 return;
             };
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: source.pdf_page,
-                region: source.region,
-                width,
-                height,
-                priority,
-                with_annotations: false,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            let id = submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: source.pdf_page,
+                    region: source.region,
+                    width,
+                    height,
+                    priority,
+                    with_annotations: false,
+                    region_name: String::new(),
+                },
+            );
             self.thumbnail_requests.insert(id);
             room -= 1;
         }
@@ -16883,33 +16892,34 @@ impl App {
         let Some(supervisor) = self.supervisor.as_mut() else {
             return;
         };
-        // One retain over `pending` for the whole batch, not one per id.
-        if !obsolete.is_empty() {
-            let doomed: std::collections::HashSet<RequestId> = obsolete.iter().copied().collect();
-            self.pending
-                .retain(|(pending, _)| !doomed.contains(pending));
+        for id in &obsolete {
+            self.thumbnail_requests.remove(id);
         }
-        for id in obsolete {
-            supervisor.cancel(id);
-            self.thumbnail_requests.remove(&id);
-            self.submitted_at.remove(&id);
-        }
+        cancel_renders(
+            supervisor,
+            &mut self.pending,
+            &mut self.submitted_at,
+            &obsolete,
+        );
         for (key, source, priority, width, height, document) in jobs {
-            let id = supervisor.next_request_id();
-            supervisor.submit(RenderJob {
-                id,
-                generation,
-                document,
-                page: source.pdf_page,
-                region: source.region,
-                width,
-                height,
-                priority,
-                with_annotations: false,
-                region_name: String::new(),
-            });
-            self.pending.push((id, key));
-            self.submitted_at.insert(id, Instant::now());
+            submit_render(
+                supervisor,
+                &mut self.pending,
+                &mut self.submitted_at,
+                Some(key),
+                |id| RenderJob {
+                    id,
+                    generation,
+                    document,
+                    page: source.pdf_page,
+                    region: source.region,
+                    width,
+                    height,
+                    priority,
+                    with_annotations: false,
+                    region_name: String::new(),
+                },
+            );
         }
 
         // The outline and the unsupported-feature report are per document, so
@@ -18471,6 +18481,53 @@ fn request_is_satisfied(cache: &FrameCache, key: FrameKey) -> bool {
 /// output-sized" audience frame was rendered at half resolution and upscaled.
 fn audience_pixel_width(logical_width: f32, scale: f32) -> u32 {
     (logical_width.max(320.0) * scale) as u32
+}
+
+/// Allocate a request id, submit the job under it, and record when it was
+/// submitted — and, unless `key` is `None`, that it is pending against that
+/// key. §79.3: this triple used to be hand-copied at every submission site;
+/// `key` is `None` only for `copy_area_as_image`'s one-off request, which is
+/// tracked through `App::area_copy` instead of the general `pending` list.
+/// `job` builds the job from the id `next_request_id` allocated, since the id
+/// is not known until this runs.
+fn submit_render(
+    supervisor: &mut RendererSupervisor,
+    pending: &mut Vec<(RequestId, FrameKey)>,
+    submitted_at: &mut std::collections::HashMap<RequestId, Instant>,
+    key: Option<FrameKey>,
+    job: impl FnOnce(RequestId) -> RenderJob,
+) -> RequestId {
+    let id = supervisor.next_request_id();
+    supervisor.submit(job(id));
+    if let Some(key) = key {
+        pending.push((id, key));
+    }
+    submitted_at.insert(id, Instant::now());
+    id
+}
+
+/// Cancel a batch of in-flight requests: drop them from `pending` in one
+/// retain rather than one per id, cancel each with the supervisor, and drop
+/// their submission stamps. Shared by both render planners (§79.3): "a
+/// request is in exactly these maps" is the invariant this keeps in one
+/// place instead of copied by hand. Callers with a third map keyed by
+/// request id (`App::thumbnail_requests`) still clear their own entries —
+/// this only owns the two maps every submission goes through.
+fn cancel_renders(
+    supervisor: &mut RendererSupervisor,
+    pending: &mut Vec<(RequestId, FrameKey)>,
+    submitted_at: &mut std::collections::HashMap<RequestId, Instant>,
+    ids: &[RequestId],
+) {
+    if ids.is_empty() {
+        return;
+    }
+    let doomed: std::collections::HashSet<RequestId> = ids.iter().copied().collect();
+    pending.retain(|(pending, _)| !doomed.contains(pending));
+    for id in ids {
+        supervisor.cancel(*id);
+        submitted_at.remove(id);
+    }
 }
 
 #[cfg(test)]
