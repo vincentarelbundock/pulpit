@@ -190,16 +190,12 @@ pub fn extract_bundle(
             return Err(ExtractionError::LimitExceeded("per-file size"));
         }
         let compressed = entry.compressed_size();
-        if compressed > 0 && declared / compressed > limits.max_ratio {
-            return Err(ExtractionError::LimitExceeded("compression ratio"));
-        }
-        expanded = expanded.saturating_add(declared);
-        if expanded > limits.max_expanded_bytes {
-            return Err(ExtractionError::LimitExceeded("expanded size"));
-        }
 
         // The header is a claim, not a fact: read one byte past the ceiling
-        // so an entry that lies about its size is caught rather than trusted.
+        // so an entry that lies about its size is caught rather than trusted,
+        // and every bound below this point is computed from what was
+        // actually read, not from the declared size — an archive can put
+        // whatever it likes in its header.
         let mut bytes = Vec::with_capacity(declared.min(1 << 20) as usize);
         entry
             .take(limits.max_file_bytes.saturating_add(1))
@@ -207,6 +203,14 @@ pub fn extract_bundle(
             .map_err(|e| ExtractionError::Archive(e.to_string()))?;
         if bytes.len() as u64 > limits.max_file_bytes {
             return Err(ExtractionError::LimitExceeded("per-file size"));
+        }
+        let real = bytes.len() as u64;
+        if compressed > 0 && real / compressed > limits.max_ratio {
+            return Err(ExtractionError::LimitExceeded("compression ratio"));
+        }
+        expanded = expanded.saturating_add(real);
+        if expanded > limits.max_expanded_bytes {
+            return Err(ExtractionError::LimitExceeded("expanded size"));
         }
 
         if let Some(parent) = destination.parent() {
@@ -670,6 +674,89 @@ mod tests {
             extract_bundle(&archive, &root, &ExtractionLimits::default()),
             Err(ExtractionError::LimitExceeded("compression ratio"))
         ));
+    }
+
+    /// Build a two-entry ZIP — the manifest, then `name`/`contents` — whose
+    /// *headers* claim the second entry is empty, in both the local file
+    /// header and the central directory record, while the bytes actually
+    /// written are `contents`. §76.9: `extract_bundle` must not trust that
+    /// claim for its expansion bound.
+    fn zip_with_lying_size(name: &str, contents: &[u8]) -> Vec<u8> {
+        let mut archive = zip_of(&[
+            (WEB_MANIFEST_NAME, manifest_json().as_bytes()),
+            (name, contents),
+        ]);
+        let true_size = (contents.len() as u32).to_le_bytes();
+        // Local file header: signature, then the uncompressed-size field 18
+        // bytes in (4: version, 2: flags, 2: method, 2: time, 2: date, 4:
+        // crc32, 4: compressed size = 18, then 4 bytes uncompressed size).
+        const LOCAL_SIG: &[u8] = b"PK\x03\x04";
+        const CENTRAL_SIG: &[u8] = b"PK\x01\x02";
+        let local_offsets: Vec<usize> = find_all(&archive, LOCAL_SIG);
+        let central_offsets: Vec<usize> = find_all(&archive, CENTRAL_SIG);
+        assert_eq!(local_offsets.len(), 2, "manifest + payload local headers");
+        assert_eq!(
+            central_offsets.len(),
+            2,
+            "manifest + payload central records"
+        );
+        let local = local_offsets[1];
+        let central = central_offsets[1];
+        // Local file header: 4 (signature) + 2 (version needed) + 2 (flags)
+        // + 2 (method) + 2 (time) + 2 (date) + 4 (crc32) + 4 (compressed
+        // size) = 22 bytes before the uncompressed-size field.
+        let local_size_at = local + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4;
+        // Central directory record has one extra field ("version made by")
+        // ahead of "version needed", so its uncompressed-size field sits 2
+        // bytes further in: 24 bytes after the signature.
+        let central_size_at = central + 4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4;
+        assert_eq!(
+            &archive[local_size_at..local_size_at + 4],
+            &true_size[..],
+            "test wrote its payload where it expected to find it"
+        );
+        assert_eq!(
+            &archive[central_size_at..central_size_at + 4],
+            &true_size[..],
+            "test wrote its payload where it expected to find it"
+        );
+        archive[local_size_at..local_size_at + 4].copy_from_slice(&[0, 0, 0, 0]);
+        archive[central_size_at..central_size_at + 4].copy_from_slice(&[0, 0, 0, 0]);
+        archive
+    }
+
+    fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let mut start = 0;
+        while let Some(found) = haystack[start..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            offsets.push(start + found);
+            start += found + 1;
+        }
+        offsets
+    }
+
+    #[test]
+    fn an_archive_lying_about_zero_bytes_is_still_bounded_by_real_expansion() {
+        let (_guard, root) = stage();
+        // Every header on this entry claims 0 bytes; the bytes actually in
+        // the archive are well over the expansion bound. §76.9 requires the
+        // *real* size to be what accumulates into `expanded`.
+        let archive = zip_with_lying_size("payload.bin", &vec![7u8; 1 << 20]);
+        let limits = ExtractionLimits {
+            max_expanded_bytes: 1 << 10,
+            max_ratio: u64::MAX,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                extract_bundle(&archive, &root, &limits),
+                Err(ExtractionError::LimitExceeded("expanded size"))
+            ),
+            "a header claiming 0 bytes must not buy unlimited real expansion"
+        );
     }
 
     #[test]
