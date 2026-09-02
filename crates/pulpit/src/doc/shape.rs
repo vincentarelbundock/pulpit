@@ -50,7 +50,11 @@ struct Record {
 }
 
 fn directory() -> PathBuf {
-    crate::settings::store::config_directory().join("shapes")
+    // This is a cache, not configuration: `remember` says so above,
+    // and losing it costs a slower open, never data. It belongs under
+    // `Directories::cache`, which a system cleaner may clear, rather than
+    // under configuration, which one must not touch.
+    crate::platform::Directories::detect().cache.join("shapes")
 }
 
 fn path_for(directory: &std::path::Path, hash: &str) -> Option<PathBuf> {
@@ -95,12 +99,16 @@ fn remember_in(directory: &std::path::Path, hash: &str, shape: DocumentShape) {
         return;
     };
     // Whole or absent: a torn record read back as a miss would be fine, but
-    // read back as valid JSON of half a document it would not be.
-    let staging = path.with_extension("tmp");
-    if std::fs::write(&staging, bytes).is_err() {
-        return;
-    }
-    let _ = std::fs::rename(&staging, &path);
+    // read back as valid JSON of half a document it would not be. Written
+    // through `pulpit_render::atomic::replace` rather than a predictable
+    // `.tmp` sibling with no `fsync`, for the same reason every other writer
+    // in pulpit goes through it.
+    let _ = pulpit_render::atomic::replace(
+        &path,
+        "shape",
+        pulpit_render::atomic::Visibility::Private,
+        &bytes,
+    );
 
     // Prune by age, oldest first, only past the bound.
     let Ok(entries) = std::fs::read_dir(directory) else {
