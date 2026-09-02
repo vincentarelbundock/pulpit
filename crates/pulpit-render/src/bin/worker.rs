@@ -15,8 +15,6 @@
 
 use std::io::{stdin, stdout};
 
-use pulpit_render::pdf::fixture::FixtureBackend;
-use pulpit_render::pdf::router::RoutingBackend;
 use pulpit_render::pdf::PdfBackend;
 
 fn main() {
@@ -40,42 +38,13 @@ fn main() {
     }
 }
 
-/// A router, so a directory source is decoded in this process and a file
-/// source reaches PDFium (§45.2).
+/// The real backend, wrapped in failure injection for CI.
 ///
 /// The failure injection wraps the router rather than sitting under it: it is
 /// keyed by page number, and which backend answers that page is not its
 /// business.
 fn select_backend() -> Box<dyn PdfBackend> {
-    Box::new(failure_injection(Box::new(RoutingBackend::new(Box::new(
-        bind_pdf,
-    )))))
-}
-
-/// Produce the PDF backend, the first time a PDF is opened (§45.4).
-fn bind_pdf() -> pulpit_render::pdf::Result<Box<dyn PdfBackend>> {
-    if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some() {
-        return Ok(Box::new(FixtureBackend::new()));
-    }
-    #[cfg(feature = "pdfium")]
-    {
-        match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
-            Ok(backend) => Ok(Box::new(backend)),
-            Err(e) => fail_without_pdfium(&e.to_string()),
-        }
-    }
-    #[cfg(not(feature = "pdfium"))]
-    fail_without_pdfium("this build was compiled without the pdfium feature");
-}
-
-/// PDFium is a hard requirement *for a PDF*: every supported package installs
-/// it, and a worker asked to open a deck it cannot render exits rather than
-/// rendering placeholder pages that the presenter might mistake for their own
-/// slides (§45.3). The fixture backend remains reachable, but only when a
-/// test asks for it by name.
-fn fail_without_pdfium(reason: &str) -> ! {
-    eprintln!("{}", pulpit_render::pdf::missing_pdfium_message(reason));
-    std::process::exit(1);
+    Box::new(failure_injection(pulpit_render::worker::default_backend()))
 }
 
 /// Failure injection for CI: `PULPIT_WORKER_CRASH_ON_PAGE=N` aborts the
@@ -107,6 +76,10 @@ impl PdfBackend for FailureInjectingBackend {
         self.inner.name()
     }
 
+    fn version(&self) -> String {
+        self.inner.version()
+    }
+
     fn open(
         &mut self,
         source: &std::path::Path,
@@ -123,6 +96,13 @@ impl PdfBackend for FailureInjectingBackend {
         document: pulpit_render::pdf::BackendDocumentId,
     ) -> pulpit_render::pdf::Result<pulpit_render::pdf::DocumentMetadata> {
         self.inner.metadata(document)
+    }
+
+    fn page_count(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+    ) -> pulpit_render::pdf::Result<usize> {
+        self.inner.page_count(document)
     }
 
     fn page_size(
@@ -148,5 +128,76 @@ impl PdfBackend for FailureInjectingBackend {
             }
         }
         self.inner.render(request, cancel)
+    }
+
+    fn render_into(
+        &self,
+        request: &pulpit_render::pdf::RenderRequest,
+        target: &mut [u8],
+        cancel: &dyn pulpit_render::pdf::CancelSignal,
+    ) -> pulpit_render::pdf::Result<()> {
+        if self.crash_on == Some(request.page) {
+            tracing::error!(page = request.page, "failure injection: aborting");
+            std::process::abort();
+        }
+        if self.hang_on == Some(request.page) {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        self.inner.render_into(request, target, cancel)
+    }
+
+    fn links(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+        page: usize,
+    ) -> pulpit_render::pdf::Result<Vec<pulpit_core::PageLink>> {
+        self.inner.links(document, page)
+    }
+
+    fn find_text(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+        query: &pulpit_core::search::Query,
+        pages: std::ops::Range<usize>,
+    ) -> pulpit_render::pdf::Result<Vec<pulpit_core::search::Hit>> {
+        self.inner.find_text(document, query, pages)
+    }
+
+    fn attachment(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+        name: &str,
+    ) -> pulpit_render::pdf::Result<Vec<u8>> {
+        self.inner.attachment(document, name)
+    }
+
+    fn attachment_names(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+    ) -> pulpit_render::pdf::Result<Vec<String>> {
+        self.inner.attachment_names(document)
+    }
+
+    fn page_labels(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+    ) -> pulpit_render::pdf::Result<pulpit_core::overlay::PageLabels> {
+        self.inner.page_labels(document)
+    }
+
+    fn outline(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+    ) -> pulpit_render::pdf::Result<pulpit_core::navigation::Outline> {
+        self.inner.outline(document)
+    }
+
+    fn evidence(
+        &self,
+        document: pulpit_render::pdf::BackendDocumentId,
+    ) -> pulpit_render::pdf::Result<pulpit_render::pdf::capabilities::DocumentEvidence> {
+        self.inner.evidence(document)
     }
 }

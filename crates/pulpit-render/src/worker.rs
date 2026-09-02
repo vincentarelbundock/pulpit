@@ -52,6 +52,43 @@ impl Shared {
     }
 }
 
+/// The renderer's real PDF backend: a router that decodes a directory itself
+/// (`SPEC-images.md` §45.2) and hands a file source to PDFium, bound the
+/// first time a PDF is actually opened rather than at worker startup
+/// (§45.4). PDFium is a hard requirement *for a PDF* — every supported
+/// package installs it — so a worker asked to open a deck it cannot render
+/// exits with guidance rather than falling back to placeholder pages, which
+/// would show the audience something that is not the deck. Only an explicit
+/// `PULPIT_FORCE_FIXTURE_BACKEND` gets the fixture backend.
+///
+/// One definition, used by the production worker binary and by `pulpit`'s
+/// own `--render-worker` role: the two used to carry separate copies of the
+/// same `RoutingBackend`/`PdfiumBackend`/`FixtureBackend` wiring, free to
+/// drift the way the copies `pulpit_core::ipc` replaced already had.
+pub fn default_backend() -> Box<dyn PdfBackend> {
+    Box::new(crate::pdf::router::RoutingBackend::new(Box::new(bind_pdf)))
+}
+
+fn bind_pdf() -> crate::pdf::Result<Box<dyn PdfBackend>> {
+    if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some() {
+        return Ok(Box::new(crate::pdf::fixture::FixtureBackend::new()));
+    }
+    #[cfg(feature = "pdfium")]
+    {
+        match crate::pdf::pdfium::PdfiumBackend::bind() {
+            Ok(backend) => Ok(Box::new(backend)),
+            Err(e) => fail_without_pdfium(&e.to_string()),
+        }
+    }
+    #[cfg(not(feature = "pdfium"))]
+    fail_without_pdfium("this build was compiled without the pdfium feature")
+}
+
+fn fail_without_pdfium(reason: &str) -> ! {
+    eprintln!("{}", crate::pdf::missing_pdfium_message(reason));
+    std::process::exit(1);
+}
+
 /// Run the worker loop until the peer closes the connection or asks it to
 /// shut down. Returns `Ok(())` on a clean shutdown.
 pub fn run(

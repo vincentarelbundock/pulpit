@@ -282,9 +282,29 @@ fn print_help() {
 }
 
 fn run_worker() {
-    use pulpit_render::pdf::fixture::FixtureBackend;
-    use pulpit_render::pdf::PdfBackend;
+    init_worker_tracing();
 
+    // Two backends in one worker (SPEC-images.md §45): a directory source is
+    // decoded here by the `image` crate, a file source goes to PDFium. The
+    // choice is made per open, not once at startup, because a worker holds
+    // several documents at a time — always two during a reload — and after
+    // this they need not be the same kind. `default_backend` is the one
+    // definition of that wiring, shared with the standalone worker binary
+    // (§80.12).
+    let backend = pulpit_render::worker::default_backend();
+
+    if let Err(e) = pulpit_render::worker::run(std::io::stdin(), std::io::stdout(), backend) {
+        tracing::error!(error = %e, "renderer worker exiting");
+        std::process::exit(1);
+    }
+}
+
+/// Tracing setup shared by every worker role: stderr, filtered by
+/// `PULPIT_LOG`, warn by default. The presenter process sets up its own
+/// logging through `settings::diagnostics::Logging`; a worker has no
+/// settings file to read, so this is deliberately simpler and does not try
+/// to share that code.
+fn init_worker_tracing() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -292,53 +312,6 @@ fn run_worker() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-
-    // Two backends in one worker (SPEC-images.md §45): a directory source is
-    // decoded here by the `image` crate, a file source goes to PDFium. The
-    // choice is made per open, not once at startup, because a worker holds
-    // several documents at a time — always two during a reload — and after
-    // this they need not be the same kind.
-    //
-    // PDFium is still a hard requirement *for a PDF*, installed by every
-    // supported package: a worker asked to open a deck it cannot render exits
-    // with guidance rather than falling back to placeholder pages, which
-    // would show the audience something that is not the deck. Only an
-    // explicit request gets the fixture backend.
-    let backend: Box<dyn PdfBackend> = Box::new(pulpit_render::pdf::router::RoutingBackend::new(
-        Box::new(|| {
-            if std::env::var_os("PULPIT_FORCE_FIXTURE_BACKEND").is_some() {
-                return Ok(Box::new(FixtureBackend::new()) as Box<dyn PdfBackend>);
-            }
-            #[cfg(feature = "pdfium")]
-            {
-                match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
-                    Ok(backend) => Ok(Box::new(backend) as Box<dyn PdfBackend>),
-                    Err(e) => {
-                        eprintln!(
-                            "{}",
-                            pulpit_render::pdf::missing_pdfium_message(&e.to_string())
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-            #[cfg(not(feature = "pdfium"))]
-            {
-                eprintln!(
-                    "{}",
-                    pulpit_render::pdf::missing_pdfium_message(
-                        "this build was compiled without the pdfium feature"
-                    )
-                );
-                std::process::exit(1);
-            }
-        }),
-    ));
-
-    if let Err(e) = pulpit_render::worker::run(std::io::stdin(), std::io::stdout(), backend) {
-        tracing::error!(error = %e, "renderer worker exiting");
-        std::process::exit(1);
-    }
 }
 
 /// Serve the document-worker role: open one PDF and answer for it until the
@@ -349,13 +322,7 @@ fn run_worker() {
 /// with no PDF library is not a worker that degrades, it is one that has
 /// nothing to say. It exits with the same guidance the renderer worker gives.
 fn run_document_worker(source: PathBuf) {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("PULPIT_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    init_worker_tracing();
 
     // A folder of images or a comic archive needs no PDF library at all, and
     // must not be refused because one is missing (SPEC-images.md §45.3,
@@ -385,8 +352,6 @@ fn run_document_worker(source: PathBuf) {
     #[cfg(feature = "pdfium")]
     {
         use pulpit_render::document::pdfium::PdfiumDocument;
-        use pulpit_render::document::worker::DocumentWorker;
-        use pulpit_render::document::PdfDocument;
 
         let mut backend = match pulpit_render::pdf::pdfium::PdfiumBackend::bind() {
             Ok(backend) => backend,
@@ -399,14 +364,6 @@ fn run_document_worker(source: PathBuf) {
             }
         };
 
-        // The identities this worker writes into `/NM` have to differ from
-        // every other session's, or two people editing two copies of one file
-        // would produce annotations that collide when the copies are merged
-        // by hand (A3). The process id and the start time are what this
-        // process has that no other does; the domain crate reads no clock, so
-        // the mixing happens here.
-        let seed = seed_from_process();
-
         let engine = match PdfiumDocument::open(&mut backend, &source) {
             Ok(engine) => engine,
             Err(error) => {
@@ -414,17 +371,7 @@ fn run_document_worker(source: PathBuf) {
                 std::process::exit(1);
             }
         };
-        let mut worker = DocumentWorker::new();
-        worker.adopt(PdfDocument::new(Box::new(engine), seed));
-
-        if let Err(e) = pulpit_render::document::session::serve_stdio(
-            worker,
-            std::io::stdin(),
-            std::io::stdout(),
-        ) {
-            tracing::error!(error = %e, "document worker exiting");
-            std::process::exit(1);
-        }
+        serve_document(Box::new(engine), "document");
     }
     #[cfg(not(feature = "pdfium"))]
     {
@@ -439,15 +386,42 @@ fn run_document_worker(source: PathBuf) {
     }
 }
 
+/// Serve the document-worker protocol for one already-opened engine.
+///
+/// The PDF, image-directory and DjVu entry points above differ only in how
+/// they build `engine` and the word they log on exit; this is the loop they
+/// all three used to run a separate, drifting copy of.
+///
+/// The identities a worker writes into `/NM` have to differ from every other
+/// session's, or two people editing two copies of one file would produce
+/// annotations that collide when the copies are merged by hand (A3). The
+/// process id and the start time are what this process has that no other
+/// does — the domain crate reads no clock, so the seed is mixed here, once,
+/// for every engine.
+fn serve_document<'a>(engine: Box<dyn pulpit_render::document::DocumentBackend + 'a>, label: &str) {
+    use pulpit_render::document::worker::DocumentWorker;
+    use pulpit_render::document::PdfDocument;
+
+    let mut worker = DocumentWorker::new();
+    worker.adopt(PdfDocument::new(engine, seed_from_process()));
+
+    if let Err(e) =
+        pulpit_render::document::session::serve_stdio(worker, std::io::stdin(), std::io::stdout())
+    {
+        tracing::error!(error = %e, "{label} worker exiting");
+        std::process::exit(1);
+    }
+}
+
 /// Serve the document-worker role for an image directory (`SPEC-images.md`
 /// §48).
 ///
 /// The same loop and the same protocol; only the engine differs, and this one
 /// refuses every PDF semantic rather than pretending to have one.
 fn run_image_document_worker(source: PathBuf) {
-    use pulpit_render::document::worker::DocumentWorker;
-    use pulpit_render::document::PdfDocument;
     use pulpit_render::images::ImageDocument;
+
+    init_worker_tracing();
 
     let engine = match ImageDocument::open(&source) {
         Ok(engine) => engine,
@@ -456,18 +430,7 @@ fn run_image_document_worker(source: PathBuf) {
             std::process::exit(1);
         }
     };
-    let mut worker = DocumentWorker::new();
-    // Nothing here writes an annotation, so the seed identifies nothing —
-    // but the document type is shared and wants one, and a per-process value
-    // is what every other engine gets.
-    worker.adopt(PdfDocument::new(Box::new(engine), seed_from_process()));
-
-    if let Err(e) =
-        pulpit_render::document::session::serve_stdio(worker, std::io::stdin(), std::io::stdout())
-    {
-        tracing::error!(error = %e, "image document worker exiting");
-        std::process::exit(1);
-    }
+    serve_document(Box::new(engine), "image document");
 }
 
 /// Serve the document-worker role for a DjVu file (`SPEC-reader-formats.md`
@@ -479,9 +442,9 @@ fn run_image_document_worker(source: PathBuf) {
 /// install it — never with a complaint about a damaged file (§61.1, §61.2).
 #[cfg(feature = "djvu")]
 fn run_djvu_document_worker(source: PathBuf) {
-    use pulpit_render::document::worker::DocumentWorker;
-    use pulpit_render::document::PdfDocument;
     use pulpit_render::DjvuDocument;
+
+    init_worker_tracing();
 
     let engine = match DjvuDocument::open(&source) {
         Ok(engine) => engine,
@@ -490,17 +453,7 @@ fn run_djvu_document_worker(source: PathBuf) {
             std::process::exit(1);
         }
     };
-    let mut worker = DocumentWorker::new();
-    // As with the image engine: nothing here writes an annotation, so the
-    // seed identifies nothing, but every engine gets one.
-    worker.adopt(PdfDocument::new(Box::new(engine), seed_from_process()));
-
-    if let Err(e) =
-        pulpit_render::document::session::serve_stdio(worker, std::io::stdin(), std::io::stdout())
-    {
-        tracing::error!(error = %e, "DjVu document worker exiting");
-        std::process::exit(1);
-    }
+    serve_document(Box::new(engine), "DjVu document");
 }
 
 /// A build compiled without the DjVu backend still recognises the format and
