@@ -34,16 +34,53 @@ pub enum Need {
 }
 
 /// One overlay's staging state.
+///
+/// The three states are mutually exclusive by construction, not by
+/// convention among three `Option`s that happened to always agree: an
+/// overlay is either still waiting on an attachment, has a source ready to
+/// open, or is permanently blocked with the reason.
 #[derive(Debug)]
-struct Staged {
-    /// Where the asset landed, once it has.
-    source: Option<SessionSource>,
-    /// The attachment name this overlay is waiting for, if any.
-    awaiting: Option<String>,
-    /// Why it will never be usable, if that is settled.
-    blocked: Option<String>,
-    /// The manifest, for a web bundle.
-    manifest: Option<WebManifest>,
+enum Staged {
+    /// Waiting on this attachment name to come back from the renderer.
+    Awaiting(String),
+    /// The asset is on disk; a web bundle also carries its manifest.
+    Ready {
+        source: SessionSource,
+        manifest: Option<WebManifest>,
+    },
+    /// Permanently unusable, with the reason.
+    Blocked(String),
+}
+
+impl Staged {
+    fn need(&self) -> Need {
+        match self {
+            Staged::Awaiting(name) => Need::Attachment(name.clone()),
+            Staged::Ready { .. } => Need::Ready,
+            Staged::Blocked(reason) => Need::Blocked(reason.clone()),
+        }
+    }
+
+    fn awaiting(&self) -> Option<&str> {
+        match self {
+            Staged::Awaiting(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn manifest(&self) -> Option<&WebManifest> {
+        match self {
+            Staged::Ready { manifest, .. } => manifest.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn source(&self) -> Option<SessionSource> {
+        match self {
+            Staged::Ready { source, .. } => Some(source.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// The live picture of one document's overlays.
@@ -51,6 +88,12 @@ pub struct MediaCoordinator {
     /// Staging root for the current generation. Dropped — and deleted — when
     /// the generation is retired.
     staging: Option<StagingRoot>,
+    /// Why `staging` is `None`, when that is because creation failed rather
+    /// than because no generation has been staged yet. An embedded overlay
+    /// needs this root to land its extracted bytes; without it, `need_for`
+    /// reports the overlay `Blocked` instead of leaving it `awaiting`
+    /// forever with nowhere for `attachment_ready` to put the result.
+    staging_error: Option<String>,
     generation: RenderGeneration,
     index: OverlayIndex,
     staged: HashMap<OverlayId, Staged>,
@@ -147,6 +190,7 @@ impl MediaCoordinator {
     pub fn new() -> Self {
         Self {
             staging: None,
+            staging_error: None,
             generation: RenderGeneration::ZERO,
             index: OverlayIndex::default(),
             staged: HashMap::new(),
@@ -276,14 +320,27 @@ impl MediaCoordinator {
     /// that turned up a moment later had nothing to attach to and were
     /// dropped, and the caller — which asks for each attachment once — never
     /// asked again. Nothing ever played.
+    /// Rebuild the overlay index for a new set of declarations.
+    ///
+    /// Within one generation, `OverlayId`s are stable only as long as the
+    /// declarations they were derived from are; a page that lands out of
+    /// render-priority order can shift an id's `occurrence` count between
+    /// two rebuilds so that the same id now names a different overlay. A
+    /// session left running under such a reused id would keep playing
+    /// content the index no longer has any record of, so `supervisor` is
+    /// used here to close every session whose id survived the rebuild but
+    /// whose content or region did not — the orphans this leaves behind
+    /// otherwise ran until `retire_generation`.
     pub fn rebuild(
         &mut self,
+        supervisor: Option<&mut MediaSupervisor>,
         generation: RenderGeneration,
         per_page: &BTreeMap<usize, Vec<OverlayDeclaration>>,
         labels: &PageLabels,
         diagnostics: Vec<String>,
     ) {
         let new_generation = generation != self.generation || self.staging.is_none();
+        let previous_index = std::mem::take(&mut self.index);
         self.index = OverlayIndex::build(per_page, labels);
         self.generation = generation;
         self.diagnostics = diagnostics;
@@ -293,6 +350,37 @@ impl MediaCoordinator {
             // drop only the bookkeeping for overlays this rebuild removed.
             let live: std::collections::HashSet<OverlayId> =
                 self.index.all().iter().map(|overlay| overlay.id).collect();
+
+            // An id that is live both before and after the rebuild but now
+            // points at different content or a different region is not the
+            // same overlay any more: its session is an orphan and must
+            // close, not keep running against stale content.
+            let reused: Vec<OverlayId> = self
+                .sessions
+                .keys()
+                .filter(
+                    |id| match (previous_index.get(**id), self.index.get(**id)) {
+                        (Some(before), Some(after)) => {
+                            before.content != after.content || before.region != after.region
+                        }
+                        _ => false,
+                    },
+                )
+                .copied()
+                .collect();
+            if !reused.is_empty() {
+                if let Some(supervisor) = supervisor {
+                    for id in &reused {
+                        if let Some(session) = self.sessions.remove(id) {
+                            supervisor.close(session);
+                        }
+                        self.parked.retain(|parked| parked != id);
+                        self.frames.remove(id);
+                        self.frame_order.retain(|frame| frame != id);
+                    }
+                }
+            }
+
             self.staged.retain(|id, _| live.contains(id));
             self.sessions.retain(|id, _| live.contains(id));
             self.parked.retain(|id| live.contains(id));
@@ -306,10 +394,14 @@ impl MediaCoordinator {
         // Frames from the previous generation stay until their overlay is
         // replaced by a complete new one, so a reload does not flash.
         self.staging = match StagingRoot::create() {
-            Ok(root) => Some(root),
+            Ok(root) => {
+                self.staging_error = None;
+                Some(root)
+            }
             Err(e) => {
-                self.diagnostics
-                    .push(format!("could not create a staging directory: {e}"));
+                let reason = format!("no staging directory: {e}");
+                self.diagnostics.push(reason.clone());
+                self.staging_error = Some(reason);
                 None
             }
         };
@@ -346,15 +438,7 @@ impl MediaCoordinator {
         document_dir: &std::path::Path,
     ) -> Need {
         if let Some(staged) = self.staged.get(&id) {
-            if let Some(reason) = &staged.blocked {
-                return Need::Blocked(reason.clone());
-            }
-            if staged.source.is_some() {
-                return Need::Ready;
-            }
-            if let Some(name) = &staged.awaiting {
-                return Need::Attachment(name.clone());
-            }
+            return staged.need();
         }
 
         // An external asset is resolved straight away; an embedded one has to
@@ -367,7 +451,8 @@ impl MediaCoordinator {
 
         if let Some(path) = external {
             let asset = pulpit_core::overlay::ExternalAssetRef::new(path);
-            match pulpit_render::pdf::overlays::resolve_external(document_dir, &asset) {
+            let staged = match pulpit_render::pdf::overlays::resolve_external(document_dir, &asset)
+            {
                 Ok(resolved) => {
                     // A web overlay beside the document serves the HTML
                     // file's own directory, so the page reaches its stylesheet
@@ -388,56 +473,37 @@ impl MediaCoordinator {
                             path: resolved.display().to_string(),
                         },
                     };
-                    self.staged.insert(
-                        id,
-                        Staged {
-                            source: Some(source),
-                            awaiting: None,
-                            blocked: None,
-                            manifest: None,
-                        },
-                    );
-                    return Need::Ready;
+                    Staged::Ready {
+                        source,
+                        manifest: None,
+                    }
                 }
-                Err(e) => {
-                    let reason = e.to_string();
-                    self.staged.insert(
-                        id,
-                        Staged {
-                            source: None,
-                            awaiting: None,
-                            blocked: Some(reason.clone()),
-                            manifest: None,
-                        },
-                    );
-                    return Need::Blocked(reason);
-                }
-            }
+                Err(e) => Staged::Blocked(e.to_string()),
+            };
+            let need = staged.need();
+            self.staged.insert(id, staged);
+            return need;
         }
 
         let Some(name) = embedded else {
-            let reason = "the overlay names no asset".to_string();
-            self.staged.insert(
-                id,
-                Staged {
-                    source: None,
-                    awaiting: None,
-                    blocked: Some(reason.clone()),
-                    manifest: None,
-                },
-            );
-            return Need::Blocked(reason);
+            let staged = Staged::Blocked("the overlay names no asset".to_string());
+            let need = staged.need();
+            self.staged.insert(id, staged);
+            return need;
         };
 
-        self.staged.insert(
-            id,
-            Staged {
-                source: None,
-                awaiting: Some(name.clone()),
-                blocked: None,
-                manifest: None,
-            },
-        );
+        // An embedded asset lands through `attachment_ready`, which needs
+        // the staging root to write into. Without one, waiting here would
+        // never resolve: the renderer's bytes have nowhere to go and
+        // `attachment_ready` drops them silently.
+        if let Some(reason) = self.staging_error.clone() {
+            let staged = Staged::Blocked(reason);
+            let need = staged.need();
+            self.staged.insert(id, staged);
+            return need;
+        }
+
+        self.staged.insert(id, Staged::Awaiting(name.clone()));
         // Several overlays may reference one attachment — a poster shared
         // between two slides, say — so the caller is told what is needed
         // every time, and `requested` is what stops it being *fetched* twice.
@@ -460,7 +526,7 @@ impl MediaCoordinator {
         let waiting: Vec<OverlayId> = self
             .staged
             .iter()
-            .filter(|(_, staged)| staged.awaiting.as_deref() == Some(name))
+            .filter(|(_, staged)| staged.awaiting() == Some(name))
             .map(|(id, _)| *id)
             .collect();
 
@@ -474,31 +540,14 @@ impl MediaCoordinator {
                 ContentKind::Web => self.stage_bundle(id, name, bytes, staging),
                 _ => self.stage_file(id, name, bytes, staging),
             };
-            match outcome {
-                Ok((source, manifest)) => {
-                    self.staged.insert(
-                        id,
-                        Staged {
-                            source: Some(source),
-                            awaiting: None,
-                            blocked: None,
-                            manifest,
-                        },
-                    );
-                }
+            let staged = match outcome {
+                Ok((source, manifest)) => Staged::Ready { source, manifest },
                 Err(reason) => {
                     self.diagnostics.push(format!("{id}: {reason}"));
-                    self.staged.insert(
-                        id,
-                        Staged {
-                            source: None,
-                            awaiting: None,
-                            blocked: Some(reason),
-                            manifest: None,
-                        },
-                    );
+                    Staged::Blocked(reason)
                 }
-            }
+            };
+            self.staged.insert(id, staged);
         }
     }
 
@@ -507,19 +556,11 @@ impl MediaCoordinator {
         let waiting: Vec<OverlayId> = self
             .staged
             .iter()
-            .filter(|(_, staged)| staged.awaiting.as_deref() == Some(name))
+            .filter(|(_, staged)| staged.awaiting() == Some(name))
             .map(|(id, _)| *id)
             .collect();
         for id in waiting {
-            self.staged.insert(
-                id,
-                Staged {
-                    source: None,
-                    awaiting: None,
-                    blocked: Some(reason.to_string()),
-                    manifest: None,
-                },
-            );
+            self.staged.insert(id, Staged::Blocked(reason.to_string()));
         }
     }
 
@@ -601,7 +642,7 @@ impl MediaCoordinator {
                 let requirements = self
                     .staged
                     .get(&id)
-                    .and_then(|staged| staged.manifest.as_ref())
+                    .and_then(|staged| staged.manifest())
                     .map(|manifest| manifest.requirements)
                     .unwrap_or(spec.requirements);
                 // Audio stays denied in the first implementation even when a
@@ -630,11 +671,7 @@ impl MediaCoordinator {
             .collect();
 
         for id in candidates {
-            let Some(source) = self
-                .staged
-                .get(&id)
-                .and_then(|staged| staged.source.clone())
-            else {
+            let Some(source) = self.staged.get(&id).and_then(|staged| staged.source()) else {
                 continue;
             };
             let Some(viewport) = viewport_for(id) else {
@@ -755,7 +792,7 @@ impl MediaCoordinator {
         height: u32,
         rgba: std::sync::Arc<Vec<u8>>,
     ) {
-        if !self.generation.is_current_for(generation) || generation != self.generation {
+        if generation != self.generation {
             // A frame from a retired generation is dropped before it can
             // replace a current one.
             return;
@@ -887,6 +924,7 @@ mod tests {
             .collect();
         let mut coordinator = MediaCoordinator::new();
         coordinator.rebuild(
+            None,
             RenderGeneration(1),
             &per_page,
             &PageLabels::default(),
@@ -907,6 +945,7 @@ mod tests {
             .collect();
         let mut coordinator = MediaCoordinator::new();
         coordinator.rebuild(
+            None,
             RenderGeneration(1),
             &per_page,
             &PageLabels::default(),
@@ -946,6 +985,24 @@ mod tests {
         let needs = coordinator.needs(0, std::path::Path::new("/tmp"));
         assert_eq!(needs.len(), 1);
         assert_eq!(needs[0].1, Need::Attachment("spinner".to_string()));
+    }
+
+    #[test]
+    fn a_failed_staging_directory_blocks_embedded_overlays_instead_of_waiting_forever() {
+        // `rebuild` records why `staging` is `None` when `StagingRoot::create`
+        // failed. An embedded overlay has nowhere for `attachment_ready` to
+        // land its bytes in that state, so it must be reported `Blocked`
+        // rather than left `awaiting` an attachment that can never resolve.
+        let mut coordinator = coordinator(&[(0, &["pulpit://image/spinner"])]);
+        coordinator.staging = None;
+        coordinator.staging_error = Some("no staging directory: disk full".to_string());
+
+        let needs = coordinator.needs(0, std::path::Path::new("/tmp"));
+        assert_eq!(needs.len(), 1);
+        assert_eq!(
+            needs[0].1,
+            Need::Blocked("no staging directory: disk full".to_string())
+        );
     }
 
     #[test]
@@ -1045,6 +1102,7 @@ mod tests {
         let mut per_page: BTreeMap<usize, Vec<OverlayDeclaration>> = BTreeMap::new();
         per_page.insert(0, declarations(&["pulpit://image/spinner"]));
         coordinator.rebuild(
+            None,
             RenderGeneration(1),
             &per_page,
             &PageLabels::default(),
@@ -1057,6 +1115,7 @@ mod tests {
         // A second page's overlays arrive before the attachment does.
         per_page.insert(1, declarations(&["pulpit://video/clip"]));
         coordinator.rebuild(
+            None,
             RenderGeneration(1),
             &per_page,
             &PageLabels::default(),
@@ -1078,6 +1137,51 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_closes_the_session_of_an_id_reused_by_different_content() {
+        // Same generation, same `OverlayId` (identity, z_index and occurrence
+        // are unchanged), but the declaration behind it changed — as happens
+        // when pages land out of render-priority order and an occurrence
+        // count settles differently on a later rebuild. The stale session
+        // must close rather than keep playing content the index no longer
+        // names.
+        let mut coordinator = coordinator(&[(0, &["pulpit://image/spinner"])]);
+        let id = coordinator.index().all()[0].id;
+        let mut supervisor =
+            pulpit_media::MediaSupervisor::unprobed(pulpit_media::MediaConfig::default());
+        coordinator.sessions.insert(id, SessionId(1));
+        coordinator.frames.insert(
+            id,
+            OverlayFrame {
+                width: 1,
+                height: 1,
+                handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0u8; 4]),
+                sequence: 1,
+            },
+        );
+
+        let mut per_page = BTreeMap::new();
+        per_page.insert(0, declarations(&["pulpit://image/spinner?autoplay"]));
+        coordinator.rebuild(
+            Some(&mut supervisor),
+            RenderGeneration(1),
+            &per_page,
+            &PageLabels::default(),
+            Vec::new(),
+        );
+
+        let same_id = coordinator.index().all()[0].id;
+        assert_eq!(same_id, id, "the id must be reused for this to be a test");
+        assert!(
+            coordinator.session(id).is_none(),
+            "the orphaned session must be closed, not left running"
+        );
+        assert!(
+            coordinator.frame(id).is_none(),
+            "a retained frame belongs to the old content and must not be shown for the new one"
+        );
+    }
+
+    #[test]
     fn a_new_generation_does_discard_the_old_staging() {
         // The opposite guarantee: a reload must not keep serving the previous
         // document's assets.
@@ -1092,6 +1196,7 @@ mod tests {
         let mut per_page = BTreeMap::new();
         per_page.insert(0, declarations(&["pulpit://image/spinner"]));
         coordinator.rebuild(
+            None,
             RenderGeneration(2),
             &per_page,
             &PageLabels::default(),
@@ -1151,6 +1256,7 @@ mod tests {
         assert!(coordinator.frame(id).is_some());
 
         coordinator.rebuild(
+            None,
             RenderGeneration(2),
             &BTreeMap::new(),
             &PageLabels::default(),

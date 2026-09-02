@@ -16813,6 +16813,7 @@ impl App {
             self.attachments_requested.clear();
         }
         self.media.rebuild(
+            self.media_supervisor.as_mut(),
             generation,
             &self.overlay_declarations,
             &pulpit_core::overlay::PageLabels::default(),
