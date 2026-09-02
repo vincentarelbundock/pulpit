@@ -158,13 +158,13 @@ pub enum Action {
 use serde::{Deserialize, Serialize};
 
 /// The reading session.
+///
+/// §81: used to be `Reading { state: SpeechStateInner { state } }`, a
+/// wrapper struct around the one field it held. Nothing else ever used
+/// `SpeechStateInner` on its own, so it named nothing `Reading` did not
+/// already name.
 #[derive(Debug, Clone, Default)]
 pub struct Reading {
-    state: SpeechStateInner,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SpeechStateInner {
     state: Option<Active>,
 }
 
@@ -196,31 +196,30 @@ impl Reading {
 
     pub fn state(&self) -> SpeechState {
         self.state
-            .state
             .as_ref()
             .map(|active| active.state.clone())
             .unwrap_or(SpeechState::Idle)
     }
 
     pub fn scope(&self) -> Option<Scope> {
-        self.state.state.as_ref().map(|active| active.scope)
+        self.state.as_ref().map(|active| active.scope)
     }
 
     /// The page speech is on, for the UI to show alongside the controls.
     pub fn page(&self) -> Option<PageIndex> {
-        self.state.state.as_ref().map(|active| active.page)
+        self.state.as_ref().map(|active| active.page)
     }
 
     /// How far through the current page, as (sentence, total). Useful as a
     /// progress readout and in tests.
     pub fn progress(&self) -> Option<(usize, usize)> {
-        let active = self.state.state.as_ref()?;
+        let active = self.state.as_ref()?;
         Some((active.index, active.units.len()))
     }
 
     /// The text of the sentence currently being spoken.
     pub fn current_text(&self) -> Option<&str> {
-        let active = self.state.state.as_ref()?;
+        let active = self.state.as_ref()?;
         let unit = active.units.get(active.index)?;
         Some(unit.text(&active.text))
     }
@@ -232,7 +231,7 @@ impl Reading {
             Event::TextArrived { page, text } => self.text_arrived(page, text),
             Event::NoSuchPage(_) => self.finish(),
             Event::UtteranceStarted => {
-                if let Some(active) = self.state.state.as_mut() {
+                if let Some(active) = self.state.as_mut() {
                     if active.state == SpeechState::Starting {
                         active.state = SpeechState::Speaking;
                     }
@@ -241,7 +240,7 @@ impl Reading {
             }
             Event::UtteranceFinished => self.advance(),
             Event::EngineFailed => {
-                self.state.state = None;
+                self.state = None;
                 vec![Action::StopSpeaking]
             }
             Event::Pause => self.pause(),
@@ -252,7 +251,7 @@ impl Reading {
     }
 
     fn start(&mut self, scope: Scope, page: PageIndex) -> Vec<Action> {
-        self.state.state = Some(Active {
+        self.state = Some(Active {
             scope,
             page,
             text: String::new(),
@@ -266,10 +265,10 @@ impl Reading {
     fn start_selection(&mut self, text: String, page: PageIndex) -> Vec<Action> {
         let units = sentences(&text);
         if units.is_empty() {
-            self.state.state = None;
+            self.state = None;
             return vec![Action::StopSpeaking, Action::Finished];
         }
-        self.state.state = Some(Active {
+        self.state = Some(Active {
             scope: Scope::Selection,
             page,
             text,
@@ -283,7 +282,7 @@ impl Reading {
     }
 
     fn text_arrived(&mut self, page: PageIndex, text: String) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         // Text for a page we have since moved off, or a stale answer after a
@@ -308,7 +307,7 @@ impl Reading {
     }
 
     fn speak_current(&mut self) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         let Some(unit) = active.units.get(active.index) else {
@@ -341,7 +340,7 @@ impl Reading {
     }
 
     fn advance(&mut self) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         // A finish that arrives while paused belongs to the utterance that
@@ -361,7 +360,7 @@ impl Reading {
     }
 
     fn next_page(&mut self) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         let next = PageIndex(active.page.0 + 1);
@@ -374,7 +373,7 @@ impl Reading {
     }
 
     fn pause(&mut self) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         if !active.state.is_pausable() {
@@ -385,7 +384,7 @@ impl Reading {
     }
 
     fn resume(&mut self) -> Vec<Action> {
-        let Some(active) = self.state.state.as_ref() else {
+        let Some(active) = self.state.as_ref() else {
             return Vec::new();
         };
         if active.state != SpeechState::Paused {
@@ -395,7 +394,7 @@ impl Reading {
         // AwaitingText — so ask again rather than speaking an empty unit.
         if active.units.is_empty() {
             let page = active.page;
-            if let Some(active) = self.state.state.as_mut() {
+            if let Some(active) = self.state.as_mut() {
                 active.state = SpeechState::AwaitingText(page);
             }
             return vec![Action::NeedText(page)];
@@ -404,15 +403,15 @@ impl Reading {
     }
 
     fn stop(&mut self) -> Vec<Action> {
-        if self.state.state.is_none() {
+        if self.state.is_none() {
             return Vec::new();
         }
-        self.state.state = None;
+        self.state = None;
         vec![Action::StopSpeaking]
     }
 
     fn skip(&mut self, direction: Direction) -> Vec<Action> {
-        let Some(active) = self.state.state.as_mut() else {
+        let Some(active) = self.state.as_mut() else {
             return Vec::new();
         };
         if active.units.is_empty() {
@@ -448,7 +447,7 @@ impl Reading {
             // Skipping while paused moves the cursor and shows the new
             // position, but does not start talking: the reader paused on
             // purpose.
-            let Some(active) = self.state.state.as_mut() else {
+            let Some(active) = self.state.as_mut() else {
                 return actions;
             };
             active.state = SpeechState::Paused;
@@ -467,7 +466,7 @@ impl Reading {
     }
 
     fn finish(&mut self) -> Vec<Action> {
-        self.state.state = None;
+        self.state = None;
         vec![Action::StopSpeaking, Action::Finished]
     }
 }
