@@ -160,7 +160,9 @@ fn connect() -> Option<Box<dyn DisplayBackend>> {
         if std::env::var_os("DISPLAY").is_some() {
             match pulpit_display::x11::X11Backend::connect() {
                 Ok(backend) => {
-                    let _ = backend.subscribe_to_topology_changes();
+                    if let Err(e) = backend.subscribe_to_topology_changes() {
+                        eprintln!("# x11: could not subscribe to topology change events: {e}");
+                    }
                     return Some(Box::new(backend));
                 }
                 Err(e) => eprintln!("# x11: {e}"),

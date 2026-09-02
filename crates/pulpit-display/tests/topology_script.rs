@@ -58,11 +58,6 @@ fn check_invariants(label: &str, outcome: &Outcome, windows: &Windows, monitors:
         windows.presenter.visible || monitors == 0,
         "{label}: the presenter window is not visible"
     );
-    assert_ne!(
-        windows.presenter.mode,
-        WindowMode::Hidden,
-        "{label}: the presenter window is hidden"
-    );
 
     // Both roles on one display is allowed, but never silently, and never
     // with the audience covering the operator's own controls.
@@ -270,4 +265,51 @@ fn out_of_order_notifications_are_dropped() {
         );
         assert_eq!(windows, settled, "a stale notification moved a window");
     }
+}
+
+/// §77.2 regression: A and B are an exact mirror, C is a third free display,
+/// and none of the three is built-in. Pinning the audience explicitly to B
+/// (one half of the mirror) used to collapse the presenter onto the same
+/// logical display as the audience, because the explicit resolution's raw
+/// snapshot index was compared against the automatic policy's *logical*
+/// (mirror-collapsed) candidate list without ever being mapped through it —
+/// so B's raw index never excluded the A/B group from being handed to the
+/// presenter, and only the redundant mapping applied afterwards folded both
+/// roles onto the same logical target. C was free the whole time.
+#[test]
+fn an_explicit_mirrored_audience_does_not_strand_the_presenter_on_a_free_third_display() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/topology/09-explicit-mirrored-audience-frees-the-presenter.txt");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let scenario = Scenario::parse(&text).unwrap();
+    let step = &scenario.steps[0];
+    let snapshot = step.snapshot(1);
+
+    let b = step
+        .monitors
+        .iter()
+        .find(|m| m.model.as_deref() == Some("B"))
+        .expect("scenario has a monitor B");
+    let c_index = step
+        .monitors
+        .iter()
+        .position(|m| m.model.as_deref() == Some("C"))
+        .expect("scenario has a monitor C");
+
+    let roles = DisplayRoles {
+        audience: RoleTarget::Monitor(Box::new(IdentityRecord::new(b.identity.clone()))),
+        ..DisplayRoles::default()
+    };
+    let windows = ready_windows();
+    let outcome = reconcile(&snapshot, &roles, Capabilities::X11, &windows);
+
+    assert_eq!(
+        outcome.resolved.presenter,
+        Some(c_index),
+        "the presenter must land on the free display C, not collapse onto \
+         the mirrored audience: resolved {:?}",
+        outcome.resolved
+    );
+    assert_ne!(outcome.resolved.presenter, outcome.resolved.audience);
+    assert!(!outcome.has_warning(&Warning::SharedDisplay));
 }

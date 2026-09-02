@@ -1,0 +1,5 @@
+# A and B are an exact mirror, C is a third free display, none built-in
+step three-way
+  monitor DP-1 1920x1080+0+0 @1 make=ACME model=A id=ACM-A001
+  monitor DP-2 1920x1080+0+0 @1 make=ACME model=B id=ACM-B001
+  monitor DP-3 1920x1080+1920+0 @1 make=ACME model=C id=ACM-C001

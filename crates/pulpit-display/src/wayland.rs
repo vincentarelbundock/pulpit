@@ -211,6 +211,28 @@ fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> Result<bool, BackendE
     Ok(ready > 0 && pollfd.revents & libc::POLLIN != 0)
 }
 
+/// A fractional-aware scale factor.
+///
+/// `wl_output.scale` is an integer, which is a lie on any 1.5x/1.25x
+/// fractional-scaling display: the compositor rounds it up (or down) to
+/// report *something*, and `scale_checks` (below) then flags every such
+/// output as "inconsistent" even though nothing is actually wrong. When both
+/// the logical size and the current mode's physical pixels are known, the
+/// true scale is their ratio; the integer is only a fallback for when one of
+/// those is unavailable. (§77.1)
+fn derive_scale_factor(
+    logical: Option<(i32, i32)>,
+    mode: Option<(i32, i32)>,
+    integer_scale: i32,
+) -> f64 {
+    if let (Some((logical_width, _)), Some((mode_width, _))) = (logical, mode) {
+        if logical_width > 0 {
+            return mode_width as f64 / logical_width as f64;
+        }
+    }
+    integer_scale.max(1) as f64
+}
+
 impl DisplayBackend for WaylandBackend {
     fn name(&self) -> &'static str {
         "wayland-output"
@@ -238,16 +260,16 @@ impl DisplayBackend for WaylandBackend {
 
             // Logical geometry when xdg-output provides it, otherwise the
             // current mode divided by the buffer scale.
+            let current_mode = info
+                .modes
+                .iter()
+                .find(|mode| mode.current)
+                .map(|mode| mode.dimensions);
             let (x, y) = info.logical_position.unwrap_or(info.location);
             let (width, height) = match info.logical_size {
                 Some((width, height)) => (width.max(0) as u32, height.max(0) as u32),
                 None => {
-                    let mode = info
-                        .modes
-                        .iter()
-                        .find(|mode| mode.current)
-                        .map(|mode| mode.dimensions)
-                        .unwrap_or((0, 0));
+                    let mode = current_mode.unwrap_or((0, 0));
                     let scale = info.scale_factor.max(1);
                     (
                         (mode.0 / scale).max(0) as u32,
@@ -255,6 +277,8 @@ impl DisplayBackend for WaylandBackend {
                     )
                 }
             };
+            let scale_factor =
+                derive_scale_factor(info.logical_size, current_mode, info.scale_factor);
 
             let identity = MonitorIdentity::Connector {
                 connector: connector.clone(),
@@ -281,7 +305,7 @@ impl DisplayBackend for WaylandBackend {
                 make,
                 model,
                 geometry: Rect::new(x, y, width, height),
-                scale_factor: info.scale_factor.max(1) as f64,
+                scale_factor,
                 physical_size_mm: (physical != (0, 0)).then_some(physical),
                 builtin: is_builtin_connector(&connector),
                 // Wayland has no notion of a primary output, and pretending
@@ -317,11 +341,13 @@ impl DisplayBackend for WaylandBackend {
 /// Phase 0 asks for this explicitly: toolkit-level scale reporting on Wayland
 /// has a history of doubling (pdfpc ships an opt-in workaround for it). Rather
 /// than a workaround flag, pulpit measures and reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScaleCheck {
     pub connector: String,
     pub logical: (u32, u32),
-    pub scale: i32,
+    /// The fractional-aware scale ([`derive_scale_factor`]), not the raw
+    /// integer `wl_output.scale`.
+    pub scale: f64,
     /// Physical pixels from the current mode, when one is reported.
     pub mode: Option<(u32, u32)>,
     pub consistent: bool,
@@ -332,11 +358,11 @@ impl ScaleCheck {
         match self.mode {
             None => format!("{}: no current mode reported", self.connector),
             Some((mw, mh)) if self.consistent => format!(
-                "{}: {}×{} × {} = {mw}×{mh} ✓",
+                "{}: {}×{} × {:.2} = {mw}×{mh} ✓",
                 self.connector, self.logical.0, self.logical.1, self.scale
             ),
             Some((mw, mh)) => format!(
-                "{}: {}×{} × {} ≠ mode {mw}×{mh} — scale reporting is inconsistent",
+                "{}: {}×{} × {:.2} ≠ mode {mw}×{mh} — scale reporting is inconsistent",
                 self.connector, self.logical.0, self.logical.1, self.scale
             ),
         }
@@ -357,22 +383,33 @@ impl WaylandBackend {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("wl-output-{}", info.id));
-            let scale = info.scale_factor.max(1);
-            let mode = info.modes.iter().find(|mode| mode.current).map(|mode| {
-                (
-                    mode.dimensions.0.max(0) as u32,
-                    mode.dimensions.1.max(0) as u32,
-                )
-            });
+            let current_mode = info
+                .modes
+                .iter()
+                .find(|mode| mode.current)
+                .map(|mode| mode.dimensions);
+            let mode =
+                current_mode.map(|(width, height)| (width.max(0) as u32, height.max(0) as u32));
+            let integer_scale = info.scale_factor.max(1);
             let logical = match info.logical_size {
                 Some((width, height)) => (width.max(0) as u32, height.max(0) as u32),
                 None => match mode {
-                    Some((width, height)) => (width / scale as u32, height / scale as u32),
+                    Some((width, height)) => {
+                        (width / integer_scale as u32, height / integer_scale as u32)
+                    }
                     None => (0, 0),
                 },
             };
+            let scale = derive_scale_factor(info.logical_size, current_mode, info.scale_factor);
+            // A rounding tolerance of one pixel per dimension: logical units
+            // are themselves rounded, so a fractional scale reconstructed
+            // from them will not always land exactly back on the mode.
             let consistent = match mode {
-                Some((mw, mh)) => logical.0 * scale as u32 == mw && logical.1 * scale as u32 == mh,
+                Some((mw, mh)) => {
+                    let expected_w = (logical.0 as f64 * scale).round() as i64;
+                    let expected_h = (logical.1 as f64 * scale).round() as i64;
+                    (expected_w - mw as i64).abs() <= 1 && (expected_h - mh as i64).abs() <= 1
+                }
                 None => true,
             };
             checks.push(ScaleCheck {
@@ -438,7 +475,7 @@ mod tests {
         let good = ScaleCheck {
             connector: "eDP-1".into(),
             logical: (1920, 1200),
-            scale: 2,
+            scale: 2.0,
             mode: Some((3840, 2400)),
             consistent: true,
         };
@@ -447,11 +484,36 @@ mod tests {
         let doubled = ScaleCheck {
             connector: "eDP-1".into(),
             logical: (3840, 2400),
-            scale: 2,
+            scale: 2.0,
             mode: Some((3840, 2400)),
             consistent: false,
         };
         assert!(doubled.describe().contains("inconsistent"));
+    }
+
+    #[test]
+    fn a_fractional_scale_is_derived_from_mode_over_logical_size() {
+        // A 1.5x display: the integer `wl_output.scale` would report 2 (or
+        // 1, depending on rounding direction), either of which is wrong.
+        assert_eq!(
+            derive_scale_factor(Some((1280, 800)), Some((1920, 1200)), 2),
+            1.5
+        );
+        // Neither logical size nor mode known: fall back to the integer.
+        assert_eq!(derive_scale_factor(None, None, 2), 2.0);
+        // A logical width of zero must not divide by zero.
+        assert_eq!(
+            derive_scale_factor(Some((0, 800)), Some((1920, 1200)), 2),
+            2.0
+        );
+    }
+
+    #[test]
+    fn scale_checks_tolerate_one_pixel_of_rounding() {
+        // logical (1280, 800) at the true 1.5x scale reconstructs to exactly
+        // the mode; the integer scale of 2 would not.
+        let derived = derive_scale_factor(Some((1280, 800)), Some((1920, 1200)), 2);
+        assert_eq!(derived, 1.5);
     }
 
     /// Runs only inside a real Wayland session; skips with a message
