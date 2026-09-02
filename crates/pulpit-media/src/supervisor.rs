@@ -45,8 +45,6 @@ pub use pulpit_core::ipc::{WorkerCommand, WORKER_MARKER};
 
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
-    /// How long a worker has to answer its handshake before it is replaced.
-    pub handshake_deadline: Duration,
     /// How long a session has to produce its first complete frame.
     pub first_frame_deadline: Duration,
     /// Restarts allowed for one session before the supervisor gives up and
@@ -68,7 +66,6 @@ pub struct MediaConfig {
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
-            handshake_deadline: Duration::from_secs(5),
             first_frame_deadline: Duration::from_secs(10),
             max_restarts: 1,
             slots: DEFAULT_SLOTS,
@@ -306,6 +303,26 @@ impl Worker {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// Let this worker go without making the caller wait through its
+    /// shutdown grace period.
+    ///
+    /// Every mid-run removal — a version mismatch, a fault the poll loop just
+    /// noticed, a launch whose `Open` write failed — happens on the
+    /// application's own event-loop turn, where up to five seconds of
+    /// `shutdown()`'s poll-then-kill is a stall a presenter mid-talk would
+    /// feel. `MediaSupervisor::shutdown` is the one caller that legitimately
+    /// wants to block: the application is already on its way out, and racing
+    /// past the grace period there is what leaves an orphaned browser behind.
+    fn discard(self) {
+        let runtime = self.runtime;
+        // If the thread cannot be spawned, `self` is dropped here instead —
+        // synchronously, same as before this existed, which is a safe worst
+        // case rather than a silent leak.
+        let _ = std::thread::Builder::new()
+            .name(format!("{runtime}-discard"))
+            .spawn(move || drop(self));
     }
 }
 
@@ -566,7 +583,9 @@ impl MediaSupervisor {
         }
         let worker = self.workers.get_mut(&runtime).expect("just inserted");
         if let Err(error) = worker.send(&MediaRequest::Open(Box::new(spec.clone()))) {
-            self.workers.remove(&runtime);
+            if let Some(worker) = self.workers.remove(&runtime) {
+                worker.discard();
+            }
             return Err(error);
         }
         Ok(ring)
@@ -821,6 +840,42 @@ impl MediaSupervisor {
             let newest = newest_frames(&events);
 
             for event in events {
+                if let MediaEvent::Hello(description) = &event {
+                    // The comment on `MEDIA_PROTOCOL_VERSION` promises a
+                    // worker that answers with another version is shut down
+                    // rather than trusted; until here nothing checked, so a
+                    // stale worker binary left behind by a partial upgrade
+                    // spoke a protocol nothing on this side understood and
+                    // was never told so.
+                    if description.version != MEDIA_PROTOCOL_VERSION {
+                        tracing::warn!(
+                            %runtime,
+                            theirs = description.version,
+                            ours = MEDIA_PROTOCOL_VERSION,
+                            "worker protocol version mismatch; worker removed"
+                        );
+                        if let Some(worker) = self.workers.remove(&runtime) {
+                            worker.discard();
+                        }
+                        let detail = format!(
+                            "the {runtime} worker speaks protocol {} but this build speaks {MEDIA_PROTOCOL_VERSION}",
+                            description.version
+                        );
+                        for session in self.sessions.values() {
+                            if session.runtime == runtime {
+                                casualties.push((
+                                    session.id,
+                                    MediaError::new(
+                                        MediaErrorKind::ProtocolViolation,
+                                        detail.clone(),
+                                    )
+                                    .with_runtime(runtime),
+                                ));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if let MediaEvent::Counters(counters) = &event {
                     self.worker_counters.insert(runtime, *counters);
                     continue;
@@ -871,7 +926,9 @@ impl MediaSupervisor {
                 // The process carrying several sessions has gone: every one of
                 // them is a casualty, and the worker is dropped so the next
                 // open starts a fresh one.
-                self.workers.remove(&runtime);
+                if let Some(worker) = self.workers.remove(&runtime) {
+                    worker.discard();
+                }
                 for session in self.sessions.values() {
                     if session.runtime == runtime {
                         casualties.push((
@@ -1018,6 +1075,14 @@ impl MediaSupervisor {
             generation: Some(generation),
             ..error
         };
+
+        // The worker still hosts this session unless the fault itself was the
+        // worker exiting — closing a dead worker is only a wasted write, but
+        // leaving a live one hosting a session the supervisor has given up on
+        // is the browser tab and the full ring that never get let go of.
+        if let Some(worker) = self.workers.get_mut(&runtime) {
+            let _ = worker.send(&MediaRequest::Close { session: id });
+        }
 
         if error.kind.is_transient() && restarts < self.config.max_restarts {
             spec.ring_name = self.namer.next_name();
