@@ -1,6 +1,10 @@
 //! The Iced application: one update loop, one presenter and an optional
 //! audience window, one presentation state.
 
+mod print;
+
+pub(crate) use print::PrintJob;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -29,6 +33,32 @@ use crate::theme::ThemeState;
 use crate::toast::{Intent, Toasts};
 
 pub(crate) const DOCUMENTATION_URL: &str = "https://vincentarelbundock.github.io/pulpit/";
+
+/// Seconds since local midnight, for the clock widget.
+///
+/// §76.13: this used to cache a UTC offset primed once from a `date +%z`
+/// subprocess, which is a shell builtin (so it fails outright) on Windows,
+/// and which never refreshed across a DST change during a session.
+/// `chrono::Local` reads the platform timezone database directly and
+/// re-derives the offset on every call, so both problems are gone at the
+/// same time. The read belongs to `App`, not to a view module: `App`
+/// refreshes [`App::last_seconds_of_day`] on the tick the clock already
+/// relies on, and the view is handed that value rather than reading the
+/// clock itself.
+pub(crate) fn seconds_of_day() -> u32 {
+    use chrono::Timelike;
+    chrono::Local::now().num_seconds_from_midnight()
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::seconds_of_day;
+
+    #[test]
+    fn the_clock_is_within_a_day() {
+        assert!(seconds_of_day() < 86_400);
+    }
+}
 
 /// Cadence for animations and short UI deadlines. Worker delivery is
 /// event-driven and does not wait for this clock.
@@ -1304,19 +1334,16 @@ pub struct App {
     /// only then go on. Writing first would put a file on disk, or paper in
     /// a tray, without the characters the reader can see.
     waits_for_form_commit: Option<AfterFormCommit>,
-    /// The print dialog, while it is open.
+    /// The print dialog, while it is open. Separate from [`PrintJob`]
+    /// (§79.4): this is the Print sheet's own UI state, guarded against a
+    /// job already in flight rather than folded into one with it.
     pub print_dialog: Option<crate::printing::PrintDialog>,
-    /// The scratch copy a marked-up print is being spooled from, while the
-    /// worker is still writing it. Recognised in [`Self::pump_reader`] the
-    /// same way the signing copy is: this is not a save the reader made, so
-    /// it is not announced and the document is not told about it.
-    pub print_scratch: Option<PathBuf>,
-    /// What that copy is to be printed as, once it exists.
-    pub print_pending: Option<crate::printing::PrintPlan>,
-    /// A job on its way to the platform: a system dialog the reader is
-    /// looking at, or a spooler reading the file. Nothing else may print
-    /// while it is set.
-    pub print_in_flight: bool,
+    /// The print job in flight, if any: a scratch copy of a marked-up
+    /// document being written before it is spooled — recognised in
+    /// [`Self::pump_reader`] the same way the signing copy is, since it is
+    /// not a save the reader made and is not announced — or a job already
+    /// handed to the platform. See `app/print.rs`.
+    pub print_job: PrintJob,
     /// Whether the save now in flight was already reviewed, so the notice the
     /// worker's answer carries is not read back to a reader who just
     /// acknowledged it.
@@ -2273,9 +2300,7 @@ impl App {
             signature_panel_expanded: None,
             waits_for_form_commit: None,
             print_dialog: None,
-            print_scratch: None,
-            print_pending: None,
-            print_in_flight: false,
+            print_job: PrintJob::Idle,
             save_reviewed: false,
             color_picker_open: None,
             session,
@@ -2421,7 +2446,7 @@ impl App {
             annotation_controls,
             alarm_controls,
             timer_controls,
-            last_seconds_of_day: crate::view::seconds_of_day(),
+            last_seconds_of_day: seconds_of_day(),
         };
 
         // Open directly on a layout page when asked.
@@ -4638,11 +4663,10 @@ impl App {
     /// Mount a layout and remember it for its mode, without claiming the user
     /// asked for it on this particular document.
     fn mount_layout(&mut self, layout: Layout) {
-        // A layout that asks to open fullscreen carries the reader's chrome
-        // state as part of its identity; every other layout mounts windowed,
-        // so leaving one is enough to get the band and the rail back.
-        self.reader_fullscreen = layout.on_mount.fullscreen
-            && crate::layout::PrimaryViewer::of(&layout) == crate::layout::PrimaryViewer::Document;
+        // Every layout mounts windowed; leaving one is enough to get the
+        // band and the rail back (§81: `Layout::on_mount` was dropped —
+        // dead machinery never round-tripping through export/import).
+        self.reader_fullscreen = false;
         self.diagnostics
             .note(format!("presenter layout: {}", layout.name));
         // Each mode remembers its own (§2.3): choosing a presenter variant
@@ -4656,17 +4680,6 @@ impl App {
             }
         }
         self.active_layout = layout;
-        // The fit is fitted to the surface the new tree gives the page, which
-        // is a different size from the one the old tree gave it — full window
-        // in fullscreen, the page cell otherwise. Size the surface first, or
-        // "fit page" resolves against the layout we just left.
-        if let Some(zoom) = self.active_layout.on_mount.zoom {
-            if let Some(cell) = self.page_surface_size() {
-                self.reader.set_cell(cell.0, cell.1);
-            }
-            self.reader
-                .apply(&crate::widgets::event::ReadCommand::SetZoom(zoom));
-        }
         self.annotation_controls =
             crate::widgets::AnnotationControls::new(annotation_options_in(&self.active_layout));
         self.persist();
@@ -4846,7 +4859,7 @@ impl App {
                 elapsed: self.state.timer().elapsed(self.now),
                 target: self.state.timer().target,
                 running: self.state.timer().is_running(),
-                seconds_of_day: crate::view::seconds_of_day(),
+                seconds_of_day: seconds_of_day(),
             },
             // The editor shows the clock with no cues set, so a layout is
             // arranged against the widget's resting state rather than
@@ -5240,8 +5253,8 @@ impl App {
         // The full capability snapshot, over the conservative one the first
         // frame was built from — this is the bus-answering version.
         // (§76.13: the UTC offset used to be primed here too, by spawning
-        // `date` on this same thread; `crate::view::seconds_of_day` now
-        // reads `chrono::Local` directly and needs no priming.)
+        // `date` on this same thread; `seconds_of_day` now reads
+        // `chrono::Local` directly and needs no priming.)
         let services = self.platform.services.clone();
         tasks.push(Task::future(async move {
             let (sender, receiver) = iced::futures::channel::oneshot::channel();
@@ -6169,7 +6182,7 @@ impl App {
         //     window, not the instant: ticks do not land on whole seconds.
         //     `crossed` drops everything after a suspend, so a machine that
         //     woke from a closed lid does not announce a lunchtime of cues.
-        let seconds_of_day = crate::view::seconds_of_day();
+        let seconds_of_day = seconds_of_day();
         self.alarm_controls
             .strike(self.last_seconds_of_day, seconds_of_day, now);
         self.last_seconds_of_day = seconds_of_day;
@@ -7482,12 +7495,11 @@ impl App {
         // A print whose scratch copy will now never be written. The dialog
         // is gone, so this is the only place it would be dropped, and a
         // pending print left behind would be spooled by the *next*
-        // document's first save.
-        self.print_dialog = None;
-        self.print_pending = None;
-        if let Some(scratch) = self.print_scratch.take() {
-            let _ = std::fs::remove_file(scratch);
-        }
+        // document's first save. A job already handed to the platform is
+        // left alone: it is out of reach, and pretending otherwise would let
+        // a second dialog open behind the first one. See
+        // `App::abandon_print_job`.
+        self.abandon_print_job();
         // A copy that landed and was waiting to be spooled. The document it
         // was made from is gone, so the paper would be a surprise; the file
         // goes with it.
@@ -7498,10 +7510,6 @@ impl App {
             let _ = std::fs::remove_file(path);
             false
         });
-        // `print_in_flight` is deliberately not cleared: a job already handed
-        // to a thread is out of reach, and pretending otherwise would let a
-        // second dialog open behind the first one. It clears when the
-        // platform answers.
         // A new document gets to explain its own refusals once.
         self.form_refusal_told = false;
     }
@@ -7911,9 +7919,7 @@ impl App {
                     // document's remembered layout is not handed on, and
                     // the edits are still unsaved as far as the open
                     // document is concerned. It is printed and deleted.
-                    if self.print_scratch.as_deref() == Some(saved.path.as_path()) {
-                        self.print_scratch = None;
-                        self.print_scratch_landed(saved.path.clone());
+                    if self.print_scratch_matches(&saved.path) {
                         continue;
                     }
                     if self.signing_temp.as_deref() == Some(saved.path.as_path()) {
@@ -8016,11 +8022,9 @@ impl App {
                     }
                     // A print waiting on a scratch copy is waiting on the
                     // same kind of answer. Dropped for the same reason, and
-                    // whatever half-written file is there goes with it.
-                    self.print_pending = None;
-                    if let Some(scratch) = self.print_scratch.take() {
-                        let _ = std::fs::remove_file(scratch);
-                    }
+                    // whatever half-written file is there goes with it. Does
+                    // nothing when the job is `Idle` or already `InFlight`.
+                    self.abandon_print_scratch();
                     // A refusal is reported and the reader carries on; a lost
                     // worker closes document mode, because nothing more will
                     // be answered and a mutation in flight must not be
@@ -10977,421 +10981,6 @@ impl App {
             }
         }
         Task::none()
-    }
-
-    // --- Printing --------------------------------------------------------
-
-    /// Ctrl+P, and everything the dialog it opens can be asked afterwards.
-    fn handle_print(&mut self, message: PrintMsg) -> Task<Message> {
-        use crate::printing::PageChoice;
-
-        match message {
-            PrintMsg::Open => {
-                self.close_menu_dropdowns();
-                // A field holding the caret holds characters PDFium has not
-                // committed yet, and the whole point of printing "as it is on
-                // screen" is that those characters are on the paper. The
-                // dialog opens from the tick once the commit has come back.
-                if self
-                    .ask_form_commit_first(AfterFormCommit::Print)
-                    .succeeded()
-                {
-                    return Task::none();
-                }
-                self.open_print_dialog()
-            }
-            PrintMsg::Close => {
-                self.print_dialog = None;
-                Task::none()
-            }
-            PrintMsg::ChoosePages(choice) => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.choice = choice;
-                }
-                Task::none()
-            }
-            PrintMsg::TypeRange(text) => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.custom = text;
-                    // Typing in the box is choosing it: a reader who types a
-                    // range and presses Print meant the range, not "all".
-                    dialog.choice = PageChoice::Custom;
-                }
-                Task::none()
-            }
-            PrintMsg::ChooseMarks(marks) => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.marks = marks;
-                }
-                Task::none()
-            }
-            PrintMsg::TypeCopies(text) => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.set_copies(&text);
-                }
-                Task::none()
-            }
-            PrintMsg::ChooseDestination(destination) => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.destination = destination;
-                }
-                Task::none()
-            }
-            PrintMsg::Destinations(names) => {
-                // Only into the dialog that asked. A list that arrives after
-                // the reader has closed the dialog, or printed, is nothing to
-                // put anywhere.
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    if dialog.asks_particulars {
-                        dialog.destinations = names;
-                    }
-                }
-                Task::none()
-            }
-            PrintMsg::AcceptPermission => {
-                if let Some(dialog) = self.print_dialog.as_mut() {
-                    dialog.permission_answered = true;
-                }
-                Task::none()
-            }
-            PrintMsg::Spooled {
-                outcome,
-                title,
-                destination,
-                scratch,
-            } => {
-                self.print_spooled(outcome, title, destination, scratch);
-                Task::none()
-            }
-            PrintMsg::Send => {
-                let Some(dialog) = self.print_dialog.take() else {
-                    return Task::none();
-                };
-                let Some(source) = self
-                    .documents
-                    .active()
-                    .map(|document| document.path.clone())
-                else {
-                    self.notify("There is no document open to print.".into());
-                    return Task::none();
-                };
-                let page_count = self.reader.page_count();
-                let current = self.reader.current_page();
-                // Asked once more here rather than trusted from the view: the
-                // button is drawn from the same answer, but the document can
-                // have closed between the draw and the press.
-                if let Some(reason) = dialog.blocked(current, page_count) {
-                    // Put the dialog back: the reader has something to
-                    // correct, and taking it away would take the correction
-                    // with it.
-                    self.print_dialog = Some(dialog);
-                    self.notify(reason);
-                    return Task::none();
-                }
-                let Ok(plan) = dialog.plan(&source, current, page_count) else {
-                    self.print_dialog = Some(dialog);
-                    return Task::none();
-                };
-                if plan.needs_a_copy {
-                    self.print_scratch_copy(&source, plan);
-                    Task::none()
-                } else {
-                    self.spool(&source, &plan, false)
-                }
-            }
-        }
-    }
-
-    /// Put the dialog up, with what this session can actually offer in it.
-    fn open_print_dialog(&mut self) -> Task<Message> {
-        if self.print_in_flight || self.print_scratch.is_some() {
-            // A system print dialog is up, a spooler is reading, or the copy
-            // one of them is about to be handed is still being written. A
-            // second dialog behind any of those is two prints the reader
-            // only asked for one of, and refusing at the Print button after
-            // letting the dialog open is a worse way to say so.
-            self.notify("A print is already on its way. Wait for it, then try again.".into());
-            return Task::none();
-        }
-        if !self.platform.capabilities.printing {
-            // Said, and said visibly, rather than a dialog that ends in
-            // nothing. This is the whole reason the capability exists.
-            self.notify(
-                "Nothing in this session can print: pulpit found no spooler to hand the \
-                 document to."
-                    .into(),
-            );
-            return Task::none();
-        }
-        if self.documents.active().is_none() {
-            self.notify("There is no document open to print.".into());
-            return Task::none();
-        }
-        // A deck open for presenting has no document worker behind it, and
-        // it is the worker that would write the copy and answer for the
-        // permission bits. Said here rather than in a dialog whose Print
-        // button could only fail.
-        if self.reader_link.is_none() {
-            self.notify(
-                "This document is open for presenting only. Read it, and Ctrl+P prints from \
-                 there."
-                    .into(),
-            );
-            return Task::none();
-        }
-        // Who asks which pages, how many copies and which queue. The
-        // desktop's own dialog asks all three where there is one, so pulpit
-        // asks none of them and this one is left with the single question no
-        // system dialog can ask.
-        let asks_particulars = self.platform.capabilities.print_options
-            && !self.platform.capabilities.system_print_dialog;
-        // The dialog opens now and the queue list catches up. Asking the
-        // spooler is a subprocess that talks to the network — `lpstat`
-        // enumerates destinations it has only heard about — so on the event
-        // loop it is a freeze of both windows for as long as one unreachable
-        // print server takes to time out. The picker appears when the answer
-        // does; until then the dialog means what an empty list has always
-        // meant here, which is the default queue.
-        let ask_destinations = if asks_particulars {
-            let services = self.platform.services.clone();
-            Task::perform(
-                async move {
-                    // Its own thread rather than the executor's blocking
-                    // pool, for the reason spooling uses one: how long the
-                    // spooler takes is not this process's to know, and an
-                    // executor thread parked on it is one the rest of the
-                    // application does not get back.
-                    let (send, receive) = std::sync::mpsc::channel();
-                    let spawned = std::thread::Builder::new()
-                        .name("pulpit-printers".into())
-                        .spawn(move || {
-                            let _ = send.send(services.printers());
-                        });
-                    match spawned {
-                        Ok(_) => receive.recv().unwrap_or_default(),
-                        Err(error) => {
-                            tracing::warn!(%error, "could not ask for the print queues");
-                            Vec::new()
-                        }
-                    }
-                },
-                |names| Message::Print(PrintMsg::Destinations(names)),
-            )
-        } else {
-            // A picker that cannot pick — or that the system dialog is about
-            // to offer properly — is worse than no picker.
-            Task::none()
-        };
-        let mut dialog = crate::printing::PrintDialog::open(
-            Vec::new(),
-            self.reader.can_undo(),
-            asks_particulars,
-        );
-        // What the document itself asks for. Already answered for a document
-        // whose properties have been read; asked for otherwise, and the
-        // dialog shows the caution as soon as it lands. Not knowing is not
-        // the same as being forbidden, so nothing waits on it.
-        dialog.permission = self
-            .document_properties
-            .as_ref()
-            .map(|properties| crate::printing::Permission::read(&properties.permissions));
-        if dialog.permission.is_none() {
-            self.ask_document_properties();
-        }
-        self.print_dialog = Some(dialog);
-        ask_destinations
-    }
-
-    /// Ask the worker for the copy a marked-up print is spooled from.
-    ///
-    /// The same write Save As makes, to a scratch directory rather than
-    /// somewhere the reader chose. It is picked up again at `Told::Saved`.
-    fn print_scratch_copy(
-        &mut self,
-        source: &std::path::Path,
-        pending: crate::printing::PrintPlan,
-    ) {
-        let directory = self.platform.services.directories().cache.join("print");
-        // One at a time. The scratch name is this process's, so a second
-        // print started while the first is still being written would target
-        // the same bytes — and the answer that came back would be matched to
-        // whichever plan was set last.
-        if self.print_scratch.is_some() || self.print_in_flight {
-            self.notify("A print is already on its way. Wait for it, then try again.".into());
-            return;
-        }
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            self.notify(format!("pulpit could not make room for the print: {error}"));
-            return;
-        }
-        let scratch = directory.join(crate::printing::spool_name(source, std::process::id()));
-        // A6 all the same: the scratch name is derived from the source, and a
-        // document already living in the cache directory could collide with
-        // it. Printing must never write over what the reader opened.
-        if Self::same_path(source, &scratch) {
-            self.notify("pulpit cannot print this document from where it is.".into());
-            return;
-        }
-        let Some(link) = self.reader_link.as_mut() else {
-            self.notify("There is no document open to print.".into());
-            return;
-        };
-        link.ask(crate::reader_link::Ask::SaveAs {
-            destination: scratch.clone(),
-            options: pulpit_render::document::SaveOptions::verified(),
-        });
-        self.print_scratch = Some(scratch);
-        self.print_pending = Some(pending);
-    }
-
-    /// The scratch copy exists. Spool it, then take it away again.
-    fn print_scratch_landed(&mut self, path: PathBuf) {
-        let Some(pending) = self.print_pending.take() else {
-            // Nothing asked for this copy, which should not happen; deleting
-            // it is still the right thing to do with it.
-            let _ = std::fs::remove_file(&path);
-            return;
-        };
-        // Queued rather than spooled directly: the pump this lands on has no
-        // way to return the `Task` that spooling is now (§79.1).
-        self.deferred.push(Message::SpoolPrint(path, pending));
-    }
-
-    /// Hand a file to the platform, on a thread, and say what came of it.
-    ///
-    /// Two paths, chosen by what the session can do rather than by what it is
-    /// running on:
-    ///
-    /// - a desktop with a print dialog of its own gets the file and the
-    ///   title, and asks the reader everything else itself;
-    /// - a desktop with only a spooler gets the pages, the copies and the
-    ///   queue that pulpit's own dialog asked for, because nothing else was
-    ///   going to ask.
-    ///
-    /// Either way the call blocks — the first for as long as a person looks
-    /// at a dialog — so neither is made here. Both go to a thread, and the
-    /// answer arrives as [`PrintMsg::Spooled`].
-    fn spool(
-        &mut self,
-        file: &std::path::Path,
-        pending: &crate::printing::PrintPlan,
-        scratch: bool,
-    ) -> Task<Message> {
-        let job = crate::platform::services::PrintJob {
-            file: file.to_path_buf(),
-            title: pending.title.clone(),
-            pages: pending.pages.ranges().to_vec(),
-            copies: pending.copies,
-            destination: pending.destination.clone(),
-        };
-        let system_dialog = self.platform.capabilities.system_print_dialog;
-        let services = std::sync::Arc::clone(&self.platform.services);
-        let title = pending.title.clone();
-        // Not named where the system dialog chose the queue: pulpit did not
-        // pick it and cannot read it back, and "Sent to HP_LaserJet" that
-        // names the queue pulpit *would* have used is a lie about where the
-        // paper is.
-        let destination = if system_dialog {
-            None
-        } else {
-            pending.destination.clone()
-        };
-        let scratch = scratch.then(|| file.to_path_buf());
-        // The dialog is up, or the spooler is reading; a second print started
-        // over the top of it would be a second dialog and, for a marked-up
-        // print, a second write to the same scratch name.
-        self.print_in_flight = true;
-
-        // A panel AppKit will only run on the thread that owns the event
-        // loop. Called in place, and pulpit's own drawing stops until the
-        // reader closes it — which is the cost of that platform having no
-        // other way to show its print dialog. The audience window keeps the
-        // last complete frame it had throughout, so the third standing rule
-        // is not what this spends.
-        if system_dialog && self.platform.services.print_dialog_wants_main_thread() {
-            let outcome = self.platform.services.print_with_dialog(&job);
-            return Task::done(Message::Print(PrintMsg::Spooled {
-                outcome,
-                title,
-                destination,
-                scratch,
-            }));
-        }
-
-        Task::perform(
-            async move {
-                // A thread rather than the async runtime's blocking pool
-                // because the wait is unbounded: it ends when a person
-                // decides, and an executor thread parked on that is one the
-                // rest of the application does not get back.
-                let (send, receive) = std::sync::mpsc::channel();
-                std::thread::Builder::new()
-                    .name("pulpit-print".into())
-                    .spawn(move || {
-                        let outcome = if system_dialog {
-                            services.print_with_dialog(&job)
-                        } else {
-                            services.print(&job)
-                        };
-                        let _ = send.send(outcome);
-                    })
-                    .map_err(|e| format!("the print could not be started: {e}"))
-                    .and_then(|_| {
-                        receive
-                            .recv()
-                            .map_err(|_| "the print ended without saying how".to_string())
-                    })
-                    .unwrap_or_else(crate::platform::Outcome::failed)
-            },
-            move |outcome| {
-                Message::Print(PrintMsg::Spooled {
-                    outcome,
-                    title: title.clone(),
-                    destination: destination.clone(),
-                    scratch: scratch.clone(),
-                })
-            },
-        )
-    }
-
-    /// The platform is done with the job.
-    fn print_spooled(
-        &mut self,
-        outcome: crate::platform::Outcome,
-        title: String,
-        destination: Option<String>,
-        scratch: Option<PathBuf>,
-    ) {
-        self.print_in_flight = false;
-        // The copy is pulpit's, and it goes whether the job was taken or not:
-        // a scratch file left behind after a refused print is a copy of a
-        // document the reader never asked for, sitting in a cache directory.
-        // Both paths have finished reading it by the time the answer is here
-        // — `lp` reads before it queues, and the portal dups the descriptor —
-        // which is why both of them wait rather than spawn.
-        if let Some(scratch) = scratch {
-            if let Err(error) = std::fs::remove_file(&scratch) {
-                tracing::warn!(%error, path = %scratch.display(), "the print copy could not be removed");
-            }
-        }
-        match outcome {
-            // Cancelling a print dialog is a thing the reader did on purpose,
-            // and reporting it as a failure would tell them their own
-            // decision went wrong. Nothing is said at all.
-            crate::platform::Outcome::Refused { .. } => {}
-            crate::platform::Outcome::Done => {
-                let where_to = match destination.as_deref() {
-                    Some(queue) => format!(" to {queue}"),
-                    None => String::new(),
-                };
-                self.notify_done(format!("Sent “{title}”{where_to} to print."));
-            }
-            other => {
-                if let Some(problem) = other.describe() {
-                    self.notify_error(format!("The print did not go: {problem}"), None);
-                }
-            }
-        }
     }
 
     // --- Signing profiles ----------------------------------------------
@@ -14923,7 +14512,7 @@ impl App {
     /// towards it was a dozen.
     fn on_alarm_command(&mut self, command: crate::widgets::event::AlarmCommand) -> Task<Message> {
         use crate::widgets::event::{AlarmCommand, TimeField};
-        let now = crate::view::seconds_of_day();
+        let now = seconds_of_day();
         match command {
             AlarmCommand::Open(open) => {
                 if open && !self.alarm_controls.open {
