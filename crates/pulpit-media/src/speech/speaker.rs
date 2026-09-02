@@ -268,12 +268,16 @@ fn synth_loop(
         let result = engine.synthesize(&text, &voice, rate);
         if let Ok(mut cache) = cache.lock() {
             // A bound, so a long document cannot grow this without limit. The
-            // only entries worth keeping are the one playing and the one
-            // prefetched; anything else is a sentence already spoken.
-            if cache.len() > 8 {
-                cache.clear();
-            }
+            // only entry this loop can vouch for is the one it just
+            // finished: the control thread is about to `ready.recv()` this
+            // exact key and go looking for it, so it is inserted *before*
+            // anything is evicted, and eviction spares it by construction
+            // rather than by trusting a `clear()` that ran a step earlier
+            // never raced a lookup for what it was about to remove.
             cache.insert(key.clone(), result);
+            if cache.len() > 8 {
+                cache.retain(|cached, _| *cached == key);
+            }
         }
         let _ = ready.send(key);
     }
