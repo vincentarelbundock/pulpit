@@ -4,13 +4,13 @@
 //! of regions, hands one to a worker per job, and the worker writes the frame
 //! directly into it. Sizes are validated on both sides before mapping.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use memmap2::{Mmap, MmapMut};
+use memmap2::MmapMut;
 
 use crate::protocol::{ProtocolError, MAX_REGION_BYTES};
 
@@ -133,18 +133,6 @@ impl AttachedRegion {
         }
         let map = unsafe { MmapMut::map_mut(&file)? };
         Ok(Self { map })
-    }
-
-    pub fn read_only(name: &str, expected_bytes: u64) -> Result<Mmap, ProtocolError> {
-        let path = path_for(name)?;
-        let file = File::open(&path)?;
-        let length = file.metadata()?.len();
-        if length < expected_bytes {
-            return Err(ProtocolError::Malformed(format!(
-                "region {name} holds {length} bytes but {expected_bytes} were declared"
-            )));
-        }
-        Ok(unsafe { Mmap::map(&file)? })
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {

@@ -184,6 +184,127 @@ fn a_crashing_worker_is_restarted_and_rendering_resumes() {
 
     // The replacement worker reopened the document and renders again.
     supervisor.submit(job(2, 1, 3, Priority::Audience));
+    let more = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        !frames(events).is_empty()
+    });
+    assert_eq!(frames(&more).len(), 1, "rendering resumed: {more:?}");
+
+    // §76.7: the replacement worker replays `Open` for every document it
+    // missed, and its `Opened` answer used to be forwarded again as if it
+    // were a second document arriving — which the application read as a
+    // fresh candidate to compare against the one it already had, closing the
+    // very document that was still live. Across the whole crash and restart,
+    // exactly one `Opened` for document 1 must reach the application.
+    let all: Vec<RenderEvent> = events.into_iter().chain(more).collect();
+    let opened_count = all
+        .iter()
+        .filter(|e| matches!(e, RenderEvent::Opened(o) if o.document == 1))
+        .count();
+    assert_eq!(
+        opened_count, 1,
+        "exactly one Opened for document 1 across the crash: {all:?}"
+    );
+}
+
+/// §77.8: `ask()` questions used to be fire-and-forget. A crash or a stall
+/// lost Navigation/Capabilities/Links with no event, and the application had
+/// no way to notice it was still waiting — it never re-asked.
+///
+/// The worker's own loop is single-threaded (see `worker.rs::run`): once it
+/// picks up a render it does not return to its inbox until that render
+/// finishes, so a render that hangs forever strands any control message
+/// queued behind it exactly as a crash would, without racing a real crash's
+/// timing.
+#[test]
+fn an_ask_lost_to_a_hung_worker_is_replayed_after_the_restart() {
+    let mut supervisor = start_with(
+        SupervisorConfig {
+            deadline: Duration::from_millis(300),
+            ..config(1)
+        },
+        &[("PULPIT_WORKER_HANG_ON_PAGE", "5")],
+    );
+    supervisor.open(1, "fixture:pages=30");
+
+    // Occupy the worker's one thread with a render that never returns.
+    supervisor.submit(job(1, 1, 5, Priority::Audience));
+    // Give the worker time to actually pick up the render and start hanging
+    // before the question arrives, so it queues behind rather than racing it.
+    std::thread::sleep(Duration::from_millis(200));
+    supervisor.request_navigation(1);
+
+    // The deadline kills the hung worker and restarts it; the replacement
+    // must still answer the question the dead one never reached.
+    let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Navigation { .. }))
+    });
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::WorkerTimedOut { .. })),
+        "the hang is what kills the worker: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::Navigation { document: 1, .. })),
+        "the lost question was replayed on the replacement, not lost: {events:?}"
+    );
+}
+
+/// §77.8: give-up used to be instant and permanent — once the restart budget
+/// inside `restart_window` was spent, the slot never rendered again for the
+/// rest of the session, even for a document with nothing wrong with it.
+/// `max_restarts: 0` makes the very first crash exceed the budget, so
+/// give-up is reached from one crash rather than racing how many times the
+/// injected crash re-arms itself across a restart (it does not: the failure
+/// injection is only inherited by the worker `start_with` spawns).
+#[test]
+fn a_given_up_worker_is_retried_once_its_backoff_elapses() {
+    let mut supervisor = start_with(
+        SupervisorConfig {
+            max_restarts: 0,
+            restart_window: Duration::from_millis(200),
+            ..config(1)
+        },
+        &[("PULPIT_WORKER_CRASH_ON_PAGE", "7")],
+    );
+    supervisor.open(1, "fixture:pages=30");
+    supervisor.submit(job(1, 1, 7, Priority::Audience));
+
+    let gave_up = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::WorkerGaveUp { .. }))
+    });
+    assert!(
+        !gave_up
+            .iter()
+            .any(|e| matches!(e, RenderEvent::WorkerRestarted { .. })),
+        "give-up is immediate, not preceded by an extra restart: {gave_up:?}"
+    );
+
+    // Past the backoff window the slot is retried on its own — no further
+    // submission is needed to provoke it, unlike the contention that grows
+    // the pool.
+    let retried = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, RenderEvent::WorkerRestarted { .. }))
+    });
+    assert!(
+        retried
+            .iter()
+            .any(|e| matches!(e, RenderEvent::WorkerRestarted { .. })),
+        "the given-up worker is retried once its backoff elapses: {retried:?}"
+    );
+    assert_eq!(supervisor.worker_count(), 1, "the pool recovered");
+
+    // And it renders again: a good deck is not stuck behind one bad page for
+    // the rest of the session.
+    supervisor.submit(job(2, 1, 3, Priority::Audience));
     let events = collect_until(&mut supervisor, Duration::from_secs(10), |events| {
         !frames(events).is_empty()
     });

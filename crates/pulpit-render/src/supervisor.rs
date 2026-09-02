@@ -468,6 +468,101 @@ struct Worker {
     alive: bool,
     /// Documents this worker has open, so a restarted worker can catch up.
     documents: Vec<(u64, String)>,
+    /// `ask()` questions sent to this worker with no answer yet: Links,
+    /// Overlays, Navigation, FindText, Capabilities, Attachment. Every one
+    /// is idempotent to re-ask, so a crash replays them on the replacement
+    /// instead of losing them with no event and no way for the application
+    /// to notice it is still waiting.
+    asked: Vec<Request>,
+    /// Set when this worker has given up: `None` while alive or newly dead
+    /// and eligible for an immediate restart attempt, `Some(until)` once the
+    /// restart budget (or a spawn itself) has failed and the slot is
+    /// waiting out `restart_window` before trying again.
+    backoff_until: Option<Instant>,
+}
+
+impl Worker {
+    /// Remove the tracked `ask()` request this response answers, if any.
+    ///
+    /// `FindText` can answer in several chunks; the first one clears the
+    /// tracked request, so a crash mid-search after the first chunk is not
+    /// replayed. The application already has that chunk and drives the rest
+    /// of the search itself, unlike Links/Navigation/Capabilities/
+    /// Attachment, which are one request to one answer.
+    fn ask_answered(&mut self, response: &Response) {
+        self.asked
+            .retain(|request| !request_answers(request, response));
+    }
+}
+
+/// Whether `response` is the answer to `request`, for the subset of
+/// [`Request`] variants sent through `ask()`.
+fn request_answers(request: &Request, response: &Response) -> bool {
+    match (request, response) {
+        (
+            Request::Links {
+                document: d1,
+                page: p1,
+            },
+            Response::Links {
+                document: d2,
+                page: p2,
+                ..
+            },
+        ) => d1 == d2 && p1 == p2,
+        (
+            Request::Overlays {
+                document: d1,
+                page: p1,
+            },
+            Response::Overlays {
+                document: d2,
+                page: p2,
+                ..
+            },
+        ) => d1 == d2 && p1 == p2,
+        (Request::Navigation { document: d1 }, Response::Navigation { document: d2, .. }) => {
+            d1 == d2
+        }
+        (Request::Capabilities { document: d1 }, Response::Capabilities { document: d2, .. }) => {
+            d1 == d2
+        }
+        (
+            Request::Attachment {
+                document: d1,
+                name: n1,
+            },
+            Response::Attachment {
+                document: d2,
+                name: n2,
+                ..
+            },
+        ) => d1 == d2 && n1 == n2,
+        (
+            Request::Attachment {
+                document: d1,
+                name: n1,
+            },
+            Response::AttachmentFailed {
+                document: d2,
+                name: n2,
+                ..
+            },
+        ) => d1 == d2 && n1 == n2,
+        (
+            Request::FindText {
+                document: d1,
+                generation: g1,
+                ..
+            },
+            Response::Found {
+                document: d2,
+                generation: g2,
+                ..
+            },
+        ) => d1 == d2 && g1 == g2,
+        _ => false,
+    }
 }
 
 /// Message from a worker's reader thread.
@@ -523,6 +618,14 @@ pub struct RendererSupervisor {
     next_request: u64,
     generation_floor: RenderGeneration,
     documents: Vec<(u64, String)>,
+    /// Documents whose `Opened`/`OpenFailed` has already reached the
+    /// application. Every live worker opens every document, and a restart
+    /// re-sends `Open` for the survivors so the replacement can catch up —
+    /// so without this, the replacement's answer would be forwarded again as
+    /// if it were a second, distinct document arriving, closing whatever the
+    /// application had already made of the first answer. Cleared on `close`
+    /// so a document reopened under the same id is reported fresh.
+    reported_open: std::collections::HashSet<u64>,
     counters: Counters,
     /// Every spawn takes the next value, so no two worker instances ever
     /// share an epoch. Per-index epochs were enough while an index was only
@@ -565,6 +668,7 @@ impl RendererSupervisor {
             next_request: 0,
             generation_floor: RenderGeneration::ZERO,
             documents: Vec::new(),
+            reported_open: std::collections::HashSet::new(),
             counters: Counters::default(),
             config,
             epochs: 0,
@@ -594,6 +698,21 @@ impl RendererSupervisor {
     /// is asked to exit and collected later rather than waited on here — a
     /// pump must not stall on a worker's shutdown.
     fn retire_idle(&mut self) {
+        // A given-up worker beyond the configured pool size is pure
+        // bookkeeping: its process is already dead, and `spawn_additional_worker`
+        // now counts only alive workers, so nothing needs the slot kept. One
+        // that gave up *within* the configured pool is left for
+        // `retry_backoff` to keep trying — popping it would forget it was
+        // ever asked for and turn a scheduled retry into starting cold.
+        while self.workers.len() > self.config.workers.max(1)
+            && self
+                .workers
+                .last()
+                .is_some_and(|worker| !worker.alive && worker.backoff_until.is_some())
+        {
+            let worker = self.workers.pop().expect("len checked");
+            tracing::info!(worker = worker.index, "given-up worker retired");
+        }
         if !self.queue.is_empty() {
             return;
         }
@@ -633,7 +752,10 @@ impl RendererSupervisor {
     /// documents it missed. Returns false when the pool is already full or
     /// the spawn failed.
     fn spawn_additional_worker(&mut self) -> bool {
-        if self.workers.len() >= self.config.workers {
+        // Dead slots waiting out a backoff must not count against the
+        // configured pool size, or a worker that gave up permanently
+        // shrinks the pool by one for the rest of the session.
+        if self.worker_count() >= self.config.workers {
             return false;
         }
         let index = self.workers.len();
@@ -685,6 +807,8 @@ impl RendererSupervisor {
             restart_times: VecDeque::new(),
             alive: true,
             documents: Vec::new(),
+            asked: Vec::new(),
+            backoff_until: None,
         };
         let _ = write_message(
             &mut worker.stdin,
@@ -746,6 +870,9 @@ impl RendererSupervisor {
     /// handle; the shared identifier is the supervisor's.
     pub fn open(&mut self, document: u64, path: &str) {
         self.documents.push((document, path.to_string()));
+        // Reopening an id already reported (a close raced a fresh open under
+        // the same key) MUST be reported again, not swallowed as a replay.
+        self.reported_open.remove(&document);
         let request = Request::Open {
             document,
             path: path.to_string(),
@@ -824,12 +951,15 @@ impl RendererSupervisor {
             .filter(|worker| worker.alive)
             .min_by_key(|worker| worker.in_flight.len());
         if let Some(worker) = target {
-            let _ = write_message(&mut worker.stdin, &request);
+            if write_message(&mut worker.stdin, &request).is_ok() {
+                worker.asked.push(request);
+            }
         }
     }
 
     pub fn close(&mut self, document: u64) {
         self.documents.retain(|(id, _)| *id != document);
+        self.reported_open.remove(&document);
         for worker in &mut self.workers {
             worker.documents.retain(|(id, _)| *id != document);
             if worker.alive {
@@ -939,6 +1069,7 @@ impl RendererSupervisor {
         }
         self.enforce_deadlines(&mut events);
         self.reap(&mut events);
+        self.retry_backoff(&mut events);
         self.retire_idle();
         self.reap_retiring();
         self.dispatch();
@@ -978,6 +1109,9 @@ impl RendererSupervisor {
         // Any message is proof of life; the deadline measures silence.
         if let Some(worker) = self.workers.get_mut(index) {
             worker.last_progress = Instant::now();
+            if let WorkerPayload::Response(response) = &message.payload {
+                worker.ask_answered(response);
+            }
         }
         match message.payload {
             WorkerPayload::Response(Response::Hello {
@@ -1009,14 +1143,18 @@ impl RendererSupervisor {
                 self.counters.backend_version = Some(backend_version);
             }
             WorkerPayload::Response(Response::Opened(opened)) => {
-                // Only report the first worker's answer; the others are
-                // identical by construction.
-                if index == self.first_alive() {
+                // Every live worker opens every document, and a restart
+                // re-sends `Open` for the survivors, so this answer can be a
+                // first report or a replay of one already delivered. Only
+                // the first reaches the application; `reported_open.insert`
+                // is true exactly once per document between an `open` and
+                // its matching `close`.
+                if self.reported_open.insert(opened.document) {
                     events.push(RenderEvent::Opened(opened));
                 }
             }
             WorkerPayload::Response(Response::OpenFailed { document, reason }) => {
-                if index == self.first_alive() {
+                if self.reported_open.insert(document) {
                     events.push(RenderEvent::OpenFailed { document, reason });
                 }
             }
@@ -1194,14 +1332,6 @@ impl RendererSupervisor {
         }
     }
 
-    fn first_alive(&self) -> usize {
-        self.workers
-            .iter()
-            .find(|w| w.alive)
-            .map(|w| w.index)
-            .unwrap_or(0)
-    }
-
     fn enforce_deadlines(&mut self, events: &mut Vec<RenderEvent>) {
         let deadline = self.config.deadline;
         // A worker is overdue when it has been silent for the deadline while
@@ -1291,12 +1421,40 @@ impl RendererSupervisor {
 
         if recent > self.config.max_restarts {
             tracing::error!(worker = index, "restart budget exhausted");
-            self.counters.workers_given_up += 1;
-            events.push(RenderEvent::WorkerGaveUp { worker: index });
+            self.give_up(index, events);
             return;
         }
 
+        if !self.respawn(index, events) {
+            tracing::error!(worker = index, "cannot restart worker");
+            self.give_up(index, events);
+        }
+    }
+
+    /// Put a worker into backoff: dead until `restart_window` has passed,
+    /// then eligible for [`retry_backoff`](Self::retry_backoff). Give-up
+    /// used to be permanent — the slot never rendered again for the rest of
+    /// the session, even for a document with nothing wrong with it — which
+    /// is the fix this replaces.
+    fn give_up(&mut self, index: usize, events: &mut Vec<RenderEvent>) {
+        self.counters.workers_given_up += 1;
+        if let Some(worker) = self.workers.get_mut(index) {
+            worker.backoff_until = Some(Instant::now() + self.config.restart_window);
+        }
+        events.push(RenderEvent::WorkerGaveUp { worker: index });
+    }
+
+    /// Spawn a fresh process for the worker at `index`, replaying the
+    /// documents it missed and the `ask()` questions it never answered.
+    /// Shared by `kill`'s immediate restart and `retry_backoff`'s delayed
+    /// one — the two differ only in when they are allowed to run, not in
+    /// what a successful respawn does.
+    fn respawn(&mut self, index: usize, events: &mut Vec<RenderEvent>) -> bool {
+        let Some(worker) = self.workers.get_mut(index) else {
+            return false;
+        };
         let documents = self.documents.clone();
+        let pending_asks = std::mem::take(&mut worker.asked);
         let epoch = self.next_epoch();
         match self.spawn_worker(index, epoch) {
             Ok(mut replacement) => {
@@ -1311,14 +1469,48 @@ impl RendererSupervisor {
                         replacement.documents.push((*document, path.clone()));
                     }
                 }
+                for request in &pending_asks {
+                    if write_message(&mut replacement.stdin, request).is_ok() {
+                        replacement.asked.push(request.clone());
+                    }
+                }
                 self.workers[index] = replacement;
                 self.counters.worker_restarts += 1;
                 events.push(RenderEvent::WorkerRestarted { worker: index });
+                true
             }
             Err(e) => {
-                tracing::error!(worker = index, error = %e, "cannot restart worker");
-                self.counters.workers_given_up += 1;
-                events.push(RenderEvent::WorkerGaveUp { worker: index });
+                tracing::error!(worker = index, error = %e, "cannot spawn a replacement worker");
+                // Not lost: put back so the next attempt (immediate retry,
+                // or a later backoff) still has them to replay.
+                if let Some(worker) = self.workers.get_mut(index) {
+                    worker.asked = pending_asks;
+                }
+                false
+            }
+        }
+    }
+
+    /// Retry workers waiting out a backoff, oldest deadline first, without
+    /// growing the alive count past `config.workers`.
+    fn retry_backoff(&mut self, events: &mut Vec<RenderEvent>) {
+        let now = Instant::now();
+        for index in 0..self.workers.len() {
+            if self.worker_count() >= self.config.workers {
+                return;
+            }
+            let due = self.workers[index]
+                .backoff_until
+                .is_some_and(|until| now >= until);
+            if !due {
+                continue;
+            }
+            if !self.respawn(index, events) {
+                // Still down; try again after another full window rather
+                // than spinning every pump.
+                if let Some(worker) = self.workers.get_mut(index) {
+                    worker.backoff_until = Some(now + self.config.restart_window);
+                }
             }
         }
     }
@@ -1346,19 +1538,51 @@ impl RendererSupervisor {
         }
     }
 
+    /// Remove the queue positions marked `true` in `dispatched`, keeping the
+    /// rest in their original order. Split out of `dispatch` because it has
+    /// two exit points that both need it: the normal end of a pass, and the
+    /// early return when a worker's pipe turns out to be gone.
+    fn remove_dispatched(&mut self, dispatched: &[bool]) {
+        if !dispatched.iter().any(|&done| done) {
+            return;
+        }
+        let mut position = 0;
+        self.queue.retain(|_| {
+            let keep = !dispatched[position];
+            position += 1;
+            keep
+        });
+    }
+
     fn dispatch(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        // Highest priority, coarse before refined, then FIFO — among the
+        // jobs some worker can take. A region job blocked on every region
+        // does not block the inline work behind it: the workers drain their
+        // own inboxes highest-priority-first, so letting a thumbnail board
+        // early never lets it render early.
+        //
+        // Sorted once per call, not once per dispatched job: dispatching one
+        // job frees a worker for the next, but it does not change the
+        // priority order the rest of the queue was already in, so a second
+        // sort could only ever reproduce the tail of the first one.
+        let mut order: Vec<usize> = (0..self.queue.len()).collect();
+        order.sort_by_key(|&position| {
+            let job = &self.queue[position];
+            (job.priority, position)
+        });
+        // Jobs leave the queue only once per call, in `remove_dispatched`
+        // below: removing one as it dispatches would shift every later
+        // position in `order` out from under it.
+        let mut dispatched = vec![false; order.len()];
+
         loop {
-            // Highest priority, coarse before refined, then FIFO — among the
-            // jobs some worker can take. A region job blocked on every
-            // region does not block the inline work behind it: the workers
-            // drain their own inboxes highest-priority-first, so letting a
-            // thumbnail board early never lets it render early.
-            let mut order: Vec<usize> = (0..self.queue.len()).collect();
-            order.sort_by_key(|&position| {
-                let job = &self.queue[position];
-                (job.priority, position)
-            });
-            let choice = order.into_iter().find_map(|position| {
+            let choice = order.iter().copied().find_map(|position| {
+                if dispatched[position] {
+                    return None;
+                }
                 let job = &self.queue[position];
                 self.workers
                     .iter()
@@ -1375,41 +1599,41 @@ impl RendererSupervisor {
                 // made an ungated pool affordable again: a burst — warming
                 // included — takes the whole pool, and a quiet half-minute
                 // gives it back.
-                if !self.queue.is_empty() && self.spawn_additional_worker() {
+                if self.spawn_additional_worker() {
                     continue;
                 }
-                return;
+                break;
             };
-            let mut job = self
-                .queue
-                .remove(position)
-                .expect("position from this queue");
+            let mut job = self.queue[position].clone();
 
             let worker = &mut self.workers[index];
             if job.is_inline() {
                 job.region_name = String::new();
             } else {
                 if let Err(error) = worker.region.ensure_capacity(job.byte_len()) {
-                    // The job has already left the queue, so it must be
-                    // *answered* here — failed, like a job whose worker died —
-                    // or its requester waits for ever: the frame key stays
-                    // pending, every later plan skips it as already asked
-                    // for, and the page it was refining keeps its coarse
-                    // stand-in for as long as it is looked at. A shared
-                    // memory that cannot grow right now (a full /dev/shm,
-                    // most plausibly) often can a moment later, and a Failed
-                    // answer is what lets the next plan try again.
+                    // The job is answered here rather than dropped — failed,
+                    // like a job whose worker died — or its requester waits
+                    // for ever: the frame key stays pending, every later plan
+                    // skips it as already asked for, and the page it was
+                    // refining keeps its coarse stand-in for as long as it is
+                    // looked at. A shared memory that cannot grow right now
+                    // (a full /dev/shm, most plausibly) often can a moment
+                    // later, and a Failed answer is what lets the next plan
+                    // try again.
                     let reason = format!("cannot size the shared region: {error}");
                     tracing::warn!(?job, reason, "render job failed before dispatch");
                     self.counters.record_failure(&reason);
                     self.owed.push(RenderEvent::Failed { job, reason });
+                    dispatched[position] = true;
                     continue;
                 }
                 job.region_name = worker.region.name().to_string();
             }
             if write_message(&mut worker.stdin, &Request::Render(job.clone())).is_err() {
                 // The pipe is gone; the reader thread will report the death.
-                self.queue.push_front(job);
+                // The job was never marked dispatched, so it is still in the
+                // queue at its original position.
+                self.remove_dispatched(&dispatched);
                 return;
             }
             let _ = worker.stdin.flush();
@@ -1423,7 +1647,9 @@ impl RendererSupervisor {
                 dispatched: Instant::now(),
             });
             self.counters.dispatched += 1;
+            dispatched[position] = true;
         }
+        self.remove_dispatched(&dispatched);
     }
 
     /// Ask every worker to exit, then wait briefly.
