@@ -10,7 +10,7 @@
 //! visible from here — so they are not guessed at. Keeping a window's set of
 //! them small is `pulpit::residency`'s job.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pulpit_core::RenderGeneration;
@@ -96,7 +96,10 @@ pub struct FrameCache {
     clock: std::cell::Cell<u64>,
     stats: CacheStats,
     /// Keys that must not be evicted: the frames currently on screen.
-    pinned: Vec<FrameKey>,
+    /// A `HashSet`, not a `Vec`: `enforce_budget` tests membership once per
+    /// resident entry it walks while eviction runs, and a linear scan there
+    /// turned eviction into entries × pinned work under a real pin-set size.
+    pinned: HashSet<FrameKey>,
     /// How many entries each generation still has resident. Fallback lookups
     /// walk these actual generations rather than every integer since the
     /// application started.
@@ -122,7 +125,7 @@ impl FrameCache {
             budget_bytes,
             clock: std::cell::Cell::new(0),
             stats: CacheStats::default(),
-            pinned: Vec::new(),
+            pinned: HashSet::new(),
             resident: std::collections::BTreeMap::new(),
             evicted_keys: Vec::new(),
         }
@@ -147,7 +150,7 @@ impl FrameCache {
 
     /// Mark the frames that are on screen right now. They are never evicted.
     pub fn pin(&mut self, keys: Vec<FrameKey>) {
-        self.pinned = keys;
+        self.pinned = keys.into_iter().collect();
     }
 
     /// How many frames are resident.
