@@ -4,9 +4,7 @@ Companion to `SPEC-signing.md`, `SPEC-reader-formats.md` and the retired
 `SPEC-simplify.md`. Adds §75–§84. Section numbers are stable so source
 comments and commits may cite them; gaps are deletions, not omissions.
 
-**Status.** Phase 1 is on `main`: every §76 item, §77, §79.1–3/5/6, most of §80–§82 and the §81 deletions, each with a **Done** paragraph below recording what changed and, where the coordinator's review altered the fix, why. Phase 2 (§78, §79.4, §82.2, the §80.6/§80.8 remainders, `OnMount`, the `RuntimeId` placeholders, the view clock read) is in progress. When a section is done, replace its *(outstanding)* marker with
-a **Done** paragraph saying what changed and what the doing changed about the
-finding, as `SPEC-simplify.md` did.
+**Status.** Both phases are on `main`. Every section below carries a **Done** paragraph recording what changed and, where the coordinator's review altered or extended an agent's fix, why. Two corrections to the findings themselves are recorded in §81 (`WidgetId` is live) and §80.11 (`signing_credentials()` was not the duplicate named). The work also surfaced two things the review had missed, recorded under §84: the process-spawning end-to-end tests had been skipping silently on every run, and once they ran they caught a crash introduced by the §80.12 consolidation before it reached a release.
 
 This document is a **findings record** from a review of the whole workspace
 against the tree at `00d40f6`, judged on four qualities in priority order:
@@ -266,7 +264,7 @@ Test: a layout with `sizes.len() != children.len()` MUST load as invalid.
 **§76.13 — The Clock widget's timezone is a cached `date +%z` subprocess.**
 *(done, verified)*
 
-**Done.** `seconds_of_day()` uses `chrono::Local::now()` and the `date` subprocess is gone, so the offset is right on every platform and refreshes across DST. The read still lives in `view.rs`; moving it into `App` is phase-2 work.
+**Done.** `seconds_of_day()` uses `chrono::Local::now()` and the `date` subprocess is gone, so the offset is right on every platform and refreshes across DST. Phase 2 then moved the read into `app.rs` (`seconds_of_day()`, refreshed into `last_seconds_of_day` each tick) and the alarms dialog reads that field; `view.rs` has no clock read.
 
 `prime_local_offset` (`crates/pulpit/src/view.rs:4301`) spawns `date` into a
 `OnceLock`. On Windows `date` is a shell builtin, so `output()` fails, the
@@ -512,7 +510,7 @@ awareness.
 
 ## 78. One parser for PDF objects
 
-*(outstanding; phase 2 in progress)*
+*(done)*
 
 **§78.1** The finding. `verify::objects::Lexer` is a complete, bounded parser
 (`PdfValue`, depth cap, array cap, stream extents). `sign::apply::parse_value`
@@ -577,11 +575,13 @@ of §76.6.
 
 
 **Done.** Only the last bullet is done: one `ObjectResolver` per signing pass and a borrowing `IncrementalWriter`. The rest of §78 is phase-2 work in progress.
+
+**Done (phase 2).** Steps carried out in the §78.3 order. `append_objects` returns each object's recorded offset and `locate_placeholders` finds the reservation inside a byte-exact re-serialisation of the signature dictionary at that offset; the typestate machine is deleted. `sign::apply::parse_value`, `tokenize`, `decode_pdf_name` and the unescape helpers are gone; `parse_object_dictionary_with` converts `resolver.resolve(n)`'s `PdfValue` (dictionary key order is now `BTreeMap` order, semantically inert). `xref_section_object_numbers` returns the whole `XrefSection` and `parse_xref_extent`/`find_prev` are deleted. The verify readers trust the inheritance-resolved `FieldEntry` and read one parsed `Dict`; a shared `objects::parse_reference_array` evaluates `/Reference` per element for both verify and preflight. `pdfwrite::parse_trailer` reads through the same section parser, which also made it read `/Info`, previously dropped from every signed revision by a match arm that did not exist. Two fail-closed corrections fell out: a dangling indirect `/Perms` now propagates as an error instead of reading as unlocked, and a test fixture whose `startxref` pointed mid-table (tolerated only by the old lenient scan) was corrected. `PdfTokenizer` survives for the `/Contents` span and `find_catalog_ref_with`'s fallback only. The §78.4 test asserts discovery and preflight enumerate the same fields from the hierarchical fixture. Net: `verify/mod.rs` 3091→2738, `preflight.rs` 1468→1378, `sign/apply.rs` 2090→2094 with the parser gone and offsets added, `pdfwrite/mod.rs` 2087→1927.
 ---
 
 ## 79. Application structure
 
-*(done except §79.4; see the items)*
+*(done; see the items)*
 
 **§79.1 — Park-on-a-flag fields.** `speech_nav`, `bookmark_added`,
 `sign_resume_pending`, `print_spool_pending`, `form_clipboard_text`,
@@ -650,11 +650,13 @@ real first-frame event or delete the state and rename the action `Promote`.
 **Done.** `compose_found`, `commit_picker_value`, `send_undo`, `page_of_slide`/`slide_of_page`; `run_document_actions` returns `()`; the dead `DocumentInfo` block and the unreachable `SavingFirst` check are deleted.
 
 **Done.** `AwaitingFirstFrame` and `RenderFirstFrame` are gone; `on_candidate_opened` promotes directly and takes `now`; `Debouncing.last_stamp` is deleted; a duplicate `Opened` for the active document is dropped (see §76.7).
+
+**Done (phase 2).** §79.4: `crates/pulpit/src/app/` now holds `print.rs` (`PrintJob { Idle, WritingScratch, InFlight }`; the spec's fourth variant had no state behind it because a landed scratch is pushed straight into a deferred `SpoolPrint`), `sign.rs` (thirteen fields grouped into `SignState`, including one the spec had not listed), `overview.rs`, `search.rs`, `thumbnails.rs`, `speech.rs`, `media.rs`, `reader_forms.rs`, `windows.rs`, `persist.rs`. For the other subsystems the fields stay on `App` and only behaviour moved, with `pub(super)` seams; grouping them is the natural next step and was not required for the split. `app.rs` went from 19 352 to 14 162 lines. Cross-cutting code (`dispatch_read_command`, `reader_patch_landed`, save routing, the identity-profile editor, `quit()`) stays in the root deliberately.
 ---
 
 ## 80. Duplication to collapse
 
-*(done except the §80.6 and §80.8 remainders; see the items)* Each item names the one owner.
+*(done; see the items)* Each item names the one owner.
 
 **§80.1** `forward_to_child!` (`crates/pulpit/src/widgets/mod.rs:751`) lacks
 `update`, `draw` and `overlay` arms, so `residency.rs:242–306`,
@@ -761,11 +763,11 @@ constant tables, while `libc` is already a workspace dependency used by
 
 **Done.** `relayout_anchored(page)` and `crop_to(region)`; the x-offset clamp now applies uniformly. The page counter goes through `column.current` because a spread change can pair the anchor with an earlier page.
 
-**Done.** `PagePoint::distance_to_segment`/`_squared`, `Region::contains` and `Outline::level`/`level_mut` exist and the callers in `annotation.rs`, `document.rs`, `overlay.rs` and `navigation.rs` use them. The three private copies in `annotate/hit.rs`, `annotate/stroke.rs` and `annotation.rs:1832` were left behind and are phase-2 work.
+**Done.** `PagePoint::distance_to_segment`/`_squared`, `Region::contains` and `Outline::level`/`level_mut` exist and the callers in `annotation.rs`, `document.rs`, `overlay.rs` and `navigation.rs` use them. The three private copies in `annotate/hit.rs`, `annotate/stroke.rs` and `annotation.rs` were then deleted in phase 2; every call site uses the `PagePoint` method.
 
 **Done.** `identity::ladder()` and a public `Monitor::matches_exactly` at all five sites; the adapters stay concrete.
 
-**Done.** `From` impls between the placement enums and the settings types (the settings types carry serde attributes the flow types deliberately do not); `common_name` delegates to `subject_common_name`. `AppearanceRotation` versus `PageRotation` is phase-2 work because the orphan rule forbids the impl from the app crate.
+**Done.** `From` impls between the placement enums and the settings types (the settings types carry serde attributes the flow types deliberately do not); `common_name` delegates to `subject_common_name`. `impl From<PageRotation> for AppearanceRotation` lives beside the type in `sign/apply.rs` and `signing.rs` calls `.into()`.
 
 **Done.** One `THEMED_VIEWS` roster; `Action::icon()` with `Icon::Mute`/`Icon::Maximize` added; media and navigation spacing on the scale.
 
@@ -828,7 +830,7 @@ design discussion; the ones marked *decide* need one sentence of intent first.
   { state } }` (`speech/cursor.rs:161`).
 
 
-**Done.** Deleted: the keymap migration layer (`Action::ALL` is now macro-derived so a new variant is a compile error); `REGISTRY`/`WidgetRegistration` with `catalog::definition` an array lookup; `RuntimeId` placeholders are phase-2; `SurfaceRing::held` and friends; `handshake_deadline`; `Action::Unfullscreen`, `WindowMode::Hidden`, `_randr_types`; `WindowPolicy`/`InputPolicy` as plain structs (`is_reserved` kept, it backs a real test); `Debouncing.last_stamp`; `run_document_actions`' task; `SignatureLine::InkMark`; `first_page_size` and `PageOverlay.page`/`.poster` as methods; `AttachedRegion::read_only`; the fake download test is real. Enums: `Gesture` in `Annotations`, `Staged` in the coordinator, `Reading` collapsed. **Correction:** `WidgetId`, `WidgetKind::id()`/`from_id()` are not dead — the v2 layout file format reads and writes them — and were kept with their stale doc comments fixed. Still open: `OnMount` (phase 2) and the lockstep snooze/target fields.
+**Done.** Deleted: the keymap migration layer (`Action::ALL` is now macro-derived so a new variant is a compile error); `REGISTRY`/`WidgetRegistration` with `catalog::definition` an array lookup; `RuntimeId::{WebKitGtk, WebView2, WkWebView}` deleted with `probe_system_webview` and the fabricated `worker_binary`, `worker_command` always builds `CurrentExe`, and a retired slug in an old settings file falls back to automatic selection with a test pinning it; `SurfaceRing::held` and friends; `handshake_deadline`; `Action::Unfullscreen`, `WindowMode::Hidden`, `_randr_types`; `WindowPolicy`/`InputPolicy` as plain structs (`is_reserved` kept, it backs a real test); `Debouncing.last_stamp`; `run_document_actions`' task; `SignatureLine::InkMark`; `first_page_size` and `PageOverlay.page`/`.poster` as methods; `AttachedRegion::read_only`; the fake download test is real. Enums: `Gesture` in `Annotations`, `Staged` in the coordinator, `Reading` collapsed. **Correction:** `WidgetId`, `WidgetKind::id()`/`from_id()` are not dead — the v2 layout file format reads and writes them — and were kept with their stale doc comments fixed. `OnMount` is deleted with its two always-no-op branches in `mount_layout`. Still open: the lockstep snooze/target fields.
 ---
 
 ## 82. Hot-path efficiency
@@ -900,7 +902,7 @@ enforce_budget` is O(entries × pinned) with `Vec::contains`; `Outline::len()`
 preflight parses on the event loop.
 
 
-**Done.** §82.1: the theme is built once in `ThemeState` and cloned; `presenter()` hoists the no-document check; `Node::widgets_iter`/`contains_kind` and `occupies_iter` remove the per-frame `Vec`s. §82.3: `pointer_moved` matches by reference. §82.4: speech settings are borrowed, not cloned; `voice_library` caches the directory probe; `fit::Recommendation` carries its `LayoutId`; `Sketch` borrows with a `canvas::Cache`; `reprobe` runs on a helper thread. §82.5: a divider drag is one undo entry and one revalidation. §82.6: `with_annotation` loads the page once per edit; `adopt_texts` derives stable ids by FNV of the annotation name. §82.7: `crop_imm` borrows and the native-size path copies once; `measure_entries` reads a 64 KiB prefix first. §82.8: `dispatch` sorts once, `pinned` is a `HashSet`, `Outline::len` sums, `sign_target_candidates` runs in the async step. §82.2 (reader page surface) is phase-2 work.
+**Done.** §82.1: the theme is built once in `ThemeState` and cloned; `presenter()` hoists the no-document check; `Node::widgets_iter`/`contains_kind` and `occupies_iter` remove the per-frame `Vec`s. §82.3: `pointer_moved` matches by reference. §82.4: speech settings are borrowed, not cloned; `voice_library` caches the directory probe; `fit::Recommendation` carries its `LayoutId`; `Sketch` borrows with a `canvas::Cache`; `reprobe` runs on a helper thread. §82.5: a divider drag is one undo entry and one revalidation. §82.6: `with_annotation` loads the page once per edit; `adopt_texts` derives stable ids by FNV of the annotation name. §82.7: `crop_imm` borrows and the native-size path copies once; `measure_entries` reads a 64 KiB prefix first. §82.8: `dispatch` sorts once, `pinned` is a `HashSet`, `Outline::len` sums, `sign_target_candidates` runs in the async step. §82.2: `ReaderPage`'s per-page vectors, `GesturePreview`'s points and quads, and `ReaderData::visible`/`PageSurface::pages` are `Rc<[T]>`, so a redraw bumps a refcount instead of copying stroke geometry; `turn_preview` shares the allocation when the rotation is `None`; a test pins `Rc::ptr_eq` across two facets of a 5 000-point stroke. The preview layers still take owned values, which is now an O(1) clone, rather than growing a lifetime parameter.
 ---
 
 ## 83. Standing rules
@@ -948,9 +950,12 @@ handshake, §79.6).
 
 ---
 
-## 84. Passes that found nothing
+## 84. Passes that found nothing, and two that found more than expected
 
 Recorded so they are not re-run.
+
+- **The end-to-end tests were not running.** `crates/pulpit/tests/document_worker.rs` (nine tests) located the executable as `current_exe().parent().parent()/pulpit`, which only exists after `cargo build`, never under `cargo test`, so every run printed "skipping" and passed; the §76.2 recovery test added in phase 1 inherited the same locator and also skipped. They now use `CARGO_BIN_EXE_pulpit`, print a single `SKIP:` line when they must skip, and fail on skip under `PULPIT_REQUIRE_E2E=1`; the recovery test runs in-process against the memory document engine because a unit test inside the binary crate cannot spawn it. This is §83.8 in practice: a green run with "skipping" lines had been hiding real coverage gaps.
+- **The first thing those tests caught was a phase-1 regression.** The §80.12 bootstrap consolidation added `init_worker_tracing()` inside the image and DjVu worker entry points that the outer entry point already initialised, and `tracing_subscriber::fmt().init()` panics on a second call, so every image-folder, comic-archive, DjVu and refused-format worker crashed on startup. Fixed before release; the nine tests now pass including the DjVu one.
 
 - **Rule 1.** `reconcile()` is pure, clock-free and idempotent by
   construction; swap, fullscreen, topology, native-id arrival and resume all
