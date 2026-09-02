@@ -999,16 +999,16 @@ fn contents_extent(sig_dict_slice: &[u8], sig_dict_offset: u64) -> Option<Conten
 /// reference dictionary, and the first one naming `/DocMDP` decides the
 /// level.
 fn extract_docmdp_level(resolver: &ObjectResolver<'_>, sig_dict: &Dict) -> Option<MdpPerm> {
-    objects::parse_reference_array(resolver, sig_dict)
+    let sig_ref = objects::parse_reference_array(resolver, sig_dict)
         .into_iter()
-        .find(|r| r.transform_method.as_deref() == Some("DocMDP"))
-        .and_then(|r| r.p)
-        .and_then(|level| match level {
-            1 => Some(MdpPerm::NoChanges),
-            2 => Some(MdpPerm::FillForms),
-            3 => Some(MdpPerm::Annotate),
-            _ => None,
-        })
+        .find(|r| r.transform_method.as_deref() == Some("DocMDP"))?;
+    let level = sig_ref.transform_params.as_ref()?.get("P")?.as_i64()?;
+    match level {
+        1 => Some(MdpPerm::NoChanges),
+        2 => Some(MdpPerm::FillForms),
+        3 => Some(MdpPerm::Annotate),
+        _ => None,
+    }
 }
 
 /// Parse a PDF string token — `(…)` or `<…>` — into UTF-8.

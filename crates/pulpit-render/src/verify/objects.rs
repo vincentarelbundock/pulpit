@@ -1718,17 +1718,15 @@ fn back_parse_object_header(bytes: &[u8], obj_pos: usize) -> Option<(usize, u32,
 pub(super) struct SigRef {
     /// `/TransformMethod`, without its leading slash.
     pub(super) transform_method: Option<String>,
-    /// `/TransformParams` `/P`: the DocMDP permission level, 1-3.
-    pub(super) p: Option<i64>,
-    /// `/TransformParams` `/Action`, without its leading slash.
+    /// `/TransformParams`, dereferenced if indirect.
     ///
-    /// Read only by `preflight`'s FieldMDP lock check (§78.3, step 3); kept
-    /// alongside `p` here rather than in a second `/Reference` array parser.
-    #[allow(dead_code)]
-    pub(super) action: Option<String>,
-    /// `/TransformParams` `/Fields`, decoded as text strings.
-    #[allow(dead_code)]
-    pub(super) fields: Vec<String>,
+    /// Kept as the raw dictionary rather than pre-extracted fields: a DocMDP
+    /// reader and a FieldMDP reader want different keys out of it (`/P`
+    /// against `/Action` and `/Fields`) and disagree on how strictly a
+    /// missing or malformed value should be treated — one is a display value,
+    /// the other a signing gate that must fail closed. Deciding that here
+    /// would force one policy on both.
+    pub(super) transform_params: Option<Dict>,
 }
 
 /// Parse `dict`'s `/Reference` array, one element at a time.
@@ -1764,35 +1762,13 @@ pub(super) fn parse_reference_array(resolver: &ObjectResolver<'_>, dict: &Dict) 
             .get("TransformMethod")
             .and_then(|v| v.as_name())
             .map(str::to_string);
-
-        let transform_params = resolver.dict_get(item_dict, "TransformParams");
-        let transform_params = transform_params.as_ref().and_then(|v| v.as_dict());
-
-        let p = transform_params
-            .and_then(|tp| tp.get("P"))
-            .and_then(|v| v.as_i64());
-        let action = transform_params
-            .and_then(|tp| tp.get("Action"))
-            .and_then(|v| v.as_name())
-            .map(str::to_string);
-        let fields = transform_params
-            .and_then(|tp| tp.get("Fields"))
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|f| match f {
-                        PdfValue::Str(s) => Some(crate::pdftext::decode_text_string(s)),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let transform_params = resolver
+            .dict_get(item_dict, "TransformParams")
+            .and_then(|v| v.as_dict().cloned());
 
         out.push(SigRef {
             transform_method,
-            p,
-            action,
-            fields,
+            transform_params,
         });
     }
     out
