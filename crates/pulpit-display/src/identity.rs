@@ -98,6 +98,24 @@ pub struct IdentityRecord {
     pub fallback: Option<MonitorIdentity>,
 }
 
+/// Build the (identity, fallback) pair every adapter's enumeration produces:
+/// the strongest identity available, plus a weaker candidate kept alongside
+/// so a persisted choice still matches when the native adapter cannot
+/// reproduce the strong one. The weaker candidate is dropped when it would
+/// be identical to the identity itself — carrying it then would only ever
+/// match what `identity` already matches.
+///
+/// Used by every adapter's enumeration (`x11`, `windows`, `macos`) and by
+/// `scenario::parse_monitor`, which had each grown its own copy of the same
+/// `Some(candidate).filter(|f| f != &identity)` line.
+pub fn ladder(
+    identity: MonitorIdentity,
+    fallback: MonitorIdentity,
+) -> (MonitorIdentity, Option<MonitorIdentity>) {
+    let fallback = (fallback != identity).then_some(fallback);
+    (identity, fallback)
+}
+
 impl IdentityRecord {
     pub fn new(identity: MonitorIdentity) -> Self {
         Self {
@@ -127,6 +145,31 @@ mod tests {
         assert!(IdentityTier::Connector < IdentityTier::Geometric);
         assert!(IdentityTier::Geometric < IdentityTier::Session);
         assert!(!IdentityTier::Session.is_persistable());
+    }
+
+    #[test]
+    fn ladder_drops_a_fallback_identical_to_the_identity() {
+        let stable = MonitorIdentity::Stable {
+            id: "EDID-ABC".into(),
+        };
+        let (identity, fallback) = ladder(stable.clone(), stable.clone());
+        assert_eq!(identity, stable);
+        assert_eq!(fallback, None);
+    }
+
+    #[test]
+    fn ladder_keeps_a_distinct_fallback() {
+        let stable = MonitorIdentity::Stable {
+            id: "EDID-ABC".into(),
+        };
+        let connector = MonitorIdentity::Connector {
+            connector: "HDMI-1".into(),
+            make: "ACME".into(),
+            model: "P1".into(),
+        };
+        let (identity, fallback) = ladder(stable.clone(), connector.clone());
+        assert_eq!(identity, stable);
+        assert_eq!(fallback, Some(connector));
     }
 
     #[test]

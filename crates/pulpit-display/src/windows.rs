@@ -12,17 +12,21 @@
 //! # Coordinate spaces
 //!
 //! A per-monitor-DPI-aware process sees the Windows desktop in *physical*
-//! pixels, while [`crate::snapshot::Rect`] is documented as logical. The two
-//! are reconciled in one place: [`WindowsBackend::enumerate_raw`] returns both,
-//! snapshots carry the logical rectangle, and [`DisplayBackend::place`] uses
-//! the physical one it re-reads immediately before the native call.
+//! pixels, and there is no single logical space that stays coherent across
+//! monitors running at different scale factors: dividing each monitor's own
+//! origin by its own DPI (an earlier version of this module did exactly
+//! that) produces a virtual desktop where monitors overlap or gap that do
+//! not in physical reality. So `geometry` on this backend's `Monitor`s is
+//! physical throughout, which is also the space `SetWindowPos` — and hence
+//! [`DisplayBackend::place`] — already works in. `scale_factor` still
+//! carries the per-monitor DPI ratio for anything that needs it.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
 
 use crate::backend::{BackendError, DisplayBackend, NativeWindow, PlacementOutcome};
-use crate::identity::MonitorIdentity;
+use crate::identity::{self, MonitorIdentity};
 use crate::reconcile::{Capabilities, WindowMode};
 use crate::snapshot::{DisplaySnapshot, Monitor, Rect};
 
@@ -183,7 +187,19 @@ const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const SWP_NOSIZE: u32 = 0x0001;
 const SW_SHOWNORMAL: i32 = 1;
-const HWND_TOP: Hwnd = std::ptr::null_mut();
+
+// `SetWindowPos` insert-after sentinels. `WS_EX_TOPMOST` cannot be toggled
+// through `SetWindowLongPtrW` — MSDN documents that changing it has no
+// effect — only a z-order change through `SetWindowPos` with one of these
+// two pseudo-handles actually moves a window into or out of the topmost
+// band (§77.1).
+fn hwnd_topmost() -> Hwnd {
+    (-1isize) as Hwnd
+}
+
+fn hwnd_notopmost() -> Hwnd {
+    (-2isize) as Hwnd
+}
 
 #[link(name = "user32")]
 extern "system" {
@@ -286,6 +302,22 @@ impl WindowsBackend {
         crate::backend::next_sequence(&self.sequence)
     }
 
+    /// Drop saved styles for `HWND`s that no longer exist.
+    ///
+    /// `saved_styles` is keyed by the raw `HWND` value, and Win32 recycles
+    /// those values once a window is destroyed. A style saved for a window
+    /// that was later closed without ever leaving fullscreen would otherwise
+    /// sit in the map forever and could be handed to an unrelated later
+    /// window that happens to reuse the same value (§77.1).
+    fn prune_stale_styles(&self) {
+        let mut styles = self.saved_styles.lock().unwrap();
+        styles.retain(|&hwnd, _| {
+            // SAFETY: `IsWindow` accepts any value, live or not, and is the
+            // documented way to re-validate a handle before use.
+            unsafe { IsWindow(hwnd as Hwnd) != 0 }
+        });
+    }
+
     fn enumerate_raw(&self) -> Result<Vec<RawMonitor>, BackendError> {
         let handles = enum_monitors();
         let targets = query_display_config();
@@ -309,13 +341,6 @@ impl WindowsBackend {
                 (info.rc_monitor.right - info.rc_monitor.left).max(0) as u32,
                 (info.rc_monitor.bottom - info.rc_monitor.top).max(0) as u32,
             );
-            // Snapshots speak logical units everywhere else in the workspace.
-            let logical = Rect::new(
-                (physical.x as f64 / scale_factor).round() as i32,
-                (physical.y as f64 / scale_factor).round() as i32,
-                (physical.width as f64 / scale_factor).round() as u32,
-                (physical.height as f64 / scale_factor).round() as u32,
-            );
 
             let model = target.friendly_name.clone();
             let make = target.make.clone();
@@ -332,12 +357,14 @@ impl WindowsBackend {
                     model: model.clone().unwrap_or_default(),
                 },
             };
-            let fallback = Some(MonitorIdentity::Connector {
-                connector: device.clone(),
-                make: make.clone().unwrap_or_default(),
-                model: model.clone().unwrap_or_default(),
-            })
-            .filter(|f| f != &identity);
+            let (identity, fallback) = identity::ladder(
+                identity,
+                MonitorIdentity::Connector {
+                    connector: device.clone(),
+                    make: make.clone().unwrap_or_default(),
+                    model: model.clone().unwrap_or_default(),
+                },
+            );
 
             out.push(RawMonitor {
                 monitor: Monitor {
@@ -346,7 +373,16 @@ impl WindowsBackend {
                     connector: Some(device),
                     make,
                     model,
-                    geometry: logical,
+                    // Physical, not divided by the per-monitor scale factor:
+                    // dividing each monitor's own physical origin by its own
+                    // DPI produces an incoherent virtual desktop under mixed
+                    // DPI (spurious `OverlappingOutputs`, wrong `Geometric`
+                    // tie-breaks), because there is no single logical space
+                    // that is coherent across monitors at different scales.
+                    // `place()` already works in physical pixels; keeping
+                    // `geometry` in that same space is what `SetWindowPos`
+                    // takes. (§77.1, unverified on real Windows hardware.)
+                    geometry: physical,
                     scale_factor,
                     // Win32 reports millimetres only through the EDID blob in
                     // the registry; the display-config path does not carry it.
@@ -582,13 +618,19 @@ impl DisplayBackend for WindowsBackend {
             Ok(monitors) => monitors,
             Err(e) => return PlacementOutcome::Failed(e.to_string()),
         };
-        let Some(target) = monitors.iter().find(|raw| {
-            &raw.monitor.identity == identity
-                || raw.monitor.fallback_identity.as_ref() == Some(identity)
-        }) else {
+        let Some(target) = monitors
+            .iter()
+            .find(|raw| raw.monitor.matches_exactly(identity))
+        else {
             return PlacementOutcome::Disappeared;
         };
         let area = target.physical;
+
+        // HWNDs are recycled: a style saved for a window that was later
+        // destroyed without ever leaving fullscreen would otherwise sit in
+        // the map forever and could be handed to an unrelated new window
+        // that reuses the same HWND value (§77.1).
+        self.prune_stale_styles();
 
         match mode {
             WindowMode::Fullscreen => {
@@ -606,11 +648,14 @@ impl DisplayBackend for WindowsBackend {
                         .entry(window.0)
                         .or_insert((style, ex_style));
 
+                    // `WS_EX_TOPMOST` is only a bookkeeping bit now; the
+                    // actual z-order change happens through `SetWindowPos`
+                    // below, with `HWND_TOPMOST` as the insert-after handle.
                     SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE) as isize);
                     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, WS_EX_TOPMOST as isize);
                     let ok = SetWindowPos(
                         hwnd,
-                        HWND_TOP,
+                        hwnd_topmost(),
                         area.x,
                         area.y,
                         area.width as i32,
@@ -641,9 +686,12 @@ impl DisplayBackend for WindowsBackend {
                     ShowWindow(hwnd, SW_SHOWNORMAL);
                     // Move onto the target monitor without resizing: leaving
                     // fullscreen must not shrink a window the user sized.
+                    // `HWND_NOTOPMOST` actually clears the topmost band that
+                    // the fullscreen branch above set through `SetWindowPos`
+                    // — `SetWindowLongPtrW` alone never touched it.
                     let ok = SetWindowPos(
                         hwnd,
-                        HWND_TOP,
+                        hwnd_notopmost(),
                         area.x + (area.width as i32 / 16),
                         area.y + (area.height as i32 / 16),
                         0,
@@ -656,9 +704,6 @@ impl DisplayBackend for WindowsBackend {
                 }
                 PlacementOutcome::Applied
             }
-            // Hiding is the toolkit's business; the backend has nothing to add
-            // and must not claim it did something.
-            WindowMode::Hidden => PlacementOutcome::Unsupported,
         }
     }
 }
