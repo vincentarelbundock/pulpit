@@ -1291,6 +1291,49 @@ mod tests {
         );
     }
 
+    /// §78.4: discovery and preflight enumerate signature fields two
+    /// different ways — `discover_signatures` walks `find_field_tree_with`
+    /// and calls `extract_signature_field` per node, while preflight walks
+    /// the same tree through `fields_with`/`extract_field_info` — and both
+    /// used to disagree about a hierarchical field before §76.6. Pinning
+    /// that they read the same set, rather than only that each individually
+    /// sees the field (the two tests above), is what actually closes the
+    /// "two readers disagree" class §78.1 names.
+    #[test]
+    fn discovery_and_preflight_see_the_same_hierarchical_signature_fields() {
+        let pdf = create_pdf_with_hierarchical_signed_field();
+
+        let resolver = ObjectResolver::new(&pdf);
+        let field_entries = fields_with(&resolver, &pdf).expect("the field tree resolves");
+        let mut preflight_names: Vec<String> = field_entries
+            .iter()
+            .filter_map(|entry| extract_field_info(&resolver, entry).ok().flatten())
+            .filter(|info| info.field_type == "Sig" && info.has_signature)
+            .map(|info| info.field_name)
+            .collect();
+        preflight_names.sort();
+
+        let revisions = crate::verify::RevisionMap::build(&pdf).expect("the revision map builds");
+        let mut discovery_names: Vec<String> = crate::verify::discover_signatures(&pdf, &revisions)
+            .expect("discovery succeeds")
+            .into_iter()
+            .map(|report| report.field_name)
+            .collect();
+        discovery_names.sort();
+
+        assert_eq!(
+            preflight_names, discovery_names,
+            "discovery and preflight must read the same set of signature fields from a \
+             hierarchical field tree"
+        );
+        assert_eq!(
+            preflight_names,
+            vec!["form.Sig1".to_string()],
+            "the fixture's one signed field, sanity-checked so the assertion above cannot \
+             pass by both sides being empty"
+        );
+    }
+
     #[test]
     fn a_fieldmdp_lock_on_a_qualified_name_locks_the_hierarchical_target() {
         // Two children of the same parent "form": Sig1 (already signed,
