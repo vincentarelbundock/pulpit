@@ -6,8 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Media and interactive overlays for pulpit, driven over CDP."
+# `tests/support` is a scripted worker used only by the supervisor's own test
+# suite (§76.8); the published crate has no business carrying it.
+exclude = ["tests/support"]
 
-# No binaries here on purpose.
+# No *runtime* binaries here on purpose.
 #
 # The browser runtime links nothing optional — it only ever *launches* an
 # installed browser — so it lives in `worker/` and runs inside the
@@ -18,6 +21,12 @@ description = "Media and interactive overlays for pulpit, driven over CDP."
 # A runtime that linked an optional system library (WebKitGTK) would need its
 # own executable, so that one absent shared library could not stop the
 # application from starting (`docs-src/internals.typ`). None currently does.
+# The one `[[bin]]` below is not a runtime: it is a scripted stand-in worker
+# used only by this crate's own tests, excluded from the published package.
+
+[[bin]]
+name = "pulpit-media-scripted-worker"
+path = "tests/support/scripted_worker.rs"
 
 [features]
 default = ["chromium-runtime"]
@@ -29,6 +38,7 @@ chromium-runtime = ["dep:image"]
 pulpit-core = { workspace = true }
 
 bincode = { workspace = true }
+libc = { workspace = true }
 # libmpv is discovered and dlopened at runtime, never linked: the same
 # ships-no-engine policy as the browser and PDFium.
 libloading = "0.8"

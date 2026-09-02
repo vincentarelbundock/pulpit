@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::protocol::{
     read_message, write_message, ImageCommand, InputEvent, MediaError, MediaErrorKind, MediaEvent,
     MediaRequest, PixelFormat, PlaybackProgress, RuntimeId, SessionId, SessionSource, SessionSpec,
-    SurfaceFrame, VideoCommand, MEDIA_PROTOCOL_VERSION,
+    SessionState, SurfaceFrame, VideoCommand, MEDIA_PROTOCOL_VERSION,
 };
 use crate::surface::AttachedRing;
 use crate::worker::reply;
@@ -38,10 +38,35 @@ const FORMAT_STRING: c_int = 1;
 const FORMAT_FLAG: c_int = 3;
 const FORMAT_DOUBLE: c_int = 5;
 
+// `mpv_event_id` values this worker acts on, from `mpv/client.h`.
+const MPV_EVENT_NONE: c_int = 0;
+const MPV_EVENT_END_FILE: c_int = 7;
+// `mpv_end_file_reason` values.
+const MPV_END_FILE_REASON_EOF: c_int = 0;
+const MPV_END_FILE_REASON_ERROR: c_int = 4;
+
 #[repr(C)]
 struct RenderParam {
     kind: c_int,
     data: *mut c_void,
+}
+
+/// `mpv_event`, from `mpv/client.h`. Only the fields this worker reads;
+/// libmpv's own struct carries no more before `data`, so the layout matches.
+#[repr(C)]
+struct MpvEvent {
+    event_id: c_int,
+    error: c_int,
+    reply_userdata: u64,
+    data: *mut c_void,
+}
+
+/// `mpv_event_end_file`'s leading fields — reason and error code — which is
+/// all `MPV_EVENT_END_FILE`'s `data` is read for here.
+#[repr(C)]
+struct MpvEventEndFile {
+    reason: c_int,
+    error: c_int,
 }
 
 /// The handful of libmpv symbols this worker needs, resolved at runtime.
@@ -57,6 +82,7 @@ pub struct Api {
     render_create: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut RenderParam) -> c_int,
     render: unsafe extern "C" fn(*mut c_void, *mut RenderParam) -> c_int,
     render_free: unsafe extern "C" fn(*mut c_void),
+    wait_event: unsafe extern "C" fn(*mut c_void, f64) -> *mut MpvEvent,
 }
 
 /// Where a libmpv may live: an explicit override, bundled beside the
@@ -203,6 +229,9 @@ impl Api {
                     as unsafe extern "C" fn(*mut c_void, *mut RenderParam) -> c_int
             ),
             render_free: symbol!(b"mpv_render_context_free\0" as unsafe extern "C" fn(*mut c_void)),
+            wait_event: symbol!(
+                b"mpv_wait_event\0" as unsafe extern "C" fn(*mut c_void, f64) -> *mut MpvEvent
+            ),
             _library: library,
         })
     }
@@ -285,8 +314,25 @@ impl Session {
             ));
         }
 
+        // Built before `render_create` below on purpose: once the render
+        // context exists, an early return from a `?` here has to free it too,
+        // and a `CString::new` failure on document-derived text (the file
+        // path) is exactly the kind of thing that must not have to remember
+        // that. Building every fallible C string while only `handle` is live
+        // means the one cleanup line above already covers every early exit
+        // in this constructor.
         let api_type = CString::new("sw")
-            .map_err(|_| MediaError::new(MediaErrorKind::LaunchFailed, "api type contains NUL"))?;
+            .map_err(|_| MediaError::new(MediaErrorKind::LaunchFailed, "api type contains NUL"))
+            .inspect_err(|_| unsafe { (api.destroy)(handle) })?;
+        let file = CString::new(path.as_str())
+            .map_err(|_| MediaError::new(MediaErrorKind::MalformedAsset, "path contains NUL"))
+            .inspect_err(|_| unsafe { (api.destroy)(handle) })?;
+        let loadfile = CString::new("loadfile")
+            .map_err(|_| {
+                MediaError::new(MediaErrorKind::LoadFailed, "loadfile command contains NUL")
+            })
+            .inspect_err(|_| unsafe { (api.destroy)(handle) })?;
+
         let mut params = [
             RenderParam {
                 kind: PARAM_API_TYPE,
@@ -306,11 +352,6 @@ impl Session {
             ));
         }
 
-        let file = CString::new(path.as_str())
-            .map_err(|_| MediaError::new(MediaErrorKind::MalformedAsset, "path contains NUL"))?;
-        let loadfile = CString::new("loadfile").map_err(|_| {
-            MediaError::new(MediaErrorKind::LoadFailed, "loadfile command contains NUL")
-        })?;
         let mut argv = [loadfile.as_ptr(), file.as_ptr(), std::ptr::null::<c_char>()];
         if unsafe { (api.command)(handle, argv.as_mut_ptr()) } < 0 {
             unsafe {
@@ -459,8 +500,69 @@ impl Session {
         unsafe { (api.command)(self.handle, argv.as_mut_ptr()) };
     }
 
+    /// Drain whatever libmpv has reported since this session was last
+    /// pumped.
+    ///
+    /// Nothing else in this worker ever called `mpv_wait_event`, so a decode
+    /// failure looked identical to silence: no new frame, forever, until the
+    /// first-frame deadline and then the restart budget ran out and the
+    /// fallback chain finally moved on — three timeouts to report what
+    /// libmpv already knew immediately. `MPV_EVENT_END_FILE` is the one
+    /// event this worker needs: a real decode error surfaces as `Failed`
+    /// right away, and reaching the end of the file on its own is reported
+    /// as `Ended` so the presenter is not left staring at a frozen frame
+    /// wondering whether it is still playing.
+    fn drain_events(&mut self, api: &Api, out: &mut impl Write) -> Result<(), MediaError> {
+        loop {
+            // A zero timeout only harvests what has already queued; it never
+            // blocks the tick that also pumps frames and progress.
+            // SAFETY: `self.handle` is a live player for the lifetime of this
+            // session, which is what `mpv_wait_event` requires.
+            let event = unsafe { (api.wait_event)(self.handle, 0.0) };
+            if event.is_null() {
+                break;
+            }
+            // SAFETY: libmpv returns a pointer to a real `mpv_event`, valid
+            // until the next call to `mpv_wait_event` on this handle, which
+            // does not happen before this reference is dropped.
+            let event = unsafe { &*event };
+            match event.event_id {
+                MPV_EVENT_NONE => break,
+                MPV_EVENT_END_FILE if !event.data.is_null() => {
+                    // SAFETY: `mpv_wait_event` documents `data` for
+                    // `MPV_EVENT_END_FILE` as pointing at an
+                    // `mpv_event_end_file`, whose first two fields this
+                    // struct mirrors.
+                    let end_file = unsafe { &*(event.data as *const MpvEventEndFile) };
+                    match end_file.reason {
+                        MPV_END_FILE_REASON_ERROR => {
+                            return Err(MediaError::new(
+                                MediaErrorKind::DecodeFailed,
+                                "libmpv could not decode the file",
+                            ));
+                        }
+                        MPV_END_FILE_REASON_EOF => {
+                            write_message(
+                                out,
+                                &MediaEvent::StateChanged {
+                                    session: self.spec.session,
+                                    state: SessionState::Ended,
+                                },
+                            )
+                            .map_err(|e| MediaError::new(MediaErrorKind::Crashed, e.to_string()))?;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Render the current frame into the ring when playback has moved.
     fn pump(&mut self, api: &Api, out: &mut impl Write) -> Result<(), MediaError> {
+        self.drain_events(api, out)?;
         let position = self.get_double(api, "time-pos").unwrap_or(-1.0);
         let first = self.sequence == 0;
         if self.active && (first || position != self.last_position) {

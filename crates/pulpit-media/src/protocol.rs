@@ -318,13 +318,13 @@ impl SessionSpec {
                 self.slot_bytes
             )));
         }
-        if self.ring_name.is_empty() || self.ring_name.len() > 256 {
+        // The one rule for a safe region name lives in `pulpit_core::ipc::shm`,
+        // shared with the render crate's own rings, so this and `path_for`
+        // cannot drift into disagreeing about what a caller may name a
+        // region — the two had already diverged once before this deferred to
+        // it.
+        if pulpit_core::ipc::shm::path_for(&self.ring_name).is_none() {
             return Err(ProtocolError::Malformed("bad shared-memory name".into()));
-        }
-        if self.ring_name.contains(['/', '\\', '\0']) {
-            return Err(ProtocolError::Malformed(
-                "shared-memory name must not contain path separators".into(),
-            ));
         }
         match &self.source {
             SessionSource::File { path } => {

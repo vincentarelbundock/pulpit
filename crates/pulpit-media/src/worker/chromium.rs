@@ -1342,6 +1342,17 @@ pub fn run() {
             MediaRequest::Open(spec) => {
                 let id = spec.session;
                 let viewport = spec.viewport;
+                // A session id can arrive again while the old one is still
+                // live: a supervisor restart races its own `Close`, and
+                // without this the old page's tab and screencast just keep
+                // running under a session table entry nothing points at any
+                // more, leaking a tab per transient restart.
+                if let Some(state) = sessions.remove(&id) {
+                    retired_ring_dropped += state.ring.dropped();
+                    if let Some(engine) = browser.as_mut() {
+                        engine.release_page(state.page.clone());
+                    }
+                }
                 let result = match executable.as_deref() {
                     Some(executable) => {
                         // Launched here rather than at start-up: a worker that
@@ -1391,11 +1402,22 @@ pub fn run() {
                 reply::closed(&mut out, session);
             }
             MediaRequest::SetActive { session, active } => {
-                if let (Some(state), Some(engine)) = (sessions.get_mut(&session), browser.as_mut())
-                {
-                    if let Err(error) = state.set_active(engine, active) {
-                        reply::failed(&mut out, Some(session), error);
+                let failed = match (sessions.get_mut(&session), browser.as_mut()) {
+                    (Some(state), Some(engine)) => state.set_active(engine, active).err(),
+                    _ => None,
+                };
+                // A `Failed` naming a session means that session is gone, not
+                // "gone if the supervisor happens to notice": kept alive
+                // here, the page went on screencasting into a ring nobody
+                // was draining any more (§76.8).
+                if let Some(error) = failed {
+                    if let Some(state) = sessions.remove(&session) {
+                        retired_ring_dropped += state.ring.dropped();
+                        if let Some(engine) = browser.as_mut() {
+                            engine.release_page(state.page.clone());
+                        }
                     }
+                    reply::failed(&mut out, Some(session), error);
                 }
             }
             MediaRequest::SetViewport { session, viewport } => {
@@ -1409,11 +1431,20 @@ pub fn run() {
                 if event.validate().is_err() {
                     continue;
                 }
-                if let (Some(state), Some(engine)) = (sessions.get_mut(&session), browser.as_mut())
-                {
-                    if let Err(error) = state.input(engine, event) {
-                        reply::failed(&mut out, Some(session), error);
+                let failed = match (sessions.get_mut(&session), browser.as_mut()) {
+                    (Some(state), Some(engine)) => state.input(engine, event).err(),
+                    _ => None,
+                };
+                // Same contract as `SetActive` above: a `Failed` here means
+                // gone, not left keeping a broken session's page alive.
+                if let Some(error) = failed {
+                    if let Some(state) = sessions.remove(&session) {
+                        retired_ring_dropped += state.ring.dropped();
+                        if let Some(engine) = browser.as_mut() {
+                            engine.release_page(state.page.clone());
+                        }
                     }
+                    reply::failed(&mut out, Some(session), error);
                 }
             }
             MediaRequest::Web { session, command } => {
