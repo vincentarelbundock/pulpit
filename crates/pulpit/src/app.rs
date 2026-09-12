@@ -12133,7 +12133,12 @@ impl App {
                 ahead.push(self.ready_frame_key(slide, FrameKind::Slide, width));
             }
         }
-        self.wanted_frames(Vec::new(), vec![self.audience_frame_key()], ahead)
+        let overlays = self
+            .audience_overlays()
+            .into_iter()
+            .map(|overlay| overlay.handle)
+            .collect();
+        self.wanted_frames(overlays, vec![self.audience_frame_key()], ahead)
     }
 
     /// Every picture the presenter window draws: the slide panels' three
@@ -12197,7 +12202,14 @@ impl App {
         // brand-new frame for *every* visible page in the same pass. One
         // upload per pass then left all but the first painting as bare sheet
         // until their turn came round: the whole-page flash on a commit.
-        let mut composites: Vec<iced::widget::image::Handle> = Vec::new();
+        // Media changes its image handle on every decoded frame. It needs
+        // the same per-window residency as the PDF: otherwise a large video
+        // disappears during each asynchronous upload, exposing the poster.
+        let mut composites: Vec<iced::widget::image::Handle> = self
+            .current_slide_overlays()
+            .into_iter()
+            .map(|overlay| overlay.handle)
+            .collect();
         for placed in self.reader.visible_pages() {
             let key = self.ready_reader_frame_key(placed.page, placed.width);
             let Some(drawn) = self.reader_frame(placed.page, placed.width) else {
