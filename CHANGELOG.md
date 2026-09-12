@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.16] — 2026-09-12
+
+### Fixed
+
+- **Embedded videos no longer flash their poster between frames.** Media
+  frames are uploaded before drawing in both presenter and audience windows,
+  preventing large video frames from disappearing during asynchronous uploads.
+
 ## [0.0.15] — 2026-09-02
 
 ### Fixed
