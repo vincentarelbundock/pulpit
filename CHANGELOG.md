@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.17] — 2026-09-16
+
+### Fixed
+
+- **Clicking a form field no longer changes the tool instead of filling the
+  field.** A press is now preceded by its own pointer move, and the pointer
+  leaving the page releases it, so the field reliably takes the caret.
+  Without both, PDFium gave the caret to the previously clicked field or to
+  nothing at all — and the digits of the date being typed then reached the
+  keymap, where they arm annotation tools and end the open field edit.
+
 ## [0.0.16] — 2026-09-12
 
 ### Fixed
