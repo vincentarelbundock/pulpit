@@ -1536,6 +1536,21 @@ pub struct App {
     /// position the pointer has already left is not worth drawing.
     form_move:
         crate::coalesce::Coalesced<(pulpit_core::page::PageIndex, pulpit_core::page::PagePoint)>,
+    /// Whether a press has gone to the document's own form and has not been
+    /// let go of yet (§8.6).
+    ///
+    /// PDFium gives a field the caret on the button *up*, not on the down, so
+    /// a press the release never followed leaves the field unfocused — and an
+    /// unfocused field means the digits of the date being typed into it reach
+    /// the keymap instead, where they arm annotation tools. The pointer
+    /// leaving the sheet is the case: iced publishes no release for it, only
+    /// an exit. So the press is remembered, and whichever of the two ends the
+    /// gesture lets the form go.
+    ///
+    /// It also stops the opposite error. A release is not the form's unless
+    /// the press was: a button-up the engine never saw a button-down for
+    /// lands in whatever widget was last under the pointer.
+    form_press_held: bool,
     /// Every edit, on disk as it is made (§11.1). `None` when there is no
     /// document open, or when the journal could not be written — in which
     /// case the user has been told that a crash would lose their edits.
@@ -2147,6 +2162,7 @@ impl App {
             selection_query: Default::default(),
             date_language: crate::datefield::Locale::from_environment(),
             form_move: Default::default(),
+            form_press_held: false,
             warned_marks_are_not_kept: false,
             reader_journal: None,
             pending_reader_recovery: None,
@@ -6730,6 +6746,10 @@ impl App {
         self.reader_patch_images.clear();
         self.reader_pending.clear();
         self.form_move.abandon();
+        // The form the press was held in is gone, so there is nothing left to
+        // let go of — and a press remembered across a document would send its
+        // button-up into the next one.
+        self.form_press_held = false;
         self.selection_query.abandon();
         self.form_clipboard = None;
         self.pending_form_goto = None;
@@ -8733,7 +8753,7 @@ impl App {
                         self.copy_area(page, rect, kind);
                     }
                     crate::reader::Released::Nothing => {
-                        self.ask_form_pointer(FormPointer::Up);
+                        self.release_form_press();
                     }
                     crate::reader::Released::CropApplied => {
                         // The rectangle acted on release, as the crop button
@@ -8748,6 +8768,12 @@ impl App {
                 Task::none()
             }
             ReadCommand::PageCancelled => {
+                // The pointer leaving the sheet is a release as far as the
+                // form is concerned, and it is the *only* one it will get:
+                // iced publishes no button-up once the cursor is off the
+                // widget. Sent before the reader forgets where the cursor
+                // was, because that is the position the up carries.
+                self.release_form_press();
                 // A drag that left the sheet can still have taken a crop on
                 // its way out, which moves the viewport like any release.
                 if self.reader.pointer_cancelled() {

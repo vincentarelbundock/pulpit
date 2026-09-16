@@ -1097,6 +1097,33 @@ that will not take form events latches it shut and the form stops following the
 pointer for the rest of the session — which is why a refusal is reported rather
 than dropped.
 
+The move is not only decoration, though, and coalescing it alone was a bug. Two
+undocumented facts about PDFium's focus govern what a click does, and both were
+found filling a real form whose date fields sit in pairs, where clicking the
+second of each pair put the typing in the first or nowhere at all:
+
++ A press focuses the widget the pointer has *entered*, not the one its
+  coordinates name. `FORM_OnLButtonDown` inside a field the engine never saw
+  the mouse move into is handled by whichever widget it did, and the caret does
+  not move.
++ The caret arrives on the button *up*. Between the down and the up there is no
+  focused annotation to report at all.
+
+So a press carries an entering move of its own, at its own position, sent
+outside the guard — a press that waited for a round trip would be a press that
+waited — and it clears whatever was waiting, because a position the pointer has
+already left must not land after the press that left it. And both ends of the
+gesture release the press: the ordinary button-up, and the pointer leaving the
+sheet, for which the toolkit publishes an exit and no release.
+
+What made these worth a section rather than a fix is what a click that takes no
+caret *becomes*. The digits arm annotation tools, in document mode and in the
+presenter's palette alike. A date is digits. So a field that quietly failed to
+focus did not merely swallow the typing: the `4` in the date armed the text
+tool, and arming a tool ends any field edit that was open. The visible symptom
+was a viewer that changed tools when a field was clicked, which names nothing
+about its own cause.
+
 == Choice fields, and why the two kinds differ
 
 A list box moves its own selection on `FORM_OnKeyDown` with an arrow key. A

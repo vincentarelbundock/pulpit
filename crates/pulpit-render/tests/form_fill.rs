@@ -1976,3 +1976,110 @@ fn a_save_made_around_an_open_caret_still_carries_what_was_typed() {
         );
     });
 }
+
+/// The two facts about PDFium's focus that the application's pointer path is
+/// built around, and which it used to get wrong (§8.6).
+///
+/// Both were found filling a real form whose date fields sit in pairs. Clicked
+/// one after the other, the second of each pair took no caret at all: the
+/// typing went into the first field, or — when nothing had been focused yet —
+/// nowhere, and the digits of the date reached the keymap instead, where they
+/// arm annotation tools.
+///
+/// 1. A press with no entering move behind it focuses nothing. The caret
+///    arrives on the button *up*, so a press the release never followed is a
+///    click that silently did nothing — which is what the pointer leaving the
+///    sheet mid-click used to produce, because iced publishes an exit for
+///    that and no release.
+/// 2. A press focuses the widget the pointer has *entered*, not the one its
+///    coordinates name: with a field already holding the caret,
+///    `FORM_OnLButtonDown` in another one is handled by the first, and the
+///    caret does not move.
+///
+/// Neither is written down in PDFium's headers, and neither is visible from
+/// the application — which is why they are pinned here rather than inferred
+/// again the next time the pointer path is touched.
+#[test]
+fn a_press_focuses_the_widget_the_pointer_entered_and_only_on_the_release() {
+    crate::testkit::on_the_pdfium_thread(|| {
+        let Some(mut guard) = common::pdfium("the form-fill spike") else {
+            return;
+        };
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("two-fields.pdf");
+        std::fs::write(&path, crate::testkit::two_text_fields()).expect("the fixture is written");
+
+        let centre = |document: &PdfDocument<'_>, field: &str| -> PagePoint {
+            let bounds = document
+                .fields()
+                .expect("the fields are readable")
+                .into_iter()
+                .find(|candidate| candidate.name == field)
+                .and_then(|candidate| candidate.anchor_on(PageIndex(0)))
+                .unwrap_or_else(|| panic!("the fixture no longer has a {field} field"));
+            PagePoint {
+                x: (bounds.left + bounds.right) / 2.0,
+                y: (bounds.top + bounds.bottom) / 2.0,
+            }
+        };
+        let focused = |result: &pulpit_render::document::protocol::FormEventResult| {
+            result
+                .focused_widget
+                .as_ref()
+                .map(|widget| widget.field.clone())
+        };
+        let event = |document: &mut PdfDocument<'_>, event| {
+            document
+                .form_event(PageIndex(0), event)
+                .expect("the event is accepted")
+        };
+
+        // (1) A cold press, with nothing focused and no move behind it.
+        {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 77);
+            let left = centre(&document, "left");
+
+            let down = event(&mut document, FormInputEvent::PointerDown { at: left });
+            assert_eq!(
+                focused(&down),
+                None,
+                "PDFium now focuses on the press; the release no longer has to \
+                 be sent for a click to land, and `App::release_form_press` \
+                 can go"
+            );
+            assert!(!down.text_focus);
+
+            let up = event(&mut document, FormInputEvent::PointerUp { at: left });
+            assert_eq!(focused(&up), Some("left".into()), "{up:?}");
+            assert!(up.text_focus, "the release did not give the field a caret");
+        }
+
+        // (2) …and a press into a second field while the first holds the
+        // caret, with and without the entering move the application now sends
+        // ahead of every press.
+        {
+            let engine = PdfiumDocument::open(&mut guard, &path).expect("the form opens");
+            let mut document = PdfDocument::new(Box::new(engine), 78);
+            let (left, right) = (centre(&document, "left"), centre(&document, "right"));
+
+            event(&mut document, FormInputEvent::PointerMove { at: left });
+            event(&mut document, FormInputEvent::PointerDown { at: left });
+            event(&mut document, FormInputEvent::PointerUp { at: left });
+
+            let stray = event(&mut document, FormInputEvent::PointerDown { at: right });
+            assert_eq!(
+                focused(&stray),
+                Some("left".into()),
+                "PDFium no longer needs the entering move; the one \
+                 `App::ask_form_pointer` sends ahead of every press can go"
+            );
+            event(&mut document, FormInputEvent::PointerUp { at: right });
+
+            event(&mut document, FormInputEvent::PointerMove { at: right });
+            let aimed = event(&mut document, FormInputEvent::PointerDown { at: right });
+            assert_eq!(focused(&aimed), Some("right".into()), "{aimed:?}");
+            assert!(aimed.text_focus);
+        }
+    });
+}

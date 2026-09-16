@@ -270,6 +270,9 @@ impl App {
     /// renders the reader is waiting on. A caret that does not change shape
     /// over a field is a smaller loss than a page that stutters while the hand
     /// moves across it.
+    ///
+    /// The press carries an entering move of its own, though, because the
+    /// hover moves are not enough to be relied on — see below.
     pub(super) fn ask_form_pointer(&mut self, which: FormPointer) -> bool {
         use pulpit_render::document::protocol::FormInputEvent;
 
@@ -279,11 +282,49 @@ impl App {
         let Some((page, at)) = self.reader.cursor_position() else {
             return false;
         };
+        // PDFium moves the focus to the widget the pointer has *entered*, not
+        // to the one the press names: `FORM_OnLButtonDown` inside a field the
+        // engine never saw the mouse move into is handled by whichever widget
+        // it did, so the caret stays in the previous field and the typing goes
+        // there too. The hover moves above are coalesced and the press is not,
+        // so the move that would have entered this field can still be waiting
+        // behind one in flight when the press goes out — and it then arrives
+        // *after* it. So the press carries its own entering move, at its own
+        // position, and takes the waiting one down with it: a position the
+        // pointer has already left must not land after the press that left it
+        // (§8.6).
+        //
+        // Sent outside the guard rather than through it, because a press that
+        // waited for a round trip would be a press that waited. The guard is
+        // there to stop a run of stale samples queueing in front of the page
+        // renders, and one move per click does not do that — the cost is at
+        // most one extra move in flight for one round trip.
+        if matches!(which, FormPointer::Down) {
+            let (page, at) = self.form_move.offer_now((page, at));
+            self.ask_form_event_on(page, FormInputEvent::PointerMove { at });
+        }
         let event = match which {
             FormPointer::Down => FormInputEvent::PointerDown { at },
             FormPointer::Up => FormInputEvent::PointerUp { at },
         };
-        self.ask_form_event_on(page, event)
+        let sent = self.ask_form_event_on(page, event);
+        // A press that did not go out is not one the release has to answer
+        // for; one that did is held until it does.
+        self.form_press_held = sent && matches!(which, FormPointer::Down);
+        sent
+    }
+
+    /// Let the form know the button came up, if a press of its own is held.
+    ///
+    /// Both ends of the gesture arrive here — the ordinary release and the
+    /// pointer leaving the sheet — because PDFium hands a field the caret on
+    /// the button up, and a press with no up at all is a click that silently
+    /// did nothing (§8.6).
+    pub(super) fn release_form_press(&mut self) {
+        if !std::mem::take(&mut self.form_press_held) {
+            return;
+        }
+        self.ask_form_pointer(FormPointer::Up);
     }
 
     /// Move a focused combo box's selection by one, if there is one to move to.

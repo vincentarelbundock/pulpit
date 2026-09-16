@@ -52,7 +52,7 @@ pub mod pdfium_thread;
 pub mod verify;
 
 pub use builder::{stream_body, utf16_string, Page, Pdf};
-pub use corpus::{corpus, Case, Expect};
+pub use corpus::{corpus, two_text_fields, Case, Expect};
 pub use guard::{nothing_written, Unchanged};
 pub use pdfium_thread::on_the_pdfium_thread;
 pub use verify::Engines;

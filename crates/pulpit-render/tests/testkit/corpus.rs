@@ -135,6 +135,28 @@ fn case(name: &'static str, note: &'static str, bytes: Vec<u8>, expect: Expect) 
     }
 }
 
+/// Two plain text fields, side by side and separately named, on one page.
+///
+/// Not a corpus case: there is nothing wrong with it. It is here because the
+/// corpus is where documents are built, and because one field is not enough
+/// to ask the question this answers — what a press does to the caret when the
+/// caret is somewhere else already.
+///
+/// `left` is `[100 300 300 330]` and `right` is `[320 300 500 330]`, in PDF
+/// user space on a 612×792 page.
+pub fn two_text_fields() -> Vec<u8> {
+    let mut doc = Doc::new();
+    let left = doc.add(text_widget("left", "100 300 300 330", ""));
+    let right = doc.add(text_widget("right", "320 300 500 330", ""));
+    doc.finish(
+        &format!(
+            "/Fields [{left} 0 R {right} 0 R] /DA (/Helv 12 Tf 0 g) \
+             /DR << /Font << /Helv 3 0 R >> >>"
+        ),
+        &format!("{left} 0 R {right} 0 R"),
+    )
+}
+
 /// Every case in the corpus.
 pub fn corpus() -> Vec<Case> {
     let mut cases = Vec::new();
