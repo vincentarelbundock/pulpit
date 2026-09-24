@@ -6521,39 +6521,13 @@ impl App {
         // taken and the notice says so (§31.3 requires the choice be offered
         // before anything can *mutate* the document, and "Allow editing" in
         // the signature panel is where it stays offered).
-        let just_signed = self
-            .sign
-            .opening_signed_copy
-            .take()
-            .zip(
-                self.documents
-                    .active()
-                    .map(|document| document.path.clone()),
-            )
-            .is_some_and(|(signed, opened)| Self::same_path(&signed, &opened));
+        let just_signed = self.sign.take_signed_copy_open(&self.documents);
         self.sign.pending_append_only_offer =
             !self.sign.document_signatures.is_empty() && !just_signed;
         if just_signed && !self.sign.document_signatures.is_empty() {
             self.sign.append_only = Some(crate::signing::AppendOnlyMode::AppendOnly);
         }
-        // Every entry here names a `/Sig` field that already carries a
-        // value, `Broken` included (§28.2/§28.3: broken is still signed,
-        // just not verifiably so) — the set `dead_fields_on` uses to keep
-        // click-to-sign off a field that already has a `/V` (§31.3).
-        self.reader.set_signed_fields(
-            self.sign
-                .document_signatures
-                .iter()
-                .map(|verification| match verification {
-                    pulpit_render::verify::SignatureVerification::Checked(status) => {
-                        status.field_name.clone()
-                    }
-                    pulpit_render::verify::SignatureVerification::Broken { field_name, .. } => {
-                        field_name.clone()
-                    }
-                })
-                .collect(),
-        );
+        self.sync_signed_fields();
         match prepared.watcher {
             Ok(mut watcher) => {
                 self.file_wakeup = watcher.take_wakeup();
@@ -6601,6 +6575,7 @@ impl App {
                 shape.info.warnings.clone(),
                 shape.info.has_form,
             );
+            self.sync_signed_fields();
             self.rescan_search_after_document_change();
             if shape.info.has_form {
                 self.ask_field_list();
@@ -6843,6 +6818,7 @@ impl App {
                     tracing::debug!(pages = geometry.len(), "reader described");
                     self.reader
                         .opened(geometry, info.level, info.warnings.clone(), info.has_form);
+                    self.sync_signed_fields();
                     // Page numbers meaning something else now applies to the
                     // search as much as to a repaint: this is the first point
                     // at which the new document's page count is known, so it

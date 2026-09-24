@@ -1102,3 +1102,250 @@ fn an_unset_id_second_element_is_refused_rather_than_written() {
     sign_document_file(&source, &destination, &credential, &set).expect("a set /ID signs");
     assert!(destination.exists());
 }
+
+/// macOS Preview's shape for a form it has saved: `/AcroForm /Fields` lists
+/// a merged field-and-widget no page references (object 5), and the page
+/// carries a separate, parentless widget with the same `/T` (object 6) that
+/// the field tree never reaches. Viewers draw the page widget, so a
+/// signature put on the listed orphan was valid and invisible everywhere.
+fn preview_split_form() -> Vec<u8> {
+    signing_fixture::assemble_single_revision(&preview_split_objects())
+}
+
+fn preview_split_objects() -> Vec<String> {
+    let empty_appearance =
+        "<</Type /XObject /Subtype /Form /BBox [0 0 0 0] /Length 3>>\nstream\nq Q\nendstream";
+    vec![
+        "<</Type /Catalog /Pages 2 0 R /AcroForm 4 0 R>>".to_string(),
+        "<</Type /Pages /Kids [3 0 R] /Count 1>>".to_string(),
+        "<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R]>>".to_string(),
+        "<</Fields [5 0 R] /NeedAppearances true>>".to_string(),
+        "<</Type /Annot /Subtype /Widget /FT /Sig /T (Membre jury) \
+          /Rect [357.655 390.255 570.491 422.255] /F 4 /AP <</N 7 0 R>>>>"
+            .to_string(),
+        "<</Type /Annot /Subtype /Widget /FT /Sig /T (Membre jury) \
+          /Rect [357.655 390.255 570.491 422.255] /F 4 /AP <</N 7 0 R>>>>"
+            .to_string(),
+        empty_appearance.to_string(),
+    ]
+}
+
+#[test]
+fn a_field_no_page_shows_is_signed_on_the_page_widget_standing_in_for_it() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("rapport.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, preview_split_form()).expect("write the source");
+
+    let mut req = request(SignTarget::ExistingField("Membre jury".to_string()));
+    req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::InkAndText {
+            strokes: vec![vec![(0.0, 0.0), (1.0, 1.0)]],
+            stroke_width: 1.5,
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024-08-20 22:00 UTC".to_string(),
+        },
+    });
+    sign_document_file(&source, &destination, &credential, &req)
+        .expect("signing the split field succeeds");
+
+    let output = std::fs::read(&destination).expect("read the output");
+    let statuses = statuses(&output);
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].field_name, "Membre jury");
+    assert!(statuses[0].intact && statuses[0].valid);
+
+    // The page's widget carries the signature and the drawn appearance…
+    let widget = String::from_utf8_lossy(
+        &pulpit_render::verify::object_definition(&output, 6).expect("the widget resolves"),
+    )
+    .into_owned();
+    assert!(
+        widget.contains("/V "),
+        "the page widget must be signed: {widget}"
+    );
+    assert!(
+        !widget.contains("/N 7 0 R"),
+        "the page widget must point at the new appearance: {widget}"
+    );
+    // …and the form lists it in place of the orphan, so validators reach
+    // the same object viewers draw.
+    let acroform = String::from_utf8_lossy(
+        &pulpit_render::verify::object_definition(&output, 4).expect("the AcroForm resolves"),
+    )
+    .into_owned();
+    assert!(acroform.contains("/Fields [6 0 R]"), "got: {acroform}");
+    assert!(acroform.contains("/SigFlags 3"), "got: {acroform}");
+    assert!(
+        !acroform.contains("/NeedAppearances"),
+        "readers must preserve the saved appearances: {acroform}"
+    );
+    // The orphan is left exactly as it was.
+    let orphan = String::from_utf8_lossy(
+        &pulpit_render::verify::object_definition(&output, 5).expect("the orphan resolves"),
+    )
+    .into_owned();
+    assert!(!orphan.contains("/V "), "got: {orphan}");
+}
+
+#[test]
+fn a_visible_signature_in_a_field_no_page_shows_is_refused() {
+    let Some(credential) = load_test_credential() else {
+        skip_message();
+        return;
+    };
+    // The split form with the page widget taken off the page (padded, so
+    // the cross-reference offsets still hold): nothing stands in for the
+    // orphan, and an appearance drawn into it would never be seen.
+    let source_bytes = String::from_utf8_lossy(&preview_split_form())
+        .replacen("/Annots [6 0 R]", "/Annots [     ]", 1)
+        .into_bytes();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("rapport.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, &source_bytes).expect("write the source");
+
+    let mut req = request(SignTarget::ExistingField("Membre jury".to_string()));
+    req.appearance = Some(SignAppearance {
+        page_rotation: AppearanceRotation::None,
+        placement: AppearancePlacement::FieldRect,
+        content: AppearanceContent::InkAndText {
+            strokes: Vec::new(),
+            stroke_width: 1.5,
+            signer_name: "Ada Lovelace".to_string(),
+            time_label: "2024-08-20 22:00 UTC".to_string(),
+        },
+    });
+    let error = sign_document_file(&source, &destination, &credential, &req)
+        .expect_err("an invisible visible signature is refused");
+    assert!(
+        matches!(error, SignApplyError::AppearancePlacement(ref detail) if detail.contains("not on any page")),
+        "got: {error:?}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn a_split_widget_with_a_null_value_is_empty() {
+    let credential = signing_fixture::any_test_credential();
+    let mut objects = preview_split_objects();
+    objects[5] = objects[5].replace("/F 4", "/F 4 /V null");
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("source.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, signing_fixture::assemble_single_revision(&objects)).unwrap();
+    sign_document_file(
+        &source,
+        &destination,
+        &credential,
+        &request(SignTarget::ExistingField("Membre jury".into())),
+    )
+    .expect("null is an empty value");
+    assert!(statuses(&std::fs::read(destination).unwrap())[0].valid);
+}
+
+#[test]
+fn repairing_a_split_field_after_another_signature_is_refused() {
+    let credential = signing_fixture::any_test_credential();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("source.pdf");
+    let first = directory.path().join("first.pdf");
+    let destination = directory.path().join("second.pdf");
+    std::fs::write(&source, preview_split_form()).unwrap();
+    sign_document_file(
+        &source,
+        &first,
+        &credential,
+        &request(SignTarget::NewInvisibleField {
+            name: Some("First".into()),
+        }),
+    )
+    .expect("first signature");
+    let before = std::fs::read(&first).unwrap();
+    let error = sign_document_file(
+        &first,
+        &destination,
+        &credential,
+        &request(SignTarget::ExistingField("Membre jury".into())),
+    )
+    .expect_err("repairing the field tree is not countersigning");
+    assert!(matches!(
+        error,
+        SignApplyError::ContentChangeInAppendOnlyMode { .. }
+    ));
+    assert_eq!(std::fs::read(first).unwrap(), before);
+    assert!(!destination.exists());
+}
+
+/// The field tree holds the typed value, but the page widget still has an
+/// empty value. Both share the saved appearance generated for the typed text.
+/// Regenerating from the widget value makes the name disappear in Poppler.
+fn split_form_with_text(appearance: bool) -> Vec<u8> {
+    let mut objects = preview_split_objects();
+    objects[2] = objects[2].replace("[6 0 R]", "[6 0 R 9 0 R]");
+    objects[3] = objects[3].replace("[5 0 R]", "[5 0 R 8 0 R]");
+    let ap = if appearance { "/AP <</N 10 0 R>>" } else { "" };
+    for value in ["Ada Lovelace", ""] {
+        objects.push(format!(
+            "<</Type /Annot /Subtype /Widget /FT /Tx /T (Name) \
+             /Rect [50 100 250 120] /F 4 /DA (/Missing 12 Tf 0 g) /V ({value}) {ap}>>"
+        ));
+    }
+    let text = "BT /F0 12 Tf 0 4 Td (Ada Lovelace) Tj ET\n";
+    objects.push(format!(
+        "<</Type /XObject /Subtype /Form /BBox [0 0 200 20] \
+         /Resources <</Font <</F0 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>>>>>> \
+         /Length {}>>\nstream\n{text}endstream",
+        text.len()
+    ));
+    signing_fixture::assemble_single_revision(&objects)
+}
+
+#[test]
+fn signing_a_split_form_preserves_the_saved_text_appearance() {
+    let credential = signing_fixture::any_test_credential();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("source.pdf");
+    let destination = directory.path().join("signed.pdf");
+    std::fs::write(&source, split_form_with_text(true)).unwrap();
+    sign_document_file(
+        &source,
+        &destination,
+        &credential,
+        &request(SignTarget::ExistingField("Membre jury".into())),
+    )
+    .expect("saved text appearances can be preserved");
+    let output = std::fs::read(destination).unwrap();
+    let acroform = verify::object_definition(&output, 4).unwrap();
+    assert!(!String::from_utf8_lossy(&acroform).contains("NeedAppearances"));
+    assert!(statuses(&output)[0].valid);
+    std::fs::write(oracle_fixture_path("apply-split-text.pdf"), &output).unwrap();
+}
+
+#[test]
+fn signing_refuses_to_freeze_a_form_with_missing_text_appearances() {
+    let credential = signing_fixture::any_test_credential();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("source.pdf");
+    let destination = directory.path().join("signed.pdf");
+    let before = split_form_with_text(false);
+    std::fs::write(&source, &before).unwrap();
+    let error = sign_document_file(
+        &source,
+        &destination,
+        &credential,
+        &request(SignTarget::ExistingField("Membre jury".into())),
+    )
+    .expect_err("missing appearances require regeneration");
+    assert!(
+        matches!(error, SignApplyError::Unsupported(ref detail) if detail.contains("no saved normal appearance"))
+    );
+    assert_eq!(std::fs::read(source).unwrap(), before);
+    assert!(!destination.exists());
+}

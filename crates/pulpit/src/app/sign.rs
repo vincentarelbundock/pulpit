@@ -112,6 +112,19 @@ pub struct SignState {
     pub(crate) temp: Option<PathBuf>,
 }
 
+impl SignState {
+    /// Preparation can finish before the render worker promotes the document,
+    /// when `active()` is still empty. The requested path is already known.
+    pub(super) fn take_signed_copy_open(
+        &mut self,
+        documents: &crate::doc::DocumentManager,
+    ) -> bool {
+        self.opening_signed_copy
+            .take()
+            .is_some_and(|signed| App::same_path(&signed, documents.path()))
+    }
+}
+
 impl App {
     /// Where §31.1 step 3's save should write, when the save in flight is
     /// signing's own. `None` for an ordinary Save As, which asks.
@@ -487,10 +500,10 @@ impl App {
     ) -> Task<Message> {
         use crate::signing::{SignMsg, SigningFlow};
 
-        let Some(source) = self.signing_source_path() else {
-            self.refuse_signing("There is no document open to sign.".to_string());
-            return Task::none();
-        };
+        // The scratch copy supplies the bytes to sign, but the open document
+        // supplies the user's filename. Naming the export after the scratch
+        // copy creates a hidden `.pulpit-signing-…-signed.pdf`.
+        let source = self.documents.path().to_path_buf();
         let options = match self.sign_prepare_options(candidates) {
             Ok(options) => options,
             Err(detail) => {
@@ -710,6 +723,32 @@ impl App {
     /// — the condition §31.1 step 3 checks before signing.
     fn has_unsaved_edits(&self) -> bool {
         self.reader.can_undo()
+    }
+
+    /// Tell the reader which `/Sig` fields already carry a value, `Broken`
+    /// included (§28.2/§28.3: broken is still signed, just not verifiably
+    /// so) — the set `dead_fields_on` uses to keep click-to-sign off a
+    /// field that already has a `/V` (§31.3).
+    ///
+    /// Called after every `ReaderSession::opened`, not once per document:
+    /// `opened` rebuilds the session from nothing, and both places that call
+    /// it (the remembered-shape pre-open and `Told::Described`) run after
+    /// `finish_document_prepare` has read the signatures. Set only there, the
+    /// set was always empty by the time a page was drawn, so an
+    /// already-signed field offered "click to sign" and the click was then
+    /// refused as a field the document does not offer.
+    pub(super) fn sync_signed_fields(&mut self) {
+        use pulpit_render::verify::SignatureVerification;
+        self.reader.set_signed_fields(
+            self.sign
+                .document_signatures
+                .iter()
+                .map(|verification| match verification {
+                    SignatureVerification::Checked(status) => status.field_name.clone(),
+                    SignatureVerification::Broken { field_name, .. } => field_name.clone(),
+                })
+                .collect(),
+        );
     }
 
     fn signing_source_path(&self) -> Option<PathBuf> {
@@ -1032,8 +1071,34 @@ impl App {
 
 #[cfg(test)]
 mod append_only_tests {
-    use super::App;
+    use super::{App, SignState};
+    use crate::doc::{DocumentManager, ReloadPolicy};
     use crate::widgets::event::ReadCommand;
+
+    #[test]
+    fn a_just_signed_copy_is_recognised_before_the_renderer_promotes_it() {
+        let path = std::path::PathBuf::from("/decks/talk-signed.pdf");
+        let mut documents = DocumentManager::new(path.clone(), ReloadPolicy::default());
+        documents.open_initial(std::time::Instant::now());
+        assert!(documents.active().is_none());
+        let mut sign = SignState {
+            opening_signed_copy: Some(path),
+            ..Default::default()
+        };
+        assert!(sign.take_signed_copy_open(&documents));
+        assert!(!sign.take_signed_copy_open(&documents));
+    }
+
+    #[test]
+    fn opening_another_document_does_not_take_the_just_signed_answer() {
+        let documents = DocumentManager::new("/decks/other.pdf", ReloadPolicy::default());
+        let mut sign = SignState {
+            opening_signed_copy: Some("/decks/talk-signed.pdf".into()),
+            ..Default::default()
+        };
+        assert!(!sign.take_signed_copy_open(&documents));
+        assert!(sign.opening_signed_copy.is_none());
+    }
 
     #[test]
     fn a_signed_document_still_takes_the_gestures_that_only_read_it() {

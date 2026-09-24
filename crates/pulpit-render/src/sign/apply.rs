@@ -574,6 +574,11 @@ struct RevisionPlan {
     previous_signatures: usize,
     seed_value_ignored: bool,
     existing_field: Option<(u32, u16)>,
+    /// The page widget that stands in for `existing_field` when the AcroForm
+    /// lists a field no page shows — see [`find_stand_in_widget_with`]. When
+    /// set, the signature goes on this widget, and the revision swaps it
+    /// into `/Fields` in place of the orphan.
+    stand_in: Option<(u32, u16)>,
 }
 
 /// §78.3: `sign_document_file_inner` builds one [`crate::verify::ObjectResolver`]
@@ -606,11 +611,35 @@ fn plan_revision(
                         ok.target_field
                     ))
                 })?;
+            let stand_in =
+                find_stand_in_widget_with(resolver, source, field_obj, &ok.target_field)?;
+            if stand_in.is_some() && previous_signatures > 0 {
+                return Err(SignApplyError::ContentChangeInAppendOnlyMode {
+                    detail: "repairing a split signature field replaces an AcroForm field; \
+                             this structural repair is only supported before the first signature"
+                        .to_string(),
+                });
+            }
+            if stand_in.is_none()
+                && request.appearance.is_some()
+                && !field_is_on_a_page_with(resolver, source, field_obj)?
+            {
+                // Drawing an appearance into a widget no page references
+                // produces a signature that is valid and that nobody can
+                // see. That is worse than a refusal.
+                return Err(SignApplyError::AppearancePlacement(format!(
+                    "signature field '{}' is listed by the form but is not on any page, so a \
+                     visible signature in it could never be seen; the source is unchanged — \
+                     sign without an appearance, or into another field",
+                    ok.target_field
+                )));
+            }
             Ok(RevisionPlan {
                 field_name: ok.target_field,
                 previous_signatures,
                 seed_value_ignored: ok.seed_value_ignored,
                 existing_field: Some(field_obj),
+                stand_in,
             })
         }
         SignTarget::NewInvisibleField { name } => {
@@ -653,6 +682,7 @@ fn plan_revision(
                 previous_signatures,
                 seed_value_ignored: false,
                 existing_field: None,
+                stand_in: None,
             })
         }
     }
@@ -736,9 +766,15 @@ fn assemble_revision(
     let mut appearance_size: Option<(f64, f64)> = None;
 
     match plan.existing_field {
-        Some((field_object, field_gen)) => {
+        Some(listed) => {
             // The minimal content-change line of §31.3: the only object that
-            // changes meaning is the field, which gains a /V.
+            // changes meaning is the field, which gains a /V — or, for a
+            // field the form lists but no page shows, the page widget that
+            // stands in for it, which the AcroForm is then pointed at.
+            let (field_object, field_gen) = plan.stand_in.unwrap_or(listed);
+            if let Some(widget) = plan.stand_in {
+                objects.extend(adopt_stand_in(resolver, source, listed, widget)?);
+            }
             let mut entries = parse_object_dictionary_with(resolver, field_object)?;
             set_entry(
                 &mut entries,
@@ -1699,6 +1735,306 @@ fn find_field_object_with(
         }
     }
     Ok(None)
+}
+
+/// Every annotation reference on every page, in page order.
+fn page_annotation_refs_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+) -> Result<Vec<(u32, u16)>, SignApplyError> {
+    let catalog = find_catalog_ref_with(resolver, bytes)?;
+    let catalog_entries = parse_object_dictionary_with(resolver, catalog.0)?;
+    let mut refs = Vec::new();
+    for (page, _) in page_objects_with(resolver, &catalog_entries)? {
+        let page_entries = parse_object_dictionary_with(resolver, page)?;
+        let annots = match entry(&page_entries, "Annots") {
+            Some(PdfObject::Array(items)) => items.clone(),
+            Some(PdfObject::IndirectRef { obj_num, .. }) => {
+                match resolved_array(resolver, *obj_num) {
+                    Some(items) => items,
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        refs.extend(annots.iter().filter_map(|annot| match annot {
+            PdfObject::IndirectRef { obj_num, gen_num } => Some((*obj_num, *gen_num)),
+            _ => None,
+        }));
+    }
+    Ok(refs)
+}
+
+/// An indirect array, converted for re-emission; `None` when the object is
+/// not an array.
+fn resolved_array(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    obj_num: u32,
+) -> Option<Vec<PdfObject>> {
+    match pdf_object_from_value(&resolver.resolve(obj_num).ok()?.0) {
+        PdfObject::Array(items) => Some(items),
+        _ => None,
+    }
+}
+
+/// Whether some page's `/Annots` references `field` or one of its `/Kids`
+/// — that is, whether an appearance drawn for it would be seen anywhere.
+fn field_is_on_a_page_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+    field: (u32, u16),
+) -> Result<bool, SignApplyError> {
+    let annots = page_annotation_refs_with(resolver, bytes)?;
+    let entries = parse_object_dictionary_with(resolver, field.0)?;
+    let kids: Vec<u32> = match entry(&entries, "Kids") {
+        Some(PdfObject::Array(items)) => items
+            .iter()
+            .filter_map(|kid| match kid {
+                PdfObject::IndirectRef { obj_num, .. } => Some(*obj_num),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(annots
+        .iter()
+        .any(|(n, _)| *n == field.0 || kids.contains(n)))
+}
+
+/// A widget's `/Rect` as `[left, bottom, right, top]`, when it is four
+/// direct numbers.
+fn rect_of(entries: &[(String, PdfObject)]) -> Option<[f64; 4]> {
+    let Some(PdfObject::Array(items)) = entry(entries, "Rect") else {
+        return None;
+    };
+    let numbers: Vec<f64> = items
+        .iter()
+        .filter_map(|item| match item {
+            PdfObject::Integer(i) => Some(*i as f64),
+            PdfObject::Real(r) => Some(*r),
+            _ => None,
+        })
+        .collect();
+    let [a, b, c, d] = numbers[..] else {
+        return None;
+    };
+    Some([a.min(c), b.min(d), a.max(c), b.max(d)])
+}
+
+/// The page widget standing in for a signature field the AcroForm lists but
+/// no page shows, if there is exactly one.
+///
+/// macOS Preview writes forms this way: every field is split into an
+/// orphan merged field-and-widget, which `/AcroForm /Fields` lists and no
+/// page references, and a standalone widget on the page carrying the same
+/// `/T` and no `/Parent`, which the field tree does not reach. Viewers pair
+/// the two by name and draw the page widget. Signing the orphan — the only
+/// one the field tree names — gave a signature every validator found and no
+/// viewer drew.
+///
+/// The stand-in must be a `/Sig` widget of the same name, outside the field
+/// tree, parentless, empty, and in the same place as the orphan: anything
+/// looser would move a signature onto a widget the document never paired
+/// with this field.
+fn find_stand_in_widget_with(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    bytes: &[u8],
+    field: (u32, u16),
+    name: &str,
+) -> Result<Option<(u32, u16)>, SignApplyError> {
+    let field_entries = parse_object_dictionary_with(resolver, field.0)?;
+    if entry(&field_entries, "Kids").is_some() {
+        return Ok(None);
+    }
+    let annots = page_annotation_refs_with(resolver, bytes)?;
+    if annots.iter().any(|(n, _)| *n == field.0) {
+        return Ok(None);
+    }
+    let catalog = crate::verify::find_catalog_ref_with(resolver, bytes)?;
+    let tree: std::collections::HashSet<u32> =
+        crate::verify::find_fields_array_with(resolver, catalog)?
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+    let field_rect = rect_of(&field_entries);
+
+    let mut matches = Vec::new();
+    for annot in annots {
+        if tree.contains(&annot.0) {
+            continue;
+        }
+        let Ok(entries) = parse_object_dictionary_with(resolver, annot.0) else {
+            continue;
+        };
+        let is = |key: &str, value: &str| matches!(entry(&entries, key), Some(PdfObject::Name(n)) if n == value);
+        if !is("Subtype", "Widget")
+            || !is("FT", "Sig")
+            || entry(&entries, "Parent").is_some()
+            || field_name_of(&entries).as_deref() != Some(name)
+        {
+            continue;
+        }
+        let same_place = match (field_rect, rect_of(&entries)) {
+            (Some(a), Some(b)) => a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1.0),
+            _ => false,
+        };
+        if !same_place {
+            continue;
+        }
+        if !matches!(entry(&entries, "V"), None | Some(PdfObject::Null)) {
+            return Err(SignApplyError::Unsupported(format!(
+                "the page widget for signature field '{name}' already carries a value; \
+                 the source is unchanged"
+            )));
+        }
+        matches.push(annot);
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        n => Err(SignApplyError::Unsupported(format!(
+            "{n} page widgets could stand in for signature field '{name}', which no page \
+             shows; pulpit will not guess which one is meant. The source is unchanged."
+        ))),
+    }
+}
+
+/// The objects that point the AcroForm at `widget` in place of `orphan`:
+/// the AcroForm itself (or the catalog, when the AcroForm is direct), and
+/// the `/Fields` array when that is an object of its own.
+///
+/// `/SigFlags` gains SignaturesExist | AppendOnly (§25.2), as it does when
+/// a new field is created; the AcroForm is being rewritten either way.
+/// Existing widget appearances are preserved after checking that they exist:
+/// regenerating them from a split widget's stale `/V` can erase filled text.
+fn adopt_stand_in(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    source: &[u8],
+    orphan: (u32, u16),
+    widget: (u32, u16),
+) -> Result<Vec<(u32, u16, PdfObject)>, SignApplyError> {
+    let not_listed = || {
+        SignApplyError::Unsupported(
+            "the signature field is not a top-level entry of the form's /Fields, so the page \
+             widget standing in for it cannot take its place; the source is unchanged"
+                .to_string(),
+        )
+    };
+    let swap = |fields: &mut Vec<PdfObject>| -> Result<(), SignApplyError> {
+        let slot = fields
+            .iter_mut()
+            .find(|item| {
+                matches!(item, PdfObject::IndirectRef { obj_num, .. } if *obj_num == orphan.0)
+            })
+            .ok_or_else(not_listed)?;
+        *slot = PdfObject::IndirectRef {
+            obj_num: widget.0,
+            gen_num: widget.1,
+        };
+        Ok(())
+    };
+
+    let mut objects = Vec::new();
+    let catalog = find_catalog_ref_with(resolver, source)?;
+    let mut catalog_entries = parse_object_dictionary_with(resolver, catalog.0)?;
+    let (acroform, mut acroform_entries) = match entry(&catalog_entries, "AcroForm").cloned() {
+        Some(PdfObject::IndirectRef { obj_num, gen_num }) => (
+            Some((obj_num, gen_num)),
+            parse_object_dictionary_with(resolver, obj_num)?,
+        ),
+        Some(PdfObject::Dictionary(entries)) => (None, entries),
+        _ => return Err(not_listed()),
+    };
+    if matches!(
+        entry(&acroform_entries, "NeedAppearances"),
+        Some(PdfObject::Boolean(true))
+    ) {
+        require_saved_widget_appearances(resolver, source)?;
+        acroform_entries.retain(|(key, _)| key != "NeedAppearances");
+    }
+    match entry(&acroform_entries, "Fields").cloned() {
+        Some(PdfObject::Array(mut fields)) => {
+            swap(&mut fields)?;
+            set_entry(&mut acroform_entries, "Fields", PdfObject::Array(fields));
+        }
+        Some(PdfObject::IndirectRef { obj_num, gen_num }) => {
+            let mut fields = resolved_array(resolver, obj_num).ok_or_else(not_listed)?;
+            swap(&mut fields)?;
+            objects.push((obj_num, gen_num, PdfObject::Array(fields)));
+        }
+        _ => return Err(not_listed()),
+    }
+    let flags = match entry(&acroform_entries, "SigFlags") {
+        Some(PdfObject::Integer(bits)) => *bits,
+        _ => 0,
+    };
+    set_entry(
+        &mut acroform_entries,
+        "SigFlags",
+        PdfObject::Integer(flags | 3),
+    );
+    match acroform {
+        Some((obj_num, gen_num)) => {
+            objects.push((obj_num, gen_num, PdfObject::Dictionary(acroform_entries)));
+        }
+        None => {
+            set_entry(
+                &mut catalog_entries,
+                "AcroForm",
+                PdfObject::Dictionary(acroform_entries),
+            );
+            objects.push((catalog.0, catalog.1, PdfObject::Dictionary(catalog_entries)));
+        }
+    }
+    Ok(objects)
+}
+
+/// Freezing appearances is safe only when the page widgets already have
+/// something to draw. Signature widgets are handled separately by signing;
+/// buttons select a named appearance, while text and choice fields use a
+/// single stream. Refuse missing or unreadable appearances instead of turning
+/// off regeneration and silently dropping a field from the signed page.
+fn require_saved_widget_appearances(
+    resolver: &crate::verify::ObjectResolver<'_>,
+    source: &[u8],
+) -> Result<(), SignApplyError> {
+    use crate::verify::objects::PdfValue;
+
+    for (object, _) in page_annotation_refs_with(resolver, source)? {
+        let (value, _) = resolver.resolve(object)?;
+        let Some(dict) = value.as_dict() else {
+            continue;
+        };
+        if dict.get("Subtype").and_then(PdfValue::as_name) != Some("Widget") {
+            continue;
+        }
+        if resolver
+            .dict_get(dict, "FT")
+            .as_ref()
+            .and_then(PdfValue::as_name)
+            == Some("Sig")
+        {
+            continue;
+        }
+        let normal = resolver
+            .dict_get(dict, "AP")
+            .and_then(|ap| resolver.dict_get(ap.as_dict()?, "N"));
+        let saved = match normal {
+            Some(PdfValue::Stream { .. }) => true,
+            Some(PdfValue::Dict(states)) => resolver
+                .dict_get(dict, "AS")
+                .and_then(|state| resolver.dict_get(&states, state.as_name()?))
+                .is_some_and(|appearance| matches!(appearance, PdfValue::Stream { .. })),
+            _ => false,
+        };
+        if !saved {
+            return Err(SignApplyError::Unsupported(format!(
+                "cannot preserve the form's appearance: page widget {object} has no saved \
+                 normal appearance; save the filled form with appearances before signing"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Reads through a resolver the caller already built — see the module note
